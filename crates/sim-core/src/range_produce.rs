@@ -31,6 +31,7 @@
 //! producer dies, the line goes; with a reclaim section the blank loses
 //! the breach share to ContainerBreach, and the rest lies with the hull,
 //! reclaimed by the dig order as a dead digger's tank is.
+use super::super::placement::Validator;
 use super::super::{battle, motion_tuning, BlastRange, RangeUnit};
 use super::Mining;
 use crate::matter::{Amount, ContainerId, Kind, Sink};
@@ -74,6 +75,9 @@ pub struct Production {
     /// Derived from the data and the body templates; never saved.
     costs: [Amount; RangeUnitKind::COUNT],
     build: [u32; RangeUnitKind::COUNT],
+    /// Exact occupied cells shared with layout validation. Prepared for
+    /// producible kinds at scene construction, never built in a tick/saved.
+    placement: Validator,
     /// Matter paid into blanks, units produced, matter refunded to stores,
     /// refunds over the cap lost to OverCap, line-ticks the store could not
     /// pay the share, line-ticks a finished unit waited at the roster
@@ -91,12 +95,19 @@ pub struct Production {
 
 impl Production {
     pub(crate) fn new(data: &RangeProduction) -> Self {
+        let placement = Validator::default();
+        for producer in &data.producers {
+            for &kind in &producer.produces {
+                placement.prepare_product(kind);
+            }
+        }
         Self {
             queue: data.queue,
             lines: Vec::new(),
             wrecks: BTreeMap::new(),
             costs: [0; RangeUnitKind::COUNT],
             build: [0; RangeUnitKind::COUNT],
+            placement,
             paid: 0,
             produced: 0,
             refunded: 0,
@@ -539,6 +550,7 @@ impl BlastRange {
             .map(|u| u.bounds())
             .collect();
         let size = self.size.map(|v| v as i32);
+        let placement = &self.mining.as_ref()?.production.as_ref()?.placement;
         'spots: for (_, _, off) in grid {
             let shift = [off[0], 0, off[1]];
             let a: [i32; 3] = std::array::from_fn(|k| lo[k] + shift[k]);
@@ -557,18 +569,11 @@ impl BlastRange {
                     continue 'spots;
                 }
             }
-            for z in a[2]..b[2] {
-                for y in a[1]..b[1] {
-                    for x in a[0]..b[0] {
-                        if self.world.solid(x as u32, y as u32, z as u32)
-                            && probe.solid([x - shift[0], y, z - shift[2]])
-                        {
-                            continue 'spots;
-                        }
-                    }
-                }
+            let at = [c[0] + off[0], c[1], c[2] + off[1]];
+            if placement.product_intersects(kind, battle && !allied, &self.world, at, (a, b)) {
+                continue;
             }
-            return Some([c[0] + off[0], c[1], c[2] + off[1]]);
+            return Some(at);
         }
         None
     }

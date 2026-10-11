@@ -25,8 +25,10 @@ struct Args {
     product: RangeUnitKind,
     control: bool,
     coverage: bool,
+    sparse: bool,
     replay: bool,
     csv: Option<String>,
+    snapshot: Option<String>,
 }
 
 impl Args {
@@ -38,16 +40,19 @@ impl Args {
             product: RangeUnitKind::Tank,
             control: false,
             coverage: false,
+            sparse: false,
             replay: false,
             csv: None,
+            snapshot: None,
         };
         let mut args = std::env::args().skip(1);
         while let Some(flag) = args.next() {
             match flag.as_str() {
                 "--control" => a.control = true,
                 "--coverage" => a.coverage = true,
+                "--sparse" => a.sparse = true,
                 "--replay" => a.replay = true,
-                "--case" | "--pieces" | "--ticks" | "--product" | "--csv" => {
+                "--case" | "--pieces" | "--ticks" | "--product" | "--csv" | "--snapshot" => {
                     let v = args
                         .next()
                         .ok_or_else(|| format!("missing value for {flag}"))?;
@@ -70,6 +75,7 @@ impl Args {
                             }
                         }
                         "--csv" => a.csv = Some(v),
+                        "--snapshot" => a.snapshot = Some(v),
                         _ => unreachable!(),
                     }
                 }
@@ -81,6 +87,12 @@ impl Args {
         }
         if a.coverage && (a.case != Case::Reclaim || a.pieces != 40000) {
             return Err("--coverage requires --case reclaim --pieces 40000".into());
+        }
+        if a.snapshot.is_some() && a.case == Case::Construct {
+            return Err("--snapshot requires a simulation case".into());
+        }
+        if a.sparse && a.case != Case::Blocked {
+            return Err("--sparse requires --case blocked".into());
         }
         Ok(a)
     }
@@ -195,17 +207,62 @@ fn blocked(a: &Args) -> BlastRange {
     // Solid terrain around an undamaged producer, with a hole for its hull.
     // Even a finished, fully paid product has no legal spot outside that hull.
     let (x0, x1, z0, z1) = (lo[0] - 1, hi[0] + 1, lo[2] - 1, hi[2] + 1);
-    for (min, max) in [
+    let walls = [
         ([64, 16, 64], [x0, 120, 704]),
         ([x1, 16, 64], [704, 120, 704]),
         ([x0, 16, 64], [x1, 120, z0]),
         ([x0, 16, z1], [x1, 120, 704]),
-    ] {
-        l.blocks.push(RangeBlock {
-            min,
-            max,
-            material: 6,
-        });
+    ];
+    if a.sparse {
+        // A narrow supported pillar at the late occupied X/Z column of
+        // each candidate. Unlike full walls, these require scanning the
+        // mostly empty mask before a collision is found. This only authors
+        // geometry; placement, production and the tick stay in the kernel.
+        let product = RangeUnit::of_kind(a.product, at);
+        let (p0, p1) = product.bounds();
+        let step = [(p1[0] - p0[0]).max(1), (p1[2] - p0[2]).max(1)];
+        let reach = ((hi[0] - lo[0]) / step[0]).max((hi[2] - lo[2]) / step[1]) + 2;
+        let mut last = None;
+        for x in p0[0]..p1[0] {
+            for z in p0[2]..p1[2] {
+                for y in 16.max(p0[1])..p1[1] {
+                    if product.solid([x, y, z]) {
+                        last = Some([x, y, z]);
+                    }
+                }
+            }
+        }
+        let last = last.expect("product has occupied cells above the ground");
+        for gz in -reach..=reach {
+            for gx in -reach..=reach {
+                if gx == 0 && gz == 0 {
+                    continue;
+                }
+                let shift = [gx * step[0], 0, gz * step[1]];
+                let b0: [i32; 3] = std::array::from_fn(|k| p0[k] + shift[k]);
+                let b1: [i32; 3] = std::array::from_fn(|k| p1[k] + shift[k]);
+                if (0..3).all(|k| b0[k] < hi[k] && lo[k] < b1[k]) {
+                    continue;
+                }
+                let p = [last[0] + shift[0], last[1], last[2] + shift[2]];
+                if p[0] < 64 || p[2] < 64 || p[0] >= 704 || p[2] >= 704 {
+                    continue;
+                }
+                l.blocks.push(RangeBlock {
+                    min: [p[0], 16, p[2]],
+                    max: [p[0] + 1, p[1] + 1, p[2] + 1],
+                    material: 6,
+                });
+            }
+        }
+    } else {
+        for (min, max) in walls {
+            l.blocks.push(RangeBlock {
+                min,
+                max,
+                material: 6,
+            });
+        }
     }
     let mut e = RangeEconomy::stock();
     e.reclaim = None;
@@ -357,10 +414,15 @@ fn run(a: Args) {
         std::fs::write(path, rows).expect("write CSV");
     }
     times.sort_unstable();
-    println!("case={:?} product={:?} pieces={} control={} coverage={} ticks={} workers={:?} global={} mean_us={:.3} p99_us={} max_us={} hash={:016x}",
-        a.case, a.product, r.matter.debris.fragments.len(), a.control, a.coverage, a.ticks, r.worker_counts(), rayon::current_num_threads(),
+    println!("case={:?} product={:?} pieces={} control={} coverage={} sparse={} ticks={} workers={:?} global={} mean_us={:.3} p99_us={} max_us={} hash={:016x}",
+        a.case, a.product, r.matter.debris.fragments.len(), a.control, a.coverage, a.sparse, a.ticks, r.worker_counts(), rayon::current_num_threads(),
         times.iter().sum::<u128>() as f64 / f64::from(a.ticks),
         times[(times.len() * 99).div_ceil(100) - 1], times[times.len() - 1], r.state_hash());
+    if let Some(path) = &a.snapshot {
+        let bytes = r.snapshot();
+        std::fs::write(path, &bytes).expect("write snapshot");
+        println!("snapshot_bytes={}", bytes.len());
+    }
     if a.replay {
         let bytes = r.snapshot();
         let mut back = BlastRange::restore(config(), &bytes).expect("restore pressure case");
