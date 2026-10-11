@@ -40,6 +40,89 @@ fn confirm(m: &mut Matter, w: &mut World) {
     assert_eq!(m.debris.claims(), 0);
 }
 
+/// A hull can leave its footprint before the flying pool has room. Its
+/// rejected contact cells must still be cut, even without another hull visit.
+#[test]
+fn rejected_hull_cuts_survive_departure_and_restore() {
+    let (mut m, mut w, mut f) = fixture(0);
+    f.radius = 1;
+    let cuts = [[20, 3, 20], [24, 3, 20], [28, 3, 20]];
+    for _ in 0..3 {
+        assert_eq!(m.fell(&mut w, &cuts, [20, 3, 20], &f), 0);
+        m.step_felling(&mut w, &f);
+    }
+    assert_eq!(
+        m.felling_pending(),
+        cuts.len(),
+        "rejected contact work was lost or duplicated"
+    );
+    let mut bytes = fx::blob::Blob::new();
+    m.save(&mut bytes);
+    let mut back = Matter::new(&[]);
+    back.load(&mut fx::blob::Scan::new(&bytes.v), &w, &[])
+        .unwrap();
+    let mut saved = fx::blob::Blob::new();
+    back.save(&mut saved);
+    assert_eq!(saved.v, bytes.v);
+    let mut restored_world = World::new(64, 96, 64, 4096, Box::new(Ground));
+    for matter in [&mut m, &mut back] {
+        matter.tuning.max_flying = 64;
+        matter.tuning.max_claims = 64;
+        matter.tuning.max_fragments = 64;
+    }
+    // No hull cuts are submitted again: only the saved continuation can work.
+    for _ in 0..8 {
+        m.felling_phase(&mut w, std::iter::empty(), &f);
+        back.felling_phase(&mut restored_world, std::iter::empty(), &f);
+        confirm(&mut m, &mut w);
+        confirm(&mut back, &mut restored_world);
+        let mut a = fx::blob::Blob::new();
+        let mut b = fx::blob::Blob::new();
+        m.save(&mut a);
+        back.save(&mut b);
+        assert_eq!(a.v, b.v);
+    }
+    assert!(cuts.iter().all(|p| w.material(p[0], p[1], p[2]) == 0));
+    assert_eq!(m.felling_pending(), 0);
+    assert!(m.spent_mj > 0 && m.spent_mj <= m.supplied_mj);
+    assert_eq!(m.economy.ledger.sunk_total(), 0);
+}
+
+#[test]
+fn partially_admitted_hull_cuts_keep_the_tail_without_duplicate_work_or_energy() {
+    let (mut m, mut w, mut f) = fixture(1);
+    f.radius = 1;
+    let cuts = [[20, 3, 20], [24, 3, 20], [28, 3, 20]];
+    let cost = m.cost(5).0;
+    assert_eq!(m.fell(&mut w, &cuts, [20, 3, 20], &f), 1);
+    let pending = m.felling_pending();
+    let paid = m.spent_mj;
+    for _ in 0..3 {
+        assert_eq!(m.fell(&mut w, &cuts, [20, 3, 20], &f), 0);
+        assert_eq!(m.felling_pending(), pending);
+        assert_eq!(m.spent_mj, paid);
+    }
+    confirm(&mut m, &mut w);
+    for _ in 0..40 {
+        for p in &mut m.debris.fragments {
+            p.resting = true;
+        }
+        m.step_felling(&mut w, &f);
+        confirm(&mut m, &mut w);
+        if m.felling_pending() == 0 {
+            break;
+        }
+    }
+    assert!(cuts.iter().all(|p| w.material(p[0], p[1], p[2]) == 0));
+    assert_eq!(m.felling_pending(), 0);
+    assert_eq!(m.spent_mj, 3 * cost);
+    assert_eq!(
+        m.admission.felling[0] - m.admission.felling[2],
+        m.felling_pending() as u64
+    );
+    assert_eq!(m.economy.ledger.sunk_total(), 0);
+}
+
 #[test]
 fn felling_cannot_take_every_slot_from_a_waiting_crater() {
     for waiting in [false, true] {

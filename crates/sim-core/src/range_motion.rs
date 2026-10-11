@@ -1488,12 +1488,14 @@ impl Motion {
     /// `budget`, and take the answer up. Returns the work spent. The
     /// first call of a tick counts the tick as waited; a second round of
     /// the range's leftover passes no changes and counts nothing.
+    /// The terrain-only planner needs hull obstacles only on a fine fallback.
+    /// Build them at most once from this phase's frozen positions.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn continue_coarse(
         &mut self,
         w: &World,
         b: &UnitBody,
-        others: &[Obstacle],
+        others: impl FnOnce() -> Vec<Obstacle>,
         rubble: &nav::vehicle::Rubble,
         tick: u32,
         changed: &nav::vehicle::Changed,
@@ -1529,7 +1531,7 @@ impl Motion {
                 // forever. The range supplies this flag: its active budget
                 // can differ from this motion's cloned navigation settings.
                 self.coarse = None;
-                self.start_fine(w, to, b, others, rubble, None, |_| {});
+                self.start_fine(w, to, b, &others(), rubble, None, |_| {});
             }
             CoarseAdvance::Pending if first => {
                 if let Some(c) = &mut self.coarse {
@@ -1547,7 +1549,7 @@ impl Motion {
             CoarseAdvance::Refused => {
                 // A refusal hands the order to the fine planner, exactly as
                 // the one-call planner did.
-                self.start_fine(w, to, b, others, rubble, None, |_| {});
+                self.start_fine(w, to, b, &others(), rubble, None, |_| {});
             }
         }
         spent
@@ -2691,6 +2693,10 @@ pub fn floor(w: &World, x: i32, z: i32) -> i32 {
 #[cfg(test)]
 #[path = "range_coarse_budget_tests.rs"]
 mod coarse_budget_tests;
+
+#[cfg(test)]
+#[path = "range_coarse_obstacle_tests.rs"]
+mod coarse_obstacle_tests;
 
 #[cfg(test)]
 mod tests {
