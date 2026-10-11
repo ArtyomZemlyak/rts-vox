@@ -5143,11 +5143,13 @@ impl BlastRange {
                     };
                     let budget = match (driven, round) {
                         (false, _) => 0,
-                        // The oldest search can always make one test, so
-                        // the queue moves whatever the data and the shape.
-                        (true, 0) if place == 0 => coarse_left
-                            .min(self.navigation.global_work_per_search)
-                            .max(u.motion.coarse_max_test()),
+                        // Offer the oldest search one test when it fits;
+                        // even this offer stays inside the tick's remainder.
+                        (true, 0) if place == 0 => coarse_left.min(
+                            self.navigation
+                                .global_work_per_search
+                                .max(u.motion.coarse_max_test()),
+                        ),
                         (true, 0) => coarse_left.min(self.navigation.global_work_per_search),
                         (true, _) => coarse_left,
                     };
@@ -5179,6 +5181,7 @@ impl BlastRange {
                         if round == 0 { &changed } else { &unchanged },
                         budget,
                         round == 0,
+                        budget == self.navigation.global_work_per_tick,
                     );
                     coarse_left = coarse_left.saturating_sub(spent);
                     self.coarse_work = self.coarse_work.wrapping_add(spent);
@@ -6067,6 +6070,15 @@ impl BlastRange {
         // Whole bodies fall a voxel at a time and bake back where they
         // land, through the edit queue like everything else.
         self.bodies.step(&mut self.world);
+        // Collapse and landing produce transfers after the main drain.
+        // Complete them this tick, preserving its deltas (ADR-684): a
+        // detached body must not leave a second copy standing in the world.
+        let earlier = self.world.edits().len();
+        self.world.flush_transfers();
+        for &e in &self.world.edits()[earlier..] {
+            self.world_changed.column(e.x as i32, e.z as i32);
+            self.collapse_backlog.insert(e);
+        }
         detail("debris_bodies");
         self.matter.step_unit_sections(&mut self.units);
         detail("debris_sections");
@@ -9309,7 +9321,10 @@ mod tests {
         }
         let pieces_before = a.matter.debris.fragments.len();
         a.step();
-        assert!(cells.iter().all(|p| material(&a.world, *p) == mat));
+        assert!(
+            cells.iter().all(|p| material(&a.world, *p) == 0),
+            "detached source cells must drain in the same tick (ADR-684)"
+        );
         (a, cells, pieces_before)
     }
     /// **No hull waits for a search start longer than its turn** (ADR-646).

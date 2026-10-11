@@ -726,6 +726,10 @@ impl Matter {
             self.admission.ground[5] += 1;
             return ClaimResult::Indestructible;
         }
+        if w.has_pending_dig(p[0] as u32, p[1] as u32, p[2] as u32) {
+            self.admission.ground[4] += 1;
+            return ClaimResult::Deferred;
+        }
         let (cost, motion) = self.cost(m);
         if cost > self.remaining_mj {
             self.admission.ground[1] += 1;
