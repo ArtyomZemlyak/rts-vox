@@ -3007,11 +3007,14 @@ impl BlastRange {
         // The matter under the cells each wave's contacts visit is read
         // ahead, every wave on its own: the world's voxels do not change
         // while the waves step (ADR-681).
-        let world = &self.world;
+        let (world, matter, units) = (&self.world, &self.matter, &self.units);
         waves
             .par_iter_mut()
             .zip(budgets.par_iter())
-            .for_each(|(w, &budget)| w.wave.read_contacts(world, budget));
+            .for_each(|(w, &budget)| {
+                let spent = Some((matter, config_of(w.weapon), w.energy));
+                w.wave.read_contacts(world, budget, units, spent)
+            });
         completed("battle_read");
         // No physics or claim confirmation runs between these atomic batches.
         // Component commits consume exactly their reservations; terrain claims

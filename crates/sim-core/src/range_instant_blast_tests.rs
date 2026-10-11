@@ -168,10 +168,25 @@ fn salvo_restored_mid_wave_matches_the_continuous_run() {
 #[test]
 #[ignore = "measurement probe: cargo test --release -- --ignored --nocapture"]
 fn probe_salvo_timeline() {
-    for (name, weapon, count) in [
-        ("canister", Weapon::Canister, 6),
-        ("shell", Weapon::Blast, 1),
-    ] {
+    // `PROBE_TICKS=n` stops each run after n ticks and `PROBE_REPEAT=k`
+    // runs the canister salvo k times: a profiler then sees the salvo's
+    // own ticks rather than the pieces settling for seconds after it.
+    let env = |name: &str, default: usize| {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    let (limit, repeat) = (env("PROBE_TICKS", 400), env("PROBE_REPEAT", 0));
+    let runs: Vec<(&str, Weapon, usize)> = if repeat > 0 {
+        vec![("canister", Weapon::Canister, 6); repeat]
+    } else {
+        vec![
+            ("canister", Weapon::Canister, 6),
+            ("shell", Weapon::Blast, 1),
+        ]
+    };
+    for (name, weapon, count) in runs {
         let mut r = salvo_range();
         r.set_physics_workers(4);
         if std::env::var_os("PROBE_UNBOUND").is_some() {
@@ -201,7 +216,7 @@ fn probe_salvo_timeline() {
             );
         }
         println!(
-            "tick,ms,waves_capturing,waves_applying,examined,pending,resumes,ground_applied,no_room,claim_limit,pending_cell,body_applied,body_deferred,pulverized,held,claims,queued_edits,applied_edits,fragments,flying,removed,chunks,phases"
+            "tick,ms,waves_capturing,waves_applying,examined,pending,resumes,ground_applied,no_room,claim_limit,pending_cell,body_applied,body_deferred,pulverized,held,claims,queued_edits,applied_edits,fragments,flying,removed,chunks,hash,phases"
         );
         let mut examined_before = 0usize;
         let mut ground_before = r.matter.admission.ground;
@@ -209,7 +224,7 @@ fn probe_salvo_timeline() {
         let mut pulverized_before = r.matter.admission.pulverized;
         let mut total = 0.0;
         let mut sums: std::collections::BTreeMap<&'static str, f64> = Default::default();
-        for t in 0..400 {
+        for t in 0..limit {
             let mut phases: Vec<(&'static str, f64)> = Vec::new();
             let start = std::time::Instant::now();
             let mut last = start;
@@ -243,7 +258,7 @@ fn probe_salvo_timeline() {
                 .map(|(p, ms)| format!("{p}={ms:.1}"))
                 .collect();
             println!(
-                "{t},{ms:.2},{c},{a},{},{pending},{resumes},{},{},{},{},{},{},{},{:?},{},{},{},{},{},{},{},{}",
+                "{t},{ms:.2},{c},{a},{},{pending},{resumes},{},{},{},{},{},{},{},{:?},{},{},{},{},{},{},{},{:016x},{}",
                 examined.saturating_sub(examined_before),
                 g[0] - ground_before[0],
                 g[2] - ground_before[2],
@@ -260,6 +275,7 @@ fn probe_salvo_timeline() {
                 pools.flying,
                 r.removed,
                 r.world.materialized,
+                r.state_hash(),
                 top.join(" ")
             );
             examined_before = if c + a == 0 { 0 } else { examined };

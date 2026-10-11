@@ -41,29 +41,43 @@ fn cells(
         lo[a] = lo[a].max(min[a]);
         hi[a] = hi[a].min(max[a]);
     }
-    for z in lo[2]..hi[2] {
-        for y in lo[1]..hi[1] {
-            for x in lo[0]..hi[0] {
-                let p = [x, y, z];
-                let local = [0, 1, 2].map(|a| {
-                    Fx::from_int(p[a])
-                        .add(Fx::from_ratio(1, 2))
-                        .sub(frame.centre[a])
-                });
+    if (0..3).any(|a| lo[a] >= hi[a]) {
+        return true;
+    }
+    // A voxel's world centre is the frame's base plus one term per local
+    // axis, each a function of that axis's coordinate alone. The terms
+    // are tabled once per axis; the sum is wrapping, so adding them in
+    // any grouping gives the same bits as the transform term by term.
+    let term = |a: usize, axis: V3| -> Vec<V3> {
+        (lo[a]..hi[a])
+            .map(|c| {
+                let local = Fx::from_int(c)
+                    .add(Fx::from_ratio(1, 2))
+                    .sub(frame.centre[a]);
                 let v = if frame.scale == Fx::ONE {
                     local
                 } else {
-                    local.map(|v| v.div(frame.scale))
+                    local.div(frame.scale)
                 };
-                let w = frame
-                    .base
-                    .add(frame.x.scale(v[0]))
-                    .add(frame.y.scale(v[1]))
-                    .add(frame.z.scale(v[2]));
-                if [w.x, w.y, w.z]
-                    .into_iter()
-                    .enumerate()
-                    .all(|(a, v)| v >= Fx::from_int(low[a]) && v < Fx::from_int(high[a]))
+                axis.scale(v)
+            })
+            .collect()
+    };
+    let (tx, ty, tz) = (term(0, frame.x), term(1, frame.y), term(2, frame.z));
+    let (wlo, whi) = (low.map(Fx::from_int), high.map(Fx::from_int));
+    for (z, dz) in (lo[2]..hi[2]).zip(&tz) {
+        let plane = frame.base.add(*dz);
+        for (y, dy) in (lo[1]..hi[1]).zip(&ty) {
+            let row = plane.add(*dy);
+            for (x, dx) in (lo[0]..hi[0]).zip(&tx) {
+                let p = [x, y, z];
+                let w = row.add(*dx);
+                if w.x >= wlo[0]
+                    && w.x < whi[0]
+                    && w.y >= wlo[1]
+                    && w.y < whi[1]
+                    && w.z >= wlo[2]
+                    && w.z < whi[2]
                 {
                     // Include empty/gone cells too: the cursor must remain
                     // stable when material claims remove cells between ticks.

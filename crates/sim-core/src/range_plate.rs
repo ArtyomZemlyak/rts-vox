@@ -137,10 +137,24 @@ impl EditTiles {
     const SHIFT: i32 = 4;
     fn of(edits: impl Iterator<Item = Edit>) -> Self {
         let mut tiles = BTreeMap::new();
+        // Edits come in runs on one tile (a drain in cell order): a run
+        // is folded before it reaches the map.
+        let mut run: Option<([i32; 2], i32)> = None;
         for e in edits {
             let key = [e.x as i32 >> Self::SHIFT, e.z as i32 >> Self::SHIFT];
-            let low = tiles.entry(key).or_insert(i32::MAX);
-            *low = (*low).min(e.y as i32);
+            match &mut run {
+                Some((k, low)) if *k == key => *low = (*low).min(e.y as i32),
+                _ => {
+                    if let Some((k, y)) = run.replace((key, e.y as i32)) {
+                        let low = tiles.entry(k).or_insert(i32::MAX);
+                        *low = (*low).min(y);
+                    }
+                }
+            }
+        }
+        if let Some((k, y)) = run {
+            let low = tiles.entry(k).or_insert(i32::MAX);
+            *low = (*low).min(y);
         }
         Self(tiles)
     }
