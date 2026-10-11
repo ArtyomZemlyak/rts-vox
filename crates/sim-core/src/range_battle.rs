@@ -2339,7 +2339,11 @@ impl BlastRange {
                             .collect();
                         let u = &mut self.units[id];
                         // Under way, the hull drives on while the new
-                        // route is searched (ADR-462).
+                        // route is searched (ADR-462). A whole-map search
+                        // begins with no work in the orders phase; the
+                        // next tick's continuation walks it under the
+                        // shared allowance (ADR-680).
+                        u.motion.allow_coarse(Some(0));
                         u.motion.retarget_observed(
                             &self.world,
                             dest,
@@ -2357,6 +2361,7 @@ impl BlastRange {
                                 });
                             },
                         );
+                        self.units[id].motion.allow_coarse(None);
                         completed("orders_retarget");
                     }
                 }
@@ -3025,3 +3030,7 @@ mod burst_admission_tests;
 #[cfg(test)]
 #[path = "range_battle_lifecycle_tests.rs"]
 mod lifecycle_tests;
+
+#[cfg(test)]
+#[path = "range_coarse_continuation_tests.rs"]
+mod coarse_continuation_tests;

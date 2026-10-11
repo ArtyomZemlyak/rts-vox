@@ -42,6 +42,18 @@ pub(super) struct PreparedGround<'a> {
     current: nav::vehicle::Pose,
     probe: nav::vehicle::Probe<'a>,
 }
+/// A whole-map search in flight (ADR-680) and the ticks it has waited
+/// for its answer: the range serves the oldest first, ties by slot.
+#[derive(Clone, Debug)]
+pub(super) struct CoarsePending {
+    search: nav::vehicle::coarse::Search,
+    waited: u32,
+}
+enum CoarseAdvance {
+    Pending,
+    Planned(nav::vehicle::Route, [Fx; 2]),
+    Refused,
+}
 enum HuntAdvance {
     Pending(Box<nav::vehicle::Hunt>),
     Restart,
@@ -198,6 +210,16 @@ pub struct Motion {
     /// route remains usable while its replacement is pending; every step
     /// still checks the current terrain and hulls.
     hunt: Option<Box<nav::vehicle::Hunt>>,
+    /// A whole-map search still walking under the range's shared work
+    /// allowance (ADR-680). Like `hunt`, it keeps the current route usable
+    /// while it runs. Saved by the range in its own snapshot section.
+    coarse: Option<Box<CoarsePending>>,
+    /// Coarse work this hull may spend in the current call; `None` runs a
+    /// coarse search to its end at once (a hull stepped outside a range).
+    /// Scratch set by the range before each call; never saved.
+    coarse_budget: Option<u64>,
+    /// Coarse work spent since the range last set the allowance. Scratch.
+    coarse_spent: u64,
     /// The last search ran its open set dry after expanding nodes. Read in
     /// the same tick it is written, never across one: not state.
     dry: bool,
@@ -423,6 +445,9 @@ impl Motion {
             last_plan: [0; 2],
             last_probe: [0; 2],
             hunt: None,
+            coarse: None,
+            coarse_budget: None,
+            coarse_spent: 0,
             dry: false,
             drive_scale: drive::drive_factor(
                 i64::from(chassis.mass) * 1000,
@@ -1069,6 +1094,7 @@ impl Motion {
         self.partial_path = false;
         self.cursor = 0;
         self.hunt = None;
+        self.coarse = None;
         self.destination = Some(to);
         self.enabled = true;
         self.blocked = false;
@@ -1137,21 +1163,13 @@ impl Motion {
             .all(|a| (EDGE..far[a]).contains(&to[a]))
             .then_some(to);
         self.enabled = true;
+        // A new request supersedes any search of the old one, fine or
+        // whole-map (ADR-680): the hull owns at most one of each.
         self.hunt = None;
+        self.coarse = None;
         // Global routing is terrain-only. A hull enters dynamic avoidance
         // only after physical contact or an escape attempt on this order.
         let avoid = self.blocked_ticks > 0 || self.escape > 0;
-        let half = shape.half.map(Fx::from_int);
-        let blockers = self.local_blockers(from, shape, others);
-        let clear = |p: [Fx; 2], head: i32| {
-            !blockers.iter().any(|o| {
-                o.overlaps(&Obstacle {
-                    pos: [p[0], Fx::ZERO, p[1]],
-                    head,
-                    half,
-                })
-            })
-        };
         if !self.blocked
             && !self.needs_recovery
             && !avoid
@@ -1164,25 +1182,99 @@ impl Motion {
                     >= Fx::from_int(self.navigation.global_min_distance)
             })
         {
-            if let Some(plan) = nav::vehicle::coarse::plan(
-                w,
-                rubble,
+            // The whole-map search walks under the range's shared work
+            // allowance (ADR-680). An answer within this call's share is
+            // taken at once; otherwise the order stands, the current route
+            // stays usable, and the range continues the search next tick.
+            if let Ok(search) = nav::vehicle::coarse::Search::new(
+                [w.nx, w.nz],
                 shape,
                 from,
                 to,
-                nav::vehicle::coarse::Config {
-                    cell: self.navigation.global_cell_units,
-                    nodes: self.navigation.global_nodes,
-                    yielding: self.navigation.fell.materials,
-                    local_grade: self.coarse_local_grade,
-                },
+                self.coarse_config(),
             ) {
-                completed("plan_coarse");
-                self.take_plan(plan);
-                return true;
+                let pending = Box::new(CoarsePending { search, waited: 0 });
+                match self.walk_coarse(pending, w, rubble) {
+                    CoarseAdvance::Pending => {
+                        completed("plan_coarse");
+                        self.blocked = false;
+                        self.needs_recovery = false;
+                        self.dry = false;
+                        return true;
+                    }
+                    CoarseAdvance::Planned(plan, _) => {
+                        completed("plan_coarse");
+                        self.take_plan(plan);
+                        return true;
+                    }
+                    CoarseAdvance::Refused => {}
+                }
             }
             completed("plan_coarse");
         }
+        self.start_fine(w, to, b, others, rubble, prepared, completed)
+    }
+    /// The configuration of this hull's whole-map searches.
+    pub(crate) fn coarse_config(&self) -> nav::vehicle::coarse::Config {
+        nav::vehicle::coarse::Config {
+            cell: self.navigation.global_cell_units,
+            nodes: self.navigation.global_nodes,
+            yielding: self.navigation.fell.materials,
+            local_grade: self.coarse_local_grade,
+            restarts: self.navigation.global_restarts,
+        }
+    }
+    /// Walk a whole-map search with what is left of this call's allowance.
+    fn walk_coarse(
+        &mut self,
+        mut pending: Box<CoarsePending>,
+        w: &World,
+        rubble: &nav::vehicle::Rubble,
+    ) -> CoarseAdvance {
+        let budget = self.coarse_budget.unwrap_or(u64::MAX);
+        let left = budget.saturating_sub(self.coarse_spent);
+        if left == 0 {
+            self.coarse = Some(pending);
+            return CoarseAdvance::Pending;
+        }
+        let (answer, spent) = pending.search.advance(w, rubble, left);
+        self.coarse_spent = self.coarse_spent.saturating_add(spent);
+        match answer {
+            None => {
+                self.coarse = Some(pending);
+                CoarseAdvance::Pending
+            }
+            Some(Ok(plan)) => CoarseAdvance::Planned(plan, pending.search.origin()),
+            Some(Err(_)) => CoarseAdvance::Refused,
+        }
+    }
+    /// Begin the oriented fine search toward `to` from where the hull
+    /// stands: the start of every short order, and of a long one the
+    /// whole-map planner refused.
+    #[allow(clippy::too_many_arguments)]
+    fn start_fine(
+        &mut self,
+        w: &World,
+        to: [i32; 2],
+        b: &UnitBody,
+        others: &[Obstacle],
+        rubble: &nav::vehicle::Rubble,
+        prepared: Option<&PreparedGround<'_>>,
+        mut completed: impl FnMut(&'static str),
+    ) -> bool {
+        let from = [self.pos[0], self.pos[2]];
+        let shape = self.shape(b);
+        let half = shape.half.map(Fx::from_int);
+        let blockers = self.local_blockers(from, shape, others);
+        let clear = |p: [Fx; 2], head: i32| {
+            !blockers.iter().any(|o| {
+                o.overlaps(&Obstacle {
+                    pos: [p[0], Fx::ZERO, p[1]],
+                    head,
+                    half,
+                })
+            })
+        };
         // Prepared motion geometry already invalidated changed pages against
         // this tick's immutable sources. Share its exact column answers, not
         // its pose: route contacts can use a different approach margin.
@@ -1360,9 +1452,116 @@ impl Motion {
         }
         self.plan_to_observed(w, to, b, others, rubble, None, completed)
     }
-    /// Whether a route search is still walking its frontier (ADR-306).
+    /// Whether a route search is still walking its frontier (ADR-306),
+    /// fine or whole-map (ADR-680).
     pub fn searching(&self) -> bool {
+        self.hunt.is_some() || self.coarse.is_some()
+    }
+    /// Whether a fine search is in flight: what continuation shares count.
+    pub(super) fn hunting(&self) -> bool {
         self.hunt.is_some()
+    }
+    /// Ticks a whole-map search in flight has waited, if there is one.
+    pub fn coarse_waited(&self) -> Option<u32> {
+        self.coarse.as_ref().map(|c| c.waited)
+    }
+    /// The most one corridor test of the search in flight can cost.
+    pub(super) fn coarse_max_test(&self) -> u64 {
+        self.coarse.as_ref().map_or(0, |c| c.search.max_test())
+    }
+    /// Work the whole-map search in flight has spent, if there is one.
+    pub fn coarse_work(&self) -> Option<u64> {
+        self.coarse.as_ref().map(|c| c.search.spent())
+    }
+    /// The coarse work this hull may spend in the coming call (ADR-680);
+    /// `None` runs a whole-map search to its end at once.
+    pub fn allow_coarse(&mut self, budget: Option<u64>) {
+        self.coarse_budget = budget;
+        self.coarse_spent = 0;
+    }
+    /// Coarse work spent since the allowance was last set.
+    pub fn coarse_spent(&self) -> u64 {
+        self.coarse_spent
+    }
+    /// The range's continuation of a whole-map search in flight (ADR-680):
+    /// note what changed in the world since the last tick, walk on with
+    /// `budget`, and take the answer up. Returns the work spent. The
+    /// first call of a tick counts the tick as waited; a second round of
+    /// the range's leftover passes no changes and counts nothing.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn continue_coarse(
+        &mut self,
+        w: &World,
+        b: &UnitBody,
+        others: &[Obstacle],
+        rubble: &nav::vehicle::Rubble,
+        tick: u32,
+        changed: &nav::vehicle::Changed,
+        budget: u64,
+        first: bool,
+    ) -> u64 {
+        let Some(mut pending) = self.coarse.take() else {
+            return 0;
+        };
+        pending.search.note(changed);
+        // As for the fine search (ADR-462): the search holds while the hull
+        // drives on or brakes within `retarget_units` of where it began. An
+        // escape, or a hull carried farther, drops it; the order stands and
+        // asks again under the start allowance.
+        let from = pending.search.origin();
+        let (dx, dz) = (self.pos[0].sub(from[0]), self.pos[2].sub(from[1]));
+        let reach = Fx::from_int(self.navigation.retarget_units);
+        if self.escape_left > 0 || dx.mul(dx).add(dz.mul(dz)) > reach.mul(reach) {
+            self.next_plan = tick;
+            return 0;
+        }
+        let to = pending.search.goal();
+        self.allow_coarse(Some(budget));
+        let result = self.walk_coarse(pending, w, rubble);
+        let spent = self.coarse_spent;
+        self.allow_coarse(None);
+        match result {
+            CoarseAdvance::Pending if first => {
+                if let Some(c) = &mut self.coarse {
+                    c.waited = c.waited.saturating_add(1);
+                }
+            }
+            CoarseAdvance::Pending => {}
+            // The cadence of the next try is the one the request set: a
+            // start in the hull's own step counted it from the start, an
+            // order left it as it was, as with the one-call planner.
+            CoarseAdvance::Planned(plan, from) => {
+                self.take_plan(plan);
+                self.take_up(from);
+            }
+            CoarseAdvance::Refused => {
+                // A refusal hands the order to the fine planner, exactly as
+                // the one-call planner did.
+                self.start_fine(w, to, b, others, rubble, None, |_| {});
+            }
+        }
+        spent
+    }
+    /// The whole-map search in flight as bytes (ADR-680), for the range's
+    /// snapshot section; nothing when there is none.
+    pub(super) fn save_coarse(&self, b: &mut Blob) {
+        if let Some(c) = &self.coarse {
+            b.u32(c.waited);
+            c.search.save(b);
+        }
+    }
+    /// Read a whole-map search in flight back; `false` when the bytes do
+    /// not describe one this hull could own.
+    pub(super) fn load_coarse(&mut self, s: &mut Scan, size: [u32; 2]) -> bool {
+        let waited = s.u32();
+        let Some(search) = nav::vehicle::coarse::Search::load(s, size) else {
+            return false;
+        };
+        if !self.enabled || self.destination != Some(search.goal()) {
+            return false;
+        }
+        self.coarse = Some(Box::new(CoarsePending { search, waited }));
+        true
     }
     /// A refused route owns the hull until its bounded escape sequence ends.
     /// Changing the goal meanwhile resets the attempt counter and prevents
@@ -1727,7 +1926,7 @@ impl Motion {
     /// for this tick, never mis-spent.
     pub(super) fn wants_start(&self, tick: u32) -> bool {
         self.enabled
-            && self.hunt.is_none()
+            && !self.searching()
             && self.escape_left == 0
             && ((self.destination.is_some()
                 && (self.blocked || self.path.is_empty())
@@ -1747,6 +1946,7 @@ impl Motion {
     }
     pub fn stop(&mut self) {
         self.hunt = None;
+        self.coarse = None;
         self.path.clear();
         self.partial_path = false;
         self.cursor = 0;
@@ -1901,7 +2101,7 @@ impl Motion {
         // it on the cadence from a moving source can lead back behind the hull
         // into the pocket it just left. A block or a new pursuit goal still
         // requests a replacement; real steps always check fresh geometry.
-        if self.hunt.is_none()
+        if !self.searching()
             && self.escape_left == 0
             && (self.blocked || self.path.is_empty())
             && tick >= self.next_plan
@@ -1922,7 +2122,7 @@ impl Motion {
             }
         }
         if self.cursor == self.path.len()
-            && self.hunt.is_none()
+            && !self.searching()
             && self.escape_left == 0
             && !self.route.is_empty()
             && !self.partial_path
@@ -1973,6 +2173,7 @@ impl Motion {
                     // A pending replacement must not revive a completed
                     // order or overwrite the next prefix/patrol request.
                     self.hunt = None;
+                    self.coarse = None;
                 }
                 if reached_end && self.partial_path {
                     // Keep the player's goal and patrol waypoint. The next tick
@@ -2028,7 +2229,7 @@ impl Motion {
             && engine
             && self.blocked_ticks >= self.navigation.recovery_ticks
             && self.escape_left == 0
-            && self.hunt.is_none()
+            && !self.searching()
             && self.escape < ESCAPES
         {
             if self.escape == 0 {
@@ -2202,7 +2403,7 @@ impl Motion {
         // several cells. Only recovery can change the next search start.
         // A search still walking is not a block: the hull is waiting.
         if self.needs_recovery
-            && self.hunt.is_none()
+            && !self.searching()
             && self.destination.is_some()
             && self.path.is_empty()
         {
@@ -2354,6 +2555,10 @@ impl Motion {
         self.contact = None;
         self.dry = false;
         self.prepared_hunt = false;
+        // A whole-map search in flight is the range's own snapshot section
+        // (ADR-680), read after every hull.
+        self.coarse = None;
+        self.allow_coarse(None);
         self.terrain_columns = nav::vehicle::Columns::default();
         self.cut_limit = usize::MAX;
         self.pos = std::array::from_fn(|_| s.fx());

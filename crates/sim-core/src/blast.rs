@@ -2710,6 +2710,9 @@ pub struct BlastRange {
     /// further tick by tick.
     collapse_cap: usize,
     pub collapse_work: CollapseWork,
+    /// Whole-map search work spent since construction (ADR-680), in the
+    /// units of `global_work_per_tick`. Diagnostics: not saved, not hashed.
+    pub coarse_work: u64,
     /// Dig economy, on a layout with an economy section (ADR-672). In the
     /// snapshot from version 62.
     mining: Option<economy::Mining>,
@@ -3205,6 +3208,7 @@ impl BlastRange {
             collapse_backlog: CollapseBacklog::default(),
             collapse_cap: stock.max_body_cells as usize,
             collapse_work: CollapseWork::default(),
+            coarse_work: 0,
             mining,
             spawned: Vec::new(),
         };
@@ -3260,8 +3264,63 @@ impl BlastRange {
     fn has_open_claims(&self) -> bool {
         self.matter.debris.claims() > 0
     }
+    /// Whether a hull has a whole-map search in flight: the snapshot then
+    /// wraps its format in version 66 and appends the searches (ADR-680).
+    fn has_coarse_searches(&self) -> bool {
+        self.units
+            .iter()
+            .chain(std::iter::once(&self.gun))
+            .any(|u| u.motion.coarse_waited().is_some())
+    }
+    /// The whole-map searches in flight, by slot; the gun is the last slot.
+    fn save_coarse_searches(&self, b: &mut fx::blob::Blob) {
+        let slots: Vec<_> = self
+            .units
+            .iter()
+            .chain(std::iter::once(&self.gun))
+            .enumerate()
+            .filter(|(_, u)| u.motion.coarse_waited().is_some())
+            .collect();
+        b.u32(slots.len() as u32);
+        for (id, u) in slots {
+            b.u32(id as u32);
+            u.motion.save_coarse(b);
+        }
+    }
+    fn load_coarse_searches(&mut self, s: &mut fx::blob::Scan) -> Option<()> {
+        let count = s.u32() as usize;
+        if count > self.units.len() + 1 {
+            return None;
+        }
+        let size = [self.world.nx, self.world.nz];
+        let mut last = None;
+        for _ in 0..count {
+            let id = s.u32() as usize;
+            if last.is_some_and(|l| id <= l) || id > self.units.len() {
+                return None;
+            }
+            last = Some(id);
+            let u = if id == self.units.len() {
+                &mut self.gun
+            } else {
+                &mut self.units[id]
+            };
+            if !u.motion.load_coarse(s, size) {
+                return None;
+            }
+        }
+        // Version 66 exists only to carry searches.
+        (count > 0).then_some(())
+    }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
+        // Whole-map searches in flight wrap the format below in version 66
+        // and follow everything else (ADR-680); without one the bytes are
+        // those of the version the range otherwise needs.
+        let coarse = self.has_coarse_searches();
+        if coarse {
+            b.u32(66);
+        }
         let version = if self.has_production() {
             65
         } else if self.has_reclaim() {
@@ -3451,6 +3510,9 @@ impl BlastRange {
         // that was known of it.
         b.bool(self.world_changed.is_empty());
         self.save_after(&mut b, 30);
+        if coarse {
+            self.save_coarse_searches(&mut b);
+        }
         b.v
     }
     /// The sections appended to the snapshot after `version`, in order:
@@ -3663,7 +3725,13 @@ impl BlastRange {
     ) -> Option<Self> {
         observe("header", 0, None);
         let mut s = fx::blob::Scan::new(bytes);
-        let version = s.u32();
+        let mut version = s.u32();
+        // Version 66 wraps another with the whole-map searches in flight
+        // (ADR-680).
+        let coarse = version == 66;
+        if coarse {
+            version = s.u32();
+        }
         if !(27..=65).contains(&version) {
             return None;
         }
@@ -4263,6 +4331,10 @@ impl BlastRange {
             r.load_production(&mut s)?;
         }
         r.check_blank_work()?;
+        if coarse {
+            observe("coarse", bytes.len() - s.left(), None);
+            r.load_coarse_searches(&mut s)?;
+        }
         observe("tail", bytes.len() - s.left(), None);
         if !s.ok() || s.left() != 0 {
             return None;
@@ -4694,7 +4766,7 @@ impl BlastRange {
         let mut starts = self.navigation.searches_started_per_tick;
         // Share continuation work before stepping any hull. Slot-order ranks
         // and tick-based remainders survive saves without scheduler state.
-        let searching = |m: &motion::Motion| m.enabled && m.searching();
+        let searching = |m: &motion::Motion| m.enabled && m.hunting();
         let count = self.units.iter().filter(|u| searching(&u.motion)).count()
             + usize::from(!battle_mode && searching(&self.gun.motion));
         let mut rank = 0;
@@ -4719,6 +4791,79 @@ impl BlastRange {
             };
             m.allow_resume(work);
         }
+        let driven = self.patrols_running && (!battle_mode || self.battle_movement_active());
+        // Whole-map searches in flight walk on before any hull moves
+        // (ADR-680): one shared work allowance a tick, the oldest search
+        // first, ties by slot, each up to its ceiling; what the first round
+        // leaves goes round once more in the same order without the
+        // ceiling. A search that reaches its share continues next tick;
+        // none stops the queue. What is left after both rounds goes to
+        // searches hulls begin in their own steps.
+        let mut coarse_left = self.navigation.global_work_per_tick;
+        {
+            let gun_id = self.units.len();
+            let mut queue: Vec<(std::cmp::Reverse<u32>, usize)> = self
+                .units
+                .iter()
+                .map(|u| &u.motion)
+                .chain((!battle_mode).then_some(&self.gun.motion))
+                .enumerate()
+                .filter_map(|(id, m)| m.coarse_waited().map(|w| (std::cmp::Reverse(w), id)))
+                .collect();
+            queue.sort_unstable();
+            let unchanged = nav::vehicle::Changed::default();
+            for round in 0..2 {
+                for (place, &(_, id)) in queue.iter().enumerate() {
+                    let u = if id == gun_id {
+                        &self.gun
+                    } else {
+                        &self.units[id]
+                    };
+                    let budget = match (driven, round) {
+                        (false, _) => 0,
+                        // The oldest search can always make one test, so
+                        // the queue moves whatever the data and the shape.
+                        (true, 0) if place == 0 => coarse_left
+                            .min(self.navigation.global_work_per_search)
+                            .max(u.motion.coarse_max_test()),
+                        (true, 0) => coarse_left.min(self.navigation.global_work_per_search),
+                        (true, _) => coarse_left,
+                    };
+                    // Changes are noted once a tick, in the first round.
+                    if round == 1 && (budget == 0 || u.motion.coarse_waited().is_none()) {
+                        continue;
+                    }
+                    let others: Vec<_> = positions
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != id)
+                        .map(|(_, p)| *p)
+                        .chain(
+                            (!battle_mode && id != gun_id)
+                                .then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body)),
+                        )
+                        .collect();
+                    let u = if id == gun_id {
+                        &mut self.gun
+                    } else {
+                        &mut self.units[id]
+                    };
+                    let spent = u.motion.continue_coarse(
+                        &self.world,
+                        &u.body,
+                        &others,
+                        &self.rubble,
+                        self.tick,
+                        if round == 0 { &changed } else { &unchanged },
+                        budget,
+                        round == 0,
+                    );
+                    coarse_left = coarse_left.saturating_sub(spent);
+                    self.coarse_work = self.coarse_work.wrapping_add(spent);
+                }
+            }
+        }
+        detail("motion_coarse");
         // Fair start allowance (analysis 240, C3). Spatial order decides who
         // commits motion first, but it used to decide who may begin a search
         // too: the hull with the smallest X took the single start every tick
@@ -4793,7 +4938,6 @@ impl BlastRange {
             }
         }
         detail("motion_routes");
-        let driven = self.patrols_running && (!battle_mode || self.battle_movement_active());
         let mut prepared_ground: Vec<_> = (0..self.units.len()).map(|_| None).collect();
         if driven && self.units.len() >= 4 {
             if let Some(pool) = &self.navigation_pool {
@@ -4830,6 +4974,9 @@ impl BlastRange {
             u.motion.cut_limit = cut_limit;
             u.motion
                 .allow_start(starts > 0 && offered.binary_search(&id).is_ok());
+            u.motion.allow_coarse(Some(
+                coarse_left.min(self.navigation.global_work_per_search),
+            ));
             {
                 let others: Vec<_> = positions
                     .iter()
@@ -4894,12 +5041,19 @@ impl BlastRange {
                 }
             }
             starts = starts.saturating_sub(usize::from(u.motion.started_search()));
+            let spent = u.motion.coarse_spent();
+            coarse_left = coarse_left.saturating_sub(spent);
+            self.coarse_work = self.coarse_work.wrapping_add(spent);
+            u.motion.allow_coarse(None);
             unit_detail(id, "unit_done");
         }
         drop(prepared_ground);
         if !self.battle_mode() {
             self.gun.motion.cut_limit = cut_limit;
             self.gun.motion.allow_start(starts > 0);
+            self.gun.motion.allow_coarse(Some(
+                coarse_left.min(self.navigation.global_work_per_search),
+            ));
             self.gun.motion.step(
                 &self.world,
                 &self.gun.body,
@@ -4912,6 +5066,7 @@ impl BlastRange {
                 &self.rubble,
                 &changed,
             );
+            self.gun.motion.allow_coarse(None);
             self.gun.update_pose(self.turret.angle);
             if let Some((target, velocity)) = self.gun.motion.take_contact() {
                 contacts.push((self.units.len(), target, velocity));
