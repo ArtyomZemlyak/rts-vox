@@ -340,7 +340,15 @@ fn main() {
         let preset = modding::range_skirmish::Skirmish::from_ron(ron).unwrap();
         layout.gun = preset.zone.spawn;
         layout.target = preset.zone.target;
-        layout.zones.push(preset.zone);
+        // Match Workshop::skirmish: replace the authored battle sector.
+        // Appending a second zone preserves this battle's counters but
+        // changes the saved layout and invalidates native/headless hashes.
+        let zone = layout
+            .zones
+            .iter()
+            .position(|z| z.name == t.zone.name)
+            .expect("authored battle sector");
+        layout.zones[zone] = preset.zone;
         layout.units = preset.units;
         layout.blocks.extend(preset.blocks);
     } else {
@@ -1450,13 +1458,19 @@ fn main() {
                 sorted[(sorted.len() * 99 / 100).min(sorted.len() - 1)], sorted.last().unwrap(), view.payload_bytes());
         }
     }
-    if !world_battle {
-        assert_eq!(
-            sim.matter
-                .economy
-                .sunk(sim_core::matter::Sink::Annihilation),
-            0
-        );
+    // ADR-681 explicitly sinks ground when it does not wait for piece room.
+    // Ledger balance remains mandatory above; the legacy zero-sink contract
+    // belongs to the mode that retains ground for fragments.
+    let annihilated = sim
+        .matter
+        .economy
+        .sunk(sim_core::matter::Sink::Annihilation);
+    println!(
+        "ground_waits_for_pool={} annihilation_qty={annihilated}",
+        sim.battle.tuning.ground_waits_for_pool
+    );
+    if !world_battle && sim.battle.tuning.ground_waits_for_pool {
+        assert_eq!(annihilated, 0);
     }
     if let Some(path) = command_csv {
         let trace = sim
