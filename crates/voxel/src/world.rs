@@ -1357,7 +1357,8 @@ impl World {
             st.noop += 1;
             return;
         }
-        if let Some(was) = self.apply(e) {
+        // Nothing changed the voxel since `previous` was read.
+        if let Some(was) = self.apply(e, previous) {
             if fresh {
                 st.materialized += 1;
                 self.materialized_in_tick += 1;
@@ -1381,9 +1382,8 @@ impl World {
     /// Материал «до» возвращается, а не выбрасывается, потому что он
     /// нужен экономике: выкопанное начисляется по тому, что сняли,
     /// а не по тому, что осталось (`docs/07-economy.md`). Читается он
-    /// здесь всё равно.
-    fn apply(&mut self, e: Edit) -> Option<Mat> {
-        let was = self.material(e.x, e.y, e.z);
+    /// здесь всё равно: `was` — материал вокселя сейчас.
+    fn apply(&mut self, e: Edit, was: Mat) -> Option<Mat> {
         if was == e.mat {
             return None;
         }
