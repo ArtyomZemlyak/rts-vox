@@ -362,6 +362,16 @@ def summarize_tick(rows, sampling='all_scopes'):
     if len(begins) != 1 or len(ends) != 1:
         raise ValueError("Tick needs exactly one begin and end")
     begin, end = begins[0], ends[0]
+    if (begin.get('os_thread') and end.get('os_thread') and
+            begin['os_thread'] != end['os_thread']):
+        raise ValueError('Tick return is not on its caller')
+    phase_threads = {r['os_thread'] for r in rows
+                     if r['lane'] == 'phase' and r.get('os_thread')}
+    if len(phase_threads) > 1:
+        raise ValueError('Phase boundaries need a single coordinator')
+    # BlastRange delegates the tick to its physics pool. The outer caller
+    # brackets dispatch/return; one pool coordinator owns phases/details.
+    coordinator = next(iter(phase_threads), begin.get('os_thread'))
     total = interval(begin, end)
     origin = optional_int(begin, "profile_offset_ns")
     if origin is not None:
@@ -383,15 +393,13 @@ def summarize_tick(rows, sampling='all_scopes'):
         if origin is not None and optional_int(row, "profile_offset_ns") != origin + int(row["offset_ns"]):
             raise ValueError("Trace clocks disagree")
         if row["lane"] == "phase":
-            if begin.get("os_thread") and row.get("os_thread") and row["os_thread"] != begin["os_thread"]:
-                raise ValueError("Phase boundary is not on the tick caller")
             phases.append(dict(name=row["event"], **interval(last, row)))
             detail_interval(row, f'{detail_group or "detail"}_unmarked_tail')
             detail_last, detail_group = None, None
             last = row
         elif row['lane'] == 'detail':
-            if begin.get('os_thread') and row.get('os_thread') and row['os_thread'] != begin['os_thread']:
-                raise ValueError('Detail boundary is not on the tick caller')
+            if coordinator and row.get('os_thread') and row['os_thread'] != coordinator:
+                raise ValueError('Detail boundary is not on the phase coordinator')
             if row['event'].endswith('_begin'):
                 detail_interval(row, f'{detail_group or "detail"}_unmarked_tail')
                 detail_group = row['event'][:-6]
@@ -424,12 +432,13 @@ def summarize_tick(rows, sampling='all_scopes'):
                                  **interval(a, row)))
     if any(pending.values()):
         raise ValueError("Unfinished worker task")
-    # The tail is explicit; phase totals partition the caller's tick only.
+    # Wall phases partition the outer tick, including dispatch and return.
+    # CPU deltas across the caller/coordinator handoff remain unavailable.
     phases.append(dict(name="unmarked_tail", **interval(last, end)))
     detail_interval(end, f'{detail_group or "detail"}_unmarked_tail')
     for detail in details:
         detail['scope_coverage'] = scope_coverage(jobs, detail['start'], detail['end'],
-                                                 begin.get('os_thread'), sampling, unidentified_tasks)
+                                                 coordinator, sampling, unidentified_tasks)
     families = {}
     actor_threads = {}
     for job in jobs:
@@ -458,6 +467,9 @@ def summarize_tick(rows, sampling='all_scopes'):
                 value['cycles'] += job['cycles']
                 value['cycle_samples'] += 1
     return dict(generation=int(begin["generation"]), tick=int(begin["tick"]), **total,
+                phase_os_thread=coordinator,
+                delegated=bool(coordinator and begin.get('os_thread') and
+                               coordinator != begin['os_thread']),
                 profile_begin_ns=optional_int(begin, "profile_offset_ns"),
                 profile_end_ns=optional_int(end, "profile_offset_ns"), phases=phases, details=details,
                 unit_intervals=sorted(units, key=lambda r: -r["wall_ms"])[:8],

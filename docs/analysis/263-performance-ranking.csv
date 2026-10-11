@@ -1,0 +1,341 @@
+﻿scope,scenario,component,unit,mean_ms,share_pct,p99_ms,max_ms,samples,note
+native_frame,ordinary-a,profile_begin_interval,ms/frame,13.2046224557157,,34.3727,56.5437,9089,ordinary 120s
+native_frame,ordinary-b,profile_begin_interval,ms/frame,13.531271025930101,,34.745,55.6494,8870,ordinary 120s
+native_frame,diagnostic,profile_begin_interval,ms/frame,11.121609151537607,,33.4529,43.6992,2699,diagnostic overhead
+native_frame,camera-tour,profile_begin_interval,ms/frame,10.544973343373494,,34.1407,42.2545,3320,diagnostic overhead
+native_frame_partition,ordinary-pooled,simulation_input_ms,ms/frame,7.850664018041094,58.7362740927458,28.1213,48.3303,17959,disjoint start-to-start partition; outside_app is not identified idle
+native_frame_partition,ordinary-pooled,outside_app,ms/frame,4.099142179408653,30.668531737135627,9.9291,16.0451,17959,disjoint start-to-start partition; outside_app is not identified idle
+native_frame_partition,ordinary-pooled,fragments_ms,ms/frame,0.7618664346567181,5.70005232999716,1.8746,4.1872,17959,disjoint start-to-start partition; outside_app is not identified idle
+native_frame_partition,ordinary-pooled,presentation_ms,ms/frame,0.6025834846038198,4.508345871650644,1.4736,2.7025,17959,disjoint start-to-start partition; outside_app is not identified idle
+native_frame_partition,ordinary-pooled,unit_mesh_ms,ms/frame,0.05129641405423464,0.3837841269146938,0.3319,0.9265,17959,disjoint start-to-start partition; outside_app is not identified idle
+native_frame_partition,ordinary-pooled,unmarked_app,ms/frame,0.00040256138983240573,0.003011841556079328,0.001100000000000101,0.12780000000000014,17959,disjoint start-to-start partition; outside_app is not identified idle
+render_thread,diagnostic-world-30s,render_schedule,ms/observed span,5.916190440904039,,12.8047,15.8424,2699,nested spans; do not add
+render_thread,diagnostic-world-30s,render_prepare,ms/observed span,3.6442652093367913,,10.25,13.2177,2699,nested spans; do not add
+render_thread,diagnostic-world-30s,pipeline_handoff,ms/observed span,2.2880574657280475,,8.8246,11.8146,2699,nested spans; do not add
+render_thread,diagnostic-world-30s,render_system,ms/observed span,2.2399522415709523,,3.0466,4.61,2699,nested spans; do not add
+render_thread,diagnostic-world-30s,render_graph,ms/observed span,1.9543403853278993,,2.6242,4.3365,2699,nested spans; do not add
+render_thread,diagnostic-world-30s,extract_callback,ms/observed span,0.3547572063727306,,1.0901,1.3751,2699,nested spans; do not add
+render_thread,diagnostic-world-30s,gas_prepare,ms/observed span,0.3034636532048907,,1.2385,1.6679,2699,nested spans; do not add
+render_thread,diagnostic-world-30s,gas_terrain_upload,ms/observed span,0.26165242682474993,,1.1533,1.597,2699,nested spans; do not add
+render_thread,diagnostic-world-30s,submit_present_tail,ms/observed span,0.15540107447202667,,0.3013,0.5006,2699,nested spans; do not add
+render_thread,diagnostic-world-30s,gas_extract,ms/observed span,0.06510300111152278,,0.404,0.6392,2699,nested spans; do not add
+render_thread,diagnostic-world-30s,gas_bricks,ms/observed span,0.01803642089662838,,0.0872,0.2612,2699,nested spans; do not add
+render_thread,diagnostic-world-30s,gas_regions,ms/observed span,0.015726268988514265,,0.0492,0.2603,2699,nested spans; do not add
+render_thread,diagnostic-world-30s,gas_views_uniform,ms/observed span,0.004367839940718785,,0.0149,0.1719,2699,nested spans; do not add
+gpu_pass,diagnostic-world-30s,render/terrain-colour/elapsed_gpu,ms/received pass sample,0.83748,,1.925,2.198,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/gas-region-2/elapsed_gpu,ms/received pass sample,0.76243,,1.252,1.367,1187,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/gas-region-7/elapsed_gpu,ms/received pass sample,0.593595,,1.264,1.497,833,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/gas-region-0/elapsed_gpu,ms/received pass sample,0.486969,,1.483,1.561,1187,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/gas-region-3/elapsed_gpu,ms/received pass sample,0.480211,,1.381,1.401,1166,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/terrain-prepass/elapsed_gpu,ms/received pass sample,0.374109,,0.605,0.726,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/gas-base/elapsed_gpu,ms/received pass sample,0.342287,,0.942,1.001,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/gas-region-4/elapsed_gpu,ms/received pass sample,0.316362,,1.076,1.175,894,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/gas-region-1/elapsed_gpu,ms/received pass sample,0.228277,,0.735,0.805,1187,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/gas-region-5/elapsed_gpu,ms/received pass sample,0.227088,,0.958,0.994,881,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/gas-region-6/elapsed_gpu,ms/received pass sample,0.222578,,0.933,1.19,833,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/ssao/elapsed_gpu,ms/received pass sample,0.099741,,0.296,0.316,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/clustering/elapsed_gpu,ms/received pass sample,0.06435,,0.071,0.269,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/bloom/elapsed_gpu,ms/received pass sample,0.056235,,0.243,0.284,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/gas-display-samples/elapsed_gpu,ms/received pass sample,0.045897,,0.243,0.269,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/gas-simulation/elapsed_gpu,ms/received pass sample,0.039699,,0.283,0.376,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/smaa/elapsed_gpu,ms/received pass sample,0.029766,,0.031,0.231,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/gas-mask/elapsed_gpu,ms/received pass sample,0.020354,,0.104,0.317,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/msaa_writeback/elapsed_gpu,ms/received pass sample,0.012011,,0.013,0.206,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/tonemapping/elapsed_gpu,ms/received pass sample,0.011515,,0.015,0.016,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/ui/elapsed_gpu,ms/received pass sample,0.009797,,0.011,0.012,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/postprocessing/elapsed_gpu,ms/received pass sample,0.00778,,0.008,0.008,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/upscaling/elapsed_gpu,ms/received pass sample,0.006317,,0.007,0.214,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/bin_unpacking/elapsed_gpu,ms/received pass sample,0.005499,,0.006,0.21,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/early_mesh_preprocessing/elapsed_gpu,ms/received pass sample,0.005403,,0.006,0.008,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/terrain-bricks/elapsed_gpu,ms/received pass sample,0.005289,,0.02,0.021,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/main_transparent_pass_3d/elapsed_gpu,ms/received pass sample,0.002801,,0.003,0.004,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/main_transparent_pass_2d/elapsed_gpu,ms/received pass sample,0.00185,,0.002,0.003,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+gpu_pass,diagnostic-world-30s,render/main_opaque_pass_3d/elapsed_gpu,ms/received pass sample,0.001844,,0.002,0.003,1487,conditional samples; pass frequency/readbacks differ; no GPU frame sum
+camera_stream,camera-tour-35s,idle,ms/frame of this kind,0.0003425668449197861,,0.0015,0.0021,1870,conditional frame kind; nested in presentation
+camera_stream,camera-tour-35s,map,ms/frame of this kind,0.0005157333333333334,,0.0009,0.0011,375,conditional frame kind; nested in presentation
+camera_stream,camera-tour-35s,publish,ms/frame of this kind,7.006233333333333,,13.2263,13.2263,6,conditional frame kind; nested in presentation
+camera_stream,camera-tour-35s,shift,ms/frame of this kind,3.518866666666667,,11.6495,11.6495,84,conditional frame kind; nested in presentation
+camera_stream,camera-tour-35s,staging,ms/frame of this kind,0.6945959432048682,,1.2593,5.1782,986,conditional frame kind; nested in presentation
+headless_tick,breakthrough,motion_us,ms/tick,0.3251220833333333,72.62119928895176,1.331,10.291,2400,disjoint root phase
+headless_tick,breakthrough,debris_us,ms/tick,0.03544666666666667,7.917577968672926,0.109,0.41,2400,disjoint root phase
+headless_tick,breakthrough,rubble_us,ms/tick,0.032911249999999996,7.351252245293027,0.058,0.743,2400,disjoint root phase
+headless_tick,breakthrough,battle_flight_us,ms/tick,0.025594583333333334,5.7169581281934345,0.05,0.578,2400,disjoint root phase
+headless_tick,breakthrough,battle_damage_us,ms/tick,0.0117025,2.6139398959487004,0.192,0.358,2400,disjoint root phase
+headless_tick,breakthrough,unobserved_us,ms/tick,0.010742916666666668,2.3996016640762425,0.021,0.03,2400,disjoint root phase
+headless_tick,breakthrough,battle_orders_us,ms/tick,0.005547916666666666,1.2392156132791048,0.022,0.517,2400,disjoint root phase
+headless_tick,breakthrough,heat_flush_us,ms/tick,0.00033375,0.07454838199298258,0.001,0.109,2400,disjoint root phase
+headless_tick,breakthrough,collapse_us,ms/tick,0.00016958333333333333,0.03787914041341312,0.0,0.185,2400,disjoint root phase
+headless_tick,breakthrough,battle_ai_us,ms/tick,7.708333333333333e-05,0.017217791097005962,0.002,0.015,2400,disjoint root phase
+headless_tick,breakthrough,wave_us,ms/tick,1.4166666666666668e-05,0.003164350796206502,0.0,0.008,2400,disjoint root phase
+headless_tick,breakthrough,unit_fire_us,ms/tick,1.0416666666666668e-05,0.002326728526622428,0.0,0.005,2400,disjoint root phase
+headless_tick,breakthrough,battle_frontier_us,ms/tick,7.499999999999999e-06,0.0016752445391681478,0.0,0.009,2400,disjoint root phase
+headless_tick,breakthrough,accounting_us,ms/tick,5.833333333333333e-06,0.0013029679749085594,0.0,0.005,2400,disjoint root phase
+headless_tick,breakthrough,heat_exchange_us,ms/tick,5e-06,0.0011168296927787653,0.0,0.004,2400,disjoint root phase
+headless_tick,breakthrough,kinetic_resume_us,ms/tick,4.583333333333333e-06,0.0010237605517138682,0.0,0.005,2400,disjoint root phase
+headless_tick,breakthrough,battle_capture_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,breakthrough,battle_read_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,breakthrough,battle_wave_step_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,breakthrough,capture_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,breakthrough,flight_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,breakthrough,observed_other_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick_total,breakthrough,total,ms/tick,0.44769583333333335,,1.665,10.639,2400,
+headless_tick_detail,breakthrough,motion_us/route_us,ms/tick,0.08641791666666666,,1.07,10.16,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,breakthrough,motion_us/commit_us,ms/tick,0.1771775,,0.962,1.501,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,breakthrough,motion_us/feet_us,ms/tick,0.04362916666666666,,0.07,0.363,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,breakthrough,motion_us/contact_us,ms/tick,0.005385416666666667,,0.001,3.254,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,breakthrough,motion_us/felling_us,ms/tick,8.333333333333333e-07,,0.0,0.001,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,breakthrough,battle_orders_us/battle_pose_us,ms/tick,0.0016716666666666668,,0.01,0.315,2400,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,breakthrough,battle_orders_us/battle_los_us,ms/tick,0.0009183333333333334,,0.005,0.016,2400,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,breakthrough,battle_orders_us/battle_laser_us,ms/tick,0.0,,0.0,0.0,2400,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,breakthrough,battle_laser_us/battle_beam_us,ms/tick,0.0,,0.0,0.0,2400,nested in battle_laser_us; do not add to root ranking
+headless_tick_detail,breakthrough,battle_laser_us/battle_halo_us,ms/tick,0.0,,0.0,0.0,2400,nested in battle_laser_us; do not add to root ranking
+headless_tick_detail,breakthrough,collapse_us/collapse_admit_us,ms/tick,2.0833333333333336e-05,,0.0,0.012,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,breakthrough,collapse_us/collapse_edits_us,ms/tick,2.0833333333333336e-05,,0.0,0.025,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,breakthrough,collapse_us/collapse_labels_us,ms/tick,6.2499999999999995e-06,,0.0,0.008,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,breakthrough,collapse_us/collapse_promote_us,ms/tick,0.00010708333333333334,,0.0,0.131,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,breakthrough,collapse_us/collapse_resolve_us,ms/tick,2.9166666666666666e-06,,0.0,0.004,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,breakthrough,collapse_us/collapse_detach_us,ms/tick,1.6666666666666667e-06,,0.0,0.002,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,breakthrough,collapse_us/collapse_crumble_us,ms/tick,8.333333333333333e-07,,0.0,0.001,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,breakthrough,collapse_us/collapse_plate_us,ms/tick,6.666666666666667e-06,,0.0,0.004,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,breakthrough,collapse_us/collapse_rest_us,ms/tick,2.5e-06,,0.0,0.002,2400,nested in collapse_us; do not add to root ranking
+headless_tick,canister,rubble_us,ms/tick,0.9166627083333333,50.02125912692971,1.686,2.047,4800,disjoint root phase
+headless_tick,canister,debris_us,ms/tick,0.459058125,25.05028863528001,1.612,4.243,4800,disjoint root phase
+headless_tick,canister,motion_us,ms/tick,0.17231791666666665,9.40319605394225,0.485,1.922,4800,disjoint root phase
+headless_tick,canister,battle_frontier_us,ms/tick,0.09215270833333333,5.028670263210728,3.479,5.581,4800,disjoint root phase
+headless_tick,canister,battle_wave_step_us,ms/tick,0.059553125000000005,3.2497474483931854,2.11,7.521,4800,disjoint root phase
+headless_tick,canister,battle_capture_us,ms/tick,0.03363208333333333,1.8352651854398399,1.494,2.814,4800,disjoint root phase
+headless_tick,canister,battle_flight_us,ms/tick,0.0284175,1.550711203059677,0.421,1.486,4800,disjoint root phase
+headless_tick,canister,unit_fire_us,ms/tick,0.017939375,0.9789316367867932,0.053,0.308,4800,disjoint root phase
+headless_tick,canister,battle_damage_us,ms/tick,0.013761458333333336,0.7509473953704217,0.224,0.646,4800,disjoint root phase
+headless_tick,canister,unobserved_us,ms/tick,0.013065833333333334,0.712987916857942,0.042,0.325,4800,disjoint root phase
+headless_tick,canister,collapse_us,ms/tick,0.008700625,0.4747833785913998,0.11,1.713,4800,disjoint root phase
+headless_tick,canister,heat_flush_us,ms/tick,0.008698958333333335,0.4746924304548021,0.1,1.975,4800,disjoint root phase
+headless_tick,canister,wave_us,ms/tick,0.0030235416666666666,0.16499128830536564,0.002,0.571,4800,disjoint root phase
+headless_tick,canister,accounting_us,ms/tick,0.0029441666666666665,0.16065988329989853,0.002,0.714,4800,disjoint root phase
+headless_tick,canister,battle_orders_us,ms/tick,0.0024847916666666664,0.13559230315014786,0.018,0.364,4800,disjoint root phase
+headless_tick,canister,battle_ai_us,ms/tick,7.208333333333334e-05,0.00393350690785203,0.002,0.015,4800,disjoint root phase
+headless_tick,canister,heat_exchange_us,ms/tick,5.6250000000000005e-05,0.00306949961017355,0.0,0.031,4800,disjoint root phase
+headless_tick,canister,kinetic_resume_us,ms/tick,5e-06,0.0002728444097932044,0.0,0.005,4800,disjoint root phase
+headless_tick,canister,battle_read_us,ms/tick,0.0,0.0,0.0,0.0,4800,disjoint root phase
+headless_tick,canister,capture_us,ms/tick,0.0,0.0,0.0,0.0,4800,disjoint root phase
+headless_tick,canister,flight_us,ms/tick,0.0,0.0,0.0,0.0,4800,disjoint root phase
+headless_tick,canister,observed_other_us,ms/tick,0.0,0.0,0.0,0.0,4800,disjoint root phase
+headless_tick_total,canister,total,ms/tick,1.83254625,,8.472,23.398,4800,
+headless_tick_detail,canister,motion_us/route_us,ms/tick,0.00010875,,0.0,0.219,4800,nested in motion_us; do not add to root ranking
+headless_tick_detail,canister,motion_us/commit_us,ms/tick,0.11574604166666667,,0.338,1.778,4800,nested in motion_us; do not add to root ranking
+headless_tick_detail,canister,motion_us/feet_us,ms/tick,0.034581458333333336,,0.078,0.357,4800,nested in motion_us; do not add to root ranking
+headless_tick_detail,canister,motion_us/contact_us,ms/tick,6.354166666666666e-05,,0.0,0.3,4800,nested in motion_us; do not add to root ranking
+headless_tick_detail,canister,motion_us/felling_us,ms/tick,6.25e-07,,0.0,0.002,4800,nested in motion_us; do not add to root ranking
+headless_tick_detail,canister,battle_orders_us/battle_pose_us,ms/tick,0.0010897916666666666,,0.009,0.135,4800,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,canister,battle_orders_us/battle_los_us,ms/tick,0.000569375,,0.005,0.018,4800,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,canister,battle_orders_us/battle_laser_us,ms/tick,0.0,,0.0,0.0,4800,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,canister,battle_laser_us/battle_beam_us,ms/tick,0.0,,0.0,0.0,4800,nested in battle_laser_us; do not add to root ranking
+headless_tick_detail,canister,battle_laser_us/battle_halo_us,ms/tick,0.0,,0.0,0.0,4800,nested in battle_laser_us; do not add to root ranking
+headless_tick_detail,canister,collapse_us/collapse_admit_us,ms/tick,0.003950416666666666,,0.008,0.902,4800,nested in collapse_us; do not add to root ranking
+headless_tick_detail,canister,collapse_us/collapse_edits_us,ms/tick,0.001455625,,0.001,0.308,4800,nested in collapse_us; do not add to root ranking
+headless_tick_detail,canister,collapse_us/collapse_labels_us,ms/tick,0.0004764583333333333,,0.009,0.103,4800,nested in collapse_us; do not add to root ranking
+headless_tick_detail,canister,collapse_us/collapse_promote_us,ms/tick,0.00038583333333333335,,0.005,0.123,4800,nested in collapse_us; do not add to root ranking
+headless_tick_detail,canister,collapse_us/collapse_resolve_us,ms/tick,4.208333333333334e-05,,0.002,0.005,4800,nested in collapse_us; do not add to root ranking
+headless_tick_detail,canister,collapse_us/collapse_detach_us,ms/tick,0.00015291666666666665,,0.005,0.086,4800,nested in collapse_us; do not add to root ranking
+headless_tick_detail,canister,collapse_us/collapse_crumble_us,ms/tick,0.00013354166666666668,,0.007,0.024,4800,nested in collapse_us; do not add to root ranking
+headless_tick_detail,canister,collapse_us/collapse_plate_us,ms/tick,0.002092708333333333,,0.005,0.478,4800,nested in collapse_us; do not add to root ranking
+headless_tick_detail,canister,collapse_us/collapse_rest_us,ms/tick,1.1041666666666666e-05,,0.0,0.015,4800,nested in collapse_us; do not add to root ranking
+headless_tick,pincer,motion_us,ms/tick,0.07281625000000001,30.744641735614977,0.145,0.403,2400,disjoint root phase
+headless_tick,pincer,rubble_us,ms/tick,0.048832499999999994,20.618168575756346,0.075,0.773,2400,disjoint root phase
+headless_tick,pincer,debris_us,ms/tick,0.04075375,17.207140482142638,0.117,0.417,2400,disjoint root phase
+headless_tick,pincer,battle_flight_us,ms/tick,0.035457916666666665,14.971121756585347,0.067,0.808,2400,disjoint root phase
+headless_tick,pincer,battle_damage_us,ms/tick,0.025397083333333334,10.723213955853144,0.332,0.618,2400,disjoint root phase
+headless_tick,pincer,unobserved_us,ms/tick,0.0096,4.053333708642009,0.021,0.042,2400,disjoint root phase
+headless_tick,pincer,battle_orders_us,ms/tick,0.0030004166666666664,1.2668427098928434,0.019,0.096,2400,disjoint root phase
+headless_tick,pincer,heat_flush_us,ms/tick,0.0005275,0.2227222428446521,0.001,0.244,2400,disjoint root phase
+headless_tick,pincer,collapse_us,ms/tick,0.000375,0.1583333479938285,0.0,0.207,2400,disjoint root phase
+headless_tick,pincer,battle_ai_us,ms/tick,5.125e-05,0.0216388908924899,0.002,0.024,2400,disjoint root phase
+headless_tick,pincer,wave_us,ms/tick,7.500000000000001e-06,0.003166666959876571,0.0,0.007,2400,disjoint root phase
+headless_tick,pincer,unit_fire_us,ms/tick,6.2499999999999995e-06,0.002638889133230475,0.0,0.008,2400,disjoint root phase
+headless_tick,pincer,accounting_us,ms/tick,5.416666666666667e-06,0.002287037248799745,0.0,0.005,2400,disjoint root phase
+headless_tick,pincer,battle_frontier_us,ms/tick,5.416666666666667e-06,0.002287037248799745,0.0,0.007,2400,disjoint root phase
+headless_tick,pincer,kinetic_resume_us,ms/tick,4.583333333333333e-06,0.001935185364369015,0.0,0.005,2400,disjoint root phase
+headless_tick,pincer,heat_exchange_us,ms/tick,1.25e-06,0.000527777826646095,0.0,0.001,2400,disjoint root phase
+headless_tick,pincer,battle_capture_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,pincer,battle_read_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,pincer,battle_wave_step_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,pincer,capture_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,pincer,flight_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,pincer,observed_other_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick_total,pincer,total,ms/tick,0.23684208333333334,,0.759,1.315,2400,
+headless_tick_detail,pincer,motion_us/route_us,ms/tick,4.625e-05,,0.0,0.052,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,pincer,motion_us/commit_us,ms/tick,0.03669458333333333,,0.059,0.353,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,pincer,motion_us/feet_us,ms/tick,0.029927083333333333,,0.05,0.349,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,pincer,motion_us/contact_us,ms/tick,4.583333333333333e-06,,0.0,0.008,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,pincer,motion_us/felling_us,ms/tick,1.25e-06,,0.0,0.002,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,pincer,battle_orders_us/battle_pose_us,ms/tick,0.0019341666666666667,,0.011,0.043,2400,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,pincer,battle_orders_us/battle_los_us,ms/tick,0.0009320833333333334,,0.008,0.033,2400,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,pincer,battle_orders_us/battle_laser_us,ms/tick,0.0,,0.0,0.0,2400,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,pincer,battle_laser_us/battle_beam_us,ms/tick,0.0,,0.0,0.0,2400,nested in battle_laser_us; do not add to root ranking
+headless_tick_detail,pincer,battle_laser_us/battle_halo_us,ms/tick,0.0,,0.0,0.0,2400,nested in battle_laser_us; do not add to root ranking
+headless_tick_detail,pincer,collapse_us/collapse_admit_us,ms/tick,2.9583333333333332e-05,,0.0,0.013,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,pincer,collapse_us/collapse_edits_us,ms/tick,4.958333333333333e-05,,0.0,0.039,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,pincer,collapse_us/collapse_labels_us,ms/tick,7.916666666666667e-06,,0.0,0.009,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,pincer,collapse_us/collapse_promote_us,ms/tick,0.00022250000000000001,,0.0,0.131,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,pincer,collapse_us/collapse_resolve_us,ms/tick,8.333333333333334e-06,,0.0,0.004,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,pincer,collapse_us/collapse_detach_us,ms/tick,2.9583333333333332e-05,,0.0,0.026,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,pincer,collapse_us/collapse_crumble_us,ms/tick,5.416666666666667e-06,,0.0,0.006,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,pincer,collapse_us/collapse_plate_us,ms/tick,1.4583333333333335e-05,,0.0,0.004,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,pincer,collapse_us/collapse_rest_us,ms/tick,7.500000000000001e-06,,0.0,0.01,2400,nested in collapse_us; do not add to root ranking
+headless_tick,spider,motion_us,ms/tick,0.16581583333333336,23.641705994458466,1.436,9.201,2400,disjoint root phase
+headless_tick,spider,rubble_us,ms/tick,0.14684166666666668,20.936405416066652,0.311,0.879,2400,disjoint root phase
+headless_tick,spider,heat_exchange_us,ms/tick,0.1381875,19.702510800290856,0.698,1.094,2400,disjoint root phase
+headless_tick,spider,debris_us,ms/tick,0.08462499999999999,12.065671471548537,0.471,0.875,2400,disjoint root phase
+headless_tick,spider,heat_flush_us,ms/tick,0.060317083333333334,8.59989496746843,0.432,0.744,2400,disjoint root phase
+headless_tick,spider,battle_orders_us,ms/tick,0.047578749999999996,6.783687639904756,0.509,0.762,2400,disjoint root phase
+headless_tick,spider,battle_flight_us,ms/tick,0.031034999999999997,4.424911245134521,0.088,1.197,2400,disjoint root phase
+headless_tick,spider,unobserved_us,ms/tick,0.014553333333333333,2.0749865738958513,0.048,0.338,2400,disjoint root phase
+headless_tick,spider,battle_frontier_us,ms/tick,0.00425625,0.6068480260062449,0.023,0.304,2400,disjoint root phase
+headless_tick,spider,battle_damage_us,ms/tick,0.00367,0.5232616165504654,0.007,0.665,2400,disjoint root phase
+headless_tick,spider,collapse_us,ms/tick,0.002235833333333333,0.31878086221727947,0.046,0.123,2400,disjoint root phase
+headless_tick,spider,unit_fire_us,ms/tick,0.0020804166666666666,0.29662184961812826,0.007,0.013,2400,disjoint root phase
+headless_tick,spider,accounting_us,ms/tick,8.041666666666667e-05,0.011465655312697528,0.001,0.011,2400,disjoint root phase
+headless_tick,spider,battle_ai_us,ms/tick,6.708333333333333e-05,0.00956461401732799,0.002,0.023,2400,disjoint root phase
+headless_tick,spider,wave_us,ms/tick,2.0416666666666667e-05,0.0029109694835346062,0.001,0.013,2400,disjoint root phase
+headless_tick,spider,kinetic_resume_us,ms/tick,5.416666666666667e-06,0.000772298026243875,0.0,0.005,2400,disjoint root phase
+headless_tick,spider,battle_capture_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,spider,battle_read_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,spider,battle_wave_step_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,spider,capture_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,spider,flight_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,spider,observed_other_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick_total,spider,total,ms/tick,0.70137,,3.351,9.293,2400,
+headless_tick_detail,spider,motion_us/route_us,ms/tick,0.010758333333333333,,0.0,9.047,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,spider,motion_us/commit_us,ms/tick,0.09841291666666667,,1.301,2.065,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,spider,motion_us/feet_us,ms/tick,0.04750166666666667,,0.085,0.379,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,spider,motion_us/contact_us,ms/tick,4.166666666666667e-06,,0.0,0.004,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,spider,motion_us/felling_us,ms/tick,1.25e-06,,0.0,0.002,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,spider,battle_orders_us/battle_pose_us,ms/tick,0.0024329166666666666,,0.016,0.029,2400,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,spider,battle_orders_us/battle_los_us,ms/tick,0.0011275,,0.009,0.032,2400,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,spider,battle_orders_us/battle_laser_us,ms/tick,0.04285708333333333,,0.484,0.745,2400,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,spider,battle_laser_us/battle_beam_us,ms/tick,0.006695416666666666,,0.062,0.34,2400,nested in battle_laser_us; do not add to root ranking
+headless_tick_detail,spider,battle_laser_us/battle_halo_us,ms/tick,0.03616041666666667,,0.447,0.712,2400,nested in battle_laser_us; do not add to root ranking
+headless_tick_detail,spider,collapse_us/collapse_admit_us,ms/tick,0.00035958333333333334,,0.006,0.013,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,spider,collapse_us/collapse_edits_us,ms/tick,0.00039749999999999996,,0.007,0.029,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,spider,collapse_us/collapse_labels_us,ms/tick,0.00019291666666666668,,0.008,0.015,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,spider,collapse_us/collapse_promote_us,ms/tick,0.0006958333333333334,,0.029,0.108,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,spider,collapse_us/collapse_resolve_us,ms/tick,0.00020416666666666665,,0.002,0.003,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,spider,collapse_us/collapse_detach_us,ms/tick,5.7916666666666674e-05,,0.004,0.014,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,spider,collapse_us/collapse_crumble_us,ms/tick,4.25e-05,,0.002,0.005,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,spider,collapse_us/collapse_plate_us,ms/tick,0.00028250000000000004,,0.003,0.005,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,spider,collapse_us/collapse_rest_us,ms/tick,2.9166666666666666e-06,,0.0,0.003,2400,nested in collapse_us; do not add to root ranking
+headless_tick,turrets,rubble_us,ms/tick,0.15205833333333332,27.47264328774383,0.452,0.78,2400,disjoint root phase
+headless_tick,turrets,debris_us,ms/tick,0.14362458333333333,25.948903021433686,0.649,2.646,2400,disjoint root phase
+headless_tick,turrets,motion_us,ms/tick,0.10458958333333333,18.896381747336598,0.414,9.278,2400,disjoint root phase
+headless_tick,turrets,battle_wave_step_us,ms/tick,0.02548458333333333,4.604343950809107,0.477,3.177,2400,disjoint root phase
+headless_tick,turrets,battle_frontier_us,ms/tick,0.023242083333333333,4.199187579420284,0.411,3.476,2400,disjoint root phase
+headless_tick,turrets,unit_fire_us,ms/tick,0.021635416666666664,3.9089083211379902,0.027,0.317,2400,disjoint root phase
+headless_tick,turrets,collapse_us,ms/tick,0.019895833333333335,3.594614777743651,0.339,0.702,2400,disjoint root phase
+headless_tick,turrets,battle_flight_us,ms/tick,0.01685,3.04431877721368,0.123,0.731,2400,disjoint root phase
+headless_tick,turrets,heat_flush_us,ms/tick,0.015434999999999999,2.788668268622739,0.357,0.646,2400,disjoint root phase
+headless_tick,turrets,unobserved_us,ms/tick,0.011895833333333333,2.149240877582853,0.024,0.313,2400,disjoint root phase
+headless_tick,turrets,accounting_us,ms/tick,0.005452916666666667,0.985187928718977,0.134,0.166,2400,disjoint root phase
+headless_tick,turrets,battle_damage_us,ms/tick,0.00526875,0.9519142170590253,0.135,0.401,2400,disjoint root phase
+headless_tick,turrets,battle_capture_us,ms/tick,0.005123333333333333,0.9256415352279775,0.0,1.634,2400,disjoint root phase
+headless_tick,turrets,battle_orders_us,ms/tick,0.0019079166666666665,0.34470661921022355,0.012,0.088,2400,disjoint root phase
+headless_tick,turrets,wave_us,ms/tick,0.0005058333333333333,0.0913897872289171,0.001,0.14,2400,disjoint root phase
+headless_tick,turrets,heat_exchange_us,ms/tick,0.0004125,0.07452709172704114,0.019,0.05,2400,disjoint root phase
+headless_tick,turrets,battle_ai_us,ms/tick,0.00010083333333333334,0.01821773353327672,0.003,0.026,2400,disjoint root phase
+headless_tick,turrets,kinetic_resume_us,ms/tick,6.666666666666667e-06,0.001204478250133998,0.0,0.006,2400,disjoint root phase
+headless_tick,turrets,battle_read_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,turrets,capture_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,turrets,flight_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick,turrets,observed_other_us,ms/tick,0.0,0.0,0.0,0.0,2400,disjoint root phase
+headless_tick_total,turrets,total,ms/tick,0.55349,,2.635,11.783,2400,
+headless_tick_detail,turrets,motion_us/route_us,ms/tick,0.009543333333333332,,0.0,9.03,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,turrets,motion_us/commit_us,ms/tick,0.053555000000000005,,0.138,0.387,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,turrets,motion_us/feet_us,ms/tick,0.023429166666666664,,0.043,0.76,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,turrets,motion_us/contact_us,ms/tick,6.666666666666667e-06,,0.0,0.008,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,turrets,motion_us/felling_us,ms/tick,0.004539583333333333,,0.038,1.277,2400,nested in motion_us; do not add to root ranking
+headless_tick_detail,turrets,battle_orders_us/battle_pose_us,ms/tick,0.0007795833333333333,,0.005,0.019,2400,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,turrets,battle_orders_us/battle_los_us,ms/tick,0.0007895833333333333,,0.004,0.019,2400,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,turrets,battle_orders_us/battle_laser_us,ms/tick,0.0,,0.0,0.0,2400,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,turrets,battle_laser_us/battle_beam_us,ms/tick,0.0,,0.0,0.0,2400,nested in battle_laser_us; do not add to root ranking
+headless_tick_detail,turrets,battle_laser_us/battle_halo_us,ms/tick,0.0,,0.0,0.0,2400,nested in battle_laser_us; do not add to root ranking
+headless_tick_detail,turrets,collapse_us/collapse_admit_us,ms/tick,0.005795833333333333,,0.117,0.302,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,turrets,collapse_us/collapse_edits_us,ms/tick,0.004695,,0.103,0.315,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,turrets,collapse_us/collapse_labels_us,ms/tick,0.00251125,,0.049,0.095,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,turrets,collapse_us/collapse_promote_us,ms/tick,0.003017083333333333,,0.065,0.436,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,turrets,collapse_us/collapse_resolve_us,ms/tick,0.00028458333333333336,,0.004,0.009,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,turrets,collapse_us/collapse_detach_us,ms/tick,0.0012654166666666666,,0.016,0.336,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,turrets,collapse_us/collapse_crumble_us,ms/tick,0.0005283333333333333,,0.01,0.173,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,turrets,collapse_us/collapse_plate_us,ms/tick,0.0016416666666666667,,0.027,0.325,2400,nested in collapse_us; do not add to root ranking
+headless_tick_detail,turrets,collapse_us/collapse_rest_us,ms/tick,0.00015666666666666666,,0.002,0.056,2400,nested in collapse_us; do not add to root ranking
+headless_tick,world,motion_us,ms/tick,7.68374125,52.208226079136615,13.877,19.689,7200,disjoint root phase
+headless_tick,world,debris_us,ms/tick,2.328425277777778,15.820802569399211,3.43,5.102,7200,disjoint root phase
+headless_tick,world,rubble_us,ms/tick,2.0008983333333332,13.595376151953884,4.081,4.636,7200,disjoint root phase
+headless_tick,world,collapse_us,ms/tick,0.757492638888889,5.14688686899665,1.797,3.517,7200,disjoint root phase
+headless_tick,world,heat_flush_us,ms/tick,0.3915183333333333,2.6602246218004066,1.968,3.231,7200,disjoint root phase
+headless_tick,world,battle_orders_us,ms/tick,0.30433375,2.0678370999949336,1.686,14.281,7200,disjoint root phase
+headless_tick,world,battle_flight_us,ms/tick,0.22243125000000002,1.5113394125635033,0.765,4.666,7200,disjoint root phase
+headless_tick,world,unit_fire_us,ms/tick,0.1930772222222222,1.3118894742205793,0.393,0.727,7200,disjoint root phase
+headless_tick,world,battle_wave_step_us,ms/tick,0.18448708333333333,1.2535226059762468,4.718,10.357,7200,disjoint root phase
+headless_tick,world,battle_frontier_us,ms/tick,0.18354055555555554,1.2470912941185752,4.722,11.679,7200,disjoint root phase
+headless_tick,world,heat_exchange_us,ms/tick,0.17460055555555556,1.1863472469205412,0.692,1.449,7200,disjoint root phase
+headless_tick,world,unobserved_us,ms/tick,0.13693611111111112,0.9304310510568873,0.296,0.64,7200,disjoint root phase
+headless_tick,world,battle_capture_us,ms/tick,0.07370541666666666,0.5008014886745824,2.983,9.097,7200,disjoint root phase
+headless_tick,world,battle_damage_us,ms/tick,0.03364236111111111,0.2285876030410111,0.543,0.902,7200,disjoint root phase
+headless_tick,world,kinetic_resume_us,ms/tick,0.024770416666666666,0.16830596858109284,0.314,1.793,7200,disjoint root phase
+headless_tick,world,accounting_us,ms/tick,0.017988194444444446,0.1222232362797257,0.366,1.1,7200,disjoint root phase
+headless_tick,world,battle_ai_us,ms/tick,0.0032719444444444445,0.02223167200924818,0.021,2.81,7200,disjoint root phase
+headless_tick,world,wave_us,ms/tick,0.0026308333333333335,0.017875555276304397,0.061,1.32,7200,disjoint root phase
+headless_tick,world,battle_read_us,ms/tick,0.0,0.0,0.0,0.0,7200,disjoint root phase
+headless_tick,world,capture_us,ms/tick,0.0,0.0,0.0,0.0,7200,disjoint root phase
+headless_tick,world,flight_us,ms/tick,0.0,0.0,0.0,0.0,7200,disjoint root phase
+headless_tick,world,observed_other_us,ms/tick,0.0,0.0,0.0,0.0,7200,disjoint root phase
+headless_tick_total,world,total,ms/tick,14.717491527777778,,26.0,43.839,7200,
+headless_tick_detail,world,motion_us/route_us,ms/tick,2.728485,,8.411,15.463,7200,nested in motion_us; do not add to root ranking
+headless_tick_detail,world,motion_us/commit_us,ms/tick,2.653054722222222,,6.36,11.442,7200,nested in motion_us; do not add to root ranking
+headless_tick_detail,world,motion_us/feet_us,ms/tick,1.3310694444444446,,2.317,2.713,7200,nested in motion_us; do not add to root ranking
+headless_tick_detail,world,motion_us/contact_us,ms/tick,0.020729583333333336,,0.003,5.099,7200,nested in motion_us; do not add to root ranking
+headless_tick_detail,world,motion_us/felling_us,ms/tick,0.55506125,,1.254,1.472,7200,nested in motion_us; do not add to root ranking
+headless_tick_detail,world,battle_orders_us/battle_pose_us,ms/tick,0.04994388888888889,,0.102,0.372,7200,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,world,battle_orders_us/battle_los_us,ms/tick,0.017472083333333333,,0.045,0.464,7200,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,world,battle_orders_us/battle_laser_us,ms/tick,0.1672823611111111,,1.345,2.041,7200,nested in battle_orders_us; do not add to root ranking
+headless_tick_detail,world,battle_laser_us/battle_beam_us,ms/tick,0.026762083333333336,,0.171,0.496,7200,nested in battle_laser_us; do not add to root ranking
+headless_tick_detail,world,battle_laser_us/battle_halo_us,ms/tick,0.14050861111111113,,1.221,1.921,7200,nested in battle_laser_us; do not add to root ranking
+headless_tick_detail,world,collapse_us/collapse_admit_us,ms/tick,0.023180416666666665,,0.235,1.099,7200,nested in collapse_us; do not add to root ranking
+headless_tick_detail,world,collapse_us/collapse_edits_us,ms/tick,0.012719444444444445,,0.163,0.554,7200,nested in collapse_us; do not add to root ranking
+headless_tick_detail,world,collapse_us/collapse_labels_us,ms/tick,0.04588958333333333,,0.129,0.511,7200,nested in collapse_us; do not add to root ranking
+headless_tick_detail,world,collapse_us/collapse_promote_us,ms/tick,0.36275250000000003,,1.258,3.0,7200,nested in collapse_us; do not add to root ranking
+headless_tick_detail,world,collapse_us/collapse_resolve_us,ms/tick,0.061290277777777784,,0.141,0.477,7200,nested in collapse_us; do not add to root ranking
+headless_tick_detail,world,collapse_us/collapse_detach_us,ms/tick,0.07107097222222222,,0.214,1.046,7200,nested in collapse_us; do not add to root ranking
+headless_tick_detail,world,collapse_us/collapse_crumble_us,ms/tick,0.16889916666666668,,0.456,0.964,7200,nested in collapse_us; do not add to root ranking
+headless_tick_detail,world,collapse_us/collapse_plate_us,ms/tick,0.010904583333333334,,0.16,0.647,7200,nested in collapse_us; do not add to root ranking
+headless_tick_detail,world,collapse_us/collapse_rest_us,ms/tick,0.0007856944444444444,,0.021,0.051,7200,nested in collapse_us; do not add to root ranking
+operation,snapshot-early,snapshot,ms/operation,24.57105,,,25.480900,8,8 warm samples; IO/hash outside
+operation,snapshot-early,restore,ms/operation,6721.196563,,,6855.123900,8,8 warm samples; IO/hash outside
+operation,snapshot-early,drop_restored_world,ms/operation,75.080425,,,85.196600,8,8 warm samples; IO/hash outside
+operation,snapshot-late,snapshot,ms/operation,166.289787,,,172.586800,8,8 warm samples; IO/hash outside
+operation,snapshot-late,restore,ms/operation,6965.045687,,,7066.146600,8,8 warm samples; IO/hash outside
+operation,snapshot-late,drop_restored_world,ms/operation,98.2725,,,115.726000,8,8 warm samples; IO/hash outside
+operation,world,reset_first,ms/operation,1076.995,,,1076.995,1,validator cache cold
+operation,world,reset_warm,ms/operation,186.4665,,,189.535,2,same-layout reuse
+operation,world,first_tick_after_reset,ms/operation,2.614666666666667,,,2.798,3,reset/setup excluded
+operation,canister,reset_first,ms/operation,48.123,,,48.123,1,validator cache cold
+operation,canister,reset_warm,ms/operation,20.705,,,20.738,2,same-layout reuse
+operation,canister,first_tick_after_reset,ms/operation,1.4466666666666668,,,1.531,3,reset/setup excluded
+operation,early,metadata_mean_ns,ms/operation,0.000237,,,,,"owned view; repeated immutable state; loop mean, no p99"
+operation,early,mesh_mean_ns,ms/operation,0.002102,,,,,"owned view; repeated immutable state; loop mean, no p99"
+operation,early,mesh_drop_mean_ns,ms/operation,0.000487,,,,,"owned view; repeated immutable state; loop mean, no p99"
+operation,early,sampled_mean_ns,ms/operation,0.000229,,,,,"owned view; repeated immutable state; loop mean, no p99"
+operation,late,metadata_mean_ns,ms/operation,0.000199,,,,,"owned view; repeated immutable state; loop mean, no p99"
+operation,late,mesh_mean_ns,ms/operation,0.003228,,,,,"owned view; repeated immutable state; loop mean, no p99"
+operation,late,mesh_drop_mean_ns,ms/operation,0.000842,,,,,"owned view; repeated immutable state; loop mean, no p99"
+operation,late,sampled_mean_ns,ms/operation,0.009001,,,,,"owned view; repeated immutable state; loop mean, no p99"
+operation,early,batch_reuse_mean_ns,ms/operation,1.163811,,,,,"owned view; repeated immutable state; loop mean, no p99"
+operation,early,batch_capture_mean_ns,ms/operation,1.212383,,,,,"owned view; repeated immutable state; loop mean, no p99"
+operation,early,batch_drop_mean_ns,ms/operation,0.000605,,,,,"owned view; repeated immutable state; loop mean, no p99"
+operation,early,changes_mean_ns,ms/operation,0.00036,,,,,"owned view; repeated immutable state; loop mean, no p99"
+operation,late,batch_reuse_mean_ns,ms/operation,2.065137,,,,,"owned view; repeated immutable state; loop mean, no p99"
+operation,late,batch_capture_mean_ns,ms/operation,2.096176,,,,,"owned view; repeated immutable state; loop mean, no p99"
+operation,late,batch_drop_mean_ns,ms/operation,0.003178,,,,,"owned view; repeated immutable state; loop mean, no p99"
+operation,late,changes_mean_ns,ms/operation,0.000367,,,,,"owned view; repeated immutable state; loop mean, no p99"
+operation,stock-km,initial_world,ms/operation,5531.231,,,,1,single cold constructor
+operation,stock-km,cold_validation,ms/operation,19.558,,,,1,single cold validation
+operation,stock-km,reset_100_chunks,ms/operation,9.486666666666666,,,9.846,3,synthetic damage; not AI reset

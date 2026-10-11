@@ -296,8 +296,33 @@ class TraceTests(unittest.TestCase):
             profile.summarize_tick(clocks)
         worker_phase = trace()
         worker_phase[-2]["os_thread"] = "2"
-        with self.assertRaisesRegex(ValueError, "tick caller"):
+        worker_phase.append(mark('phase', 'extra', 90, '1'))
+        with self.assertRaisesRegex(ValueError, "single coordinator"):
             profile.summarize_tick(worker_phase)
+
+    def test_delegated_tick_keeps_wall_and_does_not_mix_thread_cpu(self):
+        rows = [mark('tick', 'begin', 0, '1', cpu=100),
+                mark('phase', 'rubble', 20, '2', cpu=1000),
+                mark('detail', 'motion_begin', 25, '2', cpu=1005),
+                mark('detail', 'motion_routes', 50, '2', cpu=1030),
+                mark('phase', 'motion', 80, '2', cpu=1060),
+                mark('tick', 'end', 100, '1', cpu=110)]
+        tick = profile.summarize_tick(rows)
+        self.assertTrue(tick['delegated'])
+        self.assertEqual(tick['phase_os_thread'], '2')
+        self.assertAlmostEqual(sum(p['wall_ms'] for p in tick['phases']), 100/1e6)
+        self.assertIsNone(tick['phases'][0]['thread_cpu_ms'])
+        self.assertIsNone(tick['phases'][-1]['thread_cpu_ms'])
+        self.assertAlmostEqual(tick['phases'][1]['thread_cpu_ms'], 60/1e6)
+        bad = [dict(r, os_thread='3') if r['event'] == 'motion_routes' else r for r in rows]
+        with self.assertRaisesRegex(ValueError, 'phase coordinator'):
+            profile.summarize_tick(bad)
+
+    def test_tick_must_return_to_its_outer_caller(self):
+        rows = trace()
+        rows[-1]['os_thread'] = '3'
+        with self.assertRaisesRegex(ValueError, 'Tick return'):
+            profile.summarize_tick(rows)
 
 
 class FrameCadenceTests(unittest.TestCase):

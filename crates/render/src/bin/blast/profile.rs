@@ -304,8 +304,10 @@ impl Profile {
         }
     }
     fn stamp(&mut self) {
-        if let Some(last) = self.mark.replace(Instant::now()) {
-            self.phases.push(last.elapsed().as_secs_f64() * 1000.0);
+        let now = Instant::now();
+        if let Some(last) = self.mark.replace(now) {
+            self.phases
+                .push(now.duration_since(last).as_secs_f64() * 1000.0);
         }
     }
 }
@@ -755,12 +757,13 @@ pub fn end(
             v.sort_by(f64::total_cmp);
             if !v.is_empty() {
                 println!(
-                    "GPU {name} n={} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3}",
+                    "GPU {name} n={} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} mean_ms={:.6}",
                     v.len(),
                     v[v.len() / 2],
                     v[v.len() * 95 / 100],
                     v[v.len() * 99 / 100],
-                    v[v.len() - 1]
+                    v[v.len() - 1],
+                    v.iter().sum::<f64>() / v.len() as f64
                 );
             }
         }
