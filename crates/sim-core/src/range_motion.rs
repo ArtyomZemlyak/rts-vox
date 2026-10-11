@@ -226,6 +226,9 @@ pub struct Motion {
     /// (ADR-691): the range's continuation shares pay its work. Scratch
     /// set by the range around a call; never saved.
     fine_unwalked: bool,
+    /// The last call walked a fine search's start in place. Scratch read
+    /// back by the range, which charges its start allowance (ADR-691).
+    walked_start: bool,
     /// The last search ran its open set dry after expanding nodes. Read in
     /// the same tick it is written, never across one: not state.
     dry: bool,
@@ -455,6 +458,7 @@ impl Motion {
             coarse_budget: None,
             coarse_spent: 0,
             fine_unwalked: false,
+            walked_start: false,
             dry: false,
             drive_scale: drive::drive_factor(
                 i64::from(chassis.mass) * 1000,
@@ -1308,6 +1312,7 @@ impl Motion {
             completed("plan_fine");
             return !self.blocked;
         }
+        self.walked_start = true;
         let half = shape.half.map(Fx::from_int);
         let blockers = self.local_blockers(from, shape, others);
         let clear = |p: [Fx; 2], head: i32| {
@@ -1540,6 +1545,12 @@ impl Motion {
     /// (ADR-691); the range clears it after the call.
     pub fn defer_fine(&mut self, unwalked: bool) {
         self.fine_unwalked = unwalked;
+        self.walked_start = false;
+    }
+    /// Whether a call since [`Motion::defer_fine`] walked a fine search's
+    /// start in place.
+    pub fn walked_start(&self) -> bool {
+        self.walked_start
     }
     /// The range's continuation of a whole-map search in flight (ADR-680):
     /// note what changed in the world since the last tick, walk on with
@@ -2010,8 +2021,10 @@ impl Motion {
     /// May this hull begin a search this tick, and did it. The range
     /// hands the permission out under a ceiling (ADR-312); a hull refused
     /// keeps its order and asks again next tick.
-    pub(super) fn allow_resume(&mut self, work: usize) {
-        self.resume_budget = Some(work.min(self.search_slice_limit));
+    pub(super) fn allow_resume(&mut self, work: usize) -> usize {
+        let work = work.min(self.search_slice_limit);
+        self.resume_budget = Some(work);
+        work
     }
     pub fn allow_start(&mut self, may: bool) {
         self.may_start = may;
@@ -2669,6 +2682,7 @@ impl Motion {
         self.coarse = None;
         self.allow_coarse(None);
         self.fine_unwalked = false;
+        self.walked_start = false;
         self.terrain_columns = nav::vehicle::Columns::default();
         self.cut_limit = usize::MAX;
         self.pos = std::array::from_fn(|_| s.fx());
@@ -2783,6 +2797,9 @@ pub fn floor(w: &World, x: i32, z: i32) -> i32 {
 #[cfg(test)]
 #[path = "range_coarse_budget_tests.rs"]
 mod coarse_budget_tests;
+#[cfg(test)]
+#[path = "range_fine_start_tests.rs"]
+mod fine_start_tests;
 
 #[cfg(test)]
 mod tests {

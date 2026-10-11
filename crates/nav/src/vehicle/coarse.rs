@@ -1901,6 +1901,73 @@ mod tests {
         assert_eq!(calls.iter().sum::<u64>(), total);
         assert!(calls.len() as u64 >= total / 1000);
     }
+    /// **A hull pinned by an obstacle beside it gets a lattice entry**
+    /// (ADR-691). A wall clips the corner of the box around the hull
+    /// itself, so every corridor from where it stands is refused, though
+    /// the field is open. The search names the node with clear standing
+    /// room nearest the goal, the route from it is whole, and a hull
+    /// with no such node near it is refused as before. Sliced and read
+    /// back between slices, the second walk of the candidates answers the
+    /// same.
+    #[test]
+    fn a_hull_beside_an_obstacle_is_led_to_a_lattice_entry() {
+        let mut world = World::new(1024, 32, 512, 100000, Box::new(Floor));
+        for y in 6..26 {
+            for x in 325..=328 {
+                for z in 190..=222 {
+                    world.queue_edit(voxel::Edit::put(x, y, z, 3));
+                }
+            }
+        }
+        while world.queued() > 0 {
+            world.flush();
+        }
+        let r = Rubble::new();
+        let broad = Shape {
+            half: [30, 30],
+            support: [20, 20],
+            ..shape()
+        };
+        let from = [300, 250].map(Fx::from_int);
+        let to = [900, 250];
+        let answer = plan_explained(&world, &r, broad, from, to, config());
+        let Err(Refusal::Entry { at }) = answer else {
+            panic!("{answer:?}");
+        };
+        // Clear standing room, within the two snap cells, toward the goal.
+        let box_clear = |p: [i32; 2]| {
+            let (lo, hi) = (p.map(|v| v - 31), p.map(|v| v + 31));
+            !(lo[0] <= 328 && hi[0] >= 325 && lo[1] <= 222 && hi[1] >= 190)
+        };
+        assert!(box_clear(at), "{at:?}");
+        assert!((at[0] - 300).abs() <= 40 && (at[1] - 250).abs() <= 40);
+        let onward = plan_explained(&world, &r, broad, at.map(Fx::from_int), to, config());
+        assert!(onward.is_ok_and(|r| !r.partial), "no route on from {at:?}");
+        let (sliced_answer, _) = sliced(&world, &r, broad, from, to, config(), 512);
+        assert!(same(&answer, &sliced_answer));
+        // Boxed in on all sides: no node has room, the refusal stands.
+        let mut world = World::new(1024, 32, 512, 100000, Box::new(Floor));
+        for y in 6..26 {
+            // Narrower than the hull's box: no node near has room.
+            for k in 220..=280u32 {
+                for (x, z) in [(k, 220), (k, 280), (220, k), (280, k)] {
+                    world.queue_edit(voxel::Edit::put(x, y, z, 3));
+                }
+            }
+        }
+        while world.queued() > 0 {
+            world.flush();
+        }
+        let pinned = plan_explained(
+            &world,
+            &r,
+            broad,
+            [250, 250].map(Fx::from_int),
+            to,
+            config(),
+        );
+        assert_eq!(pinned.map(|r| r.path), Err(Refusal::StartCorridor));
+    }
     /// **The dense lattice is paid in the slice that builds it** (ADR-691):
     /// a slice of exactly the dearest test either stays before the
     /// frontiers or enters them having spent at least the lattice, and

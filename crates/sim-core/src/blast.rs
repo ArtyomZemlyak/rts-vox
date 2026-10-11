@@ -3006,6 +3006,12 @@ pub struct BlastRange {
     /// Whole-map search work spent since construction (ADR-680), in the
     /// units of `global_work_per_tick`. Diagnostics: not saved, not hashed.
     pub coarse_work: u64,
+    /// What the motion phase left of the tick's start allowance for
+    /// fine searches (ADR-691): the orders phase after it starts searches
+    /// in place while a whole start slice fits, and sets the rest up
+    /// unwalked. Scratch, recomputed each tick before the orders; not
+    /// saved, not hashed.
+    fine_start_left: usize,
     /// Dig economy, on a layout with an economy section (ADR-672). In the
     /// snapshot from version 62.
     mining: Option<economy::Mining>,
@@ -3502,6 +3508,7 @@ impl BlastRange {
             collapse_cap: stock.max_body_cells as usize,
             collapse_work: CollapseWork::default(),
             coarse_work: 0,
+            fine_start_left: 0,
             mining,
             spawned: Vec::new(),
         };
@@ -5191,6 +5198,7 @@ impl BlastRange {
             ),
         ];
         let mut ranks = [0; 2];
+        let mut start_left = self.navigation.search_start_budget;
         for m in self
             .units
             .iter_mut()
@@ -5206,8 +5214,12 @@ impl BlastRange {
             } else {
                 0
             };
-            m.allow_resume(work);
+            let given = m.allow_resume(work);
+            if m.starting() {
+                start_left = start_left.saturating_sub(given);
+            }
         }
+        self.fine_start_left = start_left;
         // Fair start allowance (analysis 240, C3). Spatial order decides who
         // commits motion first, but it used to decide who may begin a search
         // too: the hull with the smallest X took the single start every tick

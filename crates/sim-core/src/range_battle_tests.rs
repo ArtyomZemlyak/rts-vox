@@ -3297,16 +3297,23 @@ fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
         for _ in 0..20 {
             parallel.step();
         }
-        // Restore with a search in flight. Spider 22 used to search from
-        // its pad for hundreds of ticks; it now leaves it by a lattice
-        // entry (ADR-691), so wait for the next pursuit search instead.
-        for _ in 0..300 {
-            if parallel.units.iter().any(|u| u.motion.searching()) {
+        // Restore with fine searches in flight, two at least: the pool
+        // walks continuations only then. Spider 22 used to search from its
+        // pad for hundreds of ticks; it now leaves it by a lattice entry
+        // (ADR-691), so wait for pursuit searches instead.
+        let fine = |r: &BlastRange| {
+            r.units
+                .iter()
+                .filter(|u| u.motion.fine_work().is_some())
+                .count()
+        };
+        for _ in 0..600 {
+            if fine(&parallel) >= 2 {
                 break;
             }
             parallel.step();
         }
-        assert!(parallel.units.iter().any(|u| u.motion.searching()));
+        assert!(fine(&parallel) >= 2, "no two fine searches in flight");
         let mut serial = BlastRange::restore(config, &parallel.snapshot()).unwrap();
         assert_eq!(
             serial
