@@ -152,7 +152,7 @@ fn wave_admission_keeps_blocked_contacts_and_resumes_the_saved_turn() {
                     &b.units,
                     b.size,
                     b.turret_limits,
-                    (48, b.tick, &allied),
+                    (48, b.tick, &allied, allied.len()),
                 )
                 .unwrap();
             restored.load_wave_contacts(&mut scan, &b.units).unwrap();

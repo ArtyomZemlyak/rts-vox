@@ -305,7 +305,7 @@ fn saved_world_contact_resumes_with_the_same_frozen_geometry_and_payment() {
     step::<false>(&mut b, &mut y, &c, true);
     let bytes = wave_bytes(&y);
     let mut scan = Scan::new(&bytes);
-    y = Explosion::load(&mut scan, &b.units, b.size, true).unwrap();
+    y = Explosion::load(&mut scan, &b.units, b.units.len(), b.size, true).unwrap();
     y.load_contacts(&mut scan, &b.units, false).unwrap();
     assert!(scan.ok() && scan.left() == 0);
     same(&a, &x, &b, &y);
@@ -408,7 +408,7 @@ fn yielded_body_and_ground_cursors_restore_without_repaying_their_prefixes() {
             assert!(!y.contact_resumes.is_empty());
             let bytes = saved_queue(&y);
             let mut s = Scan::new(&bytes);
-            y = Explosion::load(&mut s, &b.units, b.size, true).unwrap();
+            y = Explosion::load(&mut s, &b.units, b.units.len(), b.size, true).unwrap();
             y.load_contacts(&mut s, &b.units, false).unwrap();
             y.load_resumes(&mut s, &b.units).unwrap();
             assert!(s.ok() && s.left() == 0);
@@ -613,7 +613,7 @@ fn completed_body_prefixes_skip_bounds_and_preserve_every_ground_subcell_on_rest
         assert!(x.only_ground_contacts(a.units.len()));
         let bytes = saved_queue(&y);
         let mut scan = Scan::new(&bytes);
-        y = Explosion::load(&mut scan, &b.units, b.size, true).unwrap();
+        y = Explosion::load(&mut scan, &b.units, b.units.len(), b.size, true).unwrap();
         y.load_contacts(&mut scan, &b.units, false).unwrap();
         y.load_resumes(&mut scan, &b.units).unwrap();
         assert!(scan.ok() && scan.left() == 0);

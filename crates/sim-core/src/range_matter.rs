@@ -159,7 +159,32 @@ impl SectionRoom {
         true
     }
 }
+/// Cells of a unit's body and its segments: segments are matter of the
+/// same body (ADR-278).
+fn body_cells(u: &RangeUnit) -> u64 {
+    u.body.solid_count() as u64
+        + u.body
+            .segments
+            .iter()
+            .map(|s| u64::from(s.body.solid_count()))
+            .sum::<u64>()
+}
+
 impl Matter {
+    /// Matter of an intact body of this unit's template: its cells times
+    /// the fixed pack's density of body material — what a produced unit
+    /// costs (ADR-675) and what a placed unit's body holds.
+    pub(super) fn template_matter(&self, u: &RangeUnit) -> crate::matter::Amount {
+        body_cells(u) * u64::from(self.source_density(3))
+    }
+    /// The body container of a unit appended to the roster (ADR-675).
+    pub(super) fn push_body(&mut self, id: crate::matter::ContainerId) {
+        self.bodies.push(id);
+    }
+    /// Body container of each unit slot.
+    pub(super) fn body_of(&self, id: usize) -> Option<crate::matter::ContainerId> {
+        self.bodies.get(id).copied()
+    }
     pub fn new(units: &[RangeUnit]) -> Self {
         let t =
             crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("stock tuning");
@@ -171,14 +196,7 @@ impl Matter {
         let bodies = units
             .iter()
             .map(|u| {
-                // Segments are matter of the same body (ADR-278).
-                let cells = u.body.solid_count() as u64
-                    + u.body
-                        .segments
-                        .iter()
-                        .map(|s| u64::from(s.body.solid_count()))
-                        .sum::<u64>();
-                let n = cells * amount;
+                let n = body_cells(u) * amount;
                 economy.ledger.create(Kind::Body, n, n)
             })
             .collect();
@@ -1314,7 +1332,9 @@ impl Matter {
         let ledger_limit = (self.tuning.max_fragments as usize)
             .saturating_mul(4usize.pow(3))
             .saturating_add(self.tuning.max_resting_fragments as usize)
-            .saturating_add(units.len().saturating_mul(3).saturating_add(3));
+            // Body, fuel and tank per unit, a blank per producer and one
+            // per dead producer (ADR-675), the ground and two stores.
+            .saturating_add(units.len().saturating_mul(5).saturating_add(3));
         if n > ledger_limit || n > s.left() / 18 {
             return None;
         }
@@ -1347,14 +1367,7 @@ impl Matter {
             let c = l.try_get(*id)?;
             if !c.alive
                 || c.kind != Kind::Body
-                || c.held
-                    != (u.body.solid_count() as u64
-                        + u.body
-                            .segments
-                            .iter()
-                            .map(|s| u64::from(s.body.solid_count()))
-                            .sum::<u64>())
-                        * u64::from(self.source_density(3))
+                || c.held != body_cells(u) * u64::from(self.source_density(3))
             {
                 return None;
             }

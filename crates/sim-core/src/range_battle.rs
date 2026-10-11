@@ -299,7 +299,61 @@ fn effective_weapon(
     }))
 }
 
+impl Actor {
+    /// A fresh actor for a unit: automatic order, the kind's stock gun.
+    /// A produced unit gets the same (ADR-675).
+    pub(super) fn of(u: &RangeUnit) -> Self {
+        Actor {
+            turret: crate::turret::Traverse::new(u.motion.drive.head),
+            order: Order::Auto,
+            target: None,
+            next: 0,
+            charge: None,
+            pursuit: 0,
+            burst: 0,
+            elevation: crate::turret::Traverse::new(0),
+            fired: 0,
+            weapon: match u.kind {
+                RangeUnitKind::Tank => Some(Weapon::Kinetic),
+                RangeUnitKind::Artillery => Some(Weapon::Blast),
+                RangeUnitKind::ArtilleryT2 | RangeUnitKind::ArtilleryTurretT2 => {
+                    Some(Weapon::Canister)
+                }
+                _ => None,
+            },
+        }
+    }
+}
+
 impl Battle {
+    /// A blast wave of the shell at `at` over the present roster. Tests
+    /// of a roster growing under a live wave (ADR-675).
+    #[cfg(test)]
+    pub(crate) fn push_test_wave(&mut self, units: &[RangeUnit], at: [i32; 3]) {
+        self.waves.push(Burst {
+            side: None,
+            weapon: Weapon::Blast,
+            wave: Explosion::begin(at, &self.shell_config, units),
+            energy: u64::from(self.shell_config.material_energy_j) * 1000,
+        });
+    }
+    /// The shell's capture budget per tick; not in the snapshot.
+    #[cfg(test)]
+    pub(crate) fn set_test_capture(&mut self, capture: usize) {
+        self.shell_config.capture_cells_per_tick = capture;
+    }
+    /// Each live wave's roster: the units it began with.
+    #[cfg(test)]
+    pub(crate) fn wave_rosters(&self, units: usize) -> Vec<usize> {
+        self.waves.iter().map(|w| w.wave.roster(units)).collect()
+    }
+    /// Append a produced unit's actor, and its fire trace when tracing.
+    pub(super) fn push_actor(&mut self, u: &RangeUnit) {
+        self.actors.push(Actor::of(u));
+        if let Some(trace) = self.fire_trace.as_mut() {
+            trace.push(FireGate::NoTarget);
+        }
+    }
     pub fn new(units: &[RangeUnit], resistance: u32) -> Self {
         let tuning = std::sync::Arc::new(
             Tuning::from_ron(include_str!("../../../data/range-battle.ron"))
@@ -336,28 +390,7 @@ impl Battle {
         canister_config.unit_ablation_resistance = resistance;
         Self {
             phase: Phase::Setup,
-            actors: units
-                .iter()
-                .map(|u| Actor {
-                    turret: crate::turret::Traverse::new(u.motion.drive.head),
-                    order: Order::Auto,
-                    target: None,
-                    next: 0,
-                    charge: None,
-                    pursuit: 0,
-                    burst: 0,
-                    elevation: crate::turret::Traverse::new(0),
-                    fired: 0,
-                    weapon: match u.kind {
-                        RangeUnitKind::Tank => Some(Weapon::Kinetic),
-                        RangeUnitKind::Artillery => Some(Weapon::Blast),
-                        RangeUnitKind::ArtilleryT2 | RangeUnitKind::ArtilleryTurretT2 => {
-                            Some(Weapon::Canister)
-                        }
-                        _ => None,
-                    },
-                })
-                .collect(),
+            actors: units.iter().map(Actor::of).collect(),
             rounds: Vec::new(),
             waves: Vec::new(),
             impacts: Vec::new(),
@@ -502,7 +535,8 @@ impl Battle {
         defer: bool,
     ) -> Option<()> {
         for burst in &mut self.waves {
-            burst.wave.load_contacts(s, units, defer)?;
+            let n = burst.wave.roster(units.len());
+            burst.wave.load_contacts(s, &units[..n], defer)?;
         }
         Some(())
     }
@@ -612,9 +646,9 @@ impl Battle {
         units: &[RangeUnit],
         size: [u32; 3],
         limits: crate::turret::Limits,
-        migration: (u32, u32, &[bool]),
+        migration: (u32, u32, &[bool], usize),
     ) -> Option<()> {
-        let (version, tick, allied) = migration;
+        let (version, tick, allied, authored) = migration;
         self.phase = match s.u8() {
             0 => Phase::Setup,
             1 => Phase::Fighting,
@@ -728,7 +762,7 @@ impl Battle {
             self.waves.push(Burst {
                 weapon,
                 energy,
-                wave: Explosion::load(s, units, size, true)?,
+                wave: Explosion::load(s, units, authored, size, true)?,
                 side: None,
             });
         }
@@ -1244,11 +1278,10 @@ impl BlastRange {
         }
         outcome
     }
+    /// The unit's side: an authored unit's from the layout, a produced
+    /// one's from its spawn record (ADR-675).
     pub fn allied(&self, id: usize) -> bool {
-        self.layout
-            .as_ref()
-            .and_then(|l| l.units.get(id))
-            .is_some_and(|u| u.allied)
+        self.unit_def(id).is_some_and(|u| u.allied)
     }
     pub fn start_battle(&mut self) -> Result<(), &'static str> {
         self.execute_battle_lifecycle(commands::BattleLifecycle::StartBattle)
@@ -1441,6 +1474,16 @@ impl BlastRange {
                 value,
             } => {
                 let outcome = self.tune_motion(kind, include_gun, field, value);
+                self.record_player_command(command, outcome);
+                return outcome;
+            }
+            commands::Command::Produce { actor, kind } => {
+                let outcome = self.enqueue_product(actor, kind, true);
+                self.record_player_command(command, outcome);
+                return outcome;
+            }
+            commands::Command::Cancel { actor } => {
+                let outcome = self.cancel_product(actor, true);
                 self.record_player_command(command, outcome);
                 return outcome;
             }
@@ -1738,9 +1781,9 @@ impl BlastRange {
     /// Health of each command base, when both sides have one. A destroyed
     /// base remains in the layout and reports zero health.
     pub fn battle_base_integrity(&self) -> Option<[i32; 2]> {
-        let layout = self.layout.as_ref()?;
+        self.layout.as_ref()?;
         let mut health = [None, None];
-        for (i, def) in layout.units.iter().enumerate() {
+        for (i, def) in self.roster().enumerate() {
             if def.kind == RangeUnitKind::Base {
                 let side = usize::from(!def.allied);
                 let unit = self.units.get(i)?;

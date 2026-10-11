@@ -28,6 +28,10 @@
 //! order. The tank has no cells: one dig edit takes `cargo_per_edit` of it,
 //! and it may be taken in part (Q-78).
 //!
+//! **A dead producer's blank lies the same way** (ADR-675): the matter
+//! paid into a producer's unfinished order breaches by the same share when
+//! the producer dies, and the rest is reclaimed at its hull as a tank is.
+//!
 //! **Searches have a ceiling per tick.** A digger without work searches
 //! only when something lies in the grid cells around its face — one with
 //! nothing there spends no search. At most `searches_per_tick` search, the
@@ -51,6 +55,8 @@ enum Work {
     Piece { id: u64, spent: u32 },
     /// The tank of the dead digger in this slot.
     Tank(u16),
+    /// The blank of the dead producer in this slot (ADR-675).
+    Blank(u16),
 }
 
 /// Reclaim's state on a layout whose economy has a reclaim section.
@@ -88,6 +94,11 @@ impl Reclaim {
             lost: 0,
         }
     }
+    /// A unit appended to the roster (ADR-675).
+    pub(crate) fn push_unit(&mut self) {
+        self.work.push(None);
+        self.breached.push(false);
+    }
     pub(crate) fn save(&self, b: &mut Blob) {
         for v in [
             self.reclaimed,
@@ -110,6 +121,10 @@ impl Reclaim {
                 }
                 Some(Work::Tank(slot)) => {
                     b.u8(2);
+                    b.u16(slot);
+                }
+                Some(Work::Blank(slot)) => {
+                    b.u8(3);
                     b.u16(slot);
                 }
             }
@@ -138,6 +153,8 @@ enum Target {
     Piece(usize),
     /// A breached tank by its slot.
     Tank(usize),
+    /// A dead producer's blank by its slot.
+    Blank(usize),
 }
 
 /// Resting pieces and breached tanks by grid cell of the reach, and resting
@@ -168,6 +185,7 @@ impl Near {
         units: &[RangeUnit],
         tanks: &[Option<ContainerId>],
         breached: &[bool],
+        blanks: &[(usize, ContainerId)],
         ledger: &Ledger,
     ) -> Self {
         let mut near = Self {
@@ -185,6 +203,11 @@ impl Near {
         for (slot, tank) in tanks.iter().enumerate() {
             if tank.is_some_and(|t| breached[slot] && ledger.held(t) > 0) {
                 near.insert(Target::Tank(slot), point(units[slot].motion.pos));
+            }
+        }
+        for &(slot, blank) in blanks {
+            if ledger.held(blank) > 0 {
+                near.insert(Target::Blank(slot), point(units[slot].motion.pos));
             }
         }
         near
@@ -228,6 +251,7 @@ pub(super) fn reclaim(
         inflight,
         reclaim: state,
         haul,
+        production,
         ..
     } = m;
     let Some(rc) = state.as_mut() else {
@@ -248,7 +272,22 @@ pub(super) fn reclaim(
     }
     let fragments = &matter.debris.fragments;
     let ledger = &matter.economy.ledger;
-    let near = Near::build(rc.data.reach, fragments, units, tanks, &rc.breached, ledger);
+    let blanks = production.as_ref().map_or_else(Vec::new, |p| p.wrecks());
+    let blank_of = |slot: u16| {
+        blanks
+            .iter()
+            .find(|(s, _)| *s == usize::from(slot))
+            .map(|&(_, c)| c)
+    };
+    let near = Near::build(
+        rc.data.reach,
+        fragments,
+        units,
+        tanks,
+        &rc.breached,
+        &blanks,
+        ledger,
+    );
     let cap = |id: usize| ledger.get(tanks[id].expect("digger has a tank")).cap;
     // Work still there, still in reach and still fitting the tank.
     for d in diggers.iter() {
@@ -265,6 +304,10 @@ pub(super) fn reclaim(
                     && ledger.held(tanks[slot].expect("a breached slot has a tank")) > 0
                     && near.within(d.face, point(units[slot].motion.pos))
             }
+            Some(Work::Blank(slot)) => blank_of(slot).is_some_and(|c| {
+                ledger.held(c) > 0
+                    && near.within(d.face, point(units[usize::from(slot)].motion.pos))
+            }),
         };
         if !valid {
             rc.work[d.id] = None;
@@ -311,6 +354,7 @@ pub(super) fn reclaim(
                         ((d2, 0, f.id), Work::Piece { id: f.id, spent: 0 })
                     }
                     Target::Tank(slot) => ((d2, 1, slot as u64), Work::Tank(slot as u16)),
+                    Target::Blank(slot) => ((d2, 2, slot as u64), Work::Blank(slot as u16)),
                 };
                 if best.is_none_or(|(b, _)| key < b) {
                     best = Some((key, work));
@@ -343,7 +387,7 @@ pub(super) fn reclaim(
         let room = ledger.room(tank).saturating_sub(inflight[d.id]);
         let full = match work {
             Work::Piece { id, .. } => ledger.held(fragments[near.pieces[&id]].held) > room,
-            Work::Tank(_) => room == 0,
+            Work::Tank(_) | Work::Blank(_) => room == 0,
         };
         if full {
             // The next thing at the face does not fit: the tank is full.
@@ -375,8 +419,14 @@ pub(super) fn reclaim(
                 }
                 spend
             }
-            Work::Tank(slot) => {
-                let wreck = tanks[usize::from(slot)].expect("a breached slot has a tank");
+            Work::Tank(_) | Work::Blank(_) => {
+                let wreck = match work {
+                    Work::Tank(slot) => {
+                        tanks[usize::from(slot)].expect("a breached slot has a tank")
+                    }
+                    Work::Blank(slot) => blank_of(slot).expect("a worked blank lies"),
+                    Work::Piece { .. } => unreachable!(),
+                };
                 let most = (budget as u64).saturating_mul(cpe);
                 let want = ledger.held(wreck).min(room).min(most);
                 let got = ledger.transfer(wreck, tank, want);
@@ -398,6 +448,22 @@ pub(super) fn reclaim(
         debris.retire_reclaimed(economy, &taken);
     }
     starved
+}
+
+impl Reclaim {
+    /// Slots whose work is a dead producer's blank.
+    pub(crate) fn blank_work(&self) -> impl Iterator<Item = usize> + '_ {
+        self.work.iter().filter_map(|w| match w {
+            Some(Work::Blank(slot)) => Some(usize::from(*slot)),
+            _ => None,
+        })
+    }
+    /// The breach share of a container's matter: `breach_num / breach_den`,
+    /// down, never more than it holds.
+    pub(crate) fn breach_loss(&self, held: Amount) -> Amount {
+        (u128::from(held) * u128::from(self.data.breach_num) / u128::from(self.data.breach_den))
+            as Amount
+    }
 }
 
 impl BlastRange {
@@ -470,6 +536,8 @@ impl BlastRange {
                     spent: s.u32(),
                 }),
                 2 => Some(Work::Tank(s.u16())),
+                // Checked against the production's blanks once they load.
+                3 => Some(Work::Blank(s.u16())),
                 _ => return None,
             };
             let Some(work) = rc.work[id] else {
@@ -489,6 +557,7 @@ impl BlastRange {
                         && pieces.get(&piece).is_some_and(|f| spent < f.count.max(1))
                 }
                 Work::Tank(slot) => rc.breached.get(usize::from(slot)) == Some(&true),
+                Work::Blank(slot) => usize::from(slot) < self.units.len(),
             };
             if !valid {
                 return None;

@@ -36,6 +36,7 @@ impl Explosion {
         }
     }
     pub(super) fn load_resumes(&mut self, s: &mut Scan, units: &[RangeUnit]) -> Option<()> {
+        let units = &units[..self.roster(units.len())];
         let count = s.usize();
         if count > self.pending.len().saturating_sub(1) || count > s.left() / 28 {
             return None;

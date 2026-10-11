@@ -72,6 +72,15 @@ pub enum Command {
         destination: [i32; 2],
         fallback: [i32; 2],
     },
+    /// Queue a unit of `kind` at producer `actor` (ADR-675).
+    Produce {
+        actor: usize,
+        kind: crate::blast::RangeUnitKind,
+    },
+    /// Cancel the last order queued at producer `actor` (ADR-675).
+    Cancel {
+        actor: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,7 +1,7 @@
-//! Dig economy of the range (plan 245, slices 0, 1, 3 and 6; ADR-672,
-//! ADR-673, ADR-674). Hauling to the docks and the sides' stores —
+//! Dig economy of the range (plan 245, slices 0, 1, 3, 4 and 6; ADR-672,
+//! ADR-673, ADR-674, ADR-675). Hauling to the docks and the sides' stores —
 //! [`haul`]; reclaim of resting debris and dead diggers' tanks —
-//! [`reclaim`].
+//! [`reclaim`]; production and produced units — [`produce`].
 //!
 //! A unit whose kind has a tank takes `Order::Dig(face)`. Within reach of
 //! its face it queues the ball of `dig_radius` around it, a cell at a time,
@@ -31,6 +31,8 @@ use voxel::store::AIR;
 
 #[path = "range_haul.rs"]
 pub mod haul;
+#[path = "range_produce.rs"]
+pub mod produce;
 #[path = "range_reclaim.rs"]
 pub mod reclaim;
 #[cfg(test)]
@@ -85,6 +87,8 @@ pub struct Mining {
     haul: Option<haul::Haul>,
     /// Reclaim, with a reclaim section (ADR-674).
     reclaim: Option<reclaim::Reclaim>,
+    /// Production, with a production section (ADR-675).
+    production: Option<produce::Production>,
 }
 
 impl Mining {
@@ -112,6 +116,7 @@ impl Mining {
             .is_some()
             .then(|| haul::Haul::new(&data, units, sides, ledger, allied_store));
         let reclaim = data.reclaim.map(|r| reclaim::Reclaim::new(r, units.len()));
+        let production = data.production.as_ref().map(produce::Production::new);
         Self {
             data,
             tanks,
@@ -123,6 +128,19 @@ impl Mining {
             deferred: 0,
             haul,
             reclaim,
+            production,
+        }
+    }
+    /// A unit appended to the roster (ADR-675): its tank, if its kind digs,
+    /// and an empty slot in every per-unit list.
+    pub(super) fn push_unit(&mut self, allied: bool, tank: Option<ContainerId>) {
+        self.tanks.push(tank);
+        self.inflight.push(0);
+        if let Some(h) = self.haul.as_mut() {
+            h.push_unit(allied);
+        }
+        if let Some(rc) = self.reclaim.as_mut() {
+            rc.push_unit();
         }
     }
     pub fn data(&self) -> &RangeEconomy {

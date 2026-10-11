@@ -110,7 +110,7 @@ fn crowded_wave_budget_turn_survives_loading_a_partial_capture() {
             &b.units,
             b.size,
             b.turret_limits,
-            (52, b.tick, &allied),
+            (52, b.tick, &allied, allied.len()),
         )
         .unwrap();
     restored.load_wave_contacts(&mut scan, &b.units).unwrap();

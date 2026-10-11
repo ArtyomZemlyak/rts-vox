@@ -57,6 +57,11 @@ impl Combustion {
             dissipated_heat: 0,
         }
     }
+    /// A produced unit's stock: no fuel container. Its fuel is matter the
+    /// side's store does not hold, and nothing refuels yet (ADR-675).
+    pub(super) fn push_unit(&mut self) {
+        self.stocks.push(Stock::default());
+    }
     fn amount(&self, matter: &Matter, ml: u32) -> u64 {
         // Density units per world cell, converted from physical millilitres.
         u64::from(ml) * 1000 * u64::from(matter.source_density(self.tuning.material))

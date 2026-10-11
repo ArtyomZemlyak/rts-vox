@@ -444,6 +444,44 @@ impl RangeUnit {
     pub fn new(at: [i32; 3]) -> Self {
         Self::of_kind(RangeUnitKind::Tank, at)
     }
+    /// A unit as a layout places it: an enemy of a battle faces the other
+    /// way. A produced unit is placed the same way (ADR-675).
+    pub(crate) fn placed(kind: RangeUnitKind, allied: bool, at: [i32; 3], battle: bool) -> Self {
+        let mut u = Self::of_kind(kind, at);
+        if battle && !allied {
+            u.motion.drive.head = fx::angle::FULL / 2;
+            u.update_pose(u.motion.drive.head);
+        }
+        u
+    }
+    /// The layout course's speeds, steps and route tuning for this kind.
+    pub(crate) fn apply_course(&mut self, c: &modding::range::RangeCourse) {
+        let tracked = matches!(
+            self.kind,
+            RangeUnitKind::Tank | RangeUnitKind::Artillery | RangeUnitKind::ArtilleryT2
+        );
+        self.motion.speed = if self.kind.emplacement() {
+            0
+        } else if self.kind == RangeUnitKind::Spider {
+            motion::spider_tuning().speed
+        } else if tracked {
+            c.tank_speed
+        } else {
+            c.walker_speed
+        };
+        self.motion.step = if self.kind.emplacement() {
+            0
+        } else if self.kind == RangeUnitKind::Spider {
+            motion::spider_tuning().step
+        } else if tracked {
+            c.step_height
+        } else {
+            c.walker_step_height
+        };
+        self.motion.arrival = c.arrival;
+        self.motion.alignment = c.turn_alignment_pct;
+        self.motion.replan = c.replan_ticks;
+    }
     pub fn of_kind(kind: RangeUnitKind, at: [i32; 3]) -> Self {
         // Stock range bodies are immutable templates until a shot damages an
         // instance. Copy their prepared voxel data instead of redrawing the
@@ -1836,7 +1874,15 @@ impl Explosion {
         dents: &SurfaceWork,
         budget: usize,
     ) -> bool {
+        let units = &units[..self.roster(units.len())];
         capture::capture(self, w, c, units, dents, budget, true)
+    }
+    /// Units the burst knows: the roster when it began. A unit produced
+    /// while it works is not in its frozen poses, and its contact cursor
+    /// counts the roster it began with; the unit meets bursts that begin
+    /// after it (ADR-675).
+    pub(crate) fn roster(&self, units: usize) -> usize {
+        self.poses.len().min(units)
     }
 
     /// The wave has cells still to reach or hits still to apply. The
@@ -1878,6 +1924,8 @@ impl Explosion {
         mut matter: Option<&mut matter::Matter>,
         room: Option<&mut u32>,
     ) {
+        let n = self.roster(units.len());
+        let units = &mut units[..n];
         if let Some(m) = matter.as_deref_mut() {
             if let Some(room) = room.as_deref() {
                 m.begin_body_batch_with_room(*room);
@@ -2665,6 +2713,10 @@ pub struct BlastRange {
     /// Dig economy, on a layout with an economy section (ADR-672). In the
     /// snapshot from version 62.
     mining: Option<economy::Mining>,
+    /// Units produced during the run, appended after the layout's (ADR-675):
+    /// with the authored layout they are the roster. In the snapshot from
+    /// version 65, right after the layout.
+    spawned: Vec<economy::produce::Spawned>,
 }
 
 /// The refused source motion is already normal to the other hull. Subtract
@@ -3015,14 +3067,7 @@ impl BlastRange {
         let mut units: Vec<RangeUnit> = if let Some(r) = &layout {
             r.units
                 .iter()
-                .map(|u| {
-                    let mut actor = RangeUnit::of_kind(u.kind, u.at);
-                    if r.battle && !u.allied {
-                        actor.motion.drive.head = fx::angle::FULL / 2;
-                        actor.update_pose(actor.motion.drive.head);
-                    }
-                    actor
-                })
+                .map(|u| RangeUnit::placed(u.kind, u.allied, u.at, r.battle))
                 .collect()
         } else {
             witness
@@ -3037,33 +3082,7 @@ impl BlastRange {
         completed("units");
         if let Some(c) = layout.as_ref().and_then(|r| r.course.as_ref()) {
             for u in units.iter_mut().chain(std::iter::once(&mut gun)) {
-                u.motion.speed = if u.kind.emplacement() {
-                    0
-                } else if u.kind == RangeUnitKind::Spider {
-                    motion::spider_tuning().speed
-                } else if matches!(
-                    u.kind,
-                    RangeUnitKind::Tank | RangeUnitKind::Artillery | RangeUnitKind::ArtilleryT2
-                ) {
-                    c.tank_speed
-                } else {
-                    c.walker_speed
-                };
-                u.motion.step = if u.kind.emplacement() {
-                    0
-                } else if u.kind == RangeUnitKind::Spider {
-                    motion::spider_tuning().step
-                } else if matches!(
-                    u.kind,
-                    RangeUnitKind::Tank | RangeUnitKind::Artillery | RangeUnitKind::ArtilleryT2
-                ) {
-                    c.step_height
-                } else {
-                    c.walker_step_height
-                };
-                u.motion.arrival = c.arrival;
-                u.motion.alignment = c.turn_alignment_pct;
-                u.motion.replan = c.replan_ticks;
+                u.apply_course(c);
             }
             for p in &c.patrols {
                 if !units[p.unit].kind.emplacement() {
@@ -3074,7 +3093,7 @@ impl BlastRange {
         }
         let mut matter = matter::Matter::new(&units);
         let combustion = fire::Combustion::new(&units, &mut matter);
-        let mining = layout.as_ref().and_then(|l| {
+        let mut mining = layout.as_ref().and_then(|l| {
             let data = l.economy.clone()?;
             // Sides as `allied` reads them (ADR-673).
             let sides = (0..units.len())
@@ -3089,6 +3108,9 @@ impl BlastRange {
                 allied_store,
             ))
         });
+        if let Some(m) = mining.as_mut() {
+            m.price_products(&matter);
+        }
         let shield_tuning =
             modding::shield::ShieldTuning::from_ron(include_str!("../../../data/shield.ron"))
                 .expect("shield tuning");
@@ -3184,6 +3206,7 @@ impl BlastRange {
             collapse_cap: stock.max_body_cells as usize,
             collapse_work: CollapseWork::default(),
             mining,
+            spawned: Vec::new(),
         };
         result.turret = crate::turret::Traverse::new(result.aim_angle());
         completed("components");
@@ -3239,7 +3262,9 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        let version = if self.has_reclaim() {
+        let version = if self.has_production() {
+            65
+        } else if self.has_reclaim() {
             64
         } else if self.has_banks() {
             63
@@ -3284,6 +3309,10 @@ impl BlastRange {
         b.bool(self.layout.is_some());
         if let Some(r) = &self.layout {
             b.u8s(r.to_ron().expect("validated layout").as_bytes());
+        }
+        // Produced units, before every per-unit section (ADR-675).
+        if version >= 65 {
+            self.save_spawned(&mut b);
         }
         let material_format = if self.matter.density_history {
             57
@@ -3497,7 +3526,9 @@ impl BlastRange {
                     .any(|u| u.kind.canister() || artillery::elevates(u.kind))
                 || artillery::elevates(self.gun.kind))
         {
-            let format = if self.has_reclaim() {
+            let format = if self.has_production() {
+                65
+            } else if self.has_reclaim() {
                 64
             } else if self.has_banks() {
                 63
@@ -3558,6 +3589,11 @@ impl BlastRange {
             if version < 64 {
                 rc.save(b);
             }
+        }
+        // Version 65 holds every section of 62, the haul and the reclaim
+        // when the range has them, and then production (ADR-675).
+        if self.has_production() && version < 65 {
+            self.save_production(b);
         }
     }
     fn save_laser_tracking(&self, b: &mut fx::blob::Blob) {
@@ -3628,7 +3664,7 @@ impl BlastRange {
         observe("header", 0, None);
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=64).contains(&version) {
+        if !(27..=65).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -3665,13 +3701,19 @@ impl BlastRange {
         } else {
             Self::build_scene(config, None, extended, witness)
         };
-        // Version 64 is the reclaim's, with or without banks; below it 63
-        // is exactly the banks'.
+        // Version 65 is production's, with whatever sections the economy
+        // has; 64 is the reclaim's, with or without banks; below it 63 is
+        // exactly the banks'.
         if (version >= 62) != r.has_economy()
-            || (version >= 64) != r.has_reclaim()
+            || (version == 65 && !r.mining.as_ref().is_some_and(|m| m.production().is_some()))
+            || (version < 65 && (version >= 64) != r.has_reclaim())
             || (version < 64 && (version >= 63) != r.has_banks())
         {
             return None;
+        }
+        if version >= 65 {
+            observe("spawned", bytes.len() - s.left(), None);
+            r.load_spawned(&mut s)?;
         }
         if let Some(current) = configured {
             // The constructor's pack and world limits come from the saved base.
@@ -3965,7 +4007,14 @@ impl BlastRange {
         }
         observe("explosion", bytes.len() - s.left(), None);
         if s.bool() {
-            r.explosion = Some(Explosion::load(&mut s, &r.units, r.size, version >= 36)?);
+            let authored = r.authored_units();
+            r.explosion = Some(Explosion::load(
+                &mut s,
+                &r.units,
+                authored,
+                r.size,
+                version >= 36,
+            )?);
         }
         if s.u32() as usize != r.shields.len() {
             return None;
@@ -4054,17 +4103,15 @@ impl BlastRange {
         }
         observe("battle", bytes.len() - s.left(), None);
         if version >= 36 {
-            let allied: Vec<_> = r
-                .layout
-                .as_ref()
-                .map(|l| l.units.iter().map(|u| u.allied).collect())
-                .unwrap_or_default();
+            // Sides of the authored and the produced units (ADR-675).
+            let allied: Vec<_> = r.roster().map(|u| u.allied).collect();
+            let authored = r.authored_units();
             r.battle.load(
                 &mut s,
                 &r.units,
                 r.size,
                 r.turret_limits,
-                (version, r.tick, &allied),
+                (version, r.tick, &allied, authored),
             )?;
             if version < 42 {
                 // Earlier snapshots had no explicit loadout. Restore their
@@ -4143,7 +4190,8 @@ impl BlastRange {
         observe("wave_contacts", bytes.len() - s.left(), None);
         if version >= 47 {
             if let Some(e) = &mut r.explosion {
-                e.load_contacts(&mut s, &r.units, version >= 52)?;
+                let n = e.roster(r.units.len());
+                e.load_contacts(&mut s, &r.units[..n], version >= 52)?;
             }
             r.battle
                 .load_wave_contacts_deferred(&mut s, &r.units, version >= 52)?;
@@ -4206,10 +4254,15 @@ impl BlastRange {
             observe("haul", bytes.len() - s.left(), None);
             r.load_haul(&mut s)?;
         }
-        if version >= 64 {
+        if version >= 64 && r.has_reclaim() {
             observe("reclaim", bytes.len() - s.left(), None);
             r.load_reclaim(&mut s)?;
         }
+        if version >= 65 {
+            observe("production", bytes.len() - s.left(), None);
+            r.load_production(&mut s)?;
+        }
+        r.check_blank_work()?;
         observe("tail", bytes.len() - s.left(), None);
         if !s.ok() || s.left() != 0 {
             return None;
@@ -5581,6 +5634,9 @@ impl BlastRange {
         // Every death of the tick is in: a dead digger's tank breaches
         // (ADR-674).
         self.breach_dead_tanks();
+        // Production pays, and finished units join the roster last of all:
+        // no phase of the tick sees a half-grown roster (ADR-675).
+        self.production_phase();
         self.tick += 1;
         completed("accounting");
     }
@@ -5608,6 +5664,7 @@ impl Explosion {
         self.validate_contacts(units)
     }
     fn validate_contacts(&self, units: &[RangeUnit]) -> Option<()> {
+        let units = &units[..self.roster(units.len())];
         self.validate_contact_cursor(
             self.pending.front(),
             self.contact_cursor,
@@ -5703,9 +5760,13 @@ impl Explosion {
             b.i32(*d);
         }
     }
+    /// `authored`: units of the layout. A burst saved while units were
+    /// produced knows the roster it began with, at least the layout's
+    /// (ADR-675); before production every burst knows them all.
     fn load(
         s: &mut fx::blob::Scan,
-        units: &[RangeUnit],
+        all: &[RangeUnit],
+        authored: usize,
         size: [u32; 3],
         aimed: bool,
     ) -> Option<Self> {
@@ -5738,7 +5799,6 @@ impl Explosion {
             pending.push_back(hit);
         }
         if !(1..=4).contains(&cell)
-            || contact_cursor >= (cell as usize).pow(3) * (units.len() + 1)
             || (pending.is_empty() && contact_cursor != 0)
             || (0..3).any(|a| {
                 at[a] < 0
@@ -5750,7 +5810,11 @@ impl Explosion {
             return None;
         }
         let n = s.u32() as usize;
-        if n != units.len() {
+        if n > all.len() || n < authored.min(all.len()) {
+            return None;
+        }
+        let units = &all[..n];
+        if contact_cursor >= (cell as usize).pow(3) * (units.len() + 1) {
             return None;
         }
         let mut poses = Vec::new();

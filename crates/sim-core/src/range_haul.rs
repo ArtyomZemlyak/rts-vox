@@ -111,6 +111,12 @@ impl Haul {
             search_deferred: 0,
         }
     }
+    /// A unit appended to the roster (ADR-675).
+    pub(crate) fn push_unit(&mut self, allied: bool) {
+        self.sides.push(allied);
+        self.legs.push(Leg::Digging);
+        self.full.push(false);
+    }
     /// The dig phase found no room for the next cell or piece.
     pub(crate) fn mark_full(&mut self, id: usize) {
         self.full[id] = true;

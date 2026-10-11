@@ -245,6 +245,19 @@ impl Ledger {
         c.alive = false;
         self.release(id)
     }
+    /// Закрыть пустой живой контейнер любого вида и освободить его слот:
+    /// заготовка завода, опустевшая выпуском или отменой (ADR-675).
+    /// Непустой не закрывается — его материя пропала бы мимо стоков.
+    pub fn retire_empty(&mut self, id: ContainerId) -> bool {
+        let Some(c) = self.containers.get_mut(id as usize) else {
+            return false;
+        };
+        if !c.alive || c.held != 0 {
+            return false;
+        }
+        c.alive = false;
+        self.release(id)
+    }
     pub fn try_get(&self, id: ContainerId) -> Option<&Container> {
         self.containers.get(id as usize)
     }

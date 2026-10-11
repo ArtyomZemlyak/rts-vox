@@ -326,6 +326,11 @@ impl Reader<'_> {
                 field: super::super::DebrisField::from_code(self.0.u8())?,
                 value: self.0.u32(),
             },
+            11 => Command::Produce {
+                actor,
+                kind: *crate::blast::RangeUnitKind::ALL.get(usize::from(self.0.u8()))?,
+            },
+            12 => Command::Cancel { actor },
             2 => Command::TuneMotion {
                 kind: *crate::blast::RangeUnitKind::ALL.get(actor)?,
                 include_gun: self.boolean()?,
@@ -728,6 +733,15 @@ pub(super) fn save_inbox(b: &mut Blob, inbox: &Inbox) {
                 for x in destination.into_iter().chain(fallback) {
                     b.i32(x);
                 }
+            }
+            Command::Produce { actor, kind } => {
+                b.u8(11);
+                b.usize(actor);
+                b.u8(kind.index() as u8);
+            }
+            Command::Cancel { actor } => {
+                b.u8(12);
+                b.usize(actor);
             }
         }
     }
