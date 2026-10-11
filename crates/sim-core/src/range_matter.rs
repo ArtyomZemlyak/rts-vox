@@ -763,6 +763,17 @@ impl Matter {
             self.admission.ground[1] += 1;
             return ClaimResult::Unaffordable;
         }
+        // At the claim ceiling a claim is refused for want of room or for
+        // the ceiling, whichever is asked first, and either way the cell
+        // is pulverised: neither question needs asking (the ceiling is
+        // asked after the room, and both end the same here).
+        if !self.ground_waits && self.debris.claims() >= self.tuning.max_claims as usize {
+            let [x, y, z] = p.map(|v| v as u32);
+            w.queue_edit(voxel::world::Edit::dig_if(x, y, z, m));
+            self.admission.pulverized += 1;
+            self.pay(cost);
+            return ClaimResult::Applied;
+        }
         // Ground pieces take only the room above the hulls' reserve. A
         // ground cell that waits for a slot waits for any: a reserve as
         // large as the pool would hold it for ever.

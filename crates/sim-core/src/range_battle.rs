@@ -2968,18 +2968,21 @@ impl BlastRange {
                 slices[i] = budget;
             }
         }
-        for &i in &order {
-            let w = &mut waves[i];
-            if w.wave.capturing() {
-                w.wave.capture(
-                    &self.world,
-                    config_of(w.weapon),
-                    &self.units,
-                    &self.surface_work,
-                    slices[i],
-                );
-                completed("battle_capture");
-            }
+        // Each wave captures its own grid from the same world, hulls and
+        // dents, by the slice handed out above: the waves capture side by
+        // side, each also in parallel within its slice (ADR-311).
+        if waves.iter().any(|w| w.wave.capturing()) {
+            let (world, units, dents) = (&self.world, &self.units, &self.surface_work);
+            waves
+                .par_iter_mut()
+                .zip(slices.par_iter())
+                .for_each(|(w, &slice)| {
+                    if w.wave.capturing() {
+                        w.wave
+                            .capture(world, config_of(w.weapon), units, dents, slice);
+                    }
+                });
+            completed("battle_capture");
         }
         let mut work_left = tuning.wave_work_ceiling;
         let mut contact_left = tuning.wave_contact_ceiling;
@@ -2999,24 +3002,22 @@ impl BlastRange {
         // Each frontier reads its own captured grid alone: the waves advance
         // theirs in parallel, every one by its own budget, and the contacts
         // below meet the same hits in the same order as when each wave
-        // advanced just before its own contacts.
+        // advanced just before its own contacts. Then each wave reads ahead
+        // the matter under the cells its contacts visit, in the same task:
+        // the world's voxels do not change while the waves step (ADR-681),
+        // and a wave with a short frontier reads while another advances.
         {
-            let (world, units) = (&self.world, &self.units);
+            let (world, matter, units) = (&self.world, &self.matter, &self.units);
             waves
                 .par_iter_mut()
-                .zip(pops.par_iter())
-                .for_each(|(w, &budget)| w.wave.advance_frontier(budget, world, units));
+                .zip(pops.par_iter().zip(budgets.par_iter()))
+                .for_each(|(w, (&pop, &budget))| {
+                    w.wave.advance_frontier(pop, world, units);
+                    let spent = Some((matter, config_of(w.weapon), w.energy));
+                    w.wave.read_contacts_with(world, budget, units, spent)
+                });
         }
         completed("battle_frontier");
-        // The matter under the cells each wave's contacts visit is read
-        // ahead, every wave on its own: the world's voxels do not change
-        // while the waves step (ADR-681).
-        let world = &self.world;
-        waves
-            .par_iter_mut()
-            .zip(budgets.par_iter())
-            .for_each(|(w, &budget)| w.wave.read_contacts(world, budget));
-        completed("battle_read");
         // No physics or claim confirmation runs between these atomic batches.
         // Component commits consume exactly their reservations; terrain claims
         // hold one slot per connected component of their group (ADR-659).

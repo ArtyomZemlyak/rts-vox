@@ -1734,6 +1734,28 @@ impl Generator for RangeTerrain {
 /// A unit's box and the body sizes it was measured on (ADR-661).
 type MeasuredBox = (Vec<u16>, ([i32; 3], [i32; 3]));
 
+/// The sizes of a unit's body and segments: what its box and the cells
+/// a wave cell owns of it depend on besides the frozen poses.
+fn body_sizes(u: &RangeUnit) -> Vec<u16> {
+    let b = &u.body;
+    let mut key = vec![b.vol.nx, b.vol.ny, b.vol.nz, b.turret_y];
+    for seg in &b.segments {
+        key.extend([seg.body.vol.nx, seg.body.vol.ny, seg.body.vol.nz]);
+    }
+    key.into_iter().map(u16::from).collect()
+}
+
+/// `u` has the body sizes `sizes`, as [`body_sizes`] lists them.
+fn same_sizes(u: &RangeUnit, sizes: &[u16]) -> bool {
+    let b = &u.body;
+    sizes.len() == 4 + 3 * b.segments.len()
+        && sizes[..4] == [b.vol.nx, b.vol.ny, b.vol.nz, b.turret_y].map(u16::from)
+        && b.segments.iter().enumerate().all(|(i, seg)| {
+            sizes[4 + 3 * i..7 + 3 * i]
+                == [seg.body.vol.nx, seg.body.vol.ny, seg.body.vol.nz].map(u16::from)
+        })
+}
+
 pub struct Explosion {
     pub at: [i32; 3],
     origin: [i32; 3],
@@ -1777,8 +1799,14 @@ pub struct Explosion {
     /// materials in `solid_mats`. The world's voxels do not change while
     /// the waves step; the cache is dropped when the step ends. Never saved.
     solid: Vec<([i32; 3], u64, u32)>,
+    /// `solid` by cell, for visits out of the order it was read in.
+    solid_index: Vec<([i32; 3], u32)>,
     solid_next: usize,
     solid_mats: Vec<u16>,
+    /// Each hull's cells by the wave cell owning them, built when a
+    /// contact first needs them (ADR-681): a function of the frozen poses
+    /// and the body sizes, kept while the sizes hold. Never saved.
+    body_maps: Vec<Option<wave_cells::BodyMap>>,
 }
 
 impl Explosion {
@@ -1791,12 +1819,7 @@ impl Explosion {
             .iter()
             .enumerate()
             .map(|(i, u)| {
-                let b = &u.body;
-                let mut key = vec![b.vol.nx, b.vol.ny, b.vol.nz, b.turret_y];
-                for seg in &b.segments {
-                    key.extend([seg.body.vol.nx, seg.body.vol.ny, seg.body.vol.nz]);
-                }
-                let key: Vec<u16> = key.into_iter().map(u16::from).collect();
+                let key = body_sizes(u);
                 let (known, bounds) = &mut memo[i];
                 if *known != key || known.is_empty() {
                     *bounds = u.bounds_aimed(
@@ -1873,8 +1896,10 @@ impl Explosion {
             captured: 0,
             frontier_ready: false,
             solid: Vec::new(),
+            solid_index: Vec::new(),
             solid_next: 0,
             solid_mats: Vec::new(),
+            body_maps: Vec::new(),
         }
     }
 
@@ -1967,45 +1992,228 @@ impl Explosion {
     /// Read ahead the matter under the cells the next fair step of
     /// `budget` visits (ADR-681). Read-only on the world; the contact
     /// step that follows uses it and drops it.
+    ///
+    /// `spent` is the wave's matter, preset and energy when its contacts
+    /// claim matter: a cell the wave has no energy for at the start of
+    /// the step costs its visit alone, as the step walks it (energy only
+    /// falls during a step, so such a cell is spent when it is visited
+    /// too). Batches of cells are read in parallel and laid out in
+    /// visiting order. What is read is the world's matter only: how far
+    /// ahead the cache reaches never changes what a visit finds.
+    #[cfg(test)]
     pub(crate) fn read_contacts(&mut self, w: &World, budget: usize) {
+        self.read_contacts_with(w, budget, &[], None);
+    }
+    /// [`Explosion::read_contacts`] with the hulls, whose cells each read
+    /// wave cell owns are mapped too, and with the wave's matter, preset
+    /// and energy when its claims pay (`spent`).
+    pub(crate) fn read_contacts_with(
+        &mut self,
+        w: &World,
+        budget: usize,
+        units: &[RangeUnit],
+        spent: Option<(&matter::Matter, &ExplosionConfig, u64)>,
+    ) {
         self.drop_contacts();
+        // A wave with no share of the tick's contacts visits nothing.
         if budget == 0 || self.pending.is_empty() {
             return;
         }
         let offsets = subcell_offsets(self.cell);
-        // The same pace as the visits: a cell and each voxel of matter in it.
-        // Copy only the current coordinate, not the unbudgeted queue tail.
-        // Indexing keeps the wrapped deque borrowed only until read_cell.
+        // A step visits at most this many cells, in about this order: the
+        // billable prefix of the queue, except that a step with contacts
+        // to resume visits those still owing body work first
+        // (`prefer_body_contacts`), which only a hull near the field can.
+        // Read in another order, the cells are found all the same, by the
+        // index below; a cell not read is read when visited.
+        let visits = self.pending.len().min(budget);
+        let roster = &units[..self.roster(units.len())];
+        let boxes = self.unit_boxes(roster);
+        let near_boxes = self.near_boxes(&boxes);
+        let order: Vec<phys::blast::Hit> =
+            if self.contact_resumes.is_empty() || near_boxes.is_empty() {
+                self.pending.range(..visits).copied().collect()
+            } else {
+                let count = roster.len();
+                let mut first: Vec<phys::blast::Hit> = Vec::new();
+                let mut rest: Vec<phys::blast::Hit> = Vec::new();
+                for (k, hit) in self.pending.iter().enumerate() {
+                    if self.owes_body_work(hit, k == 0, &near_boxes, count) {
+                        first.push(*hit);
+                    } else if rest.len() < visits {
+                        rest.push(*hit);
+                    }
+                }
+                first.extend(rest);
+                first.truncate(visits);
+                first
+            };
+        let mut left_mj = spent.map(|(_, _, energy)| self.ground_share(energy));
+        let mut prices = Prices::default();
+        let (origin, edge) = (self.origin, self.cell);
+        // The same pace as the visits: a cell and each voxel of matter in
+        // it, unless the cell is spent.
         let mut left = budget;
         let mut next = 0;
-        while left > 0 && next < self.pending.len() {
-            let cell = self.pending[next].cell;
-            let (mask, start) = self.read_cell(w, cell, &offsets);
-            self.solid.push((cell, mask, start as u32));
-            left = left.saturating_sub(1 + mask.count_ones() as usize);
-            next += 1;
+        'read: while left > 0 && next < visits {
+            // Every cell costs at least its visit: no batch reaches past
+            // what is left to bill, and a batch read past the last billed
+            // cell is not kept (review 252: only the billable prefix).
+            let batch = (visits - next)
+                .min(left)
+                .min((left / 8).clamp(READ_CHUNK, READ_BATCH));
+            let hits = &order[next..next + batch];
+            next += batch;
+            let parts: Vec<(Vec<u64>, Vec<u16>)> = hits
+                .par_chunks(READ_CHUNK)
+                .map(|chunk| {
+                    let mut masks = Vec::with_capacity(chunk.len());
+                    let mut mats = Vec::new();
+                    for hit in chunk {
+                        masks.push(read_cell_into(
+                            w, origin, edge, hit.cell, &offsets, &mut mats,
+                        ));
+                    }
+                    (masks, mats)
+                })
+                .collect();
+            let mut k = 0;
+            for (masks, mats) in parts {
+                let mut start = self.solid_mats.len();
+                self.solid_mats.extend_from_slice(&mats);
+                for mask in masks {
+                    if left == 0 {
+                        self.solid_mats.truncate(start);
+                        break 'read;
+                    }
+                    let hit = hits[k];
+                    k += 1;
+                    let count = mask.count_ones() as usize;
+                    self.solid.push((hit.cell, mask, start as u32));
+                    let cell_mats = &self.solid_mats[start..start + count];
+                    start += count;
+                    let mut worked = count;
+                    if let (Some((m, c, _)), Some(left_mj)) = (spent, left_mj.as_mut()) {
+                        if spent_cell(m, c, hit.pressure, cell_mats, *left_mj) {
+                            worked = 0;
+                        } else if c.material_energy_j > 0 {
+                            // Spend as the claims would, so that a wave whose
+                            // energy runs out within the step is read ahead
+                            // over the spent cells it walks after that. The
+                            // estimate pays for claims that will wait too,
+                            // so it runs out no later than the wave does.
+                            for &mat in cell_mats {
+                                let price = prices.get(m, mat);
+                                if hit.pressure >= material_work(mat, c) && price <= *left_mj {
+                                    *left_mj -= price;
+                                }
+                            }
+                        }
+                    }
+                    left -= left.min(1 + worked);
+                }
+            }
+        }
+        self.solid_index = self
+            .solid
+            .iter()
+            .enumerate()
+            .map(|(k, &(cell, _, _))| (cell, k as u32))
+            .collect();
+        self.solid_index.sort_unstable();
+        if !self.point_contacts {
+            self.read_bodies(units);
+        }
+    }
+    /// The body cells each cell read ahead owns of every hull whose frozen
+    /// box meets it, as the contact step asks for them: a function of the
+    /// frozen poses and the body sizes alone, computed in parallel.
+    fn read_bodies(&mut self, units: &[RangeUnit]) {
+        let units = &units[..self.roster(units.len())];
+        if units.is_empty() || self.solid.is_empty() {
+            return;
+        }
+        let boxes = self.unit_boxes(units);
+        let (domain_lo, domain_hi) = self.domain();
+        let near: Vec<usize> = (0..units.len())
+            .filter(|&i| {
+                let (lo, hi) = boxes[i];
+                (0..3).all(|a| domain_lo[a] <= hi[a] && domain_hi[a] > lo[a])
+            })
+            .collect();
+        if near.is_empty() {
+            return;
+        }
+        let (origin, edge) = (self.origin, self.cell);
+        // Hulls whose box meets a cell read ahead and whose map is missing
+        // or was built at other body sizes.
+        self.body_maps.resize_with(units.len(), || None);
+        let wanted: Vec<usize> = near
+            .into_iter()
+            .filter(|&i| {
+                let (lo, hi) = boxes[i];
+                !self.body_maps[i]
+                    .as_ref()
+                    .is_some_and(|m| same_sizes(&units[i], &m.sizes))
+                    && self.solid.iter().any(|&(cell, _, _)| {
+                        let p: [i32; 3] = std::array::from_fn(|a| origin[a] + cell[a] * edge);
+                        (0..3).all(|a| p[a] <= hi[a] && p[a] + edge > lo[a])
+                    })
+            })
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let grid = wave_cells::Grid {
+            origin,
+            edge,
+            n: self.wave.size(),
+        };
+        let (poses, seg_poses) = (&self.poses, &self.seg_poses);
+        let (deltas, pitches) = (&self.turret_deltas, &self.turret_pitches);
+        let maps: Vec<Option<wave_cells::BodyMap>> = wanted
+            .par_iter()
+            .map(|&i| {
+                let frames =
+                    HitFrames::new(&units[i], poses[i], &seg_poses[i], deltas[i], pitches[i]);
+                frames.body_map(
+                    &units[i],
+                    &poses[i],
+                    &seg_poses[i],
+                    grid,
+                    body_sizes(&units[i]),
+                )
+            })
+            .collect();
+        for (i, map) in wanted.into_iter().zip(maps) {
+            self.body_maps[i] = map;
+        }
+    }
+    /// The ground's share of `energy`, as `claim_energy` gives it.
+    fn ground_share(&self, energy: u64) -> u64 {
+        match self.body_energy_mj {
+            Some(reserved) => energy.saturating_sub(reserved),
+            None => energy,
         }
     }
     fn drop_contacts(&mut self) {
         self.solid.clear();
+        self.solid_index.clear();
         self.solid_next = 0;
         self.solid_mats.clear();
     }
     /// Read a cell's matter: a bit per subcell holding some, and where its
     /// materials start in `solid_mats`.
     fn read_cell(&mut self, w: &World, cell: [i32; 3], offsets: &[[i32; 3]]) -> (u64, usize) {
-        let p: [i32; 3] = std::array::from_fn(|a| self.origin[a] + cell[a] * self.cell);
         let start = self.solid_mats.len();
-        let mut mask = 0u64;
-        if !cell_is_air(w, p, self.cell) {
-            for (s, o) in offsets.iter().enumerate() {
-                let m = material(w, [p[0] + o[0], p[1] + o[1], p[2] + o[2]]);
-                if m != 0 {
-                    mask |= 1 << s;
-                    self.solid_mats.push(m);
-                }
-            }
-        }
+        let mask = read_cell_into(
+            w,
+            self.origin,
+            self.cell,
+            cell,
+            offsets,
+            &mut self.solid_mats,
+        );
         (mask, start)
     }
     /// Every voxel of matter in the cell would refuse the wave's claim for
@@ -2019,17 +2227,17 @@ impl Explosion {
         mask: u64,
         start: usize,
     ) -> bool {
-        let Some(m) = matter.filter(|_| c.material_energy_j > 0 && mask != 0) else {
+        let Some(m) = matter else {
             return false;
         };
-        // The ground's share, as `claim_energy` gives it.
-        let left = match self.body_energy_mj {
-            Some(reserved) => m.remaining_mj.saturating_sub(reserved),
-            None => m.remaining_mj,
-        };
-        self.solid_mats[start..start + mask.count_ones() as usize]
-            .iter()
-            .all(|&mat| pressure >= material_work(mat, c) && m.ground_price(mat) > left)
+        let left = self.ground_share(m.remaining_mj);
+        spent_cell(
+            m,
+            c,
+            pressure,
+            &self.solid_mats[start..start + mask.count_ones() as usize],
+            left,
+        )
     }
     /// The matter of the cell being visited: as read ahead when it is the
     /// next one read (or a few further on, past a cell that yielded before
@@ -2042,6 +2250,12 @@ impl Explosion {
                 self.solid_next = k + 1;
                 return (mask, start as usize);
             }
+        }
+        if let Ok(i) = self.solid_index.binary_search_by_key(&cell, |e| e.0) {
+            let k = self.solid_index[i].1 as usize;
+            let (_, mask, start) = self.solid[k];
+            self.solid_next = k + 1;
+            return (mask, start as usize);
         }
         self.read_cell(w, cell, offsets)
     }
@@ -2283,9 +2497,20 @@ impl Explosion {
                         }
                     }
                     let query = queries[actor].as_ref().expect("prepared hit frames");
+                    // The cells read ahead, or else asked now.
+                    let read = (!self.point_contacts)
+                        .then(|| {
+                            let map = self.body_maps.get(actor)?.as_ref()?;
+                            same_sizes(u, &map.sizes).then(|| {
+                                let n = self.wave.size();
+                                let c = hit.cell.map(|v| v as usize);
+                                map.range(((c[2] * n + c[1]) * n + c[0]) as u32)
+                            })
+                        })
+                        .flatten();
                     if self.point_contacts {
                         contacts.extend(query.hit(u, q));
-                    } else {
+                    } else if read.is_none() {
                         query.wave_cells(
                             u,
                             &self.poses[actor],
@@ -2295,8 +2520,15 @@ impl Explosion {
                             &mut contacts,
                         );
                     }
-                    while self.body_cursor < contacts.len() {
-                        let (part, cell) = contacts[self.body_cursor];
+                    let listed = read.map_or(contacts.len(), |(_, len)| len);
+                    while self.body_cursor < listed {
+                        let (part, cell) = match read {
+                            Some((start, _)) => self.body_maps[actor]
+                                .as_ref()
+                                .expect("body map read")
+                                .contact(start + self.body_cursor),
+                            None => contacts[self.body_cursor],
+                        };
                         let solid = if part == 0 {
                             u.body.vol.get(cell[0], cell[1], cell[2])
                         } else {
@@ -2607,27 +2839,15 @@ impl Explosion {
         let Some(front) = self.pending.front() else {
             return;
         };
+        let boxes = self.near_boxes(boxes);
         self.contact_resumes
             .insert(front.cell, (self.contact_cursor, self.body_cursor));
         let (mut body, mut ground) = (
             std::collections::VecDeque::new(),
             std::collections::VecDeque::new(),
         );
-        for hit in self.pending.drain(..) {
-            let (cursor, local) = self
-                .contact_resumes
-                .get(&hit.cell)
-                .copied()
-                .unwrap_or_default();
-            let subcell = cursor / (count + 1);
-            let actor = cursor % (count + 1);
-            let low: [i32; 3] = std::array::from_fn(|a| self.origin[a] + hit.cell[a] * self.cell);
-            let unit = local > 0
-                || ((self.point_contacts || subcell == 0)
-                    && boxes.iter().enumerate().skip(actor).any(|(_, (lo, hi))| {
-                        (0..3).all(|a| low[a] <= hi[a] && low[a] + self.cell > lo[a])
-                    }));
-            if unit {
+        for hit in std::mem::take(&mut self.pending) {
+            if self.owes_body_work(&hit, false, &boxes, count) {
                 body.push_back(hit);
             } else {
                 ground.push_back(hit);
@@ -2636,6 +2856,45 @@ impl Explosion {
         body.append(&mut ground);
         self.pending = body;
         self.resume_front();
+    }
+    /// A pending contact has body work left: a body cursor inside a hull,
+    /// or a hull box still ahead of its actor cursor that meets the cell.
+    /// The front's cursor is the live one when `front` is set.
+    /// `near` holds the hull boxes that meet the field, with their actors
+    /// ([`Explosion::near_boxes`]): no other box meets one of its cells.
+    fn owes_body_work(
+        &self,
+        hit: &phys::blast::Hit,
+        front: bool,
+        near: &[(usize, [i32; 3], [i32; 3])],
+        count: usize,
+    ) -> bool {
+        let (cursor, local) = if front {
+            (self.contact_cursor, self.body_cursor)
+        } else {
+            self.contact_resumes
+                .get(&hit.cell)
+                .copied()
+                .unwrap_or_default()
+        };
+        let subcell = cursor / (count + 1);
+        let actor = cursor % (count + 1);
+        let low: [i32; 3] = std::array::from_fn(|a| self.origin[a] + hit.cell[a] * self.cell);
+        local > 0
+            || ((self.point_contacts || subcell == 0)
+                && near.iter().any(|&(i, lo, hi)| {
+                    i >= actor && (0..3).all(|a| low[a] <= hi[a] && low[a] + self.cell > lo[a])
+                }))
+    }
+    /// The hull boxes that meet the field's domain, with their actors.
+    fn near_boxes(&self, boxes: &[([i32; 3], [i32; 3])]) -> Vec<(usize, [i32; 3], [i32; 3])> {
+        let (domain_lo, domain_hi) = self.domain();
+        boxes
+            .iter()
+            .enumerate()
+            .filter(|(_, (lo, hi))| (0..3).all(|a| domain_lo[a] <= hi[a] && domain_hi[a] > lo[a]))
+            .map(|(i, &(lo, hi))| (i, lo, hi))
+            .collect()
     }
     /// Apply exactly one live terrain contact. False leaves its cursor and
     /// unpaid work intact, so the same contact can be retried after admission.
@@ -2774,6 +3033,76 @@ pub fn material(w: &World, p: [i32; 3]) -> u16 {
     w.material(p[0] as u32, p[1] as u32, p[2] as u32)
 }
 
+/// The index of each cell's last item, in ascending cell order: what a
+/// stable sort by cell that keeps each cell's last entry gives, by one
+/// unstable sort of keys that carry the index (a salvo's drain sorts
+/// tens of thousands of edits a tick).
+fn last_per_cell<T>(items: &[T], cell: impl Fn(&T) -> [u32; 3]) -> Vec<usize> {
+    const BITS: u32 = 21;
+    let fits = items.len() <= u32::MAX as usize
+        && items.iter().all(|t| cell(t).iter().all(|&v| v < 1 << BITS));
+    let mut out = Vec::new();
+    if fits {
+        let keys: Vec<u128> = items
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let [x, y, z] = cell(t).map(u128::from);
+                (((x << (2 * BITS)) | (y << BITS) | z) << 32) | i as u128
+            })
+            .collect();
+        let keys = sort_distinct(keys);
+        for (k, key) in keys.iter().enumerate() {
+            if keys.get(k + 1).is_none_or(|next| next >> 32 != key >> 32) {
+                out.push((key & u128::from(u32::MAX)) as usize);
+            }
+        }
+    } else {
+        let mut keys: Vec<([u32; 3], usize)> = items
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (cell(t), i))
+            .collect();
+        keys.sort_unstable();
+        for (k, key) in keys.iter().enumerate() {
+            if keys.get(k + 1).is_none_or(|next| next.0 != key.0) {
+                out.push(key.1);
+            }
+        }
+    }
+    out
+}
+
+/// Distinct keys in ascending order. A long list is sorted in four runs
+/// side by side and the runs merged: keys are distinct, so the order is
+/// the one order there is, whoever sorts which run.
+fn sort_distinct(mut keys: Vec<u128>) -> Vec<u128> {
+    const RUNS: usize = 4;
+    if keys.len() < 8192 {
+        keys.sort_unstable();
+        return keys;
+    }
+    let run = keys.len().div_ceil(RUNS);
+    keys.par_chunks_mut(run).for_each(|r| r.sort_unstable());
+    let runs: Vec<&[u128]> = keys.chunks(run).collect();
+    let mut heads = vec![0usize; runs.len()];
+    let mut out = Vec::with_capacity(keys.len());
+    while out.len() < keys.len() {
+        let mut best: Option<(usize, u128)> = None;
+        for (r, slice) in runs.iter().enumerate() {
+            if let Some(&key) = slice.get(heads[r]) {
+                if best.is_none_or(|(_, b)| key < b) {
+                    best = Some((r, key));
+                }
+            }
+        }
+        let (r, key) = best.expect("a run with keys left");
+        heads[r] += 1;
+        out.push(key);
+    }
+    out
+}
+
 /// The set bits of a mask, lowest first.
 struct BitIter(u64);
 impl Iterator for BitIter {
@@ -2794,6 +3123,67 @@ fn subcell_offsets(edge: i32) -> Vec<[i32; 3]> {
     (0..e * e * e)
         .map(|s| [(s % e) as i32, (s / e % e) as i32, (s / (e * e)) as i32])
         .collect()
+}
+
+/// Cells of a wave's pending contacts read ahead per parallel batch, and
+/// per task within a batch (ADR-681). Sizes of work, not of the game.
+const READ_BATCH: usize = 2048;
+const READ_CHUNK: usize = 64;
+
+/// Ground prices by material, asked once each per read-ahead.
+#[derive(Default)]
+struct Prices(Vec<Option<u64>>);
+impl Prices {
+    fn get(&mut self, m: &matter::Matter, mat: u16) -> u64 {
+        let i = usize::from(mat);
+        if self.0.len() <= i {
+            self.0.resize(i + 1, None);
+        }
+        *self.0[i].get_or_insert_with(|| m.ground_price(mat))
+    }
+}
+
+/// Read the matter of the wave cell `cell` of a grid at `origin` with
+/// cells of `edge`: a bit per subcell holding some, its materials
+/// appended to `mats` in subcell order.
+fn read_cell_into(
+    w: &World,
+    origin: [i32; 3],
+    edge: i32,
+    cell: [i32; 3],
+    offsets: &[[i32; 3]],
+    mats: &mut Vec<u16>,
+) -> u64 {
+    let p: [i32; 3] = std::array::from_fn(|a| origin[a] + cell[a] * edge);
+    let mut mask = 0u64;
+    if !cell_is_air(w, p, edge) {
+        for (s, o) in offsets.iter().enumerate() {
+            let m = material(w, [p[0] + o[0], p[1] + o[1], p[2] + o[2]]);
+            if m != 0 {
+                mask |= 1 << s;
+                mats.push(m);
+            }
+        }
+    }
+    mask
+}
+
+/// Every voxel of matter in a cell (`mats`, at least one) would refuse a
+/// claim of the ground's `left` millijoules for want of energy, and none
+/// is a dent at this pressure: the cell's ground contacts change nothing
+/// (ADR-681).
+fn spent_cell(
+    m: &matter::Matter,
+    c: &ExplosionConfig,
+    pressure: u32,
+    mats: &[u16],
+    left: u64,
+) -> bool {
+    c.material_energy_j > 0
+        && !mats.is_empty()
+        && mats
+            .iter()
+            .all(|&mat| pressure >= material_work(mat, c) && m.ground_price(mat) > left)
 }
 
 /// No voxel of the wave cell at `p` with edge `edge` holds matter: every
@@ -5813,9 +6203,8 @@ impl BlastRange {
         // A tank this drain filled turns to haul the same tick (ADR-673).
         self.haul_phase();
         self.world_changed = nav::vehicle::Changed::default();
-        for e in self.world.edits() {
-            self.world_changed.column(e.x as i32, e.z as i32);
-        }
+        self.world_changed
+            .columns(self.world.edits().iter().map(|e| [e.x as i32, e.z as i32]));
         detail("heat_edits");
         completed("heat_flush");
         // Everything without support falls (ADR-299): the batch's collapse
@@ -5899,12 +6288,12 @@ impl BlastRange {
             // The latest edit of each cell, in cell order: what inserting
             // the drain into the backlog and admitting all of it gives
             // (ADR-681), without a map entry per edit.
-            ready = self.collapse_backlog.admit(|_| true);
-            ready.extend_from_slice(&fresh);
-            ready.sort_by_key(|e| [e.x, e.y, e.z]);
-            ready.reverse();
-            ready.dedup_by_key(|e| [e.x, e.y, e.z]);
-            ready.reverse();
+            let mut all = self.collapse_backlog.admit(|_| true);
+            all.extend_from_slice(&fresh);
+            ready = last_per_cell(&all, |e| [e.x, e.y, e.z])
+                .into_iter()
+                .map(|i| all[i])
+                .collect();
         } else {
             for e in fresh {
                 self.collapse_backlog.insert(e);
@@ -6027,15 +6416,17 @@ impl BlastRange {
                 // keeps the latest edit per cell.
                 let cs = voxel::store::CS as u32;
                 let waiting = |e: &voxel::world::Edit| held([e.x / cs, e.y / cs, e.z / cs]);
-                for e in ready
-                    .iter()
-                    .filter(|e| waiting(e) && plate::watches(layout, e))
-                {
-                    self.collapse_backlog.insert(*e);
-                }
                 // Which edits wait is asked once per edit, not once per
                 // roof the plate check walks; a byte each, not a copy.
                 let waits: Vec<bool> = ready.iter().map(waiting).collect();
+                let watch = plate::Watch::of(layout);
+                for (e, _) in ready
+                    .iter()
+                    .zip(&waits)
+                    .filter(|(e, w)| **w && watch.watches(e))
+                {
+                    self.collapse_backlog.insert(*e);
+                }
                 plate::fracture_iter(
                     layout,
                     &mut self.world,
@@ -6135,7 +6526,7 @@ impl BlastRange {
         // or not at all when the body bakes back.
         // Each cell's last say decides: a dig marks it removed with what it
         // held, a fill clears the mark (zero), and a dig that removed
-        // nobody's matter says nothing. Sorted stably by cell, the last
+        // nobody's matter says nothing. In drain order, the last
         // entry of each cell is that say.
         let mut says: Vec<([u32; 3], u16)> = Vec::new();
         for &(e, previous) in self.world.completed() {
@@ -6151,9 +6542,9 @@ impl BlastRange {
                 says.push((p, 0));
             }
         }
-        says.sort_by_key(|(p, _)| *p);
-        for (i, &(p, mat)) in says.iter().enumerate() {
-            if mat == 0 || says.get(i + 1).is_some_and(|(q, _)| *q == p) {
+        for i in last_per_cell(&says, |s| s.0) {
+            let mat = says[i].1;
+            if mat == 0 {
                 continue;
             }
             self.removed += 1;
@@ -6446,8 +6837,10 @@ impl Explosion {
             body_energy_mj: None,
             frontier_ready: false,
             solid: Vec::new(),
+            solid_index: Vec::new(),
             solid_next: 0,
             solid_mats: Vec::new(),
+            body_maps: Vec::new(),
         })
     }
 }

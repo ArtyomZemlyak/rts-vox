@@ -118,11 +118,12 @@ fn ordinary_shell_destruction_lands_within_fifteen_ticks() {
 }
 
 /// The parallel parts of the wave phase (frontiers, chunk builds, matter
-/// read ahead, captures) are functions of each wave alone: the same salvo
-/// on one, two and four physics workers gives the same state every tick.
+/// and body maps read ahead, captures side by side, sorts in runs) are
+/// functions of each wave alone or have one answer: the same salvo on one
+/// to four physics workers gives the same state every tick.
 #[test]
 fn salvo_state_is_independent_of_physics_workers() {
-    let runs: Vec<Vec<u64>> = [1, 2, 4]
+    let runs: Vec<Vec<u64>> = [1, 2, 3, 4]
         .into_iter()
         .map(|workers| {
             let mut r = salvo_range();
@@ -137,7 +138,8 @@ fn salvo_state_is_independent_of_physics_workers() {
         })
         .collect();
     assert_eq!(runs[0], runs[1], "two workers changed the salvo");
-    assert_eq!(runs[0], runs[2], "four workers changed the salvo");
+    assert_eq!(runs[0], runs[2], "three workers changed the salvo");
+    assert_eq!(runs[0], runs[3], "four workers changed the salvo");
 }
 
 /// A salvo saved while its waves still capture and dig, restored and run
@@ -162,16 +164,75 @@ fn salvo_restored_mid_wave_matches_the_continuous_run() {
     assert_eq!(c + w, 0, "the salvo did not finish after the restore");
 }
 
+/// The body map lists, for every wave cell of a field, exactly the cells
+/// `wave_cells` lists for it, in the same order: on turned and pitched
+/// hulls with segments, for each cell edge in use.
+#[test]
+fn body_map_lists_what_wave_cells_lists() {
+    use crate::blast::wave_cells::Grid;
+    let r = salvo_range();
+    for (k, u) in r.units.iter().enumerate() {
+        for (yaw, delta, pitch) in [(0, 0, 0), (5000, 9000, 0), (11000, -3000, 2500)] {
+            let pose = crate::damage::turned(&u.pose, yaw, 0);
+            let segs: Vec<_> = u
+                .seg_frames
+                .iter()
+                .map(|f| crate::damage::turned(f, yaw, 0))
+                .collect();
+            let frames = HitFrames::new(u, pose, &segs, delta, pitch);
+            let (lo, hi) = u.bounds_aimed(Some(&pose), &segs, delta, pitch);
+            for edge in [2, 3] {
+                let n = ((0..3).map(|a| hi[a] - lo[a]).max().unwrap() / edge + 4) as usize;
+                let origin = lo.map(|v| v - edge * 2 + k as i32 % edge);
+                let grid = Grid { origin, edge, n };
+                let map = frames
+                    .body_map(u, &pose, &segs, grid, body_sizes(u))
+                    .expect("map");
+                let mut listed = Vec::new();
+                let mut total = 0;
+                for i in 0..n * n * n {
+                    let cell = [i % n, i / n % n, i / (n * n)].map(|v| v as i32);
+                    let low = std::array::from_fn(|a| origin[a] + cell[a] * edge);
+                    frames.wave_cells(u, &pose, &segs, low, edge, &mut listed);
+                    let (start, len) = map.range(grid.index(cell));
+                    let mapped: Vec<_> = (start..start + len).map(|k| map.contact(k)).collect();
+                    assert_eq!(
+                        mapped, listed,
+                        "unit {k} yaw {yaw} edge {edge} cell {cell:?}"
+                    );
+                    total += len;
+                }
+                assert!(total > 0, "unit {k}: the field holds no body cell");
+            }
+        }
+    }
+}
+
 /// Measurement probe for analysis 251: per tick, live waves, heap pops,
 /// contacts, claims, edits and wall time per phase. Timing lives here,
 /// never in the simulation.
 #[test]
 #[ignore = "measurement probe: cargo test --release -- --ignored --nocapture"]
 fn probe_salvo_timeline() {
-    for (name, weapon, count) in [
-        ("canister", Weapon::Canister, 6),
-        ("shell", Weapon::Blast, 1),
-    ] {
+    // `PROBE_TICKS=n` stops each run after n ticks and `PROBE_REPEAT=k`
+    // runs the canister salvo k times: a profiler then sees the salvo's
+    // own ticks rather than the pieces settling for seconds after it.
+    let env = |name: &str, default: usize| {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    let (limit, repeat) = (env("PROBE_TICKS", 400), env("PROBE_REPEAT", 0));
+    let runs: Vec<(&str, Weapon, usize)> = if repeat > 0 {
+        vec![("canister", Weapon::Canister, 6); repeat]
+    } else {
+        vec![
+            ("canister", Weapon::Canister, 6),
+            ("shell", Weapon::Blast, 1),
+        ]
+    };
+    for (name, weapon, count) in runs {
         let mut r = salvo_range();
         r.set_physics_workers(4);
         if std::env::var_os("PROBE_UNBOUND").is_some() {
@@ -201,7 +262,7 @@ fn probe_salvo_timeline() {
             );
         }
         println!(
-            "tick,ms,waves_capturing,waves_applying,examined,pending,resumes,ground_applied,no_room,claim_limit,pending_cell,body_applied,body_deferred,pulverized,held,claims,queued_edits,applied_edits,fragments,flying,removed,chunks,phases"
+            "tick,ms,waves_capturing,waves_applying,examined,pending,resumes,ground_applied,no_room,claim_limit,pending_cell,body_applied,body_deferred,pulverized,held,claims,queued_edits,applied_edits,fragments,flying,removed,chunks,hash,phases"
         );
         let mut examined_before = 0usize;
         let mut ground_before = r.matter.admission.ground;
@@ -209,7 +270,7 @@ fn probe_salvo_timeline() {
         let mut pulverized_before = r.matter.admission.pulverized;
         let mut total = 0.0;
         let mut sums: std::collections::BTreeMap<&'static str, f64> = Default::default();
-        for t in 0..400 {
+        for t in 0..limit {
             let mut phases: Vec<(&'static str, f64)> = Vec::new();
             let start = std::time::Instant::now();
             let mut last = start;
@@ -243,7 +304,7 @@ fn probe_salvo_timeline() {
                 .map(|(p, ms)| format!("{p}={ms:.1}"))
                 .collect();
             println!(
-                "{t},{ms:.2},{c},{a},{},{pending},{resumes},{},{},{},{},{},{},{},{:?},{},{},{},{},{},{},{},{}",
+                "{t},{ms:.2},{c},{a},{},{pending},{resumes},{},{},{},{},{},{},{},{:?},{},{},{},{},{},{},{},{:016x},{}",
                 examined.saturating_sub(examined_before),
                 g[0] - ground_before[0],
                 g[2] - ground_before[2],
@@ -260,6 +321,7 @@ fn probe_salvo_timeline() {
                 pools.flying,
                 r.removed,
                 r.world.materialized,
+                r.state_hash(),
                 top.join(" ")
             );
             examined_before = if c + a == 0 { 0 } else { examined };

@@ -186,6 +186,66 @@ fn read_ahead_and_live_fair_contacts_match_through_deferral_and_drain() {
     }
 }
 
+/// The battle's read-ahead — parallel batches, body maps and the pace of
+/// spent cells — against the live step: the same state after every step
+/// and drain, with plenty of energy and with energy for a few cells.
+#[test]
+fn battle_read_ahead_and_live_contacts_match_with_hulls_and_spent_energy() {
+    for edge in [1, 2, 4] {
+        for few in [false, true] {
+            let (mut a, mut x, c) = fixture(edge, false);
+            let (mut b, mut y, _) = fixture(edge, false);
+            for (r, e) in [(&mut a, &mut x), (&mut b, &mut y)] {
+                push(e, body_point(r, e), 1_000_000);
+                r.matter.tuning.max_flying = 0;
+                if few {
+                    r.matter.remaining_mj = 3 * r.matter.ground_price(1);
+                }
+            }
+            for tick in 0..200 {
+                if tick == 6 {
+                    a.matter.tuning.max_flying = 128;
+                    b.matter.tuning.max_flying = 128;
+                }
+                let budget = [0, 1, 2, 5, 65, 129][tick % 6];
+                let spent = Some((&a.matter, &c, a.matter.remaining_mj));
+                x.read_contacts_with(&a.world, budget, &a.units, spent);
+                x.step_with_room::<true>(
+                    &mut a.world,
+                    budget,
+                    &mut a.units,
+                    &mut a.surface_work,
+                    &mut a.surface_changed,
+                    &c,
+                    Some(&mut a.matter),
+                    None,
+                );
+                y.step_with_room::<true>(
+                    &mut b.world,
+                    budget,
+                    &mut b.units,
+                    &mut b.surface_work,
+                    &mut b.surface_changed,
+                    &c,
+                    Some(&mut b.matter),
+                    None,
+                );
+                same(&a, &x, &b, &y);
+                flush(&mut a);
+                flush(&mut b);
+                same(&a, &x, &b, &y);
+                if x.pending.is_empty() {
+                    break;
+                }
+            }
+            assert!(
+                x.pending.is_empty(),
+                "edge={edge} few={few}: queue never finished"
+            );
+        }
+    }
+}
+
 #[test]
 fn deferred_ground_resumes_without_unit_geometry_and_keeps_every_subcell() {
     for edge in [1, 2, 4] {
