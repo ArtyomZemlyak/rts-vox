@@ -61,11 +61,14 @@ pub struct ExplosionConfig {
     pub unit_ablation_resistance: u32,
     /// Armour, core, engine, weapon, sensor multipliers; 1000 = base work.
     pub unit_role_resistance_milli: [u32; 5],
+    /// Frontier heap pops, and contacts visited, by one wave in one tick
+    /// (ADR-681): each wave's own, not a share of the tick's. The tick's
+    /// ceiling over all waves lives in the battle tuning.
     pub wave_work_per_tick: usize,
-    /// Cells of the resistance grid captured in one tick (ADR-311). The
-    /// capture of a charge that reaches further costs more ticks, not a
-    /// longer one; cells the inscribed sphere cuts are free and do not
-    /// count.
+    /// Cells of the resistance grid one wave captures in one tick
+    /// (ADR-311, ADR-681). The capture of a charge that reaches further
+    /// costs more ticks, not a longer one; cells the inscribed sphere cuts
+    /// are free and do not count.
     pub capture_cells_per_tick: usize,
     pub edits_per_tick: usize,
     pub fire_tick: u32,
@@ -150,7 +153,7 @@ impl ExplosionConfig {
                 .iter()
                 .any(|v| !(1..=10000).contains(v))
             || c.wave_work_per_tick == 0
-            || c.wave_work_per_tick > 8192
+            || c.wave_work_per_tick > 1 << 20
             || c.capture_cells_per_tick == 0
             || c.capture_cells_per_tick > 1_000_000
             || c.edits_per_tick == 0

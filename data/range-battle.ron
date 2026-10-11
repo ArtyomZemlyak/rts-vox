@@ -19,6 +19,17 @@
     firing_spacing: 70,
     max_rounds: 64,
     max_waves: 16,
+    // Per tick over all live waves (ADR-681): grid cells captured, frontier
+    // heap pops, and contacts (a cell visited and each voxel of matter in
+    // it). A wave takes its preset's own budget while these last.
+    wave_capture_ceiling: 196608,
+    wave_work_ceiling: 196608,
+    wave_contact_ceiling: 65536,
+    // Untouched chunks the tick's edit drain changes, built ahead in
+    // parallel instead of one by one inside the drain.
+    drain_chunk_ceiling: 64,
+    // Flying-piece slots a wave's ground cells leave to the hulls it strikes.
+    hull_piece_reserve: 1024,
     // Какой снаряд танк заряжает по цели (ADR-456): бронебойный
     // (`Kinetic`, kinetic-shell.ron) пробивает корпус и скалывает соседние воксели,
     // фугас (`Blast`) рвёт волной ноги шагохода и укрытие.

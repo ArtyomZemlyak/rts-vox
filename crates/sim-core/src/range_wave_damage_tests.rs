@@ -214,7 +214,11 @@ fn captured_resistance_matches_an_exhaustive_voxel_centre_reference() {
                 for x in 0..n {
                     let cell = [x, y, z].map(|v| v as i32);
                     let half = n as i32 / 2;
+                    // Outside the sphere, and wholly under the world's floor
+                    // (bedrock, ADR-681), the wave does not go.
+                    let under = e.origin[1] + (cell[1] + 1) * edge <= 0;
                     let want = if cell.iter().map(|v| (v - half).pow(2)).sum::<i32>() > half * half
+                        || under
                     {
                         u32::MAX
                     } else {

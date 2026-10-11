@@ -1031,6 +1031,24 @@ impl World {
         if self.chunks[ci].is_some() {
             return;
         }
+        self.chunks[ci] = Some(Arc::new(self.build_chunk(ci)));
+        self.materialized += 1;
+    }
+
+    /// Номер чанка, в котором лежит воксель внутри мира.
+    pub fn chunk_of(&self, x: u32, y: u32, z: u32) -> Option<usize> {
+        self.inside(x, y, z).then(|| self.chunk_index(x, y, z))
+    }
+
+    /// Чанк ещё не тронут: его содержимое отдаёт генератор.
+    pub fn chunk_fresh(&self, ci: usize) -> bool {
+        self.chunks[ci].is_none()
+    }
+
+    /// Чанк таким, каким его даёт генератор: чистая функция генератора,
+    /// поэтому строить его можно на любом потоке, а ставить —
+    /// [`World::install_chunk`] (ADR-681).
+    pub fn build_chunk(&self, ci: usize) -> Paletted {
         let a = (ci as u32) % self.cx;
         let b = ((ci as u32) / self.cx) % self.cy;
         let c = (ci as u32) / (self.cx * self.cy);
@@ -1056,8 +1074,19 @@ impl World {
                 }
             }
         }
-        self.chunks[ci] = Some(Arc::new(p));
-        self.materialized += 1;
+        p
+    }
+
+    /// Поставить чанк, построенный заранее [`World::build_chunk`]
+    /// (ADR-681). Тронутый чанк не заменяется. Идёт в счёт построенных
+    /// чанков, но не в потолок материализаций дренажа: этот потолок
+    /// бережёт тик от построения в очереди, а заранее строит и
+    /// ограничивает своим потолком тот, кто ставит.
+    pub fn install_chunk(&mut self, ci: usize, chunk: Paletted) {
+        if self.chunks[ci].is_none() {
+            self.chunks[ci] = Some(Arc::new(chunk));
+            self.materialized += 1;
+        }
     }
 
     /// Поставить правку в очередь. Потолок применяется при дренаже,

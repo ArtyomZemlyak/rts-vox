@@ -200,10 +200,6 @@ pub struct Burst {
 mod energy;
 /// Divide a phase quota without losing its remainder. `turn` is the offset
 /// in the tick's rotated service order, not an index into reordered state.
-fn wave_share(budget: usize, count: usize, turn: usize) -> usize {
-    debug_assert!(count > 0 && turn < count);
-    budget / count + usize::from(turn < budget % count)
-}
 #[derive(Clone, Copy)]
 pub struct Impact {
     pub at: [i32; 3],
@@ -236,6 +232,9 @@ pub struct Battle {
     // receipt and re-arms this buffer when restoring its pending checkpoint.
     plan_execution: Option<Box<commands::runtime::PlanExecution>>,
     pub(crate) ai_step: Option<Box<commands::runtime::AiStep>>,
+    /// Waves the last tick's ceilings held back: capturing, advancing
+    /// (ADR-681). A diagnostic, absent in hashes and snapshots.
+    pub wave_held: [usize; 2],
 }
 fn attack_range(tuning: &Tuning, kind: RangeUnitKind, weapon: Weapon, machine_gun: i32) -> i32 {
     if kind == RangeUnitKind::Artillery && weapon == Weapon::Blast {
@@ -411,6 +410,7 @@ impl Battle {
             command_capture: None,
             plan_execution: None,
             ai_step: None,
+            wave_held: [0; 2],
         }
     }
     pub fn trace_fire(&mut self, enabled: bool) {
@@ -1836,6 +1836,7 @@ impl BlastRange {
             command_capture: None,
             plan_execution: None,
             ai_step: None,
+            wave_held: [0; 2],
         };
         let mut battle = std::mem::replace(&mut self.battle, empty);
         battle.impacts.clear();
@@ -2924,82 +2925,150 @@ impl BlastRange {
         }
     }
     fn battle_waves(&mut self, b: &mut Battle, completed: &mut impl FnMut(&'static str)) {
+        use rayon::prelude::*;
         let n = b.waves.len().max(1);
         // A growing old crater must not consume every newly freed fragment
         // slot before a newer hit reaches its hull. Rotate service, not the
         // canonical wave array: snapshots and stable wave identity keep their
         // order, and the saved tick determines the next turn after loading.
         let first = self.tick as usize % n;
+        let order: Vec<usize> = (0..b.waves.len()).map(|k| (first + k) % n).collect();
+        let Battle {
+            waves,
+            tuning,
+            energy_config,
+            anni_config,
+            canister_config,
+            shell_config,
+            wave_held,
+            ..
+        } = b;
+        let config_of = |weapon: Weapon| match weapon {
+            Weapon::Energy => &*energy_config,
+            Weapon::Annihilation => &*anni_config,
+            Weapon::Canister => &*canister_config,
+            _ => &*shell_config,
+        };
+        // Each wave captures and advances by its own preset's budget, in
+        // turn, while the tick's ceilings over all waves last (ADR-681).
+        // A wave past a ceiling waits for the next tick.
+        *wave_held = [0; 2];
+        let mut capture_left = tuning.wave_capture_ceiling;
+        let mut slices = vec![0; waves.len()];
+        for &i in &order {
+            let w = &waves[i];
+            if w.wave.capturing() {
+                let budget = config_of(w.weapon).capture_cells_per_tick.min(capture_left);
+                capture_left -= budget;
+                wave_held[0] += usize::from(budget == 0);
+                slices[i] = budget;
+            }
+        }
+        for &i in &order {
+            let w = &mut waves[i];
+            if w.wave.capturing() {
+                w.wave.capture(
+                    &self.world,
+                    config_of(w.weapon),
+                    &self.units,
+                    &self.surface_work,
+                    slices[i],
+                );
+                completed("battle_capture");
+            }
+        }
+        let mut work_left = tuning.wave_work_ceiling;
+        let mut contact_left = tuning.wave_contact_ceiling;
+        let mut pops = vec![0; waves.len()];
+        let mut budgets = vec![0; waves.len()];
+        for &i in &order {
+            let w = &waves[i];
+            if !w.wave.capturing() {
+                let own = config_of(w.weapon).wave_work_per_tick;
+                pops[i] = own.min(work_left);
+                work_left -= pops[i];
+                budgets[i] = own.min(contact_left);
+                contact_left -= budgets[i];
+                wave_held[1] += usize::from(pops[i] == 0 || budgets[i] == 0);
+            }
+        }
+        // Each frontier reads its own captured grid alone: the waves advance
+        // theirs in parallel, every one by its own budget, and the contacts
+        // below meet the same hits in the same order as when each wave
+        // advanced just before its own contacts.
+        {
+            let (world, units) = (&self.world, &self.units);
+            waves
+                .par_iter_mut()
+                .zip(pops.par_iter())
+                .for_each(|(w, &budget)| w.wave.advance_frontier(budget, world, units));
+        }
+        completed("battle_frontier");
+        // The matter under the cells each wave's contacts visit is read
+        // ahead, every wave on its own: the world's voxels do not change
+        // while the waves step (ADR-681).
+        let world = &self.world;
+        waves
+            .par_iter_mut()
+            .zip(budgets.par_iter())
+            .for_each(|(w, &budget)| w.wave.read_contacts(world, budget));
+        completed("battle_read");
         // No physics or claim confirmation runs between these atomic batches.
         // Component commits consume exactly their reservations; terrain claims
         // hold one slot per connected component of their group (ADR-659).
         // Recount at the next phase/tick.
+        self.matter.hull_reserve = tuning.hull_piece_reserve;
+        self.matter.ground_waits = tuning.ground_waits_for_pool;
         let mut room = None;
-        for offset in 0..b.waves.len() {
-            let w = &mut b.waves[(first + offset) % n];
-            let config = match w.weapon {
-                Weapon::Energy => &b.energy_config,
-                Weapon::Annihilation => &b.anni_config,
-                Weapon::Canister => &b.canister_config,
-                _ => &b.shell_config,
-            };
+        for &i in &order {
+            let w = &mut waves[i];
             if w.wave.capturing() {
-                w.wave.capture(
-                    &self.world,
-                    config,
-                    &self.units,
-                    &self.surface_work,
-                    wave_share(config.capture_cells_per_tick, n, offset),
-                );
-                completed("battle_capture");
+                continue;
             }
-            if !w.wave.capturing() {
-                let old = self.matter.remaining_mj;
-                self.matter.remaining_mj = w.energy;
-                self.matter.fragment_size(config.fragment_box);
-                // Only annihilation consumes removed-cell deltas. Ordinary
-                // waves need neither this full roster walk nor its allocation.
-                let before = (config.material_energy_j == 0).then(|| {
-                    self.units
-                        .iter()
-                        .map(|u| (u.removed.len(), u.seg_removed.len()))
-                        .collect::<Vec<_>>()
-                });
-                let room = room.get_or_insert_with(|| self.matter.claim_room());
-                w.wave.step_with_room::<true>(
-                    &mut self.world,
-                    wave_share(config.wave_work_per_tick, n, offset),
-                    &mut self.units,
-                    &mut self.surface_work,
-                    &mut self.surface_changed,
-                    config,
-                    Some(&mut self.matter),
-                    Some(room),
-                );
-                if let Some(before) = before {
-                    for (id, (u, (root, seg))) in self.units.iter().zip(before).enumerate() {
-                        self.matter.annihilate_body(
-                            id,
-                            u.removed.len() - root + u.seg_removed.len() - seg,
-                        );
-                    }
+            let config = config_of(w.weapon);
+            let old = self.matter.remaining_mj;
+            self.matter.remaining_mj = w.energy;
+            self.matter.fragment_size(config.fragment_box);
+            // Only annihilation consumes removed-cell deltas. Ordinary
+            // waves need neither this full roster walk nor its allocation.
+            let before = (config.material_energy_j == 0).then(|| {
+                self.units
+                    .iter()
+                    .map(|u| (u.removed.len(), u.seg_removed.len()))
+                    .collect::<Vec<_>>()
+            });
+            let room = room.get_or_insert_with(|| self.matter.claim_room());
+            w.wave.step_with_room::<true>(
+                &mut self.world,
+                budgets[i],
+                &mut self.units,
+                &mut self.surface_work,
+                &mut self.surface_changed,
+                config,
+                Some(&mut self.matter),
+                Some(room),
+            );
+            if let Some(before) = before {
+                for (id, (u, (root, seg))) in self.units.iter().zip(before).enumerate() {
+                    self.matter
+                        .annihilate_body(id, u.removed.len() - root + u.seg_removed.len() - seg);
                 }
-                completed("battle_wave_step");
-                w.energy = self.matter.remaining_mj;
-                self.matter.remaining_mj = old;
-                for u in &mut self.units {
-                    if u.absorbed > 0 && u.status.alive {
-                        u.motion.impulse(
-                            &u.body,
-                            w.wave.at,
-                            u64::from(u.absorbed) * u64::from(config.hull_impulse_milli) / 1000,
-                        );
-                    }
-                    u.absorbed = 0;
+            }
+            completed("battle_wave_step");
+            w.energy = self.matter.remaining_mj;
+            self.matter.remaining_mj = old;
+            for u in &mut self.units {
+                if u.absorbed > 0 && u.status.alive {
+                    u.motion.impulse(
+                        &u.body,
+                        w.wave.at,
+                        u64::from(u.absorbed) * u64::from(config.hull_impulse_milli) / 1000,
+                    );
                 }
+                u.absorbed = 0;
             }
         }
-        b.waves.retain(|w| w.wave.working());
+        waves.retain(|w| w.wave.working());
     }
 }
 
@@ -3034,3 +3103,7 @@ mod lifecycle_tests;
 #[cfg(test)]
 #[path = "range_coarse_continuation_tests.rs"]
 mod coarse_continuation_tests;
+
+#[cfg(test)]
+#[path = "range_instant_blast_tests.rs"]
+mod instant_blast_tests;

@@ -29,10 +29,15 @@ fn steel_wall_impact(ai: bool) {
         layout.airburst_on_target = false;
         layout.units.clear();
     }
-    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut config =
+        ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    // A stock burst finishes within its impact tick (ADR-681); a slower
+    // slice keeps this one live, so a snapshot of its frontier is taken.
+    config.wave_work_per_tick = 256;
     let mut r = BlastRange::with_layout(config, layout).unwrap();
     if ai {
         r.start_battle().unwrap();
+        r.battle.shell_config.wave_work_per_tick = 256;
         assert!(r.battle_order(1, Order::Hold, None));
     }
     let mut replay: Option<BlastRange> = None;
@@ -58,8 +63,11 @@ fn steel_wall_impact(ai: bool) {
         }
         if replay.is_none() && (r.explosion.is_some() || !r.battle.waves.is_empty()) {
             let bytes = r.snapshot();
-            let copy = BlastRange::restore(r.config, &bytes).expect("surface wave snapshot");
+            let mut copy = BlastRange::restore(r.config, &bytes).expect("surface wave snapshot");
             assert_eq!(bytes, copy.snapshot());
+            // The battle's presets come from data, not the save: the copy
+            // runs the same slower slice.
+            copy.battle.shell_config.wave_work_per_tick = 256;
             replay = Some(copy);
         }
         if ai {
