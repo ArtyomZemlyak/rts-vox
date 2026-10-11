@@ -1,5 +1,5 @@
 // Dig economy of the range, by unit kind (plan 245, ADR-672, ADR-673,
-// ADR-674).
+// ADR-674, ADR-675).
 // Tank and store in matter units: one cell of a material carries its
 // density (range-materials.ron). Radius and reach in world units.
 //
@@ -7,6 +7,12 @@
 // item 7). A kind with an empty tank carries no dig parameters; a layout
 // that wants a digger names one in its own `economy` section. The base is
 // the dock: a living one adds its store to its side's.
+//
+// No kind produces: the range's base is a command base, not a factory, and
+// which kind builds what is the owner's choice. A producer kind lists what
+// it builds in `producers` of the production section; a produced kind takes
+// `build_secs` game seconds. A unit costs its template cells times the
+// density of its body material, never a number here.
 (
     // Dig edits of all diggers waiting in the edit queue at once: the dig
     // sub-pool inside the edit ceiling (8192 for the stock weapons).
@@ -47,5 +53,9 @@
         // A dead digger's tank has no cells: one dig edit takes this much of
         // it, a cell of rock (Q-78).
         cargo_per_edit: 260,
+    )),
+    production: Some((
+        // Orders one producer holds, as `max_build_queue` of `data/sim.ron`.
+        queue: 8,
     )),
 )

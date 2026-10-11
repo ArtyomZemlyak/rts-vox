@@ -1,5 +1,5 @@
-//! Dig economy of the range, by unit kind (plan 245, slices 0, 3 and 6;
-//! ADR-672, ADR-673, ADR-674).
+//! Dig economy of the range, by unit kind (plan 245, slices 0, 3, 4 and 6;
+//! ADR-672, ADR-673, ADR-674, ADR-675).
 //!
 //! Every quantity is in world units: a tank and a store hold matter units
 //! (one cell of a material carries its density, `range-materials.ron`),
@@ -26,8 +26,15 @@ pub const MAX_REFINE_DEN: u64 = 1 << 20;
 pub const MAX_DOCK_SEARCHES: u32 = 1024;
 /// Largest number of reclaim searches in a tick.
 pub const MAX_RECLAIM_SEARCHES: u32 = 1024;
+/// Longest build time of a produced kind, game seconds.
+pub const MAX_BUILD_SECS: u32 = 3600;
+/// Longest queue of one producer.
+pub const MAX_QUEUE: u32 = 64;
 
 fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+fn is_zero32(v: &u32) -> bool {
     *v == 0
 }
 
@@ -50,6 +57,12 @@ pub struct KindEconomy {
     /// its side unload there. Absent in the RON of a slice-1 layout.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub store: u64,
+    /// Game seconds a producer spends on a unit of this kind; converted to
+    /// ticks once, at load. Zero for a kind nobody produces. The cost is
+    /// not a number here: it is the kind's template cells times the
+    /// density of its body material.
+    #[serde(default, skip_serializing_if = "is_zero32")]
+    pub build_secs: u32,
 }
 
 /// The sides' stores and unloading (plan 245, slice 3; ADR-673). Without
@@ -91,6 +104,25 @@ pub struct RangeReclaim {
     pub cargo_per_edit: u64,
 }
 
+/// What one producer kind builds (ADR-675).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Producer {
+    pub kind: RangeUnitKind,
+    /// Kinds a living unit of `kind` produces, each with a build time.
+    pub produces: Vec<RangeUnitKind>,
+}
+
+/// Production by producer kinds (plan 245, slice 4; ADR-675). Without it
+/// no kind produces.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeProduction {
+    /// Orders one producer holds at once, the one being built included.
+    pub queue: u32,
+    /// At most one entry per kind; a kind without one produces nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub producers: Vec<Producer>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RangeEconomy {
     /// Dig edits of all diggers together that may wait in the world's edit
@@ -105,6 +137,9 @@ pub struct RangeEconomy {
     /// Reclaim; absent in the RON of a slice-1 or slice-3 layout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reclaim: Option<RangeReclaim>,
+    /// Production; absent in the RON of a layout before slice 4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production: Option<RangeProduction>,
 }
 
 impl RangeEconomy {
@@ -138,6 +173,30 @@ impl RangeEconomy {
             };
             if !valid || k.store > MAX_STORE || (k.store > 0 && self.bank.is_none()) {
                 return Err("range economy kind exceeds supported bounds".into());
+            }
+            if k.build_secs > MAX_BUILD_SECS {
+                return Err("range economy production exceeds supported bounds".into());
+            }
+        }
+        if let Some(p) = &self.production {
+            // A producer draws on its side's store: it needs the bank, and
+            // every product a build time. A kind or product listed twice
+            // would be inert data.
+            let bad = |(i, e): (usize, &Producer)| {
+                p.producers[..i].iter().any(|o| o.kind == e.kind)
+                    || e.produces.is_empty()
+                    || e.produces.len() > RangeUnitKind::COUNT
+                    || e.produces.iter().enumerate().any(|(j, k)| {
+                        e.produces[..j].contains(k)
+                            || self.kind(*k).is_none_or(|x| x.build_secs == 0)
+                    })
+            };
+            if !(1..=MAX_QUEUE).contains(&p.queue)
+                || p.producers.len() > RangeUnitKind::COUNT
+                || (!p.producers.is_empty() && self.bank.is_none())
+                || p.producers.iter().enumerate().any(bad)
+            {
+                return Err("range economy production exceeds supported bounds".into());
             }
         }
         if let Some(b) = &self.bank {
@@ -177,6 +236,29 @@ impl RangeEconomy {
     pub fn store(&self, kind: RangeUnitKind) -> u64 {
         self.kind(kind).map_or(0, |k| k.store)
     }
+    /// What a unit of this kind produces; empty for a kind that does not.
+    pub fn products(&self, producer: RangeUnitKind) -> &[RangeUnitKind] {
+        self.production
+            .as_ref()
+            .and_then(|p| p.producers.iter().find(|e| e.kind == producer))
+            .map_or(&[], |e| &e.produces)
+    }
+    /// Whether a unit of `producer`'s kind produces `kind`.
+    pub fn produces(&self, producer: RangeUnitKind, kind: RangeUnitKind) -> bool {
+        self.products(producer).contains(&kind)
+    }
+    /// Whether some kind produces `kind`.
+    pub fn produced(&self, kind: RangeUnitKind) -> bool {
+        self.production
+            .as_ref()
+            .is_some_and(|p| p.producers.iter().any(|e| e.produces.contains(&kind)))
+    }
+    /// Whether any kind produces.
+    pub fn any_producer(&self) -> bool {
+        self.production
+            .as_ref()
+            .is_some_and(|p| !p.producers.is_empty())
+    }
 }
 
 #[cfg(test)]
@@ -196,6 +278,10 @@ mod tests {
         assert_eq!(e.store(RangeUnitKind::Tank), 0);
         // Reclaim is on (ADR-674).
         assert!(e.reclaim.is_some());
+        // Production is on, but nothing produces (ADR-675).
+        assert!(e.production.is_some());
+        assert!(!e.any_producer());
+        assert!(e.kinds.iter().all(|k| k.build_secs == 0));
     }
 
     #[test]
@@ -203,10 +289,15 @@ mod tests {
         let mut e = RangeEconomy::stock();
         e.bank = None;
         e.reclaim = None;
+        e.production = None;
         e.kinds.iter_mut().for_each(|k| k.store = 0);
         let text = ron::ser::to_string(&e).unwrap();
         assert!(
-            !text.contains("store") && !text.contains("bank") && !text.contains("reclaim"),
+            !text.contains("store")
+                && !text.contains("bank")
+                && !text.contains("reclaim")
+                && !text.contains("produc")
+                && !text.contains("build_secs"),
             "{text}"
         );
         assert_eq!(RangeEconomy::from_ron(&text).unwrap(), e);
@@ -216,9 +307,59 @@ mod tests {
     fn a_slice_three_economy_reads_and_writes_without_reclaim() {
         let mut e = RangeEconomy::stock();
         e.reclaim = None;
+        e.production = None;
         let text = ron::ser::to_string(&e).unwrap();
         assert!(text.contains("bank") && !text.contains("reclaim"), "{text}");
         assert_eq!(RangeEconomy::from_ron(&text).unwrap(), e);
+    }
+
+    #[test]
+    fn a_producer_lists_its_kinds_and_reads_back() {
+        let mut e = RangeEconomy::stock();
+        e.production.as_mut().unwrap().producers = vec![Producer {
+            kind: RangeUnitKind::Base,
+            produces: vec![RangeUnitKind::Tank, RangeUnitKind::Strider],
+        }];
+        e.kind_mut(RangeUnitKind::Tank).unwrap().build_secs = 2;
+        e.kind_mut(RangeUnitKind::Strider).unwrap().build_secs = 3;
+        e.validate().unwrap();
+        assert!(e.any_producer());
+        assert!(e.produces(RangeUnitKind::Base, RangeUnitKind::Tank));
+        assert!(!e.produces(RangeUnitKind::Base, RangeUnitKind::Spider));
+        assert!(!e.produces(RangeUnitKind::Tank, RangeUnitKind::Tank));
+        assert!(e.produced(RangeUnitKind::Strider) && !e.produced(RangeUnitKind::Base));
+        let text = ron::ser::to_string(&e).unwrap();
+        assert!(text.contains("produces") && text.contains("build_secs"));
+        assert_eq!(RangeEconomy::from_ron(&text).unwrap(), e);
+        let broken: [fn(&mut RangeEconomy); 8] = [
+            // A product needs a build time.
+            |e| e.kind_mut(RangeUnitKind::Tank).unwrap().build_secs = 0,
+            |e| e.kind_mut(RangeUnitKind::Tank).unwrap().build_secs = MAX_BUILD_SECS + 1,
+            // Listed once.
+            |e| {
+                e.production.as_mut().unwrap().producers[0]
+                    .produces
+                    .push(RangeUnitKind::Tank)
+            },
+            |e| {
+                let p = e.production.as_mut().unwrap();
+                p.producers.push(p.producers[0].clone());
+            },
+            // A producer without products is inert.
+            |e| e.production.as_mut().unwrap().producers[0].produces.clear(),
+            // A producer needs the bank it pays from.
+            |e| {
+                e.bank = None;
+                e.kinds.iter_mut().for_each(|k| k.store = 0);
+            },
+            |e| e.production.as_mut().unwrap().queue = 0,
+            |e| e.production.as_mut().unwrap().queue = MAX_QUEUE + 1,
+        ];
+        for f in broken {
+            let mut b = e.clone();
+            f(&mut b);
+            assert!(b.validate().is_err(), "{b:?}");
+        }
     }
 
     #[test]
