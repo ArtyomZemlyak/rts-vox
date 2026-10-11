@@ -63,7 +63,7 @@ struct Line {
 }
 
 /// Production's state on a layout whose economy has a production section.
-pub(crate) struct Production {
+pub struct Production {
     /// Orders one producer holds.
     queue: u32,
     /// Sorted by producer slot: ties between producers drawing on one
@@ -170,7 +170,8 @@ impl Production {
 }
 
 impl Mining {
-    pub(crate) fn production(&self) -> Option<&Production> {
+    /// Read-only production counters; lines and their blanks remain internal.
+    pub fn production(&self) -> Option<&Production> {
         self.production.as_ref()
     }
     /// Cost and build ticks of every product, from the templates and the

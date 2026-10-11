@@ -60,7 +60,7 @@ enum Work {
 }
 
 /// Reclaim's state on a layout whose economy has a reclaim section.
-pub(crate) struct Reclaim {
+pub struct Reclaim {
     data: RangeReclaim,
     /// Each slot's work; kept only while the digger stands at its face.
     work: Vec<Option<Work>>,
@@ -141,7 +141,8 @@ impl Reclaim {
 }
 
 impl Mining {
-    pub(crate) fn reclaim(&self) -> Option<&Reclaim> {
+    /// Read-only reclaim counters; work assignments remain internal.
+    pub fn reclaim(&self) -> Option<&Reclaim> {
         self.reclaim.as_ref()
     }
 }
@@ -158,7 +159,8 @@ enum Target {
 }
 
 /// Resting pieces and breached tanks by grid cell of the reach, and resting
-/// pieces by id. Built once a tick, in fragment and slot order.
+/// pieces by id. Built once a tick for the diggers' nearby cells, in
+/// fragment and slot order. Remote heaps cannot be candidates or work.
 struct Near {
     reach: i64,
     cells: BTreeMap<[i32; 2], Vec<(Target, [i32; 3])>>,
@@ -187,27 +189,66 @@ impl Near {
         breached: &[bool],
         blanks: &[(usize, ContainerId)],
         ledger: &Ledger,
+        diggers: &[Digger],
     ) -> Self {
         let mut near = Self {
             reach: i64::from(reach),
             cells: BTreeMap::new(),
             pieces: BTreeMap::new(),
         };
+        // The same nine cells around every active face that around() reads.
+        // Retain all broad-phase candidates, including outside the sphere:
+        // they affect whether a miss spends a search and its rotation.
+        let wanted: BTreeSet<_> = diggers
+            .iter()
+            .flat_map(|d| {
+                let [cx, cz] = near.cell(d.face);
+                (-1..=1).flat_map(move |dz| (-1..=1).map(move |dx| [cx + dx, cz + dz]))
+            })
+            .collect();
+        let (lower, upper) = wanted
+            .iter()
+            .fold(([i32::MAX; 2], [i32::MIN; 2]), |(lo, hi), c| {
+                (
+                    std::array::from_fn(|k| lo[k].min(c[k])),
+                    std::array::from_fn(|k| hi[k].max(c[k])),
+                )
+            });
+        // A single face and a fully covered battlefield both form a rectangle.
+        // In that exact case membership needs no tree lookup per fragment.
+        let rectangular = (i64::from(upper[0]) - i64::from(lower[0]) + 1)
+            * (i64::from(upper[1]) - i64::from(lower[1]) + 1)
+            == wanted.len() as i64;
+        let needed = |c: [i32; 2]| {
+            if rectangular {
+                (0..2).all(|k| lower[k] <= c[k] && c[k] <= upper[k])
+            } else {
+                wanted.contains(&c)
+            }
+        };
         for (i, f) in fragments.iter().enumerate() {
             if f.resting {
                 let p = point([f.position.x, f.position.y, f.position.z]);
-                near.insert(Target::Piece(i), p);
-                near.pieces.insert(f.id, i);
+                if needed(near.cell(p)) {
+                    near.insert(Target::Piece(i), p);
+                    near.pieces.insert(f.id, i);
+                }
             }
         }
         for (slot, tank) in tanks.iter().enumerate() {
             if tank.is_some_and(|t| breached[slot] && ledger.held(t) > 0) {
-                near.insert(Target::Tank(slot), point(units[slot].motion.pos));
+                let p = point(units[slot].motion.pos);
+                if needed(near.cell(p)) {
+                    near.insert(Target::Tank(slot), p);
+                }
             }
         }
         for &(slot, blank) in blanks {
             if ledger.held(blank) > 0 {
-                near.insert(Target::Blank(slot), point(units[slot].motion.pos));
+                let p = point(units[slot].motion.pos);
+                if needed(near.cell(p)) {
+                    near.insert(Target::Blank(slot), p);
+                }
             }
         }
         near
@@ -287,6 +328,7 @@ pub(super) fn reclaim(
         &rc.breached,
         &blanks,
         ledger,
+        diggers,
     );
     let cap = |id: usize| ledger.get(tanks[id].expect("digger has a tank")).cap;
     // Work still there, still in reach and still fitting the tank.

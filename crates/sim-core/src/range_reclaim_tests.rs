@@ -251,6 +251,58 @@ fn a_flying_piece_is_not_taken() {
 }
 
 #[test]
+fn two_diggers_keep_id_ties_and_partial_work_across_neighboring_cells_and_restore() {
+    let mut r = range(layout(1_000_000, 2, 32));
+    // First ID is in the higher grid cell: grid traversal must not win ties.
+    let (first, _) = drop_piece(&mut r, 6, 2, [296, 30, 322]);
+    let (second, _) = drop_piece(&mut r, 6, 2, [264, 30, 322]);
+    let (remote, _) = drop_piece(&mut r, 6, 2, [600, 30, 600]);
+    let a = settle(&mut r, first);
+    let b = settle(&mut r, second);
+    settle(&mut r, remote);
+    assert_eq!((a[1], a[2]), (b[1], b[2]));
+    let face = [(a[0] + b[0]) / 2, a[1], a[2]];
+    for id in [0, 1] {
+        assert!(r.battle_order(id, Order::Dig(face), None));
+    }
+    r.step();
+    assert_eq!(reclaim(&r).piece_work(0), Some((first, 2)));
+    assert_eq!(reclaim(&r).piece_work(1), Some((second, 2)));
+    assert_eq!((reclaim(&r).searches, reclaim(&r).edits), (2, 4));
+    let bytes = r.snapshot();
+    let mut back = BlastRange::restore(config(), &bytes).unwrap();
+    assert_eq!(back.snapshot(), bytes);
+    for _ in 0..3 {
+        r.step();
+        back.step();
+        assert_eq!(r.state_hash(), back.state_hash());
+        assert_books(&r, reclaim(&r).reclaimed);
+    }
+    assert_eq!((reclaim(&r).pieces, reclaim(&r).reclaimed), (2, 16 * ROCK));
+    assert_eq!(r.mining().unwrap().mined, 0);
+    assert_eq!(r.tank_held(0), Some(8 * ROCK));
+    assert_eq!(r.tank_held(1), Some(8 * ROCK));
+    assert!(piece(&r, first).is_none() && piece(&r, second).is_none());
+    assert!(piece(&r, remote).is_some_and(|f| f.resting));
+}
+
+#[test]
+fn a_piece_in_neighboring_cells_but_outside_the_sphere_still_spends_a_miss() {
+    let mut r = range(layout(1_000_000, 2, 4));
+    let (id, _) = drop_piece(&mut r, 6, 2, SPOT);
+    let mut face = settle(&mut r, id);
+    face[1] = 100;
+    assert!(r.battle_order(0, Order::Dig(face), None));
+    for _ in 0..3 {
+        r.step();
+        assert_books(&r, 0);
+    }
+    assert_eq!((reclaim(&r).searches, reclaim(&r).search_misses), (3, 3));
+    assert_eq!(reclaim(&r).reclaimed, 0);
+    assert!(piece(&r, id).is_some_and(|f| f.resting));
+}
+
+#[test]
 fn reclaim_spends_the_dig_rate_and_respects_the_tank_room() {
     // Sixty-four cells at five edits a tick: thirteen ticks of work.
     let mut r = range(layout(1_000_000, 5, 4));
