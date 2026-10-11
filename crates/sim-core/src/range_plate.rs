@@ -157,13 +157,19 @@ impl EditTiles {
     }
 }
 
-/// Whether an edit would make the plate check look at any roof
-/// (ADR-645: such an edit in a waiting region is kept for later).
-pub(super) fn watches(layout: &RangeLayout, e: &Edit) -> bool {
-    layout
-        .blocks
-        .iter()
-        .any(|roof| is_roof(roof) && under(roof, e))
+/// The roofs the plate check watches, picked out of the layout's blocks
+/// once per pass rather than once per edit: a drain after a salvo holds
+/// tens of thousands of edits, and a large map thousands of blocks.
+pub(super) struct Watch<'a>(Vec<&'a RangeBlock>);
+impl<'a> Watch<'a> {
+    pub(super) fn of(layout: &'a RangeLayout) -> Self {
+        Self(layout.blocks.iter().filter(|b| is_roof(b)).collect())
+    }
+    /// Whether an edit would make the plate check look at any roof
+    /// (ADR-645: such an edit in a waiting region is kept for later).
+    pub(super) fn watches(&self, e: &Edit) -> bool {
+        self.0.iter().any(|roof| under(roof, e))
+    }
 }
 
 /// Cloneable traversal keeps plate checks on the same complete batch without

@@ -6009,15 +6009,17 @@ impl BlastRange {
                 // keeps the latest edit per cell.
                 let cs = voxel::store::CS as u32;
                 let waiting = |e: &voxel::world::Edit| held([e.x / cs, e.y / cs, e.z / cs]);
-                for e in ready
-                    .iter()
-                    .filter(|e| waiting(e) && plate::watches(layout, e))
-                {
-                    self.collapse_backlog.insert(*e);
-                }
                 // Which edits wait is asked once per edit, not once per
                 // roof the plate check walks; a byte each, not a copy.
                 let waits: Vec<bool> = ready.iter().map(waiting).collect();
+                let watch = plate::Watch::of(layout);
+                for (e, _) in ready
+                    .iter()
+                    .zip(&waits)
+                    .filter(|(e, w)| **w && watch.watches(e))
+                {
+                    self.collapse_backlog.insert(*e);
+                }
                 plate::fracture_iter(
                     layout,
                     &mut self.world,
