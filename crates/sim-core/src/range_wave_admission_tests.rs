@@ -178,7 +178,10 @@ fn wave_admission_keeps_blocked_contacts_and_resumes_the_saved_turn() {
     assert!(a.matter.economy.ledger.balanced());
 }
 
-// Pre-cache reference: independently recount before every atomic wave.
+// Pre-cache reference: independently recount before every atomic wave,
+// advance each frontier serially just before its own contacts, and read no
+// chunk or matter ahead. Budgets follow ADR-681: each wave its preset's
+// own, while the tick's ceilings last.
 impl BlastRange {
     fn scalar_waves(&mut self, b: &mut Battle, completed: &mut impl FnMut(&'static str)) {
         let n = b.waves.len().max(1);
@@ -187,25 +190,44 @@ impl BlastRange {
         // canonical wave array: snapshots and stable wave identity keep their
         // order, and the saved tick determines the next turn after loading.
         let first = self.tick as usize % n;
+        let config_of = |b: &Battle, weapon: Weapon| match weapon {
+            Weapon::Energy => b.energy_config,
+            Weapon::Annihilation => b.anni_config,
+            Weapon::Canister => b.canister_config,
+            _ => b.shell_config,
+        };
+        let mut capture_left = b.tuning.wave_capture_ceiling;
         for offset in 0..b.waves.len() {
-            let w = &mut b.waves[(first + offset) % n];
-            let config = match w.weapon {
-                Weapon::Energy => &b.energy_config,
-                Weapon::Annihilation => &b.anni_config,
-                Weapon::Canister => &b.canister_config,
-                _ => &b.shell_config,
-            };
+            let i = (first + offset) % n;
+            let config = config_of(b, b.waves[i].weapon);
+            let w = &mut b.waves[i];
             if w.wave.capturing() {
+                let budget = config.capture_cells_per_tick.min(capture_left);
+                capture_left -= budget;
                 w.wave.capture(
                     &self.world,
-                    config,
+                    &config,
                     &self.units,
                     &self.surface_work,
-                    wave_share(config.capture_cells_per_tick, n, offset),
+                    budget,
                 );
                 completed("battle_capture");
             }
+        }
+        let mut work_left = b.tuning.wave_work_ceiling;
+        let mut contact_left = b.tuning.wave_contact_ceiling;
+        self.matter.hull_reserve = b.tuning.hull_piece_reserve;
+        self.matter.ground_waits = b.tuning.ground_waits_for_pool;
+        for offset in 0..b.waves.len() {
+            let i = (first + offset) % n;
+            let config = config_of(b, b.waves[i].weapon);
+            let w = &mut b.waves[i];
             if !w.wave.capturing() {
+                let pops = config.wave_work_per_tick.min(work_left);
+                work_left -= pops;
+                let budget = config.wave_work_per_tick.min(contact_left);
+                contact_left -= budget;
+                w.wave.advance_frontier(pops, &self.world, &self.units);
                 let old = self.matter.remaining_mj;
                 self.matter.remaining_mj = w.energy;
                 self.matter.fragment_size(config.fragment_box);
@@ -216,11 +238,11 @@ impl BlastRange {
                     .collect();
                 w.wave.step_with_room::<true>(
                     &mut self.world,
-                    wave_share(config.wave_work_per_tick, n, offset),
+                    budget,
                     &mut self.units,
                     &mut self.surface_work,
                     &mut self.surface_changed,
-                    config,
+                    &config,
                     Some(&mut self.matter),
                     None,
                 );
@@ -365,6 +387,10 @@ fn wave_phase_capacity_preserves_mixed_ground_claims_and_partial_confirmation() 
             r.matter.tuning.max_claims = 1;
             // A pending edit must continue reserving its slot across phases.
             r.world.max_edits_per_tick = 1;
+            // Ground that waits for the pool, the policy a mod may keep: under
+            // the stock one it is pulverised and never claims or waits here
+            // (ADR-681).
+            std::sync::Arc::make_mut(&mut r.battle.tuning).ground_waits_for_pool = true;
             add_ground_waves(r);
         }
         for tick in 3..27 {
@@ -392,7 +418,14 @@ fn wave_phase_capacity_preserves_mixed_ground_claims_and_partial_confirmation() 
         assert!(a.matter.admission.ground[0] > 0, "no real ground claim");
         assert!(a.matter.admission.ground[1] > 0, "no unaffordable contact");
         if cap < 64 {
-            assert!(a.matter.admission.ground[2] > 0, "no pool deferral");
+            // Which admission gate refuses first — no slot or the claim
+            // ceiling — follows the per-wave budgets (ADR-681); either is
+            // a real deferral the queue must keep.
+            let ground = a.matter.admission.ground;
+            assert!(
+                ground[2] + ground[3] > 0,
+                "no pool deferral: cap={cap} ground={ground:?}"
+            );
         }
         assert!(a.matter.admission.room_scans < b.matter.admission.room_scans);
     }

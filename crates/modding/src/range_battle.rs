@@ -68,12 +68,42 @@ pub struct Tuning {
     pub firing_spacing: i32,
     pub max_rounds: usize,
     pub max_waves: usize,
+    /// Ceilings over all live waves together, per tick (ADR-681): grid
+    /// cells captured, frontier heap pops, and contacts (a cell visited,
+    /// and each voxel of matter in it). Each wave takes its preset's own
+    /// budget in turn while a ceiling lasts; a wave past it waits for the
+    /// next tick.
+    #[serde(default = "default_wave_capture_ceiling")]
+    pub wave_capture_ceiling: usize,
+    #[serde(default = "default_wave_work_ceiling")]
+    pub wave_work_ceiling: usize,
+    #[serde(default = "default_wave_work_ceiling")]
+    pub wave_contact_ceiling: usize,
+    /// Slots of the flying-piece pool a wave's ground cells leave to the
+    /// hulls it strikes (ADR-681): ground beyond the rest is pulverised.
+    #[serde(default)]
+    pub hull_piece_reserve: u32,
+    /// A wave's ground cell with no slot left waits for one, as before
+    /// ADR-681, instead of being pulverised at once.
+    #[serde(default)]
+    pub ground_waits_for_pool: bool,
+    /// Untouched terrain chunks the tick's edit drain is about to change,
+    /// built ahead on the physics pool (ADR-681); zero builds none and
+    /// leaves them to the drain's own ceiling on materialisation.
+    #[serde(default)]
+    pub drain_chunk_ceiling: usize,
     pub tank_ammo: TankAmmo,
     pub zone: RangeZone,
     pub units: Vec<RangeUnitDef>,
 }
 fn default_turret_t2_power() -> u32 {
     1000
+}
+fn default_wave_capture_ceiling() -> usize {
+    40000
+}
+fn default_wave_work_ceiling() -> usize {
+    4096
 }
 fn default_artillery_range() -> i32 {
     1800
@@ -105,6 +135,11 @@ impl Tuning {
             || !(0..=1000).contains(&t.firing_spacing)
             || !(2..=128).contains(&t.max_rounds)
             || !(1..=16).contains(&t.max_waves)
+            || !(1..=1 << 24).contains(&t.wave_capture_ceiling)
+            || !(1..=1 << 24).contains(&t.wave_work_ceiling)
+            || !(1..=1 << 24).contains(&t.wave_contact_ceiling)
+            || t.drain_chunk_ceiling > 4096
+            || t.hull_piece_reserve > 1 << 20
             || [t.tank_ammo.tank, t.tank_ammo.strider, t.tank_ammo.ground]
                 .iter()
                 .any(|d| !matches!(d, Delivery::Blast | Delivery::Kinetic))

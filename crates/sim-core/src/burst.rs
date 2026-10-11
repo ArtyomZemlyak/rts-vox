@@ -4726,6 +4726,11 @@ impl Bursts {
             side,
             mat,
         };
+        // With no slot left only a cell joining a held component can be
+        // claimed, and a group nobody holds has none (ADR-681).
+        if *room == 0 && !self.groups.contains_key(&Self::claim_group(p, &claim, t).0) {
+            return Err(GroundClaimError::NoRoom);
+        }
         let delta = self.claim_delta(p, &claim, t);
         if delta > 0 && *room == 0 {
             return Err(GroundClaimError::NoRoom);
