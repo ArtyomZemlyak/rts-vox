@@ -3399,6 +3399,12 @@ pub struct BlastRange {
     /// Whole-map search work spent since construction (ADR-680), in the
     /// units of `global_work_per_tick`. Diagnostics: not saved, not hashed.
     pub coarse_work: u64,
+    /// What the motion phase left of the tick's start allowance for
+    /// fine searches (ADR-691): the orders phase after it starts searches
+    /// in place while a whole start slice fits, and sets the rest up
+    /// unwalked. Scratch, recomputed each tick before the orders; not
+    /// saved, not hashed.
+    fine_start_left: usize,
     /// Dig economy, on a layout with an economy section (ADR-672). In the
     /// snapshot from version 62.
     mining: Option<economy::Mining>,
@@ -3895,6 +3901,7 @@ impl BlastRange {
             collapse_cap: stock.max_body_cells as usize,
             collapse_work: CollapseWork::default(),
             coarse_work: 0,
+            fine_start_left: 0,
             mining,
             spawned: Vec::new(),
         };
@@ -5488,33 +5495,6 @@ impl BlastRange {
         // again next tick, in the same stable spatial order as motion below.
         let battle_mode = self.battle_mode();
         let mut starts = self.navigation.searches_started_per_tick;
-        // Share continuation work before stepping any hull. Slot-order ranks
-        // and tick-based remainders survive saves without scheduler state.
-        let searching = |m: &motion::Motion| m.enabled && m.hunting();
-        let count = self.units.iter().filter(|u| searching(&u.motion)).count()
-            + usize::from(!battle_mode && searching(&self.gun.motion));
-        let mut rank = 0;
-        for m in self
-            .units
-            .iter_mut()
-            .map(|u| &mut u.motion)
-            .chain((!battle_mode).then_some(&mut self.gun.motion))
-        {
-            let work = if searching(m) {
-                let work = motion::resume_share(
-                    self.navigation.search_resume_budget,
-                    self.navigation.search_resume_per_unit,
-                    count,
-                    rank,
-                    self.tick,
-                );
-                rank += 1;
-                work
-            } else {
-                0
-            };
-            m.allow_resume(work);
-        }
         let driven = self.patrols_running && (!battle_mode || self.battle_movement_active());
         // Whole-map searches in flight walk on before any hull moves
         // (ADR-680): one shared work allowance a tick, the oldest search
@@ -5524,6 +5504,12 @@ impl BlastRange {
         // none stops the queue. What is left after both rounds goes to
         // searches hulls begin in their own steps.
         let mut coarse_left = self.navigation.global_work_per_tick;
+        // One allowance a tick for fine searches started in place (ADR-691):
+        // coarse hand-overs, then the orders phase's pursuit starts, each
+        // priced at one start slice. Past it, searches are set up unwalked
+        // and walk under the continuation shares.
+        let start_slice = self.navigation.search_nodes_per_tick;
+        let mut start_left = self.navigation.search_start_budget;
         {
             let gun_id = self.units.len();
             let gun_obstacle =
@@ -5577,6 +5563,10 @@ impl BlastRange {
                     } else {
                         &mut self.units[id]
                     };
+                    // A hand-over starts its fine search in place while
+                    // the tick's start allowance holds a whole slice, and
+                    // sets it up unwalked past it (ADR-691).
+                    u.motion.defer_fine(start_left < start_slice);
                     let spent = u.motion.continue_coarse(
                         &self.world,
                         &u.body,
@@ -5588,12 +5578,48 @@ impl BlastRange {
                         round == 0,
                         budget == self.navigation.global_work_per_tick,
                     );
+                    if u.motion.walked_start() {
+                        start_left -= start_slice;
+                    }
+                    u.motion.defer_fine(false);
                     coarse_left = coarse_left.saturating_sub(spent);
                     self.coarse_work = self.coarse_work.wrapping_add(spent);
                 }
             }
         }
         detail("motion_coarse");
+        // Share continuation work before stepping any hull, and after the
+        // whole-map phase: a fine search it handed an order to walks in
+        // this tick's shares (ADR-691). Slot-order ranks and tick-based
+        // remainders survive saves without scheduler state.
+        let searching = |m: &motion::Motion| m.enabled && m.hunting();
+        let count = self.units.iter().filter(|u| searching(&u.motion)).count()
+            + usize::from(!battle_mode && searching(&self.gun.motion));
+        let mut rank = 0;
+        for m in self
+            .units
+            .iter_mut()
+            .map(|u| &mut u.motion)
+            .chain((!battle_mode).then_some(&mut self.gun.motion))
+        {
+            let work = if searching(m) {
+                let work = motion::resume_share(
+                    self.navigation.search_resume_budget,
+                    self.navigation.search_resume_per_unit,
+                    count,
+                    rank,
+                    self.tick,
+                );
+                rank += 1;
+                work
+            } else {
+                0
+            };
+            m.allow_resume(work);
+        }
+        // What the hand-overs left of the start allowance goes to the
+        // orders phase's pursuit starts (ADR-691).
+        self.fine_start_left = start_left;
         // Fair start allowance (analysis 240, C3). Spatial order decides who
         // commits motion first, but it used to decide who may begin a search
         // too: the hull with the smallest X took the single start every tick

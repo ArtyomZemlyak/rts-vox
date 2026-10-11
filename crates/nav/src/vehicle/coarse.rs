@@ -45,6 +45,12 @@ pub enum Refusal {
     /// to the goal, is not clear.
     StartCorridor,
     GoalCorridor,
+    /// No corridor leaves the start, but the lattice node `at` near it has
+    /// clear standing room: the route begins with the oriented planner
+    /// leading the hull there (ADR-691).
+    Entry {
+        at: [i32; 2],
+    },
     /// One frontier ran dry: that side is enclosed for this shape.
     /// 0 is the start's side, 1 the goal's.
     Enclosed {
@@ -189,7 +195,12 @@ struct Walk<'a> {
 impl Walk<'_> {
     /// A metered corridor test; `None` when the allowance is spent.
     fn test(&mut self, a: [i32; 2], b: [i32; 2]) -> Option<bool> {
-        if !self.meter.take(self.ground.cost(a, b)) {
+        self.test_then(a, b, 0)
+    }
+    /// A metered test priced together with `then`, the work that follows
+    /// it whatever it answers (ADR-691); both or neither are paid.
+    fn test_then(&mut self, a: [i32; 2], b: [i32; 2], then: u64) -> Option<bool> {
+        if !self.meter.take(self.ground.cost(a, b).saturating_add(then)) {
             return None;
         }
         let [lo, hi] = read_box(a, b, self.ground.radius);
@@ -209,6 +220,11 @@ fn read_box(a: [i32; 2], b: [i32; 2], radius: i32) -> [[i32; 2]; 2] {
     let hi = [0, 1].map(|k| ((a[k].max(b[k]) + radius).max(0) / 8) * 8 + 7);
     [lo, hi]
 }
+
+/// Lattice nodes whose dense entry costs one unit of work to build
+/// (ADR-691): writing and faulting in a node's distances costs at most
+/// about a sixteenth of reading one terrain tile (analysis 261).
+pub const LATTICE_NODES_PER_UNIT: u64 = 16;
 
 type Open = BinaryHeap<Reverse<(u32, u32, usize)>>;
 const FAR: u32 = u32::MAX;
@@ -411,14 +427,23 @@ impl Search {
     pub fn spent(&self) -> u64 {
         self.spent
     }
-    /// The most work one corridor test of this search can cost: an
-    /// allowance of at least this much always makes progress. The widest
-    /// test spans under four cells along an axis (joining the start to
-    /// the second node of its route).
+    /// The most work one corridor test of this search can cost, with the
+    /// lattice a test may lead to: an allowance of at least this much
+    /// always makes progress. The widest test spans under four cells along
+    /// an axis (joining the start to the second node of its route).
     pub fn max_test(&self) -> u64 {
         let radius = self.shape.half[0].min(self.shape.half[1]) + 1;
         let tiles = ((4 * self.cfg.cell + 2 * radius) / 8 + 2) as u64;
-        tiles * tiles * if self.cfg.local_grade { 3 } else { 1 }
+        // The goal test also pays the lattice it leads to (ADR-691).
+        (tiles * tiles * if self.cfg.local_grade { 3 } else { 1 })
+            .saturating_add(self.lattice_cost())
+    }
+    /// Work of building one dense lattice of reached nodes (ADR-691):
+    /// one unit per [`LATTICE_NODES_PER_UNIT`] nodes, at least one.
+    pub fn lattice_cost(&self) -> u64 {
+        ((self.n * self.rows) as u64)
+            .div_ceil(LATTICE_NODES_PER_UNIT)
+            .max(1)
     }
     /// Times the search or its route check started over.
     pub fn restarts(&self) -> u32 {
@@ -605,9 +630,39 @@ impl Search {
                         Some(false) => next += 1,
                     }
                 }
+                // No corridor leaves the start. Every one of them includes
+                // the box around the hull itself, so an obstacle the hull
+                // already stands beside refuses them all. A node with clear
+                // standing room is an entry the oriented planner can lead
+                // the hull to (ADR-691): `next` walks the same candidates a
+                // second time, nearest the goal first, ties by distance
+                // from the hull.
+                let mut toward: Vec<(u32, usize, usize)> = candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &i)| (self.estimate(self.point(i), self.to), k, i))
+                    .collect();
+                toward.sort_unstable();
+                while let Some(&(_, _, i)) = next
+                    .checked_sub(candidates.len())
+                    .and_then(|k| toward.get(k))
+                {
+                    let at = self.point(i);
+                    match walk.test(at, at) {
+                        None => {
+                            self.stage = Stage::Snap { candidates, next };
+                            return Step::Pause;
+                        }
+                        Some(true) => return Step::Done(Err(Refusal::Entry { at })),
+                        Some(false) => next += 1,
+                    }
+                }
                 Step::Done(Err(Refusal::StartCorridor))
             }
-            Stage::Goal => match walk.test(self.point(self.end), self.to) {
+            // Either answer builds a dense lattice: the two frontiers, or
+            // the approach after a closed goal corridor (ADR-691).
+            Stage::Goal => match walk.test_then(self.point(self.end), self.to, self.lattice_cost())
+            {
                 None => {
                     self.stage = Stage::Goal;
                     Step::Pause
@@ -811,11 +866,17 @@ impl Search {
             }
             // Alternate the two frontiers under one shared deterministic
             // cap. A remote obstacle cannot monopolize a one-sided greedy
-            // search.
-            if !walk.meter.take(1) {
+            // search. A dry frontier hands over to the approach, whose
+            // lattice is paid with this pop (ADR-691).
+            let side = m.expanded % 2;
+            let lattice = if m.open[side].is_empty() {
+                self.lattice_cost()
+            } else {
+                0
+            };
+            if !walk.meter.take(1 + lattice) {
                 return Step::Pause;
             }
-            let side = m.expanded % 2;
             let Some(Reverse((_, cost, i))) = m.open[side].pop() else {
                 // Either frontier running dry means the two never meet;
                 // which one ran dry first only says which side is smaller.
@@ -1217,7 +1278,9 @@ impl Search {
                 }
                 let candidates: Vec<usize> = (0..count).map(|_| s.usize()).collect();
                 let next = s.usize();
-                if next > count || candidates.iter().any(|&i| i >= cells) {
+                // Past the candidates, `next` walks them again for
+                // standing room (ADR-691).
+                if next > 2 * count || candidates.iter().any(|&i| i >= cells) {
                     return None;
                 }
                 Stage::Snap { candidates, next }
@@ -1837,6 +1900,118 @@ mod tests {
         let (_, calls) = sliced(&world, &r, shape(), from, to, config(), 1000);
         assert_eq!(calls.iter().sum::<u64>(), total);
         assert!(calls.len() as u64 >= total / 1000);
+    }
+    /// **A hull pinned by an obstacle beside it gets a lattice entry**
+    /// (ADR-691). A wall clips the corner of the box around the hull
+    /// itself, so every corridor from where it stands is refused, though
+    /// the field is open. The search names the node with clear standing
+    /// room nearest the goal, the route from it is whole, and a hull
+    /// with no such node near it is refused as before. Sliced and read
+    /// back between slices, the second walk of the candidates answers the
+    /// same.
+    #[test]
+    fn a_hull_beside_an_obstacle_is_led_to_a_lattice_entry() {
+        let mut world = World::new(1024, 32, 512, 100000, Box::new(Floor));
+        for y in 6..26 {
+            for x in 325..=328 {
+                for z in 190..=222 {
+                    world.queue_edit(voxel::Edit::put(x, y, z, 3));
+                }
+            }
+        }
+        while world.queued() > 0 {
+            world.flush();
+        }
+        let r = Rubble::new();
+        let broad = Shape {
+            half: [30, 30],
+            support: [20, 20],
+            ..shape()
+        };
+        let from = [300, 250].map(Fx::from_int);
+        let to = [900, 250];
+        let answer = plan_explained(&world, &r, broad, from, to, config());
+        let Err(Refusal::Entry { at }) = answer else {
+            panic!("{answer:?}");
+        };
+        // Clear standing room, within the two snap cells, toward the goal.
+        let box_clear = |p: [i32; 2]| {
+            let (lo, hi) = (p.map(|v| v - 31), p.map(|v| v + 31));
+            !(lo[0] <= 328 && hi[0] >= 325 && lo[1] <= 222 && hi[1] >= 190)
+        };
+        assert!(box_clear(at), "{at:?}");
+        assert!((at[0] - 300).abs() <= 40 && (at[1] - 250).abs() <= 40);
+        let onward = plan_explained(&world, &r, broad, at.map(Fx::from_int), to, config());
+        assert!(onward.is_ok_and(|r| !r.partial), "no route on from {at:?}");
+        let (sliced_answer, _) = sliced(&world, &r, broad, from, to, config(), 512);
+        assert!(same(&answer, &sliced_answer));
+        // Boxed in on all sides: no node has room, the refusal stands.
+        let mut world = World::new(1024, 32, 512, 100000, Box::new(Floor));
+        for y in 6..26 {
+            // Narrower than the hull's box: no node near has room.
+            for k in 220..=280u32 {
+                for (x, z) in [(k, 220), (k, 280), (220, k), (280, k)] {
+                    world.queue_edit(voxel::Edit::put(x, y, z, 3));
+                }
+            }
+        }
+        while world.queued() > 0 {
+            world.flush();
+        }
+        let pinned = plan_explained(
+            &world,
+            &r,
+            broad,
+            [250, 250].map(Fx::from_int),
+            to,
+            config(),
+        );
+        assert_eq!(pinned.map(|r| r.path), Err(Refusal::StartCorridor));
+    }
+    /// **The dense lattice is paid in the slice that builds it** (ADR-691):
+    /// a slice of exactly the dearest test either stays before the
+    /// frontiers or enters them having spent at least the lattice, and
+    /// an approach after a dry frontier is paid the same way. Walked so,
+    /// the search still answers what one call answers.
+    #[test]
+    fn the_lattice_is_paid_before_it_is_built() {
+        let mut world = World::new(1024, 32, 512, 100000, Box::new(Floor));
+        for y in 6..26 {
+            // A closed pocket around the start: its frontier runs dry.
+            for k in 0..=300u32 {
+                world.queue_edit(voxel::Edit::put(200, y, k, 3));
+                world.queue_edit(voxel::Edit::put(k.min(200), y, 300, 3));
+            }
+        }
+        while world.queued() > 0 {
+            world.flush();
+        }
+        let r = Rubble::new();
+        let (from, to) = ([100, 100].map(Fx::from_int), [900, 100]);
+        let cfg = config();
+        let whole = plan_explained(&world, &r, shape(), from, to, cfg);
+        let mut search = Search::new([1024, 512], shape(), from, to, cfg).unwrap();
+        let lattice = search.lattice_cost();
+        assert_eq!(lattice, (64 * 32u64).div_ceil(LATTICE_NODES_PER_UNIT));
+        assert!(search.max_test() > lattice);
+        let budget = search.max_test();
+        let mut built = 0;
+        let answer = loop {
+            let before = search.stage.tag();
+            let (answer, spent) = search.advance(&world, &r, budget);
+            assert!(spent <= budget);
+            let after = search.stage.tag();
+            // Entering the frontiers or the approach builds one lattice.
+            if before != after && matches!(after, 3 | 4) {
+                assert!(spent >= lattice, "{before}->{after} spent {spent}");
+                built += 1;
+            }
+            if let Some(answer) = answer {
+                break answer;
+            }
+        };
+        assert!(built >= 2, "frontiers and approach: {built}");
+        assert!(same(&whole, &answer));
     }
     /// **A world change under a search in flight** (ADR-680). The gap the
     /// search is routing through is sealed between two slices: the found

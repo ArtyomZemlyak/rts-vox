@@ -105,3 +105,58 @@ fn a_corridor_larger_than_a_full_tick_falls_back_without_stalling_or_losing_the_
         assert_eq!(a.state_hash(), b.state_hash());
     }
 }
+
+/// A hand-over the range sets up unwalked (its start allowance spent)
+/// reads no other hull and spends no fine work where it is made (ADR-691):
+/// the fine search is set up toward the order's goal, and the start
+/// shares walk it to an answer that keeps the order.
+#[test]
+fn a_hand_over_sets_the_fine_search_up_unwalked_and_the_shares_finish_it() {
+    let r = range(RangeUnitKind::Spider);
+    let rubble = r.current_rubble();
+    let unchanged = nav::vehicle::Changed::default();
+    let body = &r.units[0].body;
+    let mut m = r.units[0].motion.clone();
+    let unwanted = || -> Vec<super::Obstacle> { panic!("an unwalked hand-over read hulls") };
+    m.defer_fine(true);
+    // No share, and a share below any test: the search holds.
+    for budget in [0, 1] {
+        m.continue_coarse(
+            &r.world, body, unwanted, &rubble, r.tick, &unchanged, budget, true, false,
+        );
+        assert!(m.coarse_waited().is_some() && m.fine_work().is_none());
+    }
+    // A test dearer than a whole tick: the order passes to the fine
+    // planner without any of its work.
+    let budget = r.navigation.global_work_per_tick;
+    assert!(m.coarse_max_test() > budget);
+    let spent = m.continue_coarse(
+        &r.world, body, unwanted, &rubble, r.tick, &unchanged, budget, true, true,
+    );
+    assert!(!m.walked_start());
+    m.defer_fine(false);
+    assert_eq!(spent, 0);
+    assert_eq!(m.coarse_waited(), None);
+    assert_eq!(m.fine_work(), Some([0, 0]), "set up, not walked");
+    assert_eq!(m.destination, Some(GOAL));
+    // The range walks it under its continuation shares to an answer.
+    let mut a = range(RangeUnitKind::Spider);
+    let mut answered = false;
+    let mut poses = 0;
+    for _ in 0..400 {
+        a.step();
+        let u = &a.units[0].motion;
+        // A tick's slice of it stays within one hull's share.
+        if let Some([_, now]) = u.fine_work() {
+            assert!((now - poses) as usize <= a.navigation.search_resume_per_unit);
+            poses = now;
+        }
+        if u.coarse_waited().is_none() && !u.searching() {
+            answered = true;
+            break;
+        }
+    }
+    assert!(answered, "the handed-over search never answered");
+    assert_eq!(a.units[0].motion.destination, Some(GOAL));
+    assert!(!a.units[0].motion.path.is_empty());
+}

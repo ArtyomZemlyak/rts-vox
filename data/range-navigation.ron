@@ -20,6 +20,11 @@
     // Graph work counts popped nodes, endpoint queries and swept edge poses.
     // Work per tick also includes goal selection and direct/final connections.
     search_nodes_per_tick: 96,
+    // Fine searches started in place a tick by coarse hand-overs and pursuit
+    // retargets, each priced at one search_nodes_per_tick slice (ADR-691):
+    // eight starts. Past it a search is set up without work and walks under
+    // the continuation shares below.
+    search_start_budget: 768,
     // Pending searches share this total, with a per-hull ceiling. A lone
     // search answers sooner; sixteen searches cannot multiply its peak by 16.
     search_resume_budget: 768,

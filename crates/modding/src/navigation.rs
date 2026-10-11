@@ -20,6 +20,11 @@ pub struct Navigation {
     /// Search work in one tick: one frontier node or one swept pose.
     /// Target selection and connections share the same bounded allowance.
     pub search_nodes_per_tick: usize,
+    /// Work a tick for fine searches started in place by coarse hand-overs
+    /// and pursuit retargets, each priced at one `search_nodes_per_tick`
+    /// slice (ADR-691). Past it, searches are set up unwalked and walk
+    /// under the continuation shares.
+    pub search_start_budget: usize,
     /// Aggregate continuation work across the range, shared by pending hunts.
     pub search_resume_budget: usize,
     /// An isolated hunt may borrow idle capacity up to this ceiling.
@@ -75,6 +80,7 @@ impl Navigation {
             || n.global_restarts > 16
             || n.searches_started_per_tick == 0
             || !(1..=51200).contains(&n.search_nodes_per_tick)
+            || !(n.search_nodes_per_tick..=51200).contains(&n.search_start_budget)
             || !(1..=51200).contains(&n.search_resume_budget)
             || !(1..=n.search_resume_budget).contains(&n.search_resume_per_unit)
             || !(2..=16).contains(&n.cell_units)
@@ -117,6 +123,7 @@ mod tests {
             "global_work_per_search: ",
             "global_restarts: ",
             "search_nodes_per_tick: 96,",
+            "search_start_budget: 768,",
             "search_resume_budget: 768,",
             "search_resume_per_unit: 192,",
             "searches_started_per_tick: 1,",

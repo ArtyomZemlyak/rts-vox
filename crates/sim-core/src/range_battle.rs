@@ -2335,13 +2335,23 @@ impl BlastRange {
                             || self.units[id].motion.destination != Some(dest))
                     {
                         completed("orders_retarget_setup");
-                        let others: Vec<_> = self
-                            .units
-                            .iter()
-                            .enumerate()
-                            .filter(|(i, _)| *i != id)
-                            .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
-                            .collect();
+                        // A fine search starts here while what the motion
+                        // phase left of the tick's start allowance holds a
+                        // whole start slice; past it, it is set up unwalked
+                        // and the next tick's start shares walk it, reading
+                        // the hulls near it then (ADR-691).
+                        let slice = self.navigation.search_nodes_per_tick;
+                        let walk = self.fine_start_left >= slice;
+                        let others: Vec<_> = if walk {
+                            self.units
+                                .iter()
+                                .enumerate()
+                                .filter(|(i, _)| *i != id)
+                                .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
                         let u = &mut self.units[id];
                         // Under way, the hull drives on while the new
                         // route is searched (ADR-462). A whole-map search
@@ -2349,6 +2359,7 @@ impl BlastRange {
                         // next tick's continuation walks it under the
                         // shared allowance (ADR-680).
                         u.motion.allow_coarse(Some(0));
+                        u.motion.defer_fine(!walk);
                         u.motion.retarget_observed(
                             &self.world,
                             dest,
@@ -2367,6 +2378,10 @@ impl BlastRange {
                             },
                         );
                         self.units[id].motion.allow_coarse(None);
+                        if self.units[id].motion.walked_start() {
+                            self.fine_start_left -= slice;
+                        }
+                        self.units[id].motion.defer_fine(false);
                         completed("orders_retarget");
                     }
                 }
