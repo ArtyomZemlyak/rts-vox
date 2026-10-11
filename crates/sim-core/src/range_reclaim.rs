@@ -181,6 +181,7 @@ fn distance2(a: [i32; 3], b: [i32; 3]) -> i64 {
 }
 
 impl Near {
+    #[allow(clippy::too_many_arguments)]
     fn build(
         reach: u32,
         fragments: &[Fragment],

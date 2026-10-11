@@ -1669,7 +1669,7 @@ mod tests {
         for y in 6..26 {
             for k in 260..=340 {
                 for (x, z) in [(k, 88), (k, 168), (260, k - 172), (340, k - 172)] {
-                    world.queue_edit(voxel::Edit::put(x, y, z as u32, 3));
+                    world.queue_edit(voxel::Edit::put(x, y, z, 3));
                 }
             }
         }

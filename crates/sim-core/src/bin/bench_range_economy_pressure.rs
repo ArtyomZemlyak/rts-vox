@@ -158,8 +158,8 @@ fn reclaim(a: &Args) -> BlastRange {
     let boxes: Vec<_> = r.units.iter().map(|u| u.bounds()).collect();
     let mut i = 0;
     while cells.len() < a.pieces {
-        let x = 256 + (i % 200) as i32 * 16;
-        let z = 256 + (i / 200) as i32 * 16;
+        let x = 256 + (i % 200) * 16;
+        let z = 256 + (i / 200) * 16;
         i += 1;
         assert!(z < 4032);
         if a.coverage
