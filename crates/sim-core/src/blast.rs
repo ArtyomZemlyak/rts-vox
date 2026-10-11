@@ -52,6 +52,9 @@ use voxel::unit::{Status, UnitBody};
 use voxel::{Generator, World};
 
 #[cfg(test)]
+#[path = "range_contact_read_tests.rs"]
+mod contact_read_tests;
+#[cfg(test)]
 #[path = "range_reset_tests.rs"]
 mod reset_tests;
 #[path = "range_structure.rs"]
@@ -1994,7 +1997,13 @@ impl Explosion {
     /// too). Batches of cells are read in parallel and laid out in
     /// visiting order. What is read is the world's matter only: how far
     /// ahead the cache reaches never changes what a visit finds.
-    pub(crate) fn read_contacts(
+    pub(crate) fn read_contacts(&mut self, w: &World, budget: usize) {
+        self.read_contacts_with(w, budget, &[], None);
+    }
+    /// [`Explosion::read_contacts`] with the hulls, whose cells each read
+    /// wave cell owns are mapped too, and with the wave's matter, preset
+    /// and energy when its claims pay (`spent`).
+    pub(crate) fn read_contacts_with(
         &mut self,
         w: &World,
         budget: usize,
@@ -2042,8 +2051,13 @@ impl Explosion {
         // it, unless the cell is spent.
         let mut left = budget;
         let mut next = 0;
-        while left > 0 && next < visits {
-            let batch = (visits - next).min(READ_BATCH);
+        'read: while left > 0 && next < visits {
+            // Every cell costs at least its visit: no batch reaches past
+            // what is left to bill, and a batch read past the last billed
+            // cell is not kept (review 252: only the billable prefix).
+            let batch = (visits - next)
+                .min(left)
+                .min((left / 8).clamp(READ_CHUNK, READ_BATCH));
             let hits = &order[next..next + batch];
             next += batch;
             let parts: Vec<(Vec<u64>, Vec<u16>)> = hits
@@ -2064,6 +2078,10 @@ impl Explosion {
                 let mut start = self.solid_mats.len();
                 self.solid_mats.extend_from_slice(&mats);
                 for mask in masks {
+                    if left == 0 {
+                        self.solid_mats.truncate(start);
+                        break 'read;
+                    }
                     let hit = hits[k];
                     k += 1;
                     let count = mask.count_ones() as usize;

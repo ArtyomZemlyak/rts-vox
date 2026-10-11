@@ -3010,7 +3010,7 @@ impl BlastRange {
                 .for_each(|(w, (&pop, &budget))| {
                     w.wave.advance_frontier(pop, world, units);
                     let spent = Some((matter, config_of(w.weapon), w.energy));
-                    w.wave.read_contacts(world, budget, units, spent)
+                    w.wave.read_contacts_with(world, budget, units, spent)
                 });
         }
         completed("battle_frontier");
