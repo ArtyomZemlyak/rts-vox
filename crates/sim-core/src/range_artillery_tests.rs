@@ -112,7 +112,10 @@ fn player_artillery_surface_blast_keeps_ground_energy_and_replays() {
     l.target = [450, 24, 336];
     l.airburst_on_target = false;
     l.units.remove(0);
-    let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    // A stock burst finishes within its impact tick (ADR-681); a slower
+    // slice keeps this one live, so a snapshot holds its unspent energy.
+    c.wave_work_per_tick = 256;
     let mut r = BlastRange::with_layout(c, l).unwrap();
     let mut replay = None;
     for _ in 0..600 {

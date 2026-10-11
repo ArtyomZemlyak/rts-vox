@@ -4,6 +4,23 @@ use modding::explosion::ExplosionConfig;
 use rayon::prelude::*;
 use voxel::World;
 
+/// The cell index a capture slice of `budget` ends at: cells outside the
+/// inscribed sphere are free, but even those wait once the quota is spent.
+/// Also how many of its cells the sphere holds.
+fn slice_end(e: &Explosion, budget: usize) -> (usize, usize) {
+    let n = e.wave.size();
+    let half = n / 2;
+    let radius2 = (half * half) as i32;
+    let mut next = e.captured;
+    let mut spent = 0;
+    while next < n * n * n && spent < budget {
+        let q = [next % n, (next / n) % n, next / (n * n)].map(|v| v as i32 - half as i32);
+        spent += usize::from(q.iter().map(|v| v * v).sum::<i32>() <= radius2);
+        next += 1;
+    }
+    (next, spent)
+}
+
 pub(super) fn capture(
     e: &mut Explosion,
     w: &World,
@@ -86,13 +103,7 @@ pub(super) fn capture(
         .clamp(1, 1_000_000) as u32;
     // Determine exactly the old slice boundary before dispatch. Outside
     // cells are free, but even those wait once the logical quota is spent.
-    let mut next = e.captured;
-    let mut spent = 0;
-    while next < cells && spent < budget {
-        let q = [next % n, (next / n) % n, next / (n * n)].map(|v| v as i32 - half as i32);
-        spent += usize::from(q.iter().map(|v| v * v).sum::<i32>() <= radius2);
-        next += 1;
-    }
+    let (next, spent) = slice_end(e, budget);
     let fill = |start: usize, output: &mut [u32]| {
         // A parallel chunk visits at most two Z planes. Share column
         // ceilings across heights locally; no cache crosses a worker.
@@ -121,6 +132,13 @@ pub(super) fn capture(
                 continue;
             }
             let end = [0, 1, 2].map(|a| p[a] + c.cell_units - 1);
+            // Under the world is bedrock: the wave does not run beneath the
+            // floor as through air and come up into the ground from below
+            // (ADR-681).
+            if end[1] < 0 {
+                *resistance = u32::MAX;
+                continue;
+            }
             let look = dented[(z * n + y) * n + x];
             let mut r = 0;
             if p[1] < w.ny as i32 && end[1] >= 0 {
