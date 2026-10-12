@@ -471,6 +471,17 @@ const PAGE_SLOTS: usize = 128;
 struct ColumnPage {
     key: [i32; 2],
     values: Vec<(u16, [u16; 2])>,
+    rows: [ColumnRow; PAGE_SIDE],
+}
+/// Bounds describe only known columns. The masks let a hull prove a
+/// sub-row clear and count yielding columns without reading each value again.
+#[derive(Clone, Copy, Debug, Default)]
+struct ColumnRow {
+    known: u32,
+    yielding: u32,
+    floor_upper: u16,
+    /// Maximum of the lowest yielding cells, not the top of their crowns.
+    yield_upper: u16,
 }
 pub struct Probe<'a> {
     world: &'a World,
@@ -693,10 +704,12 @@ impl<'a> Probe<'a> {
                         if let Some(page) = self.pages[i].as_mut().and_then(Arc::get_mut) {
                             page.key = key;
                             page.values.fill((u16::MAX, [u16::MAX, 0]));
+                            page.rows.fill(ColumnRow::default());
                         } else {
                             self.pages[i] = Some(Arc::new(ColumnPage {
                                 key,
                                 values: vec![(u16::MAX, [u16::MAX, 0]); PAGE_SIDE * PAGE_SIDE],
+                                rows: [ColumnRow::default(); PAGE_SIDE],
                             }));
                         }
                         i
@@ -711,7 +724,16 @@ impl<'a> Probe<'a> {
             }
             self.scans += 1;
             let value = self.scan(x, z);
-            Arc::make_mut(self.pages[slot].as_mut().unwrap()).values[index] = value;
+            let page = Arc::make_mut(self.pages[slot].as_mut().unwrap());
+            page.values[index] = value;
+            let row = &mut page.rows[z as usize % PAGE_SIDE];
+            let bit = 1 << (x as usize % PAGE_SIDE);
+            row.known |= bit;
+            row.floor_upper = row.floor_upper.max(value.0);
+            if value.1[0] != u16::MAX {
+                row.yielding |= bit;
+                row.yield_upper = row.yield_upper.max(value.1[0]);
+            }
             return Some(value);
         }
         let (dx, dz) = (x - self.x0, z - self.z0);
@@ -739,6 +761,46 @@ impl<'a> Probe<'a> {
             self.yields[i]
         };
         Some((self.heights[i], span))
+    }
+    /// Exact clear / crush result for a known interval within one cache page.
+    /// `belly` and `top` are lower bounds over the entire queried hull.
+    /// A failed proof does not allocate, evict, or read ahead of a refusal.
+    fn clear_run(&mut self, lo: i32, hi: i32, z: i32, belly: Fx, top: Option<Fx>) -> Option<usize> {
+        if lo < 0 || z < 0 || hi >= self.world.nx as i32 || z >= self.world.nz as i32 {
+            return None;
+        }
+        let key = [lo / PAGE_SIDE as i32, z / PAGE_SIDE as i32];
+        debug_assert_eq!(key[0], hi / PAGE_SIDE as i32);
+        let slot = if self.pages[self.last_page]
+            .as_ref()
+            .is_some_and(|p| p.key == key)
+        {
+            self.last_page
+        } else {
+            let bucket = ((key[0] as usize).wrapping_mul(73_856_093)
+                ^ (key[1] as usize).wrapping_mul(19_349_663))
+                % (PAGE_SLOTS / 4);
+            (bucket * 4..bucket * 4 + 4)
+                .find(|&i| self.pages[i].as_ref().is_some_and(|p| p.key == key))?
+        };
+        let row = self.pages[slot].as_ref().unwrap().rows[z as usize % PAGE_SIDE];
+        let mask = (u32::MAX << (lo as usize % PAGE_SIDE))
+            & (u32::MAX >> (PAGE_SIDE - 1 - hi as usize % PAGE_SIDE));
+        if row.known & mask != mask || Fx::from_int(i32::from(row.floor_upper)) > belly {
+            return None;
+        }
+        let yielding = row.yielding & mask;
+        let crush = if let Some(top) = top {
+            if yielding != 0 && Fx::from_int(i32::from(row.yield_upper)) >= top {
+                return None;
+            }
+            yielding.count_ones() as usize
+        } else {
+            0
+        };
+        self.last_page = slot;
+        self.columns += (hi - lo + 1) as u64;
+        Some(crush)
     }
     pub fn floor(&mut self, x: i32, z: i32) -> i32 {
         match self.column(x, z) {
@@ -858,6 +920,59 @@ impl<'a> Probe<'a> {
             (local.0.abs() <= bounds[0] && local.1.abs() <= bounds[1])
                 .then_some((x, local.0, local.1))
         })
+    }
+    /// Clip the two affine local coordinates to the inclusive footprint.
+    /// Checked arithmetic rejects wrapping coordinates; those use `row`.
+    /// The initial products retain exactly the same Q32.32 rounding.
+    fn row_interval(
+        pos: [Fx; 2],
+        c: Fx,
+        sin: Fx,
+        s: Shape,
+        lo: i32,
+        hi: i32,
+        z: i32,
+    ) -> Option<(i32, i32)> {
+        let half = Fx::from_ratio(1, 2);
+        let dx = Fx::from_int(lo).add(half).sub(pos[0]);
+        let dz = Fx::from_int(z).add(half).sub(pos[1]);
+        let local = [dx.mul(c).add(dz.mul(sin)), dz.mul(c).sub(dx.mul(sin))];
+        let mut first = 0i64;
+        let mut last = i64::from(hi) - i64::from(lo);
+        let width = last;
+        for ((value, slope), bound) in local.into_iter().zip([c, sin.neg()]).zip(s.half) {
+            let bound = Fx::from_int(bound).add(half).raw();
+            if bound < 0 {
+                return None;
+            }
+            let (mut value, mut slope) = (value.raw(), slope.raw());
+            let end = value.checked_add(slope.checked_mul(width)?)?;
+            if value == i64::MIN || end == i64::MIN {
+                return None;
+            }
+            if value.abs() <= bound && end.abs() <= bound {
+                continue;
+            }
+            if slope < 0 {
+                value = value.checked_neg()?;
+                slope = slope.checked_neg()?;
+            }
+            if slope == 0 {
+                return Some((1, 0));
+            }
+            let low = bound.checked_neg()?.checked_sub(value)?;
+            let high = bound.checked_sub(value)?;
+            let start = low.div_euclid(slope) + i64::from(low.rem_euclid(slope) != 0);
+            first = first.max(start);
+            last = last.min(high.div_euclid(slope));
+            if first > last {
+                return Some((1, 0));
+            }
+        }
+        Some((
+            (i64::from(lo) + first) as i32,
+            (i64::from(lo) + last) as i32,
+        ))
     }
     fn surface(&mut self, p: [Fx; 2]) -> Fx {
         self.samples += 1;
@@ -1378,32 +1493,67 @@ impl<'a> Probe<'a> {
                     Some((lo[0], hi[0]))
                 }
             });
-            for (x, u, v) in runs.flat_map(|(a, b)| Self::row(pos, c, sin, s, a, b, z)) {
-                // Floor and yielding matter come from the same column answer.
-                // A second lookup used to repeat the page/cache query for
-                // every cell of every route pose, even without any trees.
-                let (floor, low) = self
-                    .column(x, z)
-                    .map(|(floor, [low, _])| (i32::from(floor), low))
-                    .unwrap_or((self.world.ny as i32, u16::MAX));
-                let ground = Fx::from_int(floor);
-                let local = if level {
-                    height
-                } else {
-                    height.add(pitch.mul(u)).add(roll.mul(v))
-                };
-                let belly = local.add(clearance);
-                if ground > belly {
-                    result.blocked += 1;
-                    if stop_on_refusal {
-                        return result;
-                    }
+            let interval = (!self.pages.is_empty())
+                .then(|| Self::row_interval(pos, c, sin, s, lo[0], hi[0], z))
+                .flatten();
+            for (a, b) in runs {
+                let (a, b) = interval.map_or((a, b), |(first, last)| (a.max(first), b.min(last)));
+                if a > b {
+                    continue;
                 }
-                if count_crush
-                    && low != u16::MAX
-                    && Fx::from_int(i32::from(low)) < local.add(hull_height)
-                {
-                    result.crush += 1;
+                let (first, last) = interval.map_or((0, 0), |_| {
+                    (
+                        a.div_euclid(PAGE_SIDE as i32),
+                        b.div_euclid(PAGE_SIDE as i32),
+                    )
+                });
+                for page in first..=last {
+                    let (a, b) = if interval.is_some() {
+                        (
+                            a.max(page * PAGE_SIDE as i32),
+                            b.min(
+                                page.saturating_mul(PAGE_SIDE as i32)
+                                    .saturating_add(PAGE_SIDE as i32 - 1),
+                            ),
+                        )
+                    } else {
+                        (a, b)
+                    };
+                    let top = count_crush.then(|| min_belly.sub(clearance).add(hull_height));
+                    if interval.is_some() {
+                        if let Some(crush) = self.clear_run(a, b, z, min_belly, top) {
+                            result.crush += crush;
+                            continue;
+                        }
+                    }
+                    for (x, u, v) in Self::row(pos, c, sin, s, a, b, z) {
+                        // Floor and yielding matter come from the same column answer.
+                        // A second lookup used to repeat the page/cache query for
+                        // every cell of every route pose, even without any trees.
+                        let (floor, low) = self
+                            .column(x, z)
+                            .map(|(floor, [low, _])| (i32::from(floor), low))
+                            .unwrap_or((self.world.ny as i32, u16::MAX));
+                        let ground = Fx::from_int(floor);
+                        let local = if level {
+                            height
+                        } else {
+                            height.add(pitch.mul(u)).add(roll.mul(v))
+                        };
+                        let belly = local.add(clearance);
+                        if ground > belly {
+                            result.blocked += 1;
+                            if stop_on_refusal {
+                                return result;
+                            }
+                        }
+                        if count_crush
+                            && low != u16::MAX
+                            && Fx::from_int(i32::from(low)) < local.add(hull_height)
+                        {
+                            result.crush += 1;
+                        }
+                    }
                 }
             }
         }
@@ -3055,7 +3205,7 @@ mod tests {
         let w = world(false, false, false);
         let probe = Probe::new(&w);
         for base in [-100, 0, 91, 99999] {
-            for half in [[20, 10], [1, 1], [0, 0], [3, 34]] {
+            for half in [[20, 10], [1, 1], [0, 0], [3, 34], [88, 80]] {
                 let s = Shape { half, ..tank() };
                 let pos = [
                     Fx::from_int(base).add(Fx::from_ratio(1, 3)),
@@ -3098,6 +3248,13 @@ mod tests {
                             })
                             .collect();
                         assert_eq!(split, expected, "split row changed fixed-point coordinates");
+                        let (first, last) =
+                            Probe::row_interval(pos, c, sin, s, lo[0], hi[0], z).unwrap();
+                        assert_eq!(
+                            (first..=last).collect::<Vec<_>>(),
+                            expected.iter().map(|p| p.0).collect::<Vec<_>>(),
+                            "clipped base={base} half={half:?} head={head} row={z}"
+                        );
                     }
                 }
             }
@@ -3505,6 +3662,111 @@ mod tests {
             }
         }
         assert!(batches > 0);
+    }
+    #[test]
+    fn cached_rows_match_voxels_through_forks_eviction_and_edits() {
+        struct RowForest;
+        impl voxel::Generator for RowForest {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < 16 {
+                    1
+                } else if (x + z) % 5 < 3 && y >= 16 + x % 3 * 8 && y < 48 {
+                    4
+                } else {
+                    0
+                }
+            }
+        }
+        let mut w = World::new(2048, 64, 128, 100, Box::new(RowForest));
+        let mut rubble = Rubble::new();
+        let mut columns = Columns::default();
+        let mut changed = Changed::default();
+        for stage in 0..4 {
+            if stage == 0 || stage == 2 {
+                w.prepare_navigation([4, 5]);
+            }
+            if stage == 1 {
+                w.queue_edit(voxel::Edit::put(61, 40, 64, 1));
+                w.queue_dig(62, 15, 64);
+                w.flush();
+                changed.column(61, 64);
+            } else if stage == 2 {
+                rubble.insert([95, 64], 42);
+                changed.column(95, 64);
+            } else if stage == 3 {
+                rubble.remove(&[95, 64]);
+                changed.column(95, 64);
+            }
+            let mut fast = Probe::for_local(&w, &[4, 5], columns, &changed).with_rubble(&rubble);
+            let mut exact = Probe::with_yield(&w, &[4, 5]).with_rubble(&rubble);
+            // Dense oracle never takes the new paged-row branch. Warm and
+            // cold queries include mixed crown heights, edge and tilted poses.
+            for repeat in 0..2 {
+                for at in [[2, 2], [64, 64], [96, 64], [2046, 126]] {
+                    let pos = at.map(|n| Fx::from_int(n).add(Fx::from_ratio(1, 3)));
+                    for head in [-1, 0, 733, angle::FULL / 4, angle::FULL / 3] {
+                        for (height, half) in [
+                            (0, [20, 10]),
+                            (1, [20, 10]),
+                            (8, [20, 10]),
+                            (40, [20, 10]),
+                            (40, [45, 35]),
+                        ] {
+                            let s = Shape {
+                                height,
+                                half,
+                                span: 0,
+                                ..tank()
+                            };
+                            for (stop, crush) in [(false, true), (true, true), (true, false)] {
+                                let a = fast.probe_pose_cost(pos, head, s, stop, crush, false);
+                                let b = exact.probe_pose_cost(pos, head, s, stop, crush, false);
+                                assert_eq!((a.height, a.floors, a.blocked, a.steep, a.tilt, a.crush),
+                                    (b.height, b.floors, b.blocked, b.steep, b.tilt, b.crush),
+                                    "stage={stage} repeat={repeat} at={at:?} head={head} height={height}");
+                            }
+                        }
+                    }
+                }
+            }
+            // A proof cannot invent unknown columns or read ahead to warm them.
+            let mut fork = fast.fork_route();
+            assert_eq!(
+                fork.clear_run(64, 95, 64, Fx::from_int(64), Some(Fx::from_int(64))),
+                fast.clear_run(64, 95, 64, Fx::from_int(64), Some(Fx::from_int(64)))
+            );
+            // Force four-way collisions and eviction while pages are shared.
+            for x in (0..2048).step_by(32) {
+                for z in (0..128).step_by(32) {
+                    for dx in 0..32 {
+                        fork.column(x + dx, z);
+                    }
+                    let count = (x..x + 32)
+                        .filter(|&x| exact.column(x, z).unwrap().1[0] != u16::MAX)
+                        .count();
+                    assert_eq!(
+                        fork.clear_run(x, x + 31, z, Fx::from_int(64), Some(Fx::from_int(64))),
+                        Some(count)
+                    );
+                }
+            }
+            let mut fresh = Probe::for_search(&w, &[4, 5], Columns::default());
+            assert_eq!(fresh.clear_run(0, 31, 0, Fx::from_int(64), None), None);
+            assert_eq!((fresh.columns, fresh.scans), (0, 0));
+            for x in 0..31 {
+                fresh.column(x, 0);
+            }
+            assert_eq!(fresh.clear_run(0, 31, 0, Fx::from_int(64), None), None);
+            fresh.column(31, 0);
+            assert!(fresh.clear_run(0, 31, 0, Fx::from_int(64), None).is_some());
+            assert_eq!(fresh.clear_run(0, 31, 0, Fx::from_int(15), None), None);
+            assert_eq!(
+                fresh.clear_run(0, 31, 0, Fx::from_int(16), Some(Fx::from_int(16))),
+                None
+            );
+            columns = fast.take_columns();
+            changed = Changed::default();
+        }
     }
     #[test]
     fn bounded_column_cache_survives_eviction_transfer_and_world_edits() {
