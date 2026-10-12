@@ -451,6 +451,51 @@ mod tests {
                 expected.sort_by_key(|c| c.0);
                 sort_columns(&mut actual);
                 assert_eq!(actual, expected, "count={count} wide={wide}");
+                let mut maxima = BTreeMap::new();
+                for &(at, top) in &expected {
+                    let kept = maxima.entry(at).or_insert(0u16);
+                    *kept = (*kept).max(top);
+                }
+                let maxima: Vec<_> = maxima.into_iter().collect();
+                merge_columns(&mut actual);
+                assert_eq!(actual, maxima, "merged count={count} wide={wide}");
+            }
+        }
+    }
+    #[test]
+    fn rubble_row_maxima_match_tree_for_unordered_overlaps_and_zero_tops() {
+        for count in [4095, 4096, 4097, 8192, 131_074] {
+            for layout in 0..4 {
+                let mut rng = fx::rng::Rng::new(count, 696);
+                let mut columns: Vec<_> = (0..count)
+                    .map(|i| {
+                        let at = match layout {
+                            0 => [rng.below(64) as i32 * 3, rng.below(129) as i32],
+                            1 => [rng.below(3) as i32 * 31, rng.below(65_536) as i32],
+                            2 => [rng.below(65_536) as i32, rng.below(3) as i32 * 63],
+                            _ => [65_535, 65_535],
+                        };
+                        // Some whole columns are present at height zero. The
+                        // same Z has independent heights in adjacent X rows.
+                        let top = if (at[0] + at[1]) % 7 == 0 {
+                            0
+                        } else {
+                            (i % 65_536) as u16
+                        };
+                        (at, top)
+                    })
+                    .collect();
+                let mut expected = BTreeMap::new();
+                for &(at, top) in &columns {
+                    let kept = expected.entry(at).or_insert(0u16);
+                    *kept = (*kept).max(top);
+                }
+                let expected: Vec<_> = expected.into_iter().collect();
+                merge_columns(&mut columns);
+                assert_eq!(columns, expected, "count={count} layout={layout}");
+                columns.reverse();
+                merge_columns(&mut columns);
+                assert_eq!(columns, expected, "idempotent maxima");
             }
         }
     }
@@ -726,8 +771,7 @@ mod tests {
                     "physics_rubble_support_drop",
                     "physics_rubble_gather_dispatch",
                     "physics_rubble_gather",
-                    "physics_rubble_sort",
-                    "physics_rubble_dedup",
+                    "physics_rubble_merge",
                 ]);
                 assert_eq!(trace.jobs("physics_rubble_support_query_begin"), 1);
             }
@@ -5972,25 +6016,15 @@ impl Bursts {
                 gather(&floor)
             }
         };
-        // A column under several pieces holds the highest top.
-        {
-            let _task =
-                PhysicsTask::new(task, "physics_rubble_sort_begin", "physics_rubble_sort_end");
-            sort_columns(&mut columns);
-        }
+        // A column under several pieces holds the highest top. Collapse
+        // duplicate heights while ordering, without sorting every copy by Z.
         {
             let _task = PhysicsTask::new(
                 task,
-                "physics_rubble_dedup_begin",
-                "physics_rubble_dedup_end",
+                "physics_rubble_merge_begin",
+                "physics_rubble_merge_end",
             );
-            columns.dedup_by(|later, kept| {
-                let same = later.0 == kept.0;
-                if same {
-                    kept.1 = kept.1.max(later.1);
-                }
-                same
-            });
+            merge_columns(&mut columns);
         }
         nav::vehicle::Rubble::from_sorted(columns)
     }
@@ -6556,6 +6590,90 @@ fn supported(
     fragment_contact(f, world, p, low, high, [world.nx, world.ny, world.nz])
         || hull_hit(p, low, high, hulls, 0).is_some()
         || settled.supports(arr(f.position), low, high, skip)
+}
+/// Canonical maxima in X/Z order. A dense gather scatters once by X, then
+/// reduces Z into a bounded row; presence bits also retain zero-height
+/// columns. Rows are independent and no ordering of equal inputs matters
+/// to the exact maximum. Scratch is proportional to input, not world area.
+fn merge_columns(columns: &mut Vec<([i32; 2], u16)>) {
+    debug_assert!(columns
+        .iter()
+        .all(|(c, _)| c.iter().all(|v| (0..1 << 16).contains(v))));
+    if columns.len() >= 4096 {
+        let mut maximum = [0usize; 2];
+        for &(at, _) in columns.iter() {
+            for a in 0..2 {
+                maximum[a] = maximum[a].max(at[a] as usize);
+            }
+        }
+        let words = maximum[1] / 64 + 1;
+        if maximum[0] + maximum[1] + 2 <= columns.len() {
+            let mut starts = vec![0usize; maximum[0] + 2];
+            for &(at, _) in columns.iter() {
+                starts[at[0] as usize + 1] += 1;
+            }
+            for x in 0..starts.len() - 1 {
+                starts[x + 1] += starts[x];
+            }
+            // X is implicit in the row. Pack its Z/top into four bytes,
+            // instead of copying the twelve-byte full column twice.
+            let mut rows = vec![0u32; columns.len()];
+            for &([x, z], top) in columns.iter() {
+                let x = x as usize;
+                rows[starts[x]] = ((z as u32) << 16) | u32::from(top);
+                starts[x] += 1;
+            }
+            // Store top + 1: zero is absent, including when top is zero.
+            // Reset touched entries on emission; no branch per duplicate.
+            let mut tops = vec![0u32; maximum[1] + 1];
+            let mut present = vec![0u64; words];
+            let mut blocks = vec![0u64; words.div_ceil(64)];
+            columns.clear();
+            let mut begin = 0;
+            // Scatter cursors are now the ends of their rows, including
+            // empty ones. Emit only set bits, in ascending Z within each X.
+            for (x, &end) in starts[..starts.len() - 1].iter().enumerate() {
+                let mut active = 0u64;
+                for &entry in &rows[begin..end] {
+                    let z = (entry >> 16) as usize;
+                    tops[z] = tops[z].max((entry & 0xffff) + 1);
+                    let word = z / 64;
+                    present[word] |= 1u64 << (z % 64);
+                    blocks[word / 64] |= 1u64 << (word % 64);
+                    active |= 1u64 << (word / 64);
+                }
+                // Two summary levels skip every empty word, even when two
+                // columns are at opposite edges of the 16-bit domain. Each
+                // visited word holds an output: traversal is linear in N.
+                while active != 0 {
+                    let block = active.trailing_zeros() as usize;
+                    let mut occupied = std::mem::take(&mut blocks[block]);
+                    while occupied != 0 {
+                        let word = block * 64 + occupied.trailing_zeros() as usize;
+                        let mut bits = std::mem::take(&mut present[word]);
+                        while bits != 0 {
+                            let z = word * 64 + bits.trailing_zeros() as usize;
+                            columns.push(([x as i32, z as i32], (tops[z] - 1) as u16));
+                            tops[z] = 0;
+                            bits &= bits - 1;
+                        }
+                        occupied &= occupied - 1;
+                    }
+                    active &= active - 1;
+                }
+                begin = end;
+            }
+            return;
+        }
+    }
+    sort_columns(columns);
+    columns.dedup_by(|later, kept| {
+        let same = later.0 == kept.0;
+        if same {
+            kept.1 = kept.1.max(later.1);
+        }
+        same
+    });
 }
 /// Stable ascending columns (ADR-465/641). Dense maps use two full-axis
 /// passes; small/sparse maps retain four byte passes, over Z and then X.
