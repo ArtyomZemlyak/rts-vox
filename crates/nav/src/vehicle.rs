@@ -890,6 +890,33 @@ impl<'a> Probe<'a> {
         };
         a.add(b.sub(a).mul(v))
     }
+    /// A contact may be on level soil even under a forest. Unlike a complete
+    /// pose this proof needs no absence of yielding matter: only the floor
+    /// participates in its interpolation, approach and bridging samples.
+    fn uniform_floor(&self, lo: [i32; 2], hi: [i32; 2]) -> Option<Fx> {
+        let [a, b] = self.yielding.as_slice() else {
+            return None;
+        };
+        if lo[0] < 0 || lo[1] < 0 || hi[0] >= self.world.nx as i32 || hi[1] >= self.world.nz as i32
+        {
+            return None;
+        }
+        let mut level = None;
+        for z in lo[1] as u32 / 8..=hi[1] as u32 / 8 {
+            for x in lo[0] as u32 / 8..=hi[0] as u32 / 8 {
+                let [low, high] = self.world.prepared_floor_tile(x, z, [*a, *b])?;
+                if low != high || level.is_some_and(|h| h != low) {
+                    return None;
+                }
+                level = Some(low);
+            }
+        }
+        let level = level?;
+        if self.rubble.is_some_and(|r| r.upper_in(lo, hi) > level) {
+            return None;
+        }
+        Some(Fx::from_int(i32::from(level)))
+    }
     /// Support height at `p`, and whether the ground along its contact
     /// span rises steeper than the hull may climb.
     ///
@@ -898,6 +925,17 @@ impl<'a> Probe<'a> {
     /// run-up rather than at the instant of contact, and it cannot grip a
     /// grade steeper than the tilt limit however level the hull sits.
     fn contact(&mut self, p: [Fx; 2], radius: Fx, dir: [Fx; 2], s: Shape, grade: Fx) -> (Fx, bool) {
+        if s.ramp >= Fx::ZERO && s.step >= 0 && grade >= Fx::ZERO && radius >= Fx::ZERO {
+            let span = Fx::from_int(if s.span >= 2 { s.span } else { 0 });
+            let r = dir.map(|v| v.abs().mul(span).max(radius));
+            // Include the bilinear neighbour at the high edge and round the
+            // low edge down, also for fractional/negative world positions.
+            let lo = [0, 1].map(|a| (p[a].sub(r[a]).raw() >> 32) as i32);
+            let hi = [0, 1].map(|a| p[a].add(r[a]).to_int_trunc() + 1);
+            if let Some(floor) = self.uniform_floor(lo, hi) {
+                return (floor, false);
+            }
+        }
         let base = self.surface(p);
         let mut height = base;
         let (nx, nz) = (
@@ -3760,6 +3798,87 @@ mod tests {
         assert_eq!(prefix, full[..10]);
         assert!(probe.crushed_limit(at, 0, tank(), 0).is_empty());
         assert_eq!(probe.crushed_limit(at, 0, tank(), usize::MAX), full);
+    }
+    #[test]
+    fn uniform_forest_contacts_match_samples_after_edits_and_rubble() {
+        struct LevelForest;
+        impl voxel::Generator for LevelForest {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < 16 {
+                    1
+                } else if (x + z) % 7 < 3 && y < 45 {
+                    4
+                } else {
+                    0
+                }
+            }
+        }
+        let mut w = World::new(256, 96, 256, 100, Box::new(LevelForest));
+        w.prepare_navigation([4, 5]);
+        let pos = [Fx::from_int(128).add(Fx::from_ratio(1, 3)); 2];
+        let mut fast = Probe::with_yield(&w, &[4, 5]);
+        let mut exact = Probe::with_yield(&w, &[5, 4]);
+        assert_eq!(
+            fast.contacts(pos, 733, tank()),
+            exact.contacts(pos, 733, tank())
+        );
+        assert!(
+            fast.samples < exact.samples / 2,
+            "forest contact proof did not skip samples"
+        );
+        assert!(
+            fast.pose(pos, 733, tank()).crush > 0,
+            "contact proof hid vegetation"
+        );
+        let compare = |w: &World| {
+            for rubble in [
+                Rubble::new(),
+                Rubble::from([([103, 118], 12)]),
+                Rubble::from([([103, 118], 30), ([153, 138], 36)]),
+            ] {
+                for at in [[128, 128], [2, 2], [254, 254]] {
+                    let pos = at.map(|p| Fx::from_int(p).add(Fx::from_ratio(1, 3)));
+                    for head in [-733, 0, 733, angle::FULL / 8, angle::FULL / 3] {
+                        for span in [0, 1, 25] {
+                            let s = Shape { span, ..tank() };
+                            let mut fast = Probe::with_yield(w, &[4, 5]).with_rubble(&rubble);
+                            // Same material set, deliberately different profile key:
+                            // no prepared-tile shortcut, the original exact samples.
+                            let mut exact = Probe::with_yield(w, &[5, 4]).with_rubble(&rubble);
+                            assert_eq!(
+                                fast.contacts(pos, head, s),
+                                exact.contacts(pos, head, s),
+                                "at={at:?} head={head} span={span}"
+                            );
+                            assert_eq!(
+                                fast.support_floors(pos, head, s),
+                                exact.support_floors(pos, head, s)
+                            );
+                        }
+                    }
+                }
+            }
+            for (ramp, step) in [(Fx::ZERO, 0), (Fx::from_int(-1), 4), (Fx::ONE, -1)] {
+                let s = Shape {
+                    ramp,
+                    step,
+                    ..tank()
+                };
+                assert_eq!(
+                    Probe::with_yield(w, &[4, 5]).contacts(pos, 733, s),
+                    Probe::with_yield(w, &[5, 4]).contacts(pos, 733, s)
+                );
+            }
+        };
+        compare(&w);
+        // Both freshly invalidated and rebuilt tiles must see a pit / ledge
+        // on a support, while tree cells above the ground are still yielding.
+        w.queue_dig(103, 15, 118);
+        w.queue_edit(voxel::Edit::put(153, 32, 138, 2));
+        w.flush();
+        compare(&w);
+        w.prepare_navigation([4, 5]);
+        compare(&w);
     }
     #[test]
     fn prepared_flat_pose_matches_full_contacts_and_invalidates_on_edit() {

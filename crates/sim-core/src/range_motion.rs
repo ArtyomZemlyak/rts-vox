@@ -999,6 +999,9 @@ impl Motion {
         let root = self.frame(b);
         let mut frames = crate::damage::segment_frames(&root, b, self.drive.head, self.drive.head);
         let mut cells = std::collections::BTreeSet::new();
+        // Reuse the column buffer across every foot. Procedural vegetation
+        // computes its XZ geometry once; edited chunks are overlaid by World.
+        let mut materials = Vec::new();
         for (leg, rig) in self.rigs.iter().enumerate() {
             if self.legs_lost[leg] {
                 continue;
@@ -1027,9 +1030,17 @@ impl Motion {
                     // Above the column's ceiling there is only air
                     // (ADR-313): most of a foot's box asks nothing.
                     let top = w.column_ceiling(x as u32, z as u32) as i32 - 1;
-                    for y in lo[1].max(0)..=hi[1].min(w.ny as i32 - 1).min(top) {
+                    let bottom = lo[1].max(0);
+                    let top = hi[1].min(w.ny as i32 - 1).min(top);
+                    if bottom > top {
+                        continue;
+                    }
+                    materials.resize((top - bottom + 1) as usize, voxel::store::AIR);
+                    w.column(x as u32, z as u32, bottom as u32, &mut materials);
+                    for (dy, &material) in materials.iter().enumerate() {
+                        let y = bottom + dy as i32;
                         let p = [x as u32, y as u32, z as u32];
-                        if !self.yielding.contains(&w.material(p[0], p[1], p[2])) {
+                        if !self.yielding.contains(&material) {
                             continue;
                         }
                         let local = frame.local(V3::new(
@@ -3050,6 +3061,136 @@ mod tests {
         assert_eq!(occupied.path.last(), Some(&goal));
     }
 
+    #[test]
+    fn walker_column_cuts_match_voxel_oracle_across_edits_and_limits() {
+        // Independent per-voxel reference: no column buffer or ceiling proof.
+        fn reference(m: &Motion, w: &World, b: &UnitBody) -> Vec<[u32; 3]> {
+            let root = m.frame(b);
+            let mut frames = crate::damage::segment_frames(&root, b, m.drive.head, m.drive.head);
+            let mut cells = std::collections::BTreeSet::new();
+            for (i, rig) in m.rigs.iter().enumerate() {
+                if m.legs_lost[i] {
+                    continue;
+                }
+                let (Some(part), Some(contact)) = (rig.foot, &m.feet[i].contact) else {
+                    continue;
+                };
+                crate::gait::leg_frames(rig, &root, contact, &mut frames);
+                let foot = &b.segments[part].body;
+                let f = &frames[part];
+                let dims = [foot.vol.nx, foot.vol.ny, foot.vol.nz].map(i32::from);
+                let mut low = [i32::MAX; 3];
+                let mut high = [i32::MIN; 3];
+                for corner in 0..8 {
+                    let p =
+                        f.world([0, 1, 2].map(|a| {
+                            Fx::from_int(if corner & (1 << a) == 0 { 0 } else { dims[a] })
+                        }));
+                    for (a, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+                        low[a] = low[a].min((v.raw() >> 32) as i32);
+                        high[a] = high[a].max((v.raw() >> 32) as i32);
+                    }
+                }
+                for z in low[2].max(0)..=high[2].min(w.nz as i32 - 1) {
+                    for x in low[0].max(0)..=high[0].min(w.nx as i32 - 1) {
+                        for y in low[1].max(0)..=high[1].min(w.ny as i32 - 1) {
+                            if !m
+                                .yielding
+                                .contains(&w.material(x as u32, y as u32, z as u32))
+                            {
+                                continue;
+                            }
+                            let q = f.local(V3::new(
+                                Fx::from_ratio(2 * x + 1, 2),
+                                Fx::from_ratio(2 * y + 1, 2),
+                                Fx::from_ratio(2 * z + 1, 2),
+                            ));
+                            if (0..3).all(|a| q[a] >= Fx::ZERO && q[a] < Fx::from_int(dims[a])) {
+                                let q = q.map(|v| v.to_int_trunc() as usize);
+                                if foot.vol.get(q[0], q[1], q[2]) {
+                                    cells.insert([x as u32, y as u32, z as u32]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let mut cells: Vec<_> = cells.into_iter().collect();
+            cells.sort_unstable_by_key(|p| (p[2], p[0], p[1]));
+            let mut claimed = 0;
+            cells
+                .into_iter()
+                .take_while(|p| {
+                    if w.on_frame(p[0], p[1], p[2]) {
+                        return true;
+                    }
+                    claimed += 1;
+                    claimed <= m.cut_limit
+                })
+                .collect()
+        }
+        struct Forest;
+        impl voxel::Generator for Forest {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < 31 {
+                    1
+                } else if y < 47 && (x + y + z) % 5 != 0 {
+                    4 + (y % 2) as u16
+                } else {
+                    0
+                }
+            }
+        }
+        for kind in [RangeUnitKind::Strider, RangeUnitKind::Spider] {
+            for head in [0, 733, angle::FULL / 8] {
+                let mut w = World::new(256, 64, 256, 100, Box::new(Forest));
+                let mut b = match kind {
+                    RangeUnitKind::Strider => voxel::unit::strider(),
+                    _ => voxel::unit::spider(),
+                };
+                let mut m = Motion::new([128, 31, 128], kind, &b);
+                m.drive.head = head;
+                m.enabled = false;
+                m.passive(
+                    &w,
+                    &nav::vehicle::Rubble::new(),
+                    &b,
+                    98,
+                    crate::mobility::Mobility::intact(true),
+                    &[],
+                );
+                let all = reference(&m, &w, &b);
+                assert!(!all.is_empty());
+                assert!(
+                    all.iter().any(|p| p[1] >= 32),
+                    "fixture did not cross Y chunk boundary"
+                );
+                assert_eq!(m.cut, all);
+                for (i, p) in all.iter().enumerate() {
+                    if i % 3 == 0 {
+                        w.queue_dig(p[0], p[1], p[2]);
+                    } else if i % 3 == 1 {
+                        w.queue_edit(voxel::Edit::put(p[0], p[1], p[2], 2));
+                    }
+                }
+                w.flush();
+                m.legs_lost[0] = true;
+                if let Some(part) = m.rigs[1].foot {
+                    let foot = &mut b.segments[part].body;
+                    foot.remove(0, 0, 0);
+                }
+                for limit in [0, 1, 7, usize::MAX] {
+                    m.cut_limit = limit;
+                    m.cut_feet(&w, &b);
+                    assert_eq!(
+                        m.cut,
+                        reference(&m, &w, &b),
+                        "{kind:?} head={head} limit={limit}"
+                    );
+                }
+            }
+        }
+    }
     #[test]
     fn walkers_cut_only_occupied_feet_and_keep_trees_between_legs() {
         struct Forest;
