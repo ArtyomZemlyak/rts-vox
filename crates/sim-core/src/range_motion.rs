@@ -2458,6 +2458,7 @@ impl Motion {
         } else {
             ground.pose([nx, nz], next.head, shape)
         };
+        completed("terrain_pose");
         let mut candidate = Obstacle::of(self, b);
         candidate.pos[0] = nx;
         candidate.pos[2] = nz;
@@ -2522,6 +2523,7 @@ impl Motion {
             Fx::ZERO
         };
         self.brake_shove(&lim);
+        completed("terrain_collision");
         if self.rigs.is_empty()
             && ((allowed && target.crush > 0) || (!allowed && current.crush > 0))
         {
@@ -2532,6 +2534,7 @@ impl Motion {
                 self.cut_limit,
             );
         }
+        completed("terrain_crush");
         // A dry search is a block even if its tiny reachable pocket contains
         // several cells. Only recovery can change the next search start.
         // A search still walking is not a block: the hull is waiting.

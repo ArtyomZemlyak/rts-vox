@@ -609,12 +609,37 @@ impl<'a> Probe<'a> {
         // column when its lower and upper bounds agree. If this column's
         // ceiling is that floor, it cannot hide yielding matter above it.
         if let [a, b] = self.yielding.as_slice() {
-            if self
+            let bounds = self
                 .world
-                .prepared_floor_tile(x as u32 / 8, z as u32 / 8, [*a, *b])
+                .prepared_floor_tile(x as u32 / 8, z as u32 / 8, [*a, *b]);
+            if bounds
                 .is_some_and(|bounds| bounds[0] == bounds[1] && u32::from(bounds[0]) == ceiling)
             {
                 floor = ceiling as u16;
+                if let Some(top) = self.rubble.and_then(|r| r.get(&[x, z])) {
+                    floor = floor.max(*top);
+                }
+                return (floor, span);
+            }
+            if let Some(bounds) = bounds.filter(|bounds| u32::from(bounds[1]) < ceiling) {
+                // The prepared tile proves yielding matter above the floor.
+                // Evaluate its column once, including the lowest possible
+                // floor voxel, instead of regenerating the tree for every Y.
+                let low = u32::from(bounds[0].saturating_sub(1));
+                let mut materials = vec![AIR; (ceiling - low) as usize];
+                self.world.column(x as u32, z as u32, low, &mut materials);
+                for (dy, &m) in materials.iter().enumerate().rev() {
+                    if m == AIR {
+                        continue;
+                    }
+                    let y = low as u16 + dy as u16;
+                    if self.yields(m) {
+                        span = [span[0].min(y), span[1].max(y)];
+                    } else {
+                        floor = y + 1;
+                        break;
+                    }
+                }
                 if let Some(top) = self.rubble.and_then(|r| r.get(&[x, z])) {
                     floor = floor.max(*top);
                 }
@@ -741,6 +766,10 @@ impl<'a> Probe<'a> {
             return out;
         }
         let mut claimable = 0usize;
+        // A generator can compute a column's terrain/tree geometry once for
+        // all its cells. Asking material() per voxel repeats that same work.
+        // World::column overlays edited chunks, so the ordered cut is exact.
+        let mut materials = Vec::new();
         let (c, sin) = (angle::cos(head), angle::sin(head));
         let (lo, hi) = self.extent(pos, head, s);
         for z in lo[1]..=hi[1] {
@@ -749,13 +778,16 @@ impl<'a> Probe<'a> {
                     continue;
                 };
                 let top = (floor as i32 + s.height).min(self.world.ny as i32);
-                if low == u16::MAX {
+                if low == u16::MAX || i32::from(low) >= top {
                     continue;
                 }
-                for y in low as i32..=(high as i32).min(top - 1) {
-                    let m = self.world.material(x as u32, y as u32, z as u32);
+                let end = (i32::from(high) + 1).min(top);
+                materials.resize((end - i32::from(low)) as usize, AIR);
+                self.world
+                    .column(x as u32, z as u32, u32::from(low), &mut materials);
+                for (dy, &m) in materials.iter().enumerate() {
                     if m != AIR && self.yields(m) {
-                        let p = [x as u32, y as u32, z as u32];
+                        let p = [x as u32, u32::from(low) + dy as u32, z as u32];
                         if limit != usize::MAX && !self.world.on_frame(p[0], p[1], p[2]) {
                             if claimable == limit {
                                 return out;
@@ -3608,6 +3640,110 @@ mod tests {
                 hill,
             }),
         )
+    }
+    #[test]
+    fn batched_crush_matches_voxel_reads_with_edits_rubble_frames_and_limits() {
+        struct Forest;
+        impl voxel::Generator for Forest {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < (if x.is_multiple_of(11) { 0 } else { 8 + z % 3 })
+                    || (x.is_multiple_of(21) && y == 40)
+                {
+                    1
+                } else if x.is_multiple_of(7)
+                    && z.is_multiple_of(5)
+                    && (8..57).contains(&y)
+                    && y != 31
+                {
+                    if y < 25 {
+                        4
+                    } else {
+                        5
+                    }
+                } else {
+                    AIR
+                }
+            }
+        }
+        fn reference(
+            probe: &mut Probe<'_>,
+            pos: [Fx; 2],
+            head: i32,
+            s: Shape,
+            limit: usize,
+        ) -> Vec<[u32; 3]> {
+            let mut out = Vec::new();
+            if limit == 0 {
+                return out;
+            }
+            let mut count = 0;
+            let (lo, hi) = probe.extent(pos, head, s);
+            let (c, sin) = (angle::cos(head), angle::sin(head));
+            for z in lo[1]..=hi[1] {
+                for x in lo[0]..=hi[0] {
+                    if !probe.inside(pos, c, sin, s, x, z) {
+                        continue;
+                    }
+                    let Some((floor, [low, high])) = probe.column(x, z) else {
+                        continue;
+                    };
+                    let top = (i32::from(floor) + s.height).min(probe.world.ny as i32);
+                    for y in i32::from(low)..=i32::from(high).min(top - 1) {
+                        let p = [x as u32, y as u32, z as u32];
+                        let m = probe.world.material(p[0], p[1], p[2]);
+                        if m != AIR && probe.yields(m) {
+                            if !probe.world.on_frame(p[0], p[1], p[2]) {
+                                if count == limit {
+                                    return out;
+                                }
+                                count += 1;
+                            }
+                            out.push(p);
+                        }
+                    }
+                }
+            }
+            out
+        }
+        let mut w = World::new(96, 67, 96, 100, Box::new(Forest));
+        let rubble = Rubble::from([([35, 35], 27), ([42, 40], 64)]);
+        for edited in [false, true] {
+            if edited {
+                w.queue_dig(35, 32, 35);
+                w.queue_edit(voxel::Edit::put(35, 29, 35, 1));
+                w.queue_edit(voxel::Edit::put(36, 50, 35, 5));
+                w.flush();
+            }
+            w.prepare_navigation([4, 5]);
+            let mut fast = Probe::with_yield(&w, &[4, 5]).with_rubble(&rubble);
+            let mut exact = Probe::with_yield(&w, &[5, 4]).with_rubble(&rubble);
+            for x in 0..96 {
+                for z in (0..96).step_by(5) {
+                    assert_eq!(
+                        fast.column(x, z),
+                        exact.column(x, z),
+                        "column {x},{z}, edited={edited}"
+                    );
+                }
+            }
+            for pos in [[2, 2], [35, 35], [90, 90]] {
+                let pos = pos.map(|v| Fx::from_int(v).add(Fx::from_ratio(1, 3)));
+                for head in [0, 317, angle::FULL / 8, angle::FULL / 4] {
+                    for limit in [0, 1, 7, 100, usize::MAX] {
+                        let s = Shape {
+                            height: 60,
+                            ..tank()
+                        };
+                        let mut fast = Probe::with_yield(&w, &[4, 5]).with_rubble(&rubble);
+                        let mut exact = Probe::with_yield(&w, &[5, 4]).with_rubble(&rubble);
+                        assert_eq!(
+                            fast.crushed_limit(pos, head, s, limit),
+                            reference(&mut exact, pos, head, s, limit)
+                        );
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn bounded_crush_preserves_column_order_and_full_query() {

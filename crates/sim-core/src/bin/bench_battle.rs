@@ -749,7 +749,10 @@ fn main() {
     );
     let mut restored = None;
     let mut unit_time_windows = vec![vec![0u128; sim.units.len()]; ticks.div_ceil(300)];
+    // Accumulate sub-microsecond stages before converting for presentation.
+    // Truncating each unit's contact interval would hide their combined cost.
     let mut unit_phase_windows = vec![vec![[0u128; 6]; sim.units.len()]; ticks.div_ceil(300)];
+    let mut terrain_phase_windows = vec![vec![[0u128; 4]; sim.units.len()]; ticks.div_ceil(300)];
     let mut debris_phase_windows = vec![[0u128; 16]; ticks.div_ceil(300)];
     let mut settled_phase_windows = vec![[0u128; 6]; ticks.div_ceil(300)];
     let mut heat_phase_windows = vec![[0u128; 8]; ticks.div_ceil(300)];
@@ -854,6 +857,7 @@ fn main() {
         let mut profile = TickProfile::default();
         let unit_window = &mut unit_time_windows[tick_index / 300];
         let unit_phases = &mut unit_phase_windows[tick_index / 300];
+        let terrain_phases = &mut terrain_phase_windows[tick_index / 300];
         let local_hunts = &mut local_hunt_windows[tick_index / 300];
         let ground_counts = &mut ground_windows[tick_index / 300].1;
         sim.step_observed_tasks(
@@ -964,19 +968,29 @@ fn main() {
                         unit_start[id] = now;
                         unit_last[id] = now;
                     } else {
-                        let elapsed = now.duration_since(unit_last[id]).as_micros();
+                        let elapsed = now.duration_since(unit_last[id]).as_nanos();
                         unit_last[id] = now;
                         let phase = match stage {
                             "hunt" => 0,
                             "plan" | "plan_coarse" | "plan_fine" | "plan_target"
                             | "plan_prepare" | "plan_direct" => 1,
-                            "terrain" => 2,
+                            "terrain_pose" | "terrain_collision" | "terrain_crush" | "terrain" => 2,
                             "ride" => 3,
                             "feet" => 4,
                             "unit_done" => 5,
                             _ => unreachable!(),
                         };
                         unit_phases[id][phase] += elapsed;
+                        let terrain = match stage {
+                            "terrain_pose" => Some(0),
+                            "terrain_collision" => Some(1),
+                            "terrain_crush" => Some(2),
+                            "terrain" => Some(3),
+                            _ => None,
+                        };
+                        if let Some(part) = terrain {
+                            terrain_phases[id][part] += elapsed;
+                        }
                         if stage == "unit_done" {
                             unit_window[id] += now.duration_since(unit_start[id]).as_micros();
                         }
@@ -1730,9 +1744,31 @@ fn main() {
                 window[0].tick,
                 window[window.len() - 1].tick,
                 ranked
+                    .iter()
+                    .copied()
+                    .take(3)
+                    .map(|(id, _)| (
+                        id,
+                        unit_phase_windows[index][id].map(|ns| ns / (len * 1000))
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            println!(
+                "motion_terrain_window={}..{} pose_collision_crush_rest_us={:?} top={:?}",
+                window[0].tick,
+                window[window.len() - 1].tick,
+                [0, 1, 2, 3].map(|part| terrain_phase_windows[index]
+                    .iter()
+                    .map(|u| u[part])
+                    .sum::<u128>()
+                    / (len * 1000)),
+                ranked
                     .into_iter()
                     .take(3)
-                    .map(|(id, _)| (id, unit_phase_windows[index][id].map(|us| us / len)))
+                    .map(|(id, _)| (
+                        id,
+                        terrain_phase_windows[index][id].map(|ns| ns / (len * 1000))
+                    ))
                     .collect::<Vec<_>>()
             );
             println!(
