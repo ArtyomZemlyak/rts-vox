@@ -23,6 +23,9 @@ fn artillery_impacts_remove_soil_in_manual_and_ai_combat() {
             } else {
                 assert!(r.battle_order(0, Order::Attack(1), None));
             }
+            // This fixture pins partially spent wave snapshots. Stock first
+            // salvo/AI crater opening is covered by the isolated tests below.
+            super::tests::slow_blasts(&mut r);
             let mut soil = 0;
             let mut contacts = 0;
             let mut first = None;
@@ -76,7 +79,9 @@ fn artillery_impacts_remove_soil_in_manual_and_ai_combat() {
                     })
                 {
                     let bytes = r.snapshot();
-                    let copy = BlastRange::restore(r.config, &bytes).expect("mid-crater snapshot");
+                    let mut copy =
+                        BlastRange::restore(r.config, &bytes).expect("mid-crater snapshot");
+                    super::tests::slow_blasts(&mut copy);
                     assert_eq!(bytes, copy.snapshot());
                     replay = Some(copy);
                 }

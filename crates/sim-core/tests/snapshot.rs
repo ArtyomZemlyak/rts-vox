@@ -22,7 +22,7 @@ use modding::range_skirmish::WorldBattle;
 use sim_core::blast::BlastRange;
 
 /// Тик среза. К нему эталонный бой уже стреляет с обеих сторон, кто-то
-/// погиб, слой обрушения уронил рельеф, волна идёт и обломки летят.
+/// погиб, слой обрушения уронил рельеф, снаряды и обломки летят.
 const CUT: usize = 100;
 /// Сколько тиков после среза сверяются потиково.
 const AFTER: usize = 100;
@@ -59,8 +59,8 @@ fn assert_loaded(sim: &BlastRange) {
     assert!(sim.collapsed_cells > 0, "слой обрушения не работал");
     assert!(sim.world.touched_chunks() > 0, "рельеф не правлен");
     assert!(
-        sim.battle.wave_counts().iter().sum::<usize>() > 0,
-        "в точке среза нет живой волны"
+        !sim.battle.rounds.is_empty(),
+        "в точке среза нет летящих снарядов"
     );
     assert!(
         sim.matter.debris.fragments.iter().any(|f| !f.resting),
@@ -75,8 +75,11 @@ fn assert_loaded(sim: &BlastRange) {
 /// дальнейшему ходу: запись восстановленного даёт те же байты, занятость
 /// рельефа совпадает до воксела, материал — там, где идёт бой.
 /// Сравнение потиковое: расхождение, найденное
-/// на сотом тике из ста, не говорит, где оно возникло. Волна и куски,
+/// на сотом тике из ста, не говорит, где оно возникло. Снаряды и куски,
 /// летящие в момент среза, доживают свой полёт уже после загрузки.
+/// Штатные волны могут завершиться в тик удара (ADR-697); сохранение
+/// живых волн отдельно проверено instant_blast_tests и явными медленными
+/// fixture в range_battle_tests, включая одновременные и типизированные.
 /// Копии того же снимка с чужой версией или испорченным заголовком
 /// отвергаются ([`refuses_foreign_headers_of`]).
 #[test]
@@ -142,10 +145,10 @@ fn a_battle_restored_mid_fight_continues_bit_for_bit() {
 fn refuses_foreign_headers_of(bytes: &[u8]) {
     let version = u32::from_le_bytes(bytes[..4].try_into().unwrap());
     assert!(
-        (27..=61).contains(&version),
+        (27..=66).contains(&version),
         "версия {version} в первых байтах"
     );
-    for foreign in [0, 26, 62, u32::MAX] {
+    for foreign in [0, 26, 67, u32::MAX] {
         let mut b = bytes.to_vec();
         b[..4].copy_from_slice(&foreign.to_le_bytes());
         assert!(
@@ -156,16 +159,53 @@ fn refuses_foreign_headers_of(bytes: &[u8]) {
     // Флаг настроек оружия — байт, а не логическое «не ноль»:
     // любое значение, кроме нуля и единицы, — порча. Он стоит сразу
     // за версией, флагами сцены и тиком выстрела начиная с версии 59.
-    assert!(version >= 59, "версия {version} без флага настроек");
-    let mut b = bytes.to_vec();
-    b[10] = 2;
-    assert!(BlastRange::restore(config(), &b).is_none());
+    let (inner, flag) = if version == 66 {
+        (u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 14)
+    } else {
+        (version, 10)
+    };
+    if inner >= 59 {
+        let mut b = bytes.to_vec();
+        b[flag] = 2;
+        assert!(BlastRange::restore(config(), &b).is_none());
+    }
     for cut in [0, 4] {
         assert!(
             BlastRange::restore(config(), &bytes[..cut]).is_none(),
             "принят снимок, обрезанный до {cut} байт"
         );
     }
+}
+
+/// The flag corruption check has an explicit live-wave fixture: a fast
+/// stock detonation need not leave version 59+ state at the battle cut.
+#[test]
+fn a_live_wave_rejects_a_non_boolean_weapon_configuration_flag() {
+    let mut c = config();
+    c.wave_work_per_tick = 1;
+    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+    layout.course = None;
+    layout.blocks.clear();
+    layout.shields.clear();
+    layout.units.truncate(1);
+    let mut r = BlastRange::with_layout(c, layout).unwrap();
+    let c = r.config;
+    // The reserved body-energy field makes the weapon flag part of this
+    // format. A shot into bare ground can legitimately stay at version 48.
+    let u = &r.units[0];
+    r.aim = Some(
+        u.world_pos([u.body.vol.nx, u.body.vol.ny, u.body.vol.nz].map(|n| usize::from(n) / 2)),
+    );
+    while r.impact.is_none() {
+        r.step();
+    }
+    assert!(r.explosion.as_ref().is_some_and(|e| e.working()));
+    let mut bytes = r.snapshot();
+    let version = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+    assert!((59..=65).contains(&version), "fixture version {version}");
+    assert!(BlastRange::restore(c, &bytes).is_some());
+    bytes[10] = 2;
+    assert!(BlastRange::restore(c, &bytes).is_none());
 }
 
 /// **Обрезанный или удлинённый снимок не читается.**

@@ -57,7 +57,12 @@ fn weapon_knobs_send_all_thirteen_rows_through_commands_and_reset() {
 #[test]
 fn weapon_typed_bounds_and_paused_rebuild_remain_restorable() {
     let mut app = command_app();
-    for (slot, expected) in [(1, 1_000_000_000.0), (6, 10_000.0), (8, 32.0), (11, 8192.0)] {
+    for (slot, expected) in [
+        (1, 1_000_000_000.0),
+        (6, 10_000.0),
+        (8, 32.0),
+        (11, WAVE_WORK_MAX as f64),
+    ] {
         app.world_mut().resource_mut::<Overrides>().editing = Some((slot, "9999999999".into()));
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
@@ -103,10 +108,29 @@ fn weapon_typed_bounds_and_paused_rebuild_remain_restorable() {
     app.update();
     let mut scene = app.world_mut().resource_mut::<Scene>();
     assert_eq!(scene.sim.tick, 0);
-    assert_eq!(scene.sim.config.wave_work_per_tick, 8192);
+    assert_eq!(scene.sim.config.wave_work_per_tick, WAVE_WORK_MAX);
     assert!(scene.sim.config.validate().is_ok());
     let trace = scene.sim.finish_battle_command_capture().unwrap();
     assert_eq!(trace.records.len(), 0); // Rebuild already includes effective weapon settings.
+}
+
+#[cfg(test)]
+#[test]
+fn wave_work_plus_preserves_and_increases_each_stock_preset() {
+    for weapon in 0..7 {
+        let mut app = command_app();
+        click_command(&mut app, Action::Weapon(weapon));
+        let mut expected = app.world().resource::<Scene>().sim.config;
+        expected.wave_work_per_tick =
+            (expected.wave_work_per_tick + WEAPON[11].step as usize).min(WAVE_WORK_MAX);
+        click_command(&mut app, Action::Knob(11, true));
+        let actual = app.world().resource::<Scene>().sim.config;
+        assert_eq!(
+            actual, expected,
+            "weapon {weapon}: '+' changed the preset instead of increasing work"
+        );
+        assert!(actual.validate().is_ok());
+    }
 }
 
 #[cfg(test)]

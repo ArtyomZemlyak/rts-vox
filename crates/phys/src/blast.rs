@@ -370,6 +370,13 @@ impl Wave {
                 }
                 let j = (i as isize + offset) as usize;
                 let target = self.cells[j];
+                // Resistance can only lower this upper bound. Settled cells
+                // and neighbours already reached at least this strongly need
+                // neither the material multiply/divide nor a frontier push.
+                let upper = left.saturating_sub(cost);
+                if upper <= target.state {
+                    continue;
+                }
                 // A cell's material is paid once when the wave leaves
                 // it, whatever the direction. A diagonal step is longer
                 // than an axis step, so the target's material is also
@@ -377,7 +384,7 @@ impl Wave {
                 // cheaper per metre along diagonals and every crater
                 // comes out square (ADR-274).
                 let extra = target.resistance.saturating_mul(cost - 100) / 100;
-                let next = left.saturating_sub(cost).saturating_sub(extra);
+                let next = upper.saturating_sub(extra);
                 if next > target.state {
                     self.cells[j].state = next;
                     self.frontier.push(key(next, j));

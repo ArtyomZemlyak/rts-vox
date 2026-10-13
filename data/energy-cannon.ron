@@ -15,9 +15,9 @@
     steel_resistance: 6000,
     unit_ablation_resistance: 180,
     unit_role_resistance_milli: (1000, 1800, 650, 1100, 350),
-    wave_work_per_tick: 4096,
-    capture_cells_per_tick: 40000,
-    edits_per_tick: 8192,
+    wave_work_per_tick: 98304,
+    capture_cells_per_tick: 147456,
+    edits_per_tick: 65536,
     // A bolt ablates finely: pieces within a two-cell box (ADR-284).
     fragment_box: 2,
     // A bolt pushes too, by the pressure its wave puts on the body: the

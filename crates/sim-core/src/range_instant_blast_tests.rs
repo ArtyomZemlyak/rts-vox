@@ -1,4 +1,4 @@
-//! A burst is instantaneous (ADR-681): one canister salvo and one ordinary
+//! A burst is fast (ADR-697): one canister salvo and one ordinary
 //! shell finish their destruction, applied edits included, within a bound
 //! of ticks on a reference layout.
 use super::*;
@@ -96,23 +96,23 @@ fn ticks_to_rest(r: &mut BlastRange, limit: u32) -> Option<u32> {
 }
 
 #[test]
-fn canister_salvo_destruction_lands_within_fifteen_ticks() {
+fn canister_salvo_destruction_lands_within_five_ticks() {
     let mut r = salvo_range();
     let before = r.removed;
     land(&mut r, Weapon::Canister, [420, 330], 6);
-    let ticks = ticks_to_rest(&mut r, 15);
-    assert!(ticks.is_some(), "salvo still working after 15 ticks");
+    let ticks = ticks_to_rest(&mut r, 5);
+    assert!(ticks.is_some(), "salvo still working after 5 ticks");
     assert!(r.removed > before, "the salvo removed no ground");
     assert!(r.matter.economy.ledger.balanced());
 }
 
 #[test]
-fn ordinary_shell_destruction_lands_within_fifteen_ticks() {
+fn ordinary_shell_destruction_lands_within_five_ticks() {
     let mut r = salvo_range();
     let before = r.removed;
     land(&mut r, Weapon::Blast, [420, 330], 1);
-    let ticks = ticks_to_rest(&mut r, 15);
-    assert!(ticks.is_some(), "shell still working after 15 ticks");
+    let ticks = ticks_to_rest(&mut r, 5);
+    assert!(ticks.is_some(), "shell still working after 5 ticks");
     assert!(r.removed > before, "the shell removed no ground");
     assert!(r.matter.economy.ledger.balanced());
 }
@@ -165,6 +165,80 @@ fn soil_trial(config: ExplosionConfig) -> BlastRange {
 
 fn soil_removed(r: &BlastRange) -> usize {
     r.removed_materials[1] + r.removed_materials[7] + r.removed_materials[8]
+}
+
+fn single_blast_latency(
+    config: ExplosionConfig,
+    mut step: impl FnMut(&mut BlastRange),
+) -> (u32, usize) {
+    let mut r = soil_trial(config);
+    let mut impact = None;
+    for t in 0..240 {
+        step(&mut r);
+        assert!(r.matter.economy.ledger.balanced());
+        if r.impact.is_some() {
+            let start = *impact.get_or_insert(t);
+            if r.explosion.as_ref().is_some_and(|e| !e.working())
+                && r.world.queued() == 0
+                && r.matter.debris.claims() == 0
+            {
+                return (t - start + 1, soil_removed(&r));
+            }
+        }
+    }
+    panic!("blast did not finish");
+}
+
+#[test]
+fn explosive_presets_at_one_two_and_four_power_finish_within_five_ticks() {
+    for (name, text) in soil_presets().into_iter().filter(|(name, _)| {
+        matches!(
+            *name,
+            "shell" | "canister_round" | "energy" | "annihilation"
+        )
+    }) {
+        for power in [1, 2, 4] {
+            let mut c = soil_config(name, text);
+            c.energy *= power;
+            c.material_energy_j *= power;
+            let (ticks, removed) = single_blast_latency(c, BlastRange::step);
+            assert!(removed > 0, "{name} x{power}");
+            assert!(ticks <= 5, "{name} x{power}: {ticks} ticks");
+        }
+    }
+}
+
+#[test]
+#[ignore = "latency and peak CPU measurement for blast pacing"]
+fn probe_explosive_preset_latency() {
+    for (name, text) in soil_presets().into_iter().filter(|(name, _)| {
+        matches!(
+            *name,
+            "shell" | "canister_round" | "energy" | "annihilation"
+        )
+    }) {
+        for power in [1, 2, 4] {
+            let mut c = soil_config(name, text);
+            c.energy *= power;
+            c.material_energy_j *= power;
+            if std::env::var_os("PROBE_OLD_PACE").is_some() {
+                let material = c.material_energy_j > 0;
+                c.wave_work_per_tick = if material { 32768 } else { 4096 };
+                c.capture_cells_per_tick = if material { 49152 } else { 40000 };
+                c.edits_per_tick = if material { 65536 } else { 8192 };
+            }
+            let mut peak = 0.0f64;
+            let mut total = 0.0;
+            let (ticks, removed) = single_blast_latency(c, |r| {
+                let start = std::time::Instant::now();
+                r.step();
+                let ms = start.elapsed().as_secs_f64() * 1000.0;
+                peak = peak.max(ms);
+                total += ms;
+            });
+            println!("{name} power={power} ticks={ticks} soil={removed} peak_ms={peak:.3} total_ms={total:.3}");
+        }
+    }
 }
 
 /// Empty cells of the fixture's original 16-cell soil slab, and the
@@ -320,7 +394,7 @@ fn salvo_state_is_independent_of_physics_workers() {
 fn salvo_restored_mid_wave_matches_the_continuous_run() {
     let mut a = salvo_range();
     land(&mut a, Weapon::Canister, [420, 330], 6);
-    for _ in 0..4 {
+    for _ in 0..1 {
         a.step();
     }
     let [capturing, applying] = a.battle.wave_counts();
@@ -407,6 +481,19 @@ fn probe_salvo_timeline() {
     for (name, weapon, count) in runs {
         let mut r = salvo_range();
         r.set_physics_workers(4);
+        // Version 59+ also saves the constructor's weapon configuration.
+        // Keep it equal in old-pace A/B runs, not just the battle's grants.
+        r.config.wave_work_per_tick = env("PROBE_WORK", r.config.wave_work_per_tick);
+        r.config.capture_cells_per_tick = env("PROBE_CAPTURE", r.config.capture_cells_per_tick);
+        r.weapon_initial = r.config;
+        for c in [&mut r.battle.canister_config, &mut r.battle.shell_config] {
+            c.wave_work_per_tick = env("PROBE_WORK", c.wave_work_per_tick);
+            c.capture_cells_per_tick = env("PROBE_CAPTURE", c.capture_cells_per_tick);
+        }
+        let tuning = std::sync::Arc::make_mut(&mut r.battle.tuning);
+        tuning.wave_capture_ceiling = env("PROBE_CAPTURE_CEILING", tuning.wave_capture_ceiling);
+        tuning.wave_work_ceiling = env("PROBE_WORK_CEILING", tuning.wave_work_ceiling);
+        tuning.wave_contact_ceiling = env("PROBE_CONTACT_CEILING", tuning.wave_contact_ceiling);
         if std::env::var_os("PROBE_UNBOUND").is_some() {
             for c in [&mut r.battle.canister_config, &mut r.battle.shell_config] {
                 c.wave_work_per_tick = 1 << 30;

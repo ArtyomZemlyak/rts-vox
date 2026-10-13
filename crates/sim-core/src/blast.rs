@@ -2114,13 +2114,6 @@ impl Explosion {
                 }
             }
         }
-        self.solid_index = self
-            .solid
-            .iter()
-            .enumerate()
-            .map(|(k, &(cell, _, _))| (cell, k as u32))
-            .collect();
-        self.solid_index.sort_unstable();
         if !self.point_contacts {
             self.read_bodies(units);
         }
@@ -2250,6 +2243,17 @@ impl Explosion {
                 self.solid_next = k + 1;
                 return (mask, start as usize);
             }
+        }
+        // Canonical visits normally consume the read-ahead in order. Build
+        // the lookup only when a deferred/reordered contact needs it.
+        if self.solid_index.is_empty() && !self.solid.is_empty() {
+            self.solid_index = self
+                .solid
+                .iter()
+                .enumerate()
+                .map(|(k, &(cell, _, _))| (cell, k as u32))
+                .collect();
+            self.solid_index.sort_unstable();
         }
         if let Ok(i) = self.solid_index.binary_search_by_key(&cell, |e| e.0) {
             let k = self.solid_index[i].1 as usize;
@@ -3151,17 +3155,27 @@ fn read_cell_into(
     origin: [i32; 3],
     edge: i32,
     cell: [i32; 3],
-    offsets: &[[i32; 3]],
+    _offsets: &[[i32; 3]],
     mats: &mut Vec<u16>,
 ) -> u64 {
     let p: [i32; 3] = std::array::from_fn(|a| origin[a] + cell[a] * edge);
     let mut mask = 0u64;
     if !cell_is_air(w, p, edge) {
-        for (s, o) in offsets.iter().enumerate() {
-            let m = material(w, [p[0] + o[0], p[1] + o[1], p[2] + o[2]]);
-            if m != 0 {
-                mask |= 1 << s;
-                mats.push(m);
+        let x0 = p[0].max(0);
+        let x1 = (p[0] + edge).min(w.nx as i32);
+        let mut cursor = World::mat_cursor();
+        if x0 < x1 {
+            for z in p[2].max(0)..(p[2] + edge).min(w.nz as i32) {
+                for y in p[1].max(0)..(p[1] + edge).min(w.ny as i32) {
+                    let mut bits = w.solid_bits(x0 as u32, y as u32, z as u32, (x1 - x0) as u32);
+                    while bits != 0 {
+                        let x = x0 + bits.trailing_zeros() as i32;
+                        bits &= bits - 1;
+                        let s = x - p[0] + edge * (y - p[1] + edge * (z - p[2]));
+                        mask |= 1 << s;
+                        mats.push(material_cached(w, &mut cursor, [x, y, z]));
+                    }
+                }
             }
         }
     }
@@ -3179,11 +3193,27 @@ fn spent_cell(
     mats: &[u16],
     left: u64,
 ) -> bool {
-    c.material_energy_j > 0
-        && !mats.is_empty()
-        && mats
-            .iter()
-            .all(|&mat| pressure >= material_work(mat, c) && m.ground_price(mat) > left)
+    if c.material_energy_j == 0 || mats.is_empty() {
+        return false;
+    }
+    // The predicate depends on material, pressure and this cell's remaining
+    // energy, never the voxel position. Homogeneous ground must not recompute
+    // the same fracture price for every one of its 8/27/64 subcells. IDs above
+    // the bitmap retain the exact scalar path; there is no material limit.
+    let mut seen = 0u64;
+    for &mat in mats {
+        if mat < 64 {
+            let bit = 1u64 << mat;
+            if seen & bit != 0 {
+                continue;
+            }
+            seen |= bit;
+        }
+        if pressure < material_work(mat, c) || m.ground_price(mat) <= left {
+            return false;
+        }
+    }
+    true
 }
 
 /// No voxel of the wave cell at `p` with edge `edge` holds matter: every

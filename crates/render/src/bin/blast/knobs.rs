@@ -15,6 +15,9 @@ use std::collections::BTreeMap;
 pub const FILE: &str = "out/range-tuning.txt";
 /// Rows a group may show at once; the tank and walker groups fill them.
 pub const SLOTS: usize = 20;
+// Technical bound accepted by ExplosionConfig::validate. The UI must not
+// clamp a stock preset's work allowance down when its '+' button is pressed.
+const WAVE_WORK_MAX: usize = 1 << 20;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Group {
@@ -321,7 +324,7 @@ const WEAPON: [Knob; 13] = [
         "Работа волны за тик",
         512.0,
         64.0,
-        8192.0,
+        WAVE_WORK_MAX as f64,
     ),
     k(
         "weapon.capture_cells_per_tick",
@@ -709,7 +712,7 @@ fn set_weapon(c: &mut ExplosionConfig, f: &str, v: f64) {
         "heat_units" => c.heat_units = i(v).clamp(0, 32),
         "heat_per_cell" => c.heat_per_cell = u(v),
         "gas_source_radius" => c.gas_source_radius = i(v).max(1),
-        "wave_work_per_tick" => c.wave_work_per_tick = u(v).clamp(64, 8192) as usize,
+        "wave_work_per_tick" => c.wave_work_per_tick = (u(v) as usize).clamp(64, WAVE_WORK_MAX),
         "capture_cells_per_tick" => c.capture_cells_per_tick = u(v).max(1000) as usize,
         _ => {}
     }

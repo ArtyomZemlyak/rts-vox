@@ -45,6 +45,55 @@ pub struct Heat {
 
 const HEAT_CAP: u32 = 1_000_000;
 
+/// Transient neighbour sums are queried while cooling the source slice;
+/// only the unconsumed gains are committed, in canonical cell order.
+/// Lookup exposes no unordered iteration (analysis 239, P-74).
+#[derive(Default)]
+struct Gains {
+    fast: fx::lookup::Lookup<[u32; 3], u32, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>,
+    #[cfg(test)]
+    reference: Option<BTreeMap<[u32; 3], u32>>,
+}
+impl Gains {
+    fn new(_parallel: bool) -> Self {
+        Self {
+            #[cfg(test)]
+            reference: (!_parallel).then(BTreeMap::new),
+            ..Self::default()
+        }
+    }
+    fn add(&mut self, p: [u32; 3], heat: u32) {
+        #[cfg(test)]
+        if let Some(reference) = &mut self.reference {
+            *reference.entry(p).or_default() += heat;
+            return;
+        }
+        let entry = self.fast.entry(p).or_default();
+        *entry += heat;
+    }
+    fn remove(&mut self, p: &[u32; 3]) -> Option<u32> {
+        #[cfg(test)]
+        if let Some(reference) = &mut self.reference {
+            return reference.remove(p);
+        }
+        self.fast.remove(p)
+    }
+    fn remaining(mut self) -> Vec<([u32; 3], u32)> {
+        #[cfg(test)]
+        if let Some(reference) = self.reference {
+            return reference.into_iter().collect();
+        }
+        self.fast
+            .sorted_keys()
+            .into_iter()
+            .map(|p| {
+                let heat = self.fast.remove(&p).expect("remaining gain");
+                (p, heat)
+            })
+            .collect()
+    }
+}
+
 impl Heat {
     /// Ordered bounded source slice for range contact heat. No full-map scan.
     pub(crate) fn batch_after(&self, cursor: Option<[u32; 3]>, limit: usize) -> Vec<[u32; 3]> {
@@ -367,7 +416,7 @@ impl Heat {
             "physics_ground_heat_commit_begin",
             "physics_ground_heat_commit_end",
         );
-        let mut gain: BTreeMap<[u32; 3], u32> = BTreeMap::new();
+        let mut gain = Gains::new(parallel);
         for (&(p, _), &(_, share, solid)) in batch.iter().zip(&reads) {
             if solid == 0 {
                 continue;
@@ -382,7 +431,7 @@ impl Heat {
                 } else {
                     q[bit / 2] += 1;
                 }
-                *gain.entry(q).or_insert(0) += share;
+                gain.add(q, share);
             }
         }
         // Preserve the former tree mutation order as an independent oracle.
@@ -437,7 +486,7 @@ impl Heat {
                     self.cells.insert(p, c);
                 }
             }
-            for (q, g) in gain {
+            for (q, g) in gain.remaining() {
                 let c = self.cells.entry(q).or_default();
                 c.heat = c.heat.saturating_add(g).min(HEAT_CAP);
             }
@@ -526,7 +575,7 @@ impl Heat {
         for p in removed {
             cells.remove(&p);
         }
-        for (q, g) in gain {
+        for (q, g) in gain.remaining() {
             let c = cells.entry(q).or_default();
             c.heat = c.heat.saturating_add(g).min(HEAT_CAP);
         }
@@ -636,6 +685,34 @@ fn neighbours(w: &World, p: [u32; 3]) -> impl Iterator<Item = (usize, [u32; 3])>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn neighbour_gains_preserve_large_sums_zero_presence_and_order() {
+        for parallel in [false, true] {
+            let mut gains = Gains::new(parallel);
+            for (p, heat) in [
+                ([3, 2, 1], u32::MAX - 1),
+                ([1, 2, 3], 0),
+                ([3, 2, 1], 1),
+                ([2, 3, 1], 400),
+                ([2, 3, 1], 500),
+            ] {
+                gains.add(p, heat);
+            }
+            assert_eq!(gains.remove(&[2, 3, 1]), Some(900));
+            assert_eq!(gains.remove(&[2, 3, 1]), None);
+            assert_eq!(
+                gains.remaining(),
+                vec![([1, 2, 3], 0), ([3, 2, 1], u32::MAX)]
+            );
+        }
+    }
+    #[test]
+    #[should_panic]
+    fn overflowing_neighbour_gains_keep_the_reference_overflow_check() {
+        let mut gains = Gains::new(true);
+        gains.add([1; 3], u32::MAX);
+        gains.add([1; 3], 1);
+    }
     /// Объём километровой карты не помещается в `u32`.
     #[test]
     fn the_kilometre_map_volume_is_counted_without_overflow() {

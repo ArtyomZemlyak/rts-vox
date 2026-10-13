@@ -1813,6 +1813,7 @@ fn replay_with_multiple_projectiles_and_waves() {
     // Explicitly equip both tanks with high-explosive rounds: new tanks
     // otherwise start with armour-piercing ammunition.
     let high_explosive = |r: &mut BlastRange| {
+        slow_blasts(r);
         for actor in &mut r.battle.actors {
             actor.weapon = Some(Weapon::Blast);
         }
@@ -1838,6 +1839,19 @@ fn replay_with_multiple_projectiles_and_waves() {
         waves = waves.max(a.battle.waves.len());
     }
     assert!(waves > 0, "the replay carried no wave");
+}
+
+// Explicit delayed-wave fixture for save/cursor tests. Stock detonations may
+// finish during impact; every restored fixture must use these same rules.
+pub(super) fn slow_blasts(r: &mut BlastRange) {
+    for c in [
+        &mut r.battle.shell_config,
+        &mut r.battle.canister_config,
+        &mut r.battle.energy_config,
+        &mut r.battle.anni_config,
+    ] {
+        c.wave_work_per_tick = 256;
+    }
 }
 #[test]
 fn cover_blocks_enemy_machine_gun_and_winner_is_reported() {
@@ -2017,6 +2031,7 @@ fn ground_fire_keeps_an_existing_battle_route() {
 #[test]
 fn simultaneous_impacts_keep_both_waves_and_replay() {
     let mut a = arena(RangeUnitKind::Tank);
+    slow_blasts(&mut a);
     a.start_battle().unwrap();
     for actor in &mut a.battle.actors {
         actor.order = Order::Hold;
@@ -2042,6 +2057,7 @@ fn simultaneous_impacts_keep_both_waves_and_replay() {
     a.step();
     assert_eq!(a.battle.waves.len(), 2, "one impact replaced another");
     let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
+    slow_blasts(&mut b);
     for _ in 0..50 {
         a.step();
         b.step();
@@ -2767,6 +2783,7 @@ fn battle_machine_guns_use_paired_finite_flight_and_shared_burst_timing() {
 fn energy_weapons_keep_identity_in_flight_and_replay_their_own_wave() {
     for weapon in [Weapon::Energy, Weapon::Annihilation] {
         let mut r = arena(RangeUnitKind::Tank);
+        slow_blasts(&mut r);
         r.start_battle().unwrap();
         r.battle.actors[1].order = Order::Hold;
         r.battle.ai.next_tick = u32::MAX;
@@ -2793,6 +2810,7 @@ fn energy_weapons_keep_identity_in_flight_and_replay_their_own_wave() {
         // A valid future AI deadline for snapshot validation, with quiet enemies.
         r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         let mut replay = BlastRange::restore(r.config, &r.snapshot()).expect("in-flight snapshot");
+        slow_blasts(&mut replay);
         let mut impact = false;
         let mut wave = false;
         for _ in 0..120 {
@@ -2804,6 +2822,7 @@ fn energy_weapons_keep_identity_in_flight_and_replay_their_own_wave() {
                 wave = true;
                 // Restore during the delayed wave as well, not just during flight.
                 replay = BlastRange::restore(r.config, &r.snapshot()).expect("typed wave snapshot");
+                slow_blasts(&mut replay);
             }
         }
         assert!(impact && wave, "bolt never produced its typed impact/wave");
@@ -3482,17 +3501,22 @@ fn the_world_battle_hash_does_not_depend_on_physics_workers() {
         assert_eq!(sim.worker_counts()[0], workers);
         assert!(sim.set_ai_vs_ai(true));
         sim.start_battle().unwrap();
-        let mut waves = 0;
+        let mut blast = false;
         for _ in 0..150 {
             sim.step();
-            waves = waves.max(sim.battle.waves.len());
+            blast |= sim.battle.impacts.iter().any(|i| {
+                matches!(
+                    i.weapon,
+                    Weapon::Blast | Weapon::Canister | Weapon::Energy | Weapon::Annihilation
+                )
+            });
         }
         // ADR-116: the parallel phases this pins have to do work in it.
         assert!(
             sim.battle.actors.iter().any(|a| a.fired > 0),
             "nobody fired"
         );
-        assert!(waves > 0, "no blast wave lived");
+        assert!(blast, "no explosive projectile impacted");
         assert!(
             sim.matter.debris.fragments.len() > 100,
             "the debris phase was idle"
@@ -3675,6 +3699,7 @@ fn t2_defends_against_five_tanks_from_each_cardinal_direction() {
 #[test]
 fn t2_energy_round_preserves_class_power_after_owner_loss_and_save() {
     let mut r = arena_of([RangeUnitKind::Tank, RangeUnitKind::TurretT2]);
+    slow_blasts(&mut r);
     r.start_battle().unwrap();
     r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
     for actor in &mut r.battle.actors {
@@ -3727,6 +3752,7 @@ fn t2_energy_round_preserves_class_power_after_owner_loss_and_save() {
         last = (s, o, u);
     })
     .unwrap_or_else(|| panic!("T2 contact restore refused at {last:?}"));
+    slow_blasts(&mut copy);
     for _ in 0..30 {
         r.step();
         copy.step();
@@ -3739,6 +3765,7 @@ fn t2_energy_round_preserves_class_power_after_owner_loss_and_save() {
     let wave = &r.battle.waves[0].wave.wave;
     assert_eq!(wave.pressure_at([wave.size() / 2; 3]), heavy);
     let mut wave_copy = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+    slow_blasts(&mut wave_copy);
     for _ in 0..30 {
         r.step();
         wave_copy.step();

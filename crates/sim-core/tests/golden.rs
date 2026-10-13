@@ -18,6 +18,7 @@
 use modding::explosion::ExplosionConfig;
 use modding::range::RangeLayout;
 use modding::range_skirmish::WorldBattle;
+use sim_core::blast::battle::Weapon;
 use sim_core::blast::BlastRange;
 
 /// Хеш шестисотого тика эталонного боя.
@@ -30,7 +31,9 @@ use sim_core::blast::BlastRange;
 // ADR-690 поверх ADR-691: грунт/дёрн/дорога требуют вчетверо больше
 // fracture-энергии. Баланс намеренно меняет бой; точный кэш цены сам
 // по себе состояния не меняет. Свежий Windows CLI, analysis/262.
-const GOLDEN_600: u64 = 0x74f9_a6e6_513d_3711;
+// ADR-697: квоты быстрых взрывов намеренно меняют межтиковый темп
+// разрушения. Windows 1/4/8 — analysis/268, формат снимка прежний.
+const GOLDEN_600: u64 = 0x5131_bc7b_e4f8_74fa;
 
 /// Сценарий собирается **из тех же данных, что у игры**: `include_str!`
 /// разворачивается на сборке, ввода-вывода в тесте нет, а литералы
@@ -44,15 +47,20 @@ fn reference() -> BlastRange {
 
 /// **Эталонный бой даёт записанный хеш**, и прогон нагружает то, что
 /// хеш объявляет покрытым (ADR-116): обе армии стреляют, юниты гибнут,
-/// слой обрушения роняет рельеф, волны живут, обломки летят. Хеш над
+/// слой обрушения роняет рельеф, взрывные попадания есть, обломки летят. Хеш над
 /// холостой фазой не закреплял бы ничего.
 #[test]
 fn the_reference_battle_hashes_what_was_recorded() {
     let mut sim = reference();
-    let mut waves = 0usize;
+    let mut blast = false;
     for _ in 0..600 {
         sim.step();
-        waves = waves.max(sim.battle.wave_counts().iter().sum());
+        blast |= sim.battle.impacts.iter().any(|i| {
+            matches!(
+                i.weapon,
+                Weapon::Blast | Weapon::Canister | Weapon::Energy | Weapon::Annihilation
+            )
+        });
     }
     let fired = [true, false].map(|side| {
         (0..sim.units.len())
@@ -67,7 +75,7 @@ fn the_reference_battle_hashes_what_was_recorded() {
     );
     assert!(dead > 0, "за 600 тиков боя никто не погиб");
     assert!(sim.collapsed_cells > 0, "слой обрушения не работал");
-    assert!(waves > 0, "ни одной взрывной волны");
+    assert!(blast, "ни одного взрывного попадания");
     assert!(!sim.matter.debris.fragments.is_empty(), "нет обломков");
     assert!(sim.matter.economy.ledger.balanced());
     // Маршруты боя строятся продолжением по тикам (ADR-680): работа

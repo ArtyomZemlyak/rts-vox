@@ -3,6 +3,7 @@ use super::*;
 
 type Bounds = ([i32; 3], [i32; 3]);
 type HaloObservations<'a, F> = (&'a [Bounds], &'a F);
+type HaloBody = (usize, Bounds, Option<HitFrames>);
 
 #[derive(Default)]
 struct HaloDeposits {
@@ -33,16 +34,20 @@ fn outside_halo(q: [i64; 3], d: [i64; 3], length2: i64, radius: i32) -> bool {
 }
 
 impl BlastRange {
-    fn laser_cell(&self, p: [i32; 3], bounds: &[(usize, Bounds)]) -> Option<thermal::Cell> {
-        bounds.iter().find_map(|(id, (lo, hi))| {
+    fn laser_cell(&self, p: [i32; 3], bounds: &[HaloBody]) -> Option<thermal::Cell> {
+        bounds.iter().find_map(|(id, (lo, hi), frames)| {
             if (0..3).any(|a| p[a] < lo[a] || p[a] > hi[a]) {
                 return None;
             }
-            self.units[*id].hit(p).map(|(part, at)| thermal::Cell {
-                unit: *id as u16,
-                part: part as u8,
-                at: at.map(|v| v as u8),
-            })
+            let u = &self.units[*id];
+            frames
+                .as_ref()
+                .map_or_else(|| u.hit(p), |f| f.hit(u, p))
+                .map(|(part, at)| thermal::Cell {
+                    unit: *id as u16,
+                    part: part as u8,
+                    at: at.map(|v| v as u8),
+                })
         })
     }
 
@@ -53,7 +58,7 @@ impl BlastRange {
         source: [i64; 3],
         target: [i32; 3],
         cell: Option<thermal::Cell>,
-        bounds: &[(usize, Bounds)],
+        bounds: &[HaloBody],
     ) -> bool {
         let delta: [i64; 3] = std::array::from_fn(|a| i64::from(target[a]) * 16 + 8 - source[a]);
         let steps = (delta.iter().map(|v| v.abs()).max().unwrap() + 3) / 4;
@@ -167,9 +172,16 @@ impl BlastRange {
                     return None;
                 }
                 let box_at = boxes.map_or_else(|| u.bounds(), |boxes| boxes[id]);
-                (0..3)
-                    .all(|i| box_at.0[i] <= region_hi[i] && box_at.1[i] >= region_lo[i])
-                    .then_some((id, box_at))
+                if !(0..3).all(|i| box_at.0[i] <= region_hi[i] && box_at.1[i] >= region_lo[i]) {
+                    return None;
+                }
+                // Geometry is immutable until all radial rays have deposited
+                // their heat. Reuse transforms/segment boxes for this halo;
+                // the serial test oracle retains the original direct hit.
+                let frames = (!cfg!(test) || parallel).then(|| {
+                    HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta, u.turret_pitch)
+                });
+                Some((id, box_at, frames))
             })
             .collect();
         // Above both the terrain column and every nearby unit box there is
@@ -177,7 +189,7 @@ impl BlastRange {
         // exact distance to the beam for each empty-air candidate.
         let unit_top = bounds
             .iter()
-            .map(|(_, (_, hi))| hi[1] + 1)
+            .map(|(_, (_, hi), _)| hi[1] + 1)
             .max()
             .unwrap_or(0);
         let core_cell = contact.and_then(|p| self.laser_cell(p, &bounds));

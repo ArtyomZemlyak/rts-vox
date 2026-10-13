@@ -104,133 +104,194 @@ pub(super) fn capture(
     // Determine exactly the old slice boundary before dispatch. Outside
     // cells are free, but even those wait once the logical quota is spent.
     let (next, spent) = slice_end(e, budget);
+    // The serial test oracle keeps the original per-cell path, so comparing
+    // workers also checks row proofs, not merely parallel dispatch of them.
+    // Production capture always enables these exact row reductions.
+    let batch_rows = !cfg!(test) || parallel;
     let fill = |start: usize, output: &mut [u32]| {
         // A parallel chunk visits at most two Z planes. Share column
         // ceilings across heights locally; no cache crosses a worker.
         let first_z = start / (n * n);
         let last_z = (start + output.len() - 1) / (n * n);
         let mut ceilings = vec![u32::MAX; n * (last_z - first_z + 1)];
-        let mut cursor = World::mat_cursor();
-        let mut parts = Vec::new();
-        for (offset, resistance) in output.iter_mut().enumerate() {
-            let index = start + offset;
-            let (x, y, z) = (index % n, (index / n) % n, index / (n * n));
-            let p = [
-                origin[0] + x as i32 * c.cell_units,
-                origin[1] + y as i32 * c.cell_units,
-                origin[2] + z as i32 * c.cell_units,
-            ];
-            // Beyond the inscribed sphere the wave does not go: a reach
-            // the grid cuts is cut the same in every direction.
-            let (cx, cy, cz) = (
-                x as i32 - half as i32,
-                y as i32 - half as i32,
-                z as i32 - half as i32,
-            );
-            if cx * cx + cy * cy + cz * cz > radius2 {
-                *resistance = u32::MAX;
-                continue;
-            }
-            let end = [0, 1, 2].map(|a| p[a] + c.cell_units - 1);
-            // Under the world is bedrock: the wave does not run beneath the
-            // floor as through air and come up into the ground from below
-            // (ADR-681).
-            if end[1] < 0 {
-                *resistance = u32::MAX;
-                continue;
-            }
-            let look = dented[(z * n + y) * n + x];
-            let mut r = 0;
-            if p[1] < w.ny as i32 && end[1] >= 0 {
-                let ceiling = &mut ceilings[(z - first_z) * n + x];
-                if *ceiling == u32::MAX {
-                    *ceiling = 0;
-                    for dz in 0..c.cell_units {
-                        for dx in 0..c.cell_units {
-                            let wx = p[0] + dx;
-                            let wz = p[2] + dz;
-                            if wx >= 0 && wz >= 0 && wx < w.nx as i32 && wz < w.nz as i32 {
-                                *ceiling = (*ceiling).max(w.column_ceiling(wx as u32, wz as u32));
-                            }
+        let mut row_ceilings = vec![u32::MAX; last_z - first_z + 1];
+        let ceiling = |x: usize, z: usize, ceilings: &mut [u32]| {
+            let cached = &mut ceilings[(z - first_z) * n + x];
+            if *cached == u32::MAX {
+                *cached = 0;
+                let wx = origin[0] + x as i32 * c.cell_units;
+                let wz = origin[2] + z as i32 * c.cell_units;
+                for dz in 0..c.cell_units {
+                    for dx in 0..c.cell_units {
+                        let (x, z) = (wx + dx, wz + dz);
+                        if x >= 0 && z >= 0 && x < w.nx as i32 && z < w.nz as i32 {
+                            *cached = (*cached).max(w.column_ceiling(x as u32, z as u32));
                         }
                     }
                 }
-                if p[1] < *ceiling as i32 {
-                    let x0 = p[0].max(0);
-                    let x1 = (end[0] + 1).min(w.nx as i32);
-                    'terrain: for wz in p[2].max(0)..(end[2] + 1).min(w.nz as i32) {
-                        for wy in p[1].max(0)..(end[1] + 1).min(w.ny as i32) {
-                            if x1 <= x0 {
-                                continue;
-                            }
-                            let mut bits =
-                                w.solid_bits(x0 as u32, wy as u32, wz as u32, (x1 - x0) as u32);
-                            while bits != 0 {
-                                let q = [x0 + bits.trailing_zeros() as i32, wy, wz];
-                                bits &= bits - 1;
-                                let work = material_work(material_cached(w, &mut cursor, q), c);
-                                let dent = if look {
-                                    dents.get(&q).copied().unwrap_or(0)
-                                } else {
-                                    0
-                                };
-                                r = r.max(work.saturating_sub(dent));
-                                if r == maximum {
-                                    break 'terrain;
+            }
+            *cached
+        };
+        let mut cursor = World::mat_cursor();
+        let mut parts = Vec::new();
+        let mut offset = 0;
+        while offset < output.len() {
+            let index = start + offset;
+            let (x, y, z) = (index % n, index / n % n, index / (n * n));
+            let len = (n - x).min(output.len() - offset);
+            let wy = origin[1] + y as i32 * c.cell_units;
+            let (cy, cz) = (y as i32 - half as i32, z as i32 - half as i32);
+            let transverse = cy * cy + cz * cz;
+            // Exact constant rows: bedrock/outside the sphere, or verified
+            // air above terrain and every frozen hull in this Z strip. Only
+            // the spherical boundary is refined per cell. Quotas and the
+            // captured linear prefix remain unchanged.
+            if batch_rows && (wy + c.cell_units <= 0 || transverse > radius2) {
+                output[offset..offset + len].fill(u32::MAX);
+                offset += len;
+                continue;
+            }
+            if batch_rows && x == 0 && len == n {
+                let row = &mut row_ceilings[z - first_z];
+                if *row == u32::MAX {
+                    *row = (0..n).map(|x| ceiling(x, z, &mut ceilings)).max().unwrap();
+                }
+                let wz = origin[2] + z as i32 * c.cell_units;
+                let body = queries.iter().any(|(_, lo, hi, ..)| {
+                    wy <= hi[1]
+                        && wy + c.cell_units > lo[1]
+                        && wz <= hi[2]
+                        && wz + c.cell_units > lo[2]
+                });
+                if wy >= *row as i32 && !body {
+                    for (x, resistance) in output[offset..offset + len].iter_mut().enumerate() {
+                        let cx = x as i32 - half as i32;
+                        *resistance = if cx * cx + transverse > radius2 {
+                            u32::MAX
+                        } else {
+                            0
+                        };
+                    }
+                    offset += len;
+                    continue;
+                }
+            }
+            for (local, resistance) in output[offset..offset + len].iter_mut().enumerate() {
+                let offset = offset + local;
+                let index = start + offset;
+                let (x, y, z) = (index % n, (index / n) % n, index / (n * n));
+                let p = [
+                    origin[0] + x as i32 * c.cell_units,
+                    origin[1] + y as i32 * c.cell_units,
+                    origin[2] + z as i32 * c.cell_units,
+                ];
+                // Beyond the inscribed sphere the wave does not go: a reach
+                // the grid cuts is cut the same in every direction.
+                let (cx, cy, cz) = (
+                    x as i32 - half as i32,
+                    y as i32 - half as i32,
+                    z as i32 - half as i32,
+                );
+                if cx * cx + cy * cy + cz * cz > radius2 {
+                    *resistance = u32::MAX;
+                    continue;
+                }
+                let end = [0, 1, 2].map(|a| p[a] + c.cell_units - 1);
+                // Under the world is bedrock: the wave does not run beneath the
+                // floor as through air and come up into the ground from below
+                // (ADR-681).
+                if end[1] < 0 {
+                    *resistance = u32::MAX;
+                    continue;
+                }
+                let look = dented[(z * n + y) * n + x];
+                let mut r = 0;
+                if p[1] < w.ny as i32 && end[1] >= 0 {
+                    if p[1] < ceiling(x, z, &mut ceilings) as i32 {
+                        let x0 = p[0].max(0);
+                        let x1 = (end[0] + 1).min(w.nx as i32);
+                        'terrain: for wz in p[2].max(0)..(end[2] + 1).min(w.nz as i32) {
+                            for wy in p[1].max(0)..(end[1] + 1).min(w.ny as i32) {
+                                if x1 <= x0 {
+                                    continue;
+                                }
+                                let mut bits =
+                                    w.solid_bits(x0 as u32, wy as u32, wz as u32, (x1 - x0) as u32);
+                                while bits != 0 {
+                                    let q = [x0 + bits.trailing_zeros() as i32, wy, wz];
+                                    bits &= bits - 1;
+                                    let work = material_work(material_cached(w, &mut cursor, q), c);
+                                    let dent = if look {
+                                        dents.get(&q).copied().unwrap_or(0)
+                                    } else {
+                                        0
+                                    };
+                                    r = r.max(work.saturating_sub(dent));
+                                    if r == maximum {
+                                        break 'terrain;
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-            // Body resistance is independent of the terrain reduction. Ask
-            // only the intersecting part of each box, including suspended parts.
-            'bodies: for (u, lo, hi, pose, segments, query) in &queries {
-                if r >= unit_maximum {
-                    break;
-                }
-                if (0..3).any(|a| end[a] < lo[a] || p[a] > hi[a]) {
-                    continue;
-                }
-                if !e.point_contacts {
-                    // Same voxel-centre ownership as damage, including thin
-                    // rotated plates missed by the old world-point samples.
-                    query.visit_wave_cells(u, pose, segments, p, c.cell_units, |(part, cell)| {
-                        let occupied = if part == 0 {
-                            u.body.vol.get(cell[0], cell[1], cell[2])
-                        } else {
-                            !u.seg_gone[part - 1]
-                                && u.body.segments[part - 1]
-                                    .body
-                                    .vol
-                                    .get(cell[0], cell[1], cell[2])
-                        };
-                        if occupied {
-                            r = r.max(u.hit_resistance(Some((part, cell)), c));
-                        }
-                        r < unit_maximum
-                    });
+                // Body resistance is independent of the terrain reduction. Ask
+                // only the intersecting part of each box, including suspended parts.
+                'bodies: for (u, lo, hi, pose, segments, query) in &queries {
                     if r >= unit_maximum {
-                        break 'bodies;
+                        break;
                     }
-                    continue;
-                }
-                query.parts_in(u, p, end, &mut parts);
-                for wz in p[2].max(lo[2])..=end[2].min(hi[2]) {
-                    for wy in p[1].max(lo[1])..=end[1].min(hi[1]) {
-                        for wx in p[0].max(lo[0])..=end[0].min(hi[0]) {
-                            r = r.max(u.hit_resistance(
-                                query.hit_parts(u, [wx, wy, wz], parts.iter().copied()),
-                                c,
-                            ));
-                            if r >= unit_maximum {
-                                break 'bodies;
+                    if (0..3).any(|a| end[a] < lo[a] || p[a] > hi[a]) {
+                        continue;
+                    }
+                    if !e.point_contacts {
+                        // Same voxel-centre ownership as damage, including thin
+                        // rotated plates missed by the old world-point samples.
+                        query.visit_wave_cells(
+                            u,
+                            pose,
+                            segments,
+                            p,
+                            c.cell_units,
+                            |(part, cell)| {
+                                let occupied = if part == 0 {
+                                    u.body.vol.get(cell[0], cell[1], cell[2])
+                                } else {
+                                    !u.seg_gone[part - 1]
+                                        && u.body.segments[part - 1]
+                                            .body
+                                            .vol
+                                            .get(cell[0], cell[1], cell[2])
+                                };
+                                if occupied {
+                                    r = r.max(u.hit_resistance(Some((part, cell)), c));
+                                }
+                                r < unit_maximum
+                            },
+                        );
+                        if r >= unit_maximum {
+                            break 'bodies;
+                        }
+                        continue;
+                    }
+                    query.parts_in(u, p, end, &mut parts);
+                    for wz in p[2].max(lo[2])..=end[2].min(hi[2]) {
+                        for wy in p[1].max(lo[1])..=end[1].min(hi[1]) {
+                            for wx in p[0].max(lo[0])..=end[0].min(hi[0]) {
+                                r = r.max(u.hit_resistance(
+                                    query.hit_parts(u, [wx, wy, wz], parts.iter().copied()),
+                                    c,
+                                ));
+                                if r >= unit_maximum {
+                                    break 'bodies;
+                                }
                             }
                         }
                     }
                 }
+                *resistance = r;
             }
-            *resistance = r;
+            offset += len;
         }
     };
     let mut resistance = vec![0; next - e.captured];
@@ -269,6 +330,42 @@ mod tests {
                 3
             } else {
                 0
+            }
+        }
+    }
+
+    #[test]
+    fn contact_rows_match_voxel_oracle_at_edges_and_after_edits() {
+        use super::super::{material, read_cell_into, subcell_offsets};
+        let mut w = World::new(192, 64, 192, 100, Box::new(Ground));
+        for edited in [false, true] {
+            if edited {
+                for x in [0, 31, 63, 104, 191] {
+                    w.queue_edit(Edit::dig_if(x, 15, 96, 2));
+                    w.queue_edit(Edit::put(x, 42, 96, 3));
+                }
+                w.flush();
+            }
+            for edge in 1..=4 {
+                let offsets = subcell_offsets(edge);
+                for x in [-3, -1, 0, 15, 31, 62, 63, 103, 190, 192] {
+                    for y in [-3, -1, 0, 14, 15, 16, 38, 41, 63, 64] {
+                        for z in [-1, 0, 31, 63, 95, 96, 190, 192] {
+                            let p = [x, y, z];
+                            let mut want = (0u64, vec![99]);
+                            for (s, o) in offsets.iter().enumerate() {
+                                let mat = material(&w, std::array::from_fn(|a| p[a] + o[a]));
+                                if mat != 0 {
+                                    want.0 |= 1 << s;
+                                    want.1.push(mat);
+                                }
+                            }
+                            let mut mats = vec![99];
+                            let mask = read_cell_into(&w, p, edge, [0; 3], &offsets, &mut mats);
+                            assert_eq!((mask, mats), want, "{edited} {edge} {p:?}");
+                        }
+                    }
+                }
             }
         }
     }

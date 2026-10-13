@@ -5,21 +5,16 @@ fn crowded_waves(count: usize, capture: usize, propagation: usize) -> BlastRange
     let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
     let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
     let mut r = BlastRange::with_layout(config, layout).unwrap();
-    let text = include_str!("../../../data/explosion.ron")
-        .replace("half_cells: 20", "half_cells: 2")
-        .replace("cell_units: 2", "cell_units: 1")
-        .replace("energy: 3500", "energy: 1")
-        .replace("material_energy_j: 45000000", "material_energy_j: 0")
-        .replace(
-            "capture_cells_per_tick: 49152",
-            &format!("capture_cells_per_tick: {capture}"),
-        )
-        .replace(
-            "wave_work_per_tick: 32768",
-            &format!("wave_work_per_tick: {propagation}"),
-        );
+    let mut tiny = config;
+    tiny.half_cells = 2;
+    tiny.cell_units = 1;
+    tiny.energy = 1;
+    tiny.material_energy_j = 0;
+    tiny.capture_cells_per_tick = capture;
+    tiny.wave_work_per_tick = propagation;
     // These are accepted mod configurations, not invalid zero budgets.
-    r.battle.shell_config = ExplosionConfig::from_ron(&text).unwrap();
+    tiny.validate().unwrap();
+    r.battle.shell_config = tiny;
     assert_eq!(r.battle.shell_config.capture_cells_per_tick, capture);
     assert_eq!(r.battle.shell_config.wave_work_per_tick, propagation);
     // The tick's ceiling as small as one wave's budget: the legal quota
