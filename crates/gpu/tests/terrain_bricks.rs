@@ -42,6 +42,72 @@ fn dispatch(g: &Gpu, pipe: &wgpu::ComputePipeline, group: &wgpu::BindGroup, n: u
 }
 
 #[test]
+fn prewrapped_origin_matches_integer_modulo_on_gpu() {
+    let Some(g) = Gpu::new(wgpu::Backends::VULKAN) else {
+        eprintln!("no Vulkan device: toroidal address oracle skipped");
+        return;
+    };
+    let source = include_str!("../../render/src/terrain_common.wgsl");
+    let query = r#"
+@group(0) @binding(1) var<storage,read_write> counts:array<atomic<u32>>;
+@compute @workgroup_size(64)
+fn query(@builtin(global_invocation_id) id:vec3<u32>) {
+    let dims=vec3<u32>(p.terrain.xyz);let lo=vec3<u32>(p.terrain_origin.xyz);
+    var offset=vec3(id.x,id.x*73u,id.x*151u)%dims;
+    if id.x==0u {offset=vec3(0u);}
+    if id.x==1u {offset=dims-vec3(1u);}
+    let q=lo+offset;let result=wrap_voxel(q,dims);
+    if any(result!=q%dims) || any(result>=dims) {atomicAdd(&counts[0],1u);}
+    atomicAdd(&counts[1],1u);
+}
+"#;
+    let pipe = g.pipeline(
+        &format!("{source}\n{query}"),
+        "query",
+        "wrapped address oracle",
+    );
+    let fields = common::Layout::of(source);
+    let params = uniform(&g, &vec![0; fields.floats]);
+    let counts = g.storage(8, "errors and checked addresses");
+    let group = group(&g, &pipe, &[(1, &counts), (3, &params)]);
+    for dims in [[1280u32, 192, 1280], [64, 32, 64], [13, 7, 17], [8, 8, 8]] {
+        for origin in [
+            [0u32, 0, 0],
+            [856, 0, 552],
+            [1560, 96, 1352],
+            [41, 1, 57],
+            [1_000_001, 96, 5_000_007],
+        ] {
+            let mut p = vec![0f32; fields.floats];
+            for (name, value) in [
+                ("terrain", dims),
+                ("terrain_origin", origin),
+                (
+                    "terrain_wrap",
+                    [
+                        origin[0] % dims[0],
+                        origin[1] % dims[1],
+                        origin[2] % dims[2],
+                    ],
+                ),
+            ] {
+                for i in 0..3 {
+                    p[fields.at(name) + i] = value[i] as f32;
+                }
+            }
+            g.queue.write_buffer(
+                &params,
+                0,
+                &p.into_iter().flat_map(f32::to_le_bytes).collect::<Vec<_>>(),
+            );
+            dispatch(&g, &pipe, &group, 128);
+        }
+    }
+    let got = g.read_u32(&counts, 2);
+    assert_eq!(got, [0, 163_840]);
+}
+
+#[test]
 fn bricks_rebuild_after_removal_and_rays_preserve_thin_walls_in_wrapped_windows() {
     let Some(g) = Gpu::new(wgpu::Backends::VULKAN) else {
         eprintln!("no Vulkan device");
@@ -81,10 +147,14 @@ fn query(@builtin(global_invocation_id) gid:vec3<u32>) {
 "#;
     let common = include_str!("../../render/src/terrain_common.wgsl");
     let fast = g.pipeline(&format!("{common}\n{query}"), "query", "accelerated rays");
+    let wrapped_address = "let relative=q-vec3<u32>(p.terrain_origin.xyz)+vec3<u32>(p.terrain_wrap.xyz);\n    return select(relative,relative-dims,relative>=dims);";
+    let reference_source = common.replace("\r\n", "\n");
+    assert!(reference_source.contains(wrapped_address));
     let reference = g.pipeline(
         &format!(
             "{}\n{query}",
-            common
+            reference_source
+                .replace(wrapped_address, "return q%dims;")
                 .replace("let skip=brick_space(q);", "let skip=vec2<i32>(q.y+1,8);")
                 .replace("packed.x==0u &&", "false && packed.x==0u &&")
         ),
@@ -159,6 +229,13 @@ fn query(@builtin(global_invocation_id) gid:vec3<u32>) {
             0.0,
             origin[2] as f32,
             32.0,
+        ]);
+        let wrap = fields.at("terrain_wrap");
+        params[wrap..wrap + 4].copy_from_slice(&[
+            (origin[0] % 64) as f32,
+            0.0,
+            (origin[2] % 64) as f32,
+            0.0,
         ]);
         let params = uniform(&g, &params.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
         let mut rays = vec![];

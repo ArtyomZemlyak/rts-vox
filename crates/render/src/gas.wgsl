@@ -15,6 +15,7 @@ struct Params {
     energy:vec4<f32>, beam:vec4<f32>, weapon:vec4<f32>,
     look: vec4<f32>, distant:vec4<f32>, distant_bounds:vec4<f32>,
     energy_count:vec4<f32>, energy_sources:array<EnergySource,24>,
+    terrain_wrap:vec4<f32>,
 };
 struct Cell { flow: vec4<f32>, matter: vec4<f32> }; // v.xyz, pressure; excess kelvin/1000, fuel, O2, soot
 @group(0) @binding(0) var<uniform> p: Params;

@@ -76,6 +76,8 @@ pub struct GasParams {
     pub distant_bounds: Vec4,
     pub energy_count: Vec4,
     pub energy_sources: [EnergySource; ENERGY_SOURCES],
+    /// Physical toroidal coordinate of the window origin, computed once on CPU.
+    pub terrain_wrap: Vec4,
 }
 impl Default for GasParams {
     fn default() -> Self {
@@ -100,6 +102,7 @@ impl Default for GasParams {
             distant_bounds: Vec4::ZERO,
             energy_count: Vec4::ZERO,
             energy_sources: [EnergySource::default(); ENERGY_SOURCES],
+            terrain_wrap: Vec4::ZERO,
         }
     }
 }
@@ -1103,6 +1106,12 @@ fn prepare(
         .then(std::time::Instant::now);
     let mut allocated_ns = 0;
     let mut params = input.params;
+    params.terrain_wrap = Vec4::new(
+        (input.window.origin[0] as u32 % input.window.dims[0].max(1)) as f32,
+        (input.window.origin[1] as u32 % input.window.dims[1].max(1)) as f32,
+        (input.window.origin[2] as u32 % input.window.dims[2].max(1)) as f32,
+        0.0,
+    );
     for (entity, view) in &views {
         params.world_from_clip = view.world_from_view.to_matrix() * view.clip_from_view.inverse();
         params.clip_from_world = params.world_from_clip.inverse();
@@ -1278,6 +1287,7 @@ fn prepare(
         p.sky = params.sky;
         p.terrain = params.terrain;
         p.terrain_origin = params.terrain_origin;
+        p.terrain_wrap = params.terrain_wrap;
         p.distant = params.distant;
         p.distant_bounds = params.distant_bounds;
         p.weapon.y = params.weapon.y;

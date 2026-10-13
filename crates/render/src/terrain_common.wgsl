@@ -7,15 +7,17 @@ struct Params {
     clip_from_world: mat4x4<f32>, sun: vec4<f32>, sky: vec4<f32>,
     energy:vec4<f32>, beam:vec4<f32>, weapon:vec4<f32>, look:vec4<f32>, distant:vec4<f32>, distant_bounds:vec4<f32>,
     energy_count:vec4<f32>, energy_sources:array<EnergySource,24>,
+    terrain_wrap:vec4<f32>,
 };
 @group(0) @binding(3) var<uniform> p: Params;
 @group(0) @binding(5) var<storage, read> terrain: array<u32>;
 @group(0) @binding(7) var<storage, read> bricks: array<u32>;
 fn wrap_voxel(q:vec3<u32>,dims:vec3<u32>)->vec3<u32> {
-    // The starting window needs no wrap. Avoid three dynamic integer
-    // divisions at every ray step; moved windows retain the exact modulo.
-    if all(q<dims) {return q;}
-    return q%dims;
+    // Callers have already proved q lies in [origin, origin+dims).
+    // Adding the prewrapped origin gives [0, 2*dims); one subtraction
+    // replaces dynamic integer division at every step of every shadow ray.
+    let relative=q-vec3<u32>(p.terrain_origin.xyz)+vec3<u32>(p.terrain_wrap.xyz);
+    return select(relative,relative-dims,relative>=dims);
 }
 // The hierarchy is enabled only for aligned windows. Small test layouts
 // remain valid without padding or changing their physical storage.
