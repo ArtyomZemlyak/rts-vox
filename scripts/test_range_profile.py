@@ -1333,10 +1333,50 @@ class ReportTests(unittest.TestCase):
             out.write("PROFILE " + " ".join(f"{k}={v}" for k, v in fields.items()) + "\n")
         path = self.path / "world-battle.manifest.json"
         manifest = json.loads(path.read_text()); manifest["RenderTimeline"] = True
-        if fields["render_timeline_schema"] == 4:
+        if fields["render_timeline_schema"] >= 4:
             manifest["RenderSpanLimit"] = fields["render_span_limit"]
         path.write_text(json.dumps(manifest))
         return spans
+
+    def test_main_schedule_boundaries_cover_previous_frame_gap(self):
+        spans = self.render_fixture()
+        for name, start, end in [('main_after_update', 1210, 1290), ('main_before_update_next', 1900000, 1990000)]:
+            spans.append(dict(spans[0], stage=name, begin_ns=str(start), end_ns=str(end)))
+        spans.sort(key=lambda row: int(row['begin_ns']))
+        for row in spans:
+            row.update({key: '' for key in ('completed', 'input_frame_row', *profile.GAS_WORK_FIELDS, *profile.GAS_EXTRACT_FIELDS)})
+        metadata = dict(render_timeline_schema=5, render_gas_details='false', render_span_bytes=336)
+        self.render_fixture(spans, **metadata)
+        result = profile.analyze(self.path)
+        self.assertTrue(result['valid_for_comparison'])
+        self.assertAlmostEqual(result['render_timeline']['stage_ms']['main_after_update']['mean'], .00008)
+        gap = result['render_timeline']['main_gap_accounting']
+        self.assertAlmostEqual(sum(v['total_ms'] for v in gap['parts'].values()), gap['total_ms'])
+        self.render_fixture([s for s in spans if s['stage']!='main_after_update'], **metadata)
+        with self.assertRaisesRegex(ValueError,'Main schedule coverage'):
+            profile.analyze(self.path)
+        next(s for s in spans if s['stage']=='main_before_update_next')['end_ns'] = '2000001'
+        self.render_fixture(spans, **metadata)
+        with self.assertRaisesRegex(ValueError,'following gap'):
+            profile.analyze(self.path)
+
+    def test_gpu_mode_and_maximize_are_independent_acceptance_conditions(self):
+        self.write()
+        file = self.path/'world-battle.manifest.json'
+        manifest = json.loads(file.read_text())
+        manifest['GpuTimestamps'] = True
+        file.write_text(json.dumps(manifest))
+        log = self.path/'world-battle.log'
+        log.write_text(log.read_text()+'GPU render/example/elapsed_gpu n=1 p50_ms=1 p95_ms=1 p99_ms=1 max_ms=1 mean_ms=1\n')
+        result = profile.analyze(self.path)
+        self.assertTrue(result['valid_for_comparison'])
+        self.assertFalse(result['acceptance_eligible'])
+        self.assertEqual(result['gpu']['schema'],0)
+        manifest['RequestedMaximized'] = True
+        file.write_text(json.dumps(manifest))
+        self.assertIn('window_maximize_mode_mismatch', profile.analyze(self.path)['reasons'])
+        log.write_text(log.read_text()+'PROFILE window_maximize_requested=true\n')
+        self.assertTrue(profile.analyze(self.path)['valid_for_comparison'])
 
     def test_render_source_identity_and_async_overlap_are_not_double_counted(self):
         self.render_fixture()

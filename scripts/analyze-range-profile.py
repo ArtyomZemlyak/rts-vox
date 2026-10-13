@@ -13,6 +13,7 @@ import math
 from pathlib import Path
 import re
 import statistics
+import range_gpu_profile
 
 
 def read_csv(path):
@@ -841,17 +842,20 @@ def analyze_render_timeline(directory, scenario, log, manifest, frames, top, rol
     span_bytes = int(metadata[0][9]) if metadata[0][9] else None
     budget_valid = (limit == RENDER_SPAN_LIMIT and span_bytes is None) if schema < 4 else (
         1 <= limit <= RENDER_MAX_SPANS and span_bytes is not None and 1 <= span_bytes <= 1024)
-    if schema not in (1, 2, 3, 4) or (schema == 1 and metadata[0][8]) or (schema >= 2 and not metadata[0][8]) or not budget_valid or retained != min(started, limit) or started != retained + dropped or incomplete > retained or retained == 0:
+    if schema not in (1, 2, 3, 4, 5) or (schema == 1 and metadata[0][8]) or (schema >= 2 and not metadata[0][8]) or not budget_valid or retained != min(started, limit) or started != retained + dropped or incomplete > retained or retained == 0:
         raise ValueError("Render timeline metadata budget/count mismatch")
     issues = []
-    if schema == 4 and (manifest or {}).get("RenderSpanLimit") != limit:
+    if schema >= 4 and (manifest or {}).get("RenderSpanLimit") != limit:
         issues.append("render_timeline_budget_manifest_mismatch")
-    if schema == 4 and dropped:
+    if schema >= 4 and dropped:
         issues.append("render_timeline_truncated")
     if not all(r.get("frame_end_ns") for r in frames) or cutoff < int(frames[-1]["frame_end_ns"]):
         raise ValueError("Render timeline cutoff/frame clock mismatch")
     gas_details = metadata[0][8] == "true"
     allowed_stages = RENDER_STAGES | GAS_STAGES if gas_details else RENDER_STAGES
+    main_stages = {'main_after_update', 'main_before_update_next'}
+    if schema >= 5:
+        allowed_stages = allowed_stages | main_stages
     groups, intervals, pending = {}, {}, 0
     count, last_begin = 0, -1
     for row in read_csv(path):
@@ -926,7 +930,7 @@ def analyze_render_timeline(directory, scenario, log, manifest, frames, top, rol
                     raise ValueError("Render timeline extraction phase scope mismatch")
                 group[stage].update(completed=row["completed"] == "1", work=work, input_frame_row=payload_row)
         if roles is not None and counters["begin_os_thread"] is not None:
-            roles.setdefault(str(counters["begin_os_thread"]), set()).add(stage if stage.startswith("render_") else "render_" + stage)
+            roles.setdefault(str(counters["begin_os_thread"]), set()).add(stage if stage.startswith(("render_", "main_")) else "render_" + stage)
         if b is not None:
             intervals.setdefault(stage, []).append((a, b))
     if count != retained or pending != incomplete:
@@ -956,6 +960,18 @@ def analyze_render_timeline(directory, scenario, log, manifest, frames, top, rol
             x, y = group.get(before), group.get(after)
             if x and y and (x["end_ns"] is None or x["end_ns"] > y["begin_ns"]):
                 raise ValueError("Render timeline stage order mismatch")
+    if schema >= 5 and not dropped:
+        for idx, group in groups.items():
+            if idx+1 >= len(frames):
+                continue
+            for stage in main_stages:
+                span = group.get(stage)
+                if span is None or span['end_ns'] is None:
+                    raise ValueError('Main schedule coverage missing')
+                if span['end_ns'] > int(frames[idx+1]['frame_start_ns']):
+                    raise ValueError('Main schedule exceeds its following gap')
+            if group['main_after_update']['end_ns'] > group['main_before_update_next']['begin_ns']:
+                raise ValueError('Main schedule order mismatch')
     # Validate completeness before the cutoff, except the trailing active frame
     # and explicitly dropped records. Missing interior stages are corrupt data.
     pipelined = metadata[0][7] == "true"
@@ -1033,6 +1049,30 @@ def analyze_render_timeline(directory, scenario, log, manifest, frames, top, rol
         gaps.append(dict(row=idx, gap_ms=(b - a) / 1e6, overlap_ms=spans,
                          unobserved_or_other_ms=max(0, b - a - overlap_ns(covered_index, a, b)) / 1e6))
     gaps.sort(key=lambda r: -r["gap_ms"])
+    main_gap = None
+    if schema >= 5 and not dropped and pipelined:
+        parts = {name: [] for name in ('main_after_update', 'pipeline_handoff', 'main_before_update_next', 'unmarked_gap')}
+        gap_total = 0.0
+        for idx in range(len(frames)-1):
+            group = groups.get(idx, {})
+            a, b = int(frames[idx]['frame_end_ns']), int(frames[idx+1]['frame_start_ns'])
+            spans = [group.get(name) for name in parts if name != 'unmarked_gap']
+            if any(span is None or span['end_ns'] is None for span in spans):
+                raise ValueError('Main gap timeline coverage missing')
+            previous = a
+            wall = 0.0
+            for name,span in zip(parts,spans):
+                if span['begin_ns'] < previous or span['end_ns'] > b:
+                    raise ValueError('Main gap timeline overlaps or exceeds its interval')
+                duration = (span['end_ns']-span['begin_ns'])/1e6
+                parts[name].append(duration)
+                wall += duration
+                previous = span['end_ns']
+            gap_total += (b-a)/1e6
+            parts['unmarked_gap'].append(max(0.0,(b-a)/1e6-wall))
+        main_gap = dict(intervals=len(frames)-1, total_ms=gap_total,
+                        parts={name: dict(**stats(values), total_ms=sum(values)) for name,values in parts.items()},
+                        limitation='Disjoint main schedule/handoff wall within the following gap; handoff includes waiting and extraction, not CPU busy time.')
     gas_summary = None
     if gas_details:
         actual_extracts = sum("gas_extract" in g for g in groups.values())
@@ -1043,7 +1083,7 @@ def analyze_render_timeline(directory, scenario, log, manifest, frames, top, rol
             reused_payload_calls=sum(g.get("gas_prepare", {}).get("input_frame_row") not in (None, idx) for idx, g in groups.items()),
             transfer_totals={field: sum(g.get("gas_terrain_upload", {}).get("work", {}).get(field, 0) for g in groups.values())
                              for field in ("terrain_writes", "terrain_bytes", "terrain_submits")})
-    summary = dict(schema=schema, gas_details=gas_details, gas_summary=gas_summary, pipelined=pipelined, cutoff_ns=cutoff, retained=retained, dropped=dropped,
+    summary = dict(schema=schema, gas_details=gas_details, gas_summary=gas_summary, main_gap_accounting=main_gap, pipelined=pipelined, cutoff_ns=cutoff, retained=retained, dropped=dropped,
         span_limit=limit, span_bytes=span_bytes, reserved_span_bytes=limit * span_bytes if span_bytes else None,
         capture_not_truncated=dropped == 0, last_source_row=max(groups) if groups else None,
         last_span_begin_ns=last_begin,
@@ -1373,6 +1413,11 @@ def analyze(directory, scenario="world-battle", top=12):
     validity = manifest.get("Validity") or {} if manifest else {}
     reasons = list(validity.get("Reasons") or [])
     camera_tour = camera_tour_capture(directory, scenario, log, manifest, len(frames), reasons, frames)
+    gpu = range_gpu_profile.capture(directory, scenario, log, manifest, frames, reasons)
+    maximize = re.findall(r'^PROFILE window_maximize_requested=(true|false)$', log, re.M)
+    requested_maximize = bool((manifest or {}).get('RequestedMaximized'))
+    if (requested_maximize and len(maximize) != 1) or len(maximize) > 1 or (maximize and (maximize[0]=='true') != requested_maximize):
+        reasons.append('window_maximize_mode_mismatch')
     if not manifest:
         reasons.append("legacy_run_without_manifest")
     elif not manifest.get("BinarySha256") or not manifest.get("InputHashes"):
@@ -1449,7 +1494,7 @@ def analyze(directory, scenario="world-battle", top=12):
     return dict(schema=6, directory=str(directory), scenario=scenario, manifest=manifest,
         valid_for_comparison=bool(validity.get("ValidForComparison")) and not reasons,
         meets_simulation_rate=meets_rate,
-        acceptance_eligible=bool(validity.get("ValidForComparison")) and not reasons and meets_rate and not bool((manifest or {}).get("CorePhases")) and stall_trace is None and not bool((manifest or {}).get("CoreTriggerMilliseconds")) and render_trace is None and not bool((manifest or {}).get("RenderTimeline")) and not task_build and render_tasks is None and not bool((manifest or {}).get("RenderTasks")) and not bool((manifest or {}).get("OsPressure")),
+        acceptance_eligible=bool(validity.get("ValidForComparison")) and not bool((manifest or {}).get("GpuTimestamps")) and not reasons and meets_rate and not bool((manifest or {}).get("CorePhases")) and stall_trace is None and not bool((manifest or {}).get("CoreTriggerMilliseconds")) and render_trace is None and not bool((manifest or {}).get("RenderTimeline")) and not task_build and render_tasks is None and not bool((manifest or {}).get("RenderTasks")) and not bool((manifest or {}).get("OsPressure")),
         reasons=sorted(set(reasons)), frames=len(frames), frame_ms=stats([v for v in frame_times if v is not None]),
         frame_timing_metric="profile_begin_interval" if aligned else "bevy_time_delta_unaligned",
         bevy_frame_ms=stats([float(r["frame_ms"]) for r in frames]),
@@ -1461,6 +1506,7 @@ def analyze(directory, scenario="world-battle", top=12):
         actual_compute_workers=compute,
         actual_render_context=context,
         camera_tour=camera_tour,
+        gpu=gpu, main_wall_accounting=range_gpu_profile.frame_accounting(frames),
         os_cpu_window=cpu_window,
         terrain_journal_maintenance=journal_maintenance(log),
         task_families=task_families, physics_thread_totals=list(physics_threads.values()), actor_thread_totals=list(actor_threads.values()),
@@ -1521,6 +1567,10 @@ def compare(a, b):
             problems.append(f"{label}:simulation_not_realtime")
     keys = ["Scenario", "RequestedSeconds", "TargetFps", "RayonEnvironment", "NavigationWorkers", "GpuTimestamps",
             "CpuThreads", "CorePhases", "EnvironmentSampleIntervalMs", "InputHashes", "RequestedWindow", "RustLog"]
+    if bool((a["manifest"] or {}).get("RequestedMaximized")) != bool((b["manifest"] or {}).get("RequestedMaximized")):
+        problems.append("different:RequestedMaximized")
+    if (a.get("gpu") or {}).get("schema") != (b.get("gpu") or {}).get("schema"):
+        problems.append("different:gpu_schema")
     if bool((a["manifest"] or {}).get("CameraTour")) != bool((b["manifest"] or {}).get("CameraTour")):
         problems.append("different:CameraTour")
     if bool((a["manifest"] or {}).get("RenderTimeline")) != bool((b["manifest"] or {}).get("RenderTimeline")):
@@ -1747,6 +1797,28 @@ def markdown(report):
         for gap in timeline["slow_gaps"]:
             lines.append(f"- row {gap['row']}: gap {gap['gap_ms']:.3f}ms, stage overlaps {gap['overlap_ms']}, unobserved/other {gap['unobserved_or_other_ms']:.3f}ms.")
         lines += ["", *timeline["limitations"]]
+    accounting = report.get('main_wall_accounting') or {}
+    if accounting.get('status') == 'partitioned':
+        lines += ["", "Disjoint main wall (preceding Update + following gap; other-thread scopes overlap):", "", "| Part | Mean per observed interval, ms | p99, ms | Wall share |", "|---|---:|---:|---:|"]
+        for name,value in sorted(accounting['parts'].items(), key=lambda item: -item[1]['mean']):
+            lines.append(f"| {name} | {value['mean']:.3f} | {value['p99']:.3f} | {value['wall_fraction']:.1%} |")
+        lines += ["", accounting['limitation']]
+    main_gap = (report.get('render_timeline') or {}).get('main_gap_accounting')
+    if main_gap:
+        lines += ["", "Following gap partition (already included in outside_update_ms):", "", "| Part | Mean per interval, ms | p99, ms |", "|---|---:|---:|"]
+        for name,value in sorted(main_gap['parts'].items(), key=lambda item: -item[1]['mean']):
+            lines.append(f"| {name} | {value['mean']:.3f} | {value['p99']:.3f} |")
+        lines += ["", main_gap['limitation']]
+    gpu = report.get('gpu')
+    if gpu:
+        lines += ["", f"GPU evidence: {gpu['status']}.", "", "| GPU pass | Observed samples | Mean, ms | p99, ms | Max, ms |", "|---|---:|---:|---:|---:|"]
+        for name,value in sorted(gpu['passes'].items(), key=lambda item: -item[1]['mean']):
+            lines.append(f"| {name} | {value['samples']} | {value['mean']:.3f} | {value['p99']:.3f} | {value['max']:.3f} |")
+        if gpu.get('groups'):
+            lines += ["", f"Published batches: {gpu['batches']} / main frames: {gpu['main_frames']}; this is not complete GPU frame coverage.", "", "| Observed sibling scopes | Mean per publication batch, ms | p99, ms |", "|---|---:|---:|"]
+            for name,value in sorted(gpu['groups'].items(), key=lambda item: -item[1]['mean']):
+                lines.append(f"| {name} | {value['mean']:.3f} | {value['p99']:.3f} |")
+        lines += ["", gpu['limitation']]
     if "comparison" in report:
         lines += ["", f"Pair comparison: {json.dumps(report['comparison'])}"]
     return "\n".join(lines) + "\n"

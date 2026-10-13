@@ -30,6 +30,15 @@ Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log $maximizedL
 Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($log + "`nPROFILE window_maximize_requested=false") -Maximized).Reasons -contains 'window_maximize_mode_mismatch') 'Rejected maximize request accepted'
 Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($log + "`nPROFILE window_maximize_requested=false")).AcceptanceEligible) 'Explicit restored window rejected'
 Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($maximizedLog + "`nPROFILE window_maximize_requested=true") -Maximized).Reasons -contains 'window_maximize_mode_mismatch') 'Duplicate maximize acknowledgement accepted'
+$gpuLog = $log + "`nPROFILE gpu_capture_schema=1 gpu_sample_limit=1000000 gpu_samples_seen=1 gpu_samples_retained=1 gpu_samples_dropped=0 gpu_samples_invalid=0 gpu_clock=publication_without_source_frame"
+$gpu = Get-RangeValidity $rows -Scenario world-battle -Log $gpuLog -Gpu
+Assert-Profile ($gpu.ValidForComparison -and -not $gpu.AcceptanceEligible -and $gpu.Mode -eq 'gpu_diagnostic') 'GPU diagnostic accepted as plain FPS benchmark'
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log $log -Gpu).Reasons -contains 'gpu_capture_metadata_missing') 'GPU flag without GPU evidence accepted'
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log $gpuLog).Reasons -contains 'gpu_capture_mode_mismatch') 'Undeclared GPU capture accepted'
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($gpuLog.Replace('gpu_samples_seen=1','gpu_samples_seen=2').Replace('gpu_samples_dropped=0','gpu_samples_dropped=1')) -Gpu).Reasons -contains 'gpu_samples_truncated') 'Truncated GPU data accepted'
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($gpuLog.Replace('gpu_samples_seen=1','gpu_samples_seen=0').Replace('gpu_samples_retained=1','gpu_samples_retained=0')) -Gpu).Reasons -contains 'gpu_samples_unavailable') 'Empty GPU data accepted'
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($gpuLog.Replace('gpu_samples_seen=1','gpu_samples_seen=2').Replace('gpu_samples_invalid=0','gpu_samples_invalid=1')) -Gpu).Reasons -contains 'gpu_samples_invalid') 'Invalid GPU values accepted'
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($gpuLog.Replace('gpu_samples_seen=1','gpu_samples_seen=3')) -Gpu).Reasons -contains 'gpu_sample_count_mismatch') 'Incorrect GPU counts accepted'
 $tourLog = $log + "`nPROFILE camera_tour_schema=1 camera_tour_clock=wall camera_tour_route=bases_pan_zoom_v1"
 $tour = Get-RangeValidity $rows -Scenario world-battle -Log $tourLog -CameraTour
 Assert-Profile $tour.ValidForComparison 'Declared camera tour rejected'
@@ -63,12 +72,14 @@ $renderV3 = Get-RangeValidity $rows -Scenario world-battle -Log ($renderV2Log.Re
 Assert-Profile ($renderV3.ValidForComparison -and -not $renderV3.AcceptanceEligible) 'Extract phase schema used for FPS acceptance or rejected'
 $noPhaseMode = Get-RangeValidity $rows -Scenario world-battle -Log ($renderLog.Replace('render_timeline_schema=1 ', 'render_timeline_schema=3 ')) -RenderTimeline
 Assert-Profile ($noPhaseMode.Reasons -contains 'render_timeline_detail_mode_missing') 'Extract phase schema accepted without mode'
-Assert-Profile ((Get-RangeRenderSpanLimit -Seconds 5) -eq 100000 -and (Get-RangeRenderSpanLimit -Seconds 20) -eq 109200 -and (Get-RangeRenderSpanLimit -Seconds 120) -eq 629200 -and (Get-RangeRenderSpanLimit -Seconds 3600) -eq 1000000 -and (Get-RangeRenderSpanLimit -Seconds 120 -Requested 3) -eq 3) 'Duration budget diverged from native contract'
+Assert-Profile ((Get-RangeRenderSpanLimit -Seconds 5) -eq 100000 -and (Get-RangeRenderSpanLimit -Seconds 20) -eq 126000 -and (Get-RangeRenderSpanLimit -Seconds 120) -eq 726000 -and (Get-RangeRenderSpanLimit -Seconds 3600) -eq 1000000 -and (Get-RangeRenderSpanLimit -Seconds 120 -Requested 3) -eq 3) 'Duration budget diverged from native contract'
 $renderV4Log = $renderV2Log.Replace('render_timeline_schema=2 ', 'render_timeline_schema=4 ').Replace('render_span_limit=100000 ', 'render_span_limit=629200 ') + ' render_span_bytes=256'
 $renderV4 = Get-RangeValidity $rows -Scenario world-battle -Log $renderV4Log -RenderTimeline -RenderSpanLimit 629200
 Assert-Profile ($renderV4.ValidForComparison -and -not $renderV4.AcceptanceEligible) 'Duration budget rejected or used for FPS acceptance'
 $wrongBudget = Get-RangeValidity $rows -Scenario world-battle -Log $renderV4Log -RenderTimeline -RenderSpanLimit 100000
 Assert-Profile ($wrongBudget.Reasons -contains 'render_timeline_budget_manifest_mismatch') 'Requested/actual trace budget mismatch hidden'
+$renderV5 = Get-RangeValidity $rows -Scenario world-battle -Log ($renderV4Log.Replace('render_timeline_schema=4 ', 'render_timeline_schema=5 ')) -RenderTimeline -RenderSpanLimit 629200
+Assert-Profile ($renderV5.ValidForComparison -and -not $renderV5.AcceptanceEligible) 'Main schedule diagnostic rejected or accepted as plain FPS'
 $truncatedLog = $renderV4Log.Replace('render_span_limit=629200 ', 'render_span_limit=7 ').Replace('render_spans_started=7 ', 'render_spans_started=8 ').Replace('render_spans_dropped=0 ', 'render_spans_dropped=1 ')
 $truncated = Get-RangeValidity $rows -Scenario world-battle -Log $truncatedLog -RenderTimeline -RenderSpanLimit 7
 Assert-Profile (-not $truncated.ValidForComparison -and $truncated.Reasons -contains 'render_timeline_truncated') 'Dropped late trace accepted for comparison'

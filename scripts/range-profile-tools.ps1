@@ -28,7 +28,7 @@ function Get-RangeRenderSpanLimit {
     param([ValidateRange(1, 3600)][int]$Seconds, [ValidateRange(0, 1000000)][int]$Requested = 0)
     if ($Requested -gt 0) { return $Requested }
     # Same bounded planning rule as render::timeline::span_limit_for_seconds.
-    [int][Math]::Min(1000000, [Math]::Max(100000, ($Seconds + 1) * 400 * 13))
+    [int][Math]::Min(1000000, [Math]::Max(100000, ($Seconds + 1) * 400 * 15))
 }
 function Get-RangeCompetingProcesses {
     param([int[]]$Exclude = @(), [string[]]$AdditionalNames = @())
@@ -104,7 +104,7 @@ function Get-RangeTaskLogFilter {
 
 function Get-RangeValidity {
     param([object[]]$Rows, [string[]]$Reasons = @(), [string]$Scenario, [string]$Log,
-        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0, [switch]$RenderTasks, [int]$ComputeWorkers = 0, [int]$PhysicsWorkers = 0, [int]$NavigationWorkers = 0, [switch]$CameraTour, [switch]$OsPressure, [switch]$Maximized)
+        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0, [switch]$RenderTasks, [int]$ComputeWorkers = 0, [int]$PhysicsWorkers = 0, [int]$NavigationWorkers = 0, [switch]$CameraTour, [switch]$OsPressure, [switch]$Maximized, [switch]$Gpu)
     $issues = [System.Collections.Generic.List[string]]::new()
     foreach ($reason in $Reasons) { $issues.Add($reason) }
     $timing = Get-RangeFrameTimes -Rows $Rows
@@ -141,6 +141,19 @@ function Get-RangeValidity {
         ($maximizeRequests.Count -eq 1 -and ($maximizeRequests[0].Groups[1].Value -eq 'true') -ne [bool]$Maximized)) {
         $issues.Add('window_maximize_mode_mismatch')
     }
+    $gpuMeta = @([regex]::Matches($Log, '(?m)^PROFILE gpu_capture_schema=1 gpu_sample_limit=(\d+) gpu_samples_seen=(\d+) gpu_samples_retained=(\d+) gpu_samples_dropped=(\d+) gpu_samples_invalid=(\d+) gpu_clock=publication_without_source_frame\r?$'))
+    if ($Gpu) {
+        if ($gpuMeta.Count -ne 1) { $issues.Add('gpu_capture_metadata_missing') }
+        else {
+            $g = $gpuMeta[0].Groups
+            $limit = [long]$g[1].Value; $seen = [long]$g[2].Value; $kept = [long]$g[3].Value
+            $dropped = [long]$g[4].Value; $invalid = [long]$g[5].Value
+            if ($limit -lt 1 -or $limit -gt 1000000 -or $kept -gt $limit -or $seen -ne ($kept + $dropped + $invalid)) { $issues.Add('gpu_sample_count_mismatch') }
+            if ($kept -eq 0) { $issues.Add('gpu_samples_unavailable') }
+            if ($dropped -gt 0) { $issues.Add('gpu_samples_truncated') }
+            if ($invalid -gt 0) { $issues.Add('gpu_samples_invalid') }
+        }
+    } elseif ($Log -match '(?m)^PROFILE gpu_capture_schema=') { $issues.Add('gpu_capture_mode_mismatch') }
     $contexts = @([regex]::Matches($Log, '(?m)^PROFILE render_context(?:_step=\d+ value)?=(RenderContext \{[^\r\n]+\})\r?$'))
     $focusValues = @($contexts | ForEach-Object {
         if ($_.Groups[1].Value -match '\bfocused: (true|false)(?:,| \})') { $Matches[1] }
@@ -169,7 +182,7 @@ function Get-RangeValidity {
         $issues.Add('software_adapter')
     }
     if ($RenderTimeline) {
-        $renderMeta = [regex]::Matches($Log, '(?m)^PROFILE render_timeline_schema=([1234]) render_span_limit=(\d+) render_spans_started=(\d+) render_spans_retained=(\d+) render_spans_dropped=(\d+) render_spans_incomplete=(\d+) render_cutoff_ns=\d+ render_pipelined=(true|false)(?: render_gas_details=(true|false))?(?: render_span_bytes=(\d+))?\r?$')
+        $renderMeta = [regex]::Matches($Log, '(?m)^PROFILE render_timeline_schema=([12345]) render_span_limit=(\d+) render_spans_started=(\d+) render_spans_retained=(\d+) render_spans_dropped=(\d+) render_spans_incomplete=(\d+) render_cutoff_ns=\d+ render_pipelined=(true|false)(?: render_gas_details=(true|false))?(?: render_span_bytes=(\d+))?\r?$')
         if ($renderMeta.Count -ne 1) { $issues.Add('render_timeline_metadata_missing') }
         else {
             $g = $renderMeta[0].Groups
@@ -177,16 +190,16 @@ function Get-RangeValidity {
             $started = [long]$g[3].Value; $retained = [long]$g[4].Value
             $dropped = [long]$g[5].Value; $incomplete = [long]$g[6].Value
             if (($schema -lt 4 -and ($limit -ne 100000 -or $g[9].Success)) -or
-                ($schema -eq 4 -and ($limit -lt 1 -or $limit -gt 1000000 -or -not $g[9].Success -or [long]$g[9].Value -lt 1 -or [long]$g[9].Value -gt 1024)) -or
+                ($schema -ge 4 -and ($limit -lt 1 -or $limit -gt 1000000 -or -not $g[9].Success -or [long]$g[9].Value -lt 1 -or [long]$g[9].Value -gt 1024)) -or
                 $retained -ne [Math]::Min($started, $limit) -or $started -ne ($retained + $dropped) -or $incomplete -gt $retained -or $retained -eq 0) {
                 $issues.Add('render_timeline_budget_count_mismatch')
             }
-            if ($schema -eq 4 -and $RenderSpanLimit -gt 0 -and $limit -ne $RenderSpanLimit) { $issues.Add('render_timeline_budget_manifest_mismatch') }
-            if ($schema -eq 4 -and $dropped -gt 0) { $issues.Add('render_timeline_truncated') }
+            if ($schema -ge 4 -and $RenderSpanLimit -gt 0 -and $limit -ne $RenderSpanLimit) { $issues.Add('render_timeline_budget_manifest_mismatch') }
+            if ($schema -ge 4 -and $dropped -gt 0) { $issues.Add('render_timeline_truncated') }
         }
     }
-    if ($RenderTimeline -and $Log -match '(?m)^PROFILE render_timeline_schema=[234] ' -and
-        $Log -notmatch '(?m)^PROFILE render_timeline_schema=[234] [^\r\n]+ render_gas_details=(true|false)( render_span_bytes=\d+)?\r?$') {
+    if ($RenderTimeline -and $Log -match '(?m)^PROFILE render_timeline_schema=[2345] ' -and
+        $Log -notmatch '(?m)^PROFILE render_timeline_schema=[2345] [^\r\n]+ render_gas_details=(true|false)( render_span_bytes=\d+)?\r?$') {
         $issues.Add('render_timeline_detail_mode_missing')
     }
     # A separate comparison key must still match scenario, inputs and flags.
@@ -218,13 +231,13 @@ function Get-RangeValidity {
     $meetsRate = $Scenario -eq 'actions' -or $ticks -ge ([long][Math]::Floor($seconds * $rate) - 1)
     [pscustomobject]@{
         ValidForComparison = $valid
-        AcceptanceEligible = $valid -and -not $CorePhases -and -not $TriggerPhases -and -not $RenderTimeline -and -not $taskBuild -and -not $RenderTasks -and -not $OsPressure -and $meetsRate
+        AcceptanceEligible = $valid -and -not $Gpu -and -not $CorePhases -and -not $TriggerPhases -and -not $RenderTimeline -and -not $taskBuild -and -not $RenderTasks -and -not $OsPressure -and $meetsRate
         Reasons = @($issues | Select-Object -Unique)
         SimulationTicks = $ticks
         ObservedSeconds = $seconds
         SimulationRealtimeRatio = if ($seconds -gt 0) { $ticks / ($seconds * $rate) } else { 0.0 }
         MeetsSimulationRate = $meetsRate
-        Mode = if ($RenderTasks) { 'render_task_diagnostic' } elseif ($RenderTimeline) { 'render_diagnostic' } elseif ($CorePhases) { 'diagnostic' } elseif ($TriggerPhases) { 'trigger_diagnostic' } elseif ($OsPressure) { 'os_pressure_diagnostic' } else { 'timing' }
+        Mode = if ($RenderTasks) { 'render_task_diagnostic' } elseif ($RenderTimeline) { 'render_diagnostic' } elseif ($CorePhases) { 'diagnostic' } elseif ($TriggerPhases) { 'trigger_diagnostic' } elseif ($OsPressure) { 'os_pressure_diagnostic' } elseif ($Gpu) { 'gpu_diagnostic' } else { 'timing' }
         FrameTimingMetric = $timing.Metric
     }
 }

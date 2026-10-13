@@ -19,6 +19,7 @@ use bevy::core_pipeline::tonemapping::tonemapping;
 use bevy::core_pipeline::{Core3d, Core3dSystems, FullscreenShader};
 use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_component::{
     ComponentUniforms, DynamicUniformIndex, ExtractComponent, ExtractComponentPlugin,
     UniformComponentPlugin,
@@ -259,6 +260,9 @@ fn draw_edges(
         )),
     );
 
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let span = diagnostics.time_span(ctx.command_encoder(), "voxel-edge");
     let mut pass = ctx
         .command_encoder()
         .begin_render_pass(&RenderPassDescriptor {
@@ -277,4 +281,6 @@ fn draw_edges(
     pass.set_pipeline(render_pipeline);
     pass.set_bind_group(0, &bind_group, &[index.index()]);
     pass.draw(0..3, 0..1);
+    drop(pass);
+    span.end(ctx.command_encoder());
 }

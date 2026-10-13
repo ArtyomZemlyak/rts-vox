@@ -2,6 +2,7 @@
 //! pipelined rendering never reads the next main world's frame ID.
 //! These spans are not GPU execution, CPU utilization, or lock-wait samples.
 use bevy::prelude::*;
+mod main_world;
 #[cfg(feature = "render-tasks")]
 pub mod tasks;
 use bevy::render::{
@@ -207,13 +208,13 @@ impl Timeline {
 }
 
 /// Budget for the requested capture, not the achieved frame rate. Reserve space
-/// for 400 frames/s and all 13 current scopes/frame, plus the terminal frame.
+/// for 400 frames/s and all 15 current scopes/frame, plus the terminal frame.
 /// Allocation remains bounded even for hour-long diagnostics; overflow is
 /// reported explicitly and disqualifies a schema-4 capture from comparison.
 pub const MAX_SPANS: usize = 1_000_000;
 pub fn span_limit_for_seconds(seconds: f64) -> usize {
     assert!(seconds.is_finite() && (1.0..=3600.0).contains(&seconds));
-    ((seconds.ceil() as usize + 1) * 400 * 13).clamp(100_000, MAX_SPANS)
+    ((seconds.ceil() as usize + 1) * 400 * 15).clamp(100_000, MAX_SPANS)
 }
 
 pub struct Capture {
@@ -235,7 +236,7 @@ impl Capture {
             gas_details,
         } = self;
         let incomplete = spans.iter().filter(|s| s.end_ns.is_none()).count();
-        println!("PROFILE render_timeline_schema=4 render_span_limit={limit} render_spans_started={started} render_spans_retained={} render_spans_dropped={} render_spans_incomplete={incomplete} render_cutoff_ns={cutoff_ns} render_pipelined={pipelined} render_gas_details={gas_details} render_span_bytes={}",
+        println!("PROFILE render_timeline_schema=5 render_span_limit={limit} render_spans_started={started} render_spans_retained={} render_spans_dropped={} render_spans_incomplete={incomplete} render_cutoff_ns={cutoff_ns} render_pipelined={pipelined} render_gas_details={gas_details} render_span_bytes={}",
             spans.len(), started - spans.len() as u64, std::mem::size_of::<Span>());
         let path = std::path::Path::new(output).with_extension("render.csv");
         let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
@@ -332,6 +333,7 @@ impl Plugin for TimelinePlugin {
         };
         app.init_resource::<FrameSource>()
             .insert_resource(recorder.clone());
+        main_world::install(app);
         let render = app
             .get_sub_app_mut(RenderApp)
             .expect("timeline requires RenderApp");
@@ -472,9 +474,9 @@ mod tests {
     #[test]
     fn duration_budget_is_bounded_and_keeps_late_records() {
         assert_eq!(span_limit_for_seconds(5.0), 100_000);
-        assert_eq!(span_limit_for_seconds(20.0), 109_200);
-        assert_eq!(span_limit_for_seconds(120.0), 629_200);
-        assert_eq!(span_limit_for_seconds(120.1), 634_400);
+        assert_eq!(span_limit_for_seconds(20.0), 126_000);
+        assert_eq!(span_limit_for_seconds(120.0), 726_000);
+        assert_eq!(span_limit_for_seconds(120.1), 732_000);
         assert_eq!(span_limit_for_seconds(3600.0), MAX_SPANS);
         let recorder = Timeline::with_limit(span_limit_for_seconds(120.0));
         let tag = tag(0);

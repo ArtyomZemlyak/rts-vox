@@ -70,7 +70,7 @@ try {
         $manifest = $null
         try {
             $manifestPath = Join-Path $directory "$scenario.manifest.json"
-            foreach ($artifact in "$scenario.manifest.json", "$scenario.csv", "$scenario.log", "$scenario.err", "$scenario.camera.csv", "$scenario.core.csv", "$scenario.physics.csv", "$scenario.stall.csv", "$scenario.render.csv", "$scenario.tasks.csv", "$scenario.task-names.csv", "$scenario-cpu") {
+            foreach ($artifact in "$scenario.manifest.json", "$scenario.csv", "$scenario.log", "$scenario.err", "$scenario.camera.csv", "$scenario.core.csv", "$scenario.physics.csv", "$scenario.stall.csv", "$scenario.render.csv", "$scenario.tasks.csv", "$scenario.gpu.csv", "$scenario.task-names.csv", "$scenario-cpu") {
                 if (Test-Path -LiteralPath (Join-Path $directory $artifact)) { throw "Existing run retained: $artifact. Use a fresh output directory." }
             }
             $binaryName = [System.IO.Path]::GetFileNameWithoutExtension($binary)
@@ -127,10 +127,9 @@ try {
             if ($CameraTour) { $arguments += '--profile-camera-tour' }
             if ($RenderTimeline) { $arguments += '--profile-render' }
             if ($RenderTasks) { $arguments += '--profile-render-tasks' }
-            # Preserve automatic runs of frozen schema-1/2/3 binaries. New
-            # executables plan the same duration budget internally; only an
-            # explicit override requires the new CLI flag.
-            if ($RenderSpanLimit -gt 0) { $arguments += @('--profile-render-spans', $RenderSpanLimit) }
+            # Explicit budget keeps schema-4 frozen binaries comparable when
+            # a newer collector adds scopes to its automatic planning formula.
+            if ($RenderTimeline) { $arguments += @('--profile-render-spans', $renderBudget) }
             if ($CorePhases) { $arguments += '--profile-core' }
             if ($TriggerMilliseconds -gt 0) { $arguments += @('--profile-trigger-ms', $TriggerMilliseconds) }
             if ($NavigationWorkers -gt 0) { $arguments += @('--nav-workers', $NavigationWorkers) }
@@ -180,9 +179,12 @@ try {
                 $reasons.Add('render_timeline_artifact_missing')
             }
             if ($RenderTasks -and (-not (Test-Path -LiteralPath (Join-Path $directory "$scenario.tasks.csv")) -or -not (Test-Path -LiteralPath (Join-Path $directory "$scenario.task-names.csv")))) { $reasons.Add('render_tasks_artifact_missing') }
-            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline -RenderSpanLimit $renderBudget -RenderTasks:$RenderTasks -ComputeWorkers $ComputeWorkers -PhysicsWorkers $PhysicsWorkers -NavigationWorkers $NavigationWorkers -CameraTour:$CameraTour -OsPressure:$OsPressure -Maximized:$Maximized
+            if ($Gpu -and -not (Test-Path -LiteralPath (Join-Path $directory "$scenario.gpu.csv"))) {
+                $reasons.Add('gpu_samples_artifact_missing')
+            }
+            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline -RenderSpanLimit $renderBudget -RenderTasks:$RenderTasks -ComputeWorkers $ComputeWorkers -PhysicsWorkers $PhysicsWorkers -NavigationWorkers $NavigationWorkers -CameraTour:$CameraTour -OsPressure:$OsPressure -Maximized:$Maximized -Gpu:$Gpu
             $manifest.Validity = $validity
-            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|render_timeline_schema|render_tasks_|stall_retained_frame|physics_task_sampling=|tick_rate=|camera_tour_|adapter|state_hash=|battle=|compute_workers=|compute_override=|physics_workers=|physics_override=|navigation_override=|simulation_ticks=|render_context|window_maximize_requested=)' })
+            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|render_timeline_schema|render_tasks_|stall_retained_frame|physics_task_sampling=|tick_rate=|camera_tour_|adapter|state_hash=|battle=|compute_workers=|compute_override=|physics_workers=|physics_override=|navigation_override=|simulation_ticks=|render_context|window_maximize_requested=|gpu_capture_schema=)' })
             $manifest.Status = 'completed'
             $manifest.FinishedUtc = (Get-Date).ToUniversalTime().ToString('o')
             Save-RangeManifest $manifest $manifestPath

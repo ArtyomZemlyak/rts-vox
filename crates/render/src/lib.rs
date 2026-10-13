@@ -21,6 +21,7 @@ pub mod footing;
 pub mod gait;
 pub mod gas;
 pub mod geom;
+pub mod gpu_profile;
 pub mod look;
 pub mod model;
 pub mod occlusion;

@@ -29,7 +29,7 @@ pub struct Profile {
     pub physics_workers: Option<usize>,
     action_step: u8,
     action_time: f64,
-    gpu_samples: std::collections::BTreeMap<String, GpuSamples>,
+    gpu_samples: render::gpu_profile::Capture,
     emitted: bool,
     warm: Option<f64>,
     start: Option<f64>,
@@ -230,11 +230,6 @@ pub fn actions(
     );
     p.action_step += 1;
     p.action_time = now;
-}
-#[derive(Default)]
-struct GpuSamples {
-    last: Option<bevy::platform::time::Instant>,
-    values: Vec<f64>,
 }
 impl Profile {
     pub(super) fn camera_sample(&self, now: f64, size: [u32; 3]) -> Option<camera::Sample> {
@@ -460,19 +455,9 @@ pub fn end(
     p.stamp();
     if p.gpu {
         if let Some(diagnostics) = diagnostics {
-            for d in diagnostics.iter() {
-                let path = d.path().to_string();
-                if !path.ends_with("/elapsed_gpu") {
-                    continue;
-                }
-                if let Some(m) = d.measurement() {
-                    let samples = p.gpu_samples.entry(path).or_default();
-                    if samples.last != Some(m.time) {
-                        samples.last = Some(m.time);
-                        samples.values.push(m.value);
-                    }
-                }
-            }
+            let epoch = p.epoch.unwrap();
+            let row = p.rows.len();
+            p.gpu_samples.observe(&diagnostics, epoch, row);
         }
     }
     let elapsed = time.elapsed_secs_f64() - start;
@@ -560,6 +545,13 @@ pub fn end(
         Vec::new()
     };
     let result = (|| -> std::io::Result<()> {
+        if p.gpu {
+            let path = std::path::Path::new(p.output.as_ref().unwrap()).with_extension("gpu.csv");
+            let mut gpu = std::io::BufWriter::new(std::fs::File::create(path)?);
+            p.gpu_samples.save(&mut gpu)?;
+            gpu.flush()?;
+            p.gpu_samples.summary(&mut std::io::stdout().lock())?;
+        }
         if p.camera_tour {
             camera::save(p.output.as_ref().unwrap(), &p.camera_frames)?;
         }
@@ -751,26 +743,6 @@ pub fn end(
         p.render_context_invalid
     );
     println!("PROFILE state_hash={:016x}", scene.sim.state_hash());
-    if p.gpu {
-        for (name, samples) in &mut p.gpu_samples {
-            let v = &mut samples.values;
-            v.sort_by(f64::total_cmp);
-            if !v.is_empty() {
-                println!(
-                    "GPU {name} n={} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} mean_ms={:.6}",
-                    v.len(),
-                    v[v.len() / 2],
-                    v[v.len() * 95 / 100],
-                    v[v.len() * 99 / 100],
-                    v[v.len() - 1],
-                    v.iter().sum::<f64>() / v.len() as f64
-                );
-            }
-        }
-        if p.gpu_samples.is_empty() {
-            eprintln!("GPU timestamps unavailable on this device/backend");
-        }
-    }
     if let Err(e) = result {
         eprintln!("profile output: {e}");
         exit.write(AppExit::error());
