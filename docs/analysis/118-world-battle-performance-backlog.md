@@ -1,5 +1,13 @@
 # Производительность боя на всей карте: аудит и отдельный бэклог
 
+[279](279-engine-hotspots-and-bugs-recheck.md): свежий длинный аудит
+`0f0d8c9`, 1850 Rust / 145 Python pass. Поздние rubble/debris/collapse —
+62,4% тика; валка 6,72 млн записей и ещё 4,14 млн после минуты drain.
+Group18 трогается 18/18, но max164>100 тиков. Native240 при 3840×1949
+даёт rate0,9836× и не допускается в FPS-приёмку. WBPERF-016/026 и цели
+каждого тика/кадра остаются открытыми; таблицы и критерии следующей работы
+в 279. Полная квалификация 5000 машин и 30-минутный soak не заявляются.
+
 [278](278-bounded-impact-light.md), ADR-705: реализован первый узкий
 вариант визуального приближения. Очень слабый отсвет удара плавно
 гасится до дорогого луча видимости; яркий свет и независимая копоть
@@ -371,7 +379,7 @@ native контроль выполняется без ослабления actio
 | WBPERF-013 | Частично | Stable fragment slots реализованы; вся цепочка build/publish/free не квалифицирована. | 10 |
 | WBPERF-014 | Открыто | Сузить площадь GPU-работы/композиции без потери дыма и перекрытий; новый native профиль. | 10 |
 | WBPERF-015 | Частично | Часть буферов переиспользуется; bounded upload, bind groups и GPU lifetime нужны целиком. | 10–11 |
-| WBPERF-016 | Частично | Есть input→reaction/first-motion в тиках; полный input→admit→apply→route→visible и хвост 18-го не закрыты. | 02–03, 08 |
+| WBPERF-016 | Частично | Есть reaction/first-motion в тиках: свежий group18 (279) движется 18/18, max164>100. Длинный хвост и полный input→admit→apply→route→visible не закрыты. | 02–03, 08 |
 | WBPERF-017 | Частично | Ground component admission, региональный collapse и сторона волны внедрены; sustained capacity/latency остаются. | 04–06 |
 | WBPERF-018 | Частично | Старые RSS/OOM и snapshot measurements есть; актуальная атрибуция и transient peaks не приняты. | 11 |
 | WBPERF-019 | Частично | Owned witness geometry есть; granular damage build и budget publication остаются. | 02b, 10 |
