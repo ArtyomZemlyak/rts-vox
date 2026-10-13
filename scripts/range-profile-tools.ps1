@@ -104,7 +104,7 @@ function Get-RangeTaskLogFilter {
 
 function Get-RangeValidity {
     param([object[]]$Rows, [string[]]$Reasons = @(), [string]$Scenario, [string]$Log,
-        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0, [switch]$RenderTasks, [int]$ComputeWorkers = 0, [int]$PhysicsWorkers = 0, [int]$NavigationWorkers = 0, [switch]$CameraTour, [switch]$OsPressure)
+        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0, [switch]$RenderTasks, [int]$ComputeWorkers = 0, [int]$PhysicsWorkers = 0, [int]$NavigationWorkers = 0, [switch]$CameraTour, [switch]$OsPressure, [switch]$Maximized)
     $issues = [System.Collections.Generic.List[string]]::new()
     foreach ($reason in $Reasons) { $issues.Add($reason) }
     $timing = Get-RangeFrameTimes -Rows $Rows
@@ -134,6 +134,13 @@ function Get-RangeValidity {
         $Log -notmatch '(?m)^PROFILE render_context_step=\d+ value=RenderContext \{' -or
         $Log -notmatch '(?m)^PROFILE render_context_changed=(true|false)\r?$') { $issues.Add('render_context_missing') }
     if ($Log -match '(?m)^PROFILE render_context_changed=true\r?$') { $issues.Add('render_context_changed_during_run') }
+    # Legacy binaries silently ignore unknown flags. An explicit maximized run
+    # must acknowledge the request; stable client dimensions remain in context.
+    $maximizeRequests = @([regex]::Matches($Log, '(?m)^PROFILE window_maximize_requested=(true|false)\r?$'))
+    if (($Maximized -and $maximizeRequests.Count -ne 1) -or $maximizeRequests.Count -gt 1 -or
+        ($maximizeRequests.Count -eq 1 -and ($maximizeRequests[0].Groups[1].Value -eq 'true') -ne [bool]$Maximized)) {
+        $issues.Add('window_maximize_mode_mismatch')
+    }
     $contexts = @([regex]::Matches($Log, '(?m)^PROFILE render_context(?:_step=\d+ value)?=(RenderContext \{[^\r\n]+\})\r?$'))
     $focusValues = @($contexts | ForEach-Object {
         if ($_.Groups[1].Value -match '\bfocused: (true|false)(?:,| \})') { $Matches[1] }

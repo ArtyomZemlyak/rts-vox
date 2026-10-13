@@ -29,6 +29,9 @@ param(
     [ValidateRange(0, 16)][int]$ComputeWorkers = 0,
     [ValidateRange(960, 8192)][int]$WindowWidth = 1600,
     [ValidateRange(540, 8192)][int]$WindowHeight = 900,
+    # Maximize before profile warmup; actual client pixels come from RenderContext.
+    # Width/height are the restored window size in this mode.
+    [switch]$Maximized,
     [switch]$AllowContaminated
 )
 $ErrorActionPreference = 'Stop'
@@ -91,6 +94,7 @@ try {
                 RustLog = $env:RUST_LOG
                 EnvironmentSampleIntervalMs = 1000; PreflightProcesses = $preflight
                 RequestedWindow = @($WindowWidth, $WindowHeight)
+                RequestedMaximized = [bool]$Maximized
                 Status = 'preflight'; Validity = $null
             }
             Save-RangeManifest $manifest $manifestPath
@@ -119,6 +123,7 @@ try {
             $err = Join-Path $directory "$scenario.err"
             $arguments = @('--range', 'data/range-km.ron', '--stock-tuning', '--window', "$WindowWidth,$WindowHeight", '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
             if ($Gpu) { $arguments += '--profile-gpu' }
+            if ($Maximized) { $arguments += '--maximized' }
             if ($CameraTour) { $arguments += '--profile-camera-tour' }
             if ($RenderTimeline) { $arguments += '--profile-render' }
             if ($RenderTasks) { $arguments += '--profile-render-tasks' }
@@ -175,9 +180,9 @@ try {
                 $reasons.Add('render_timeline_artifact_missing')
             }
             if ($RenderTasks -and (-not (Test-Path -LiteralPath (Join-Path $directory "$scenario.tasks.csv")) -or -not (Test-Path -LiteralPath (Join-Path $directory "$scenario.task-names.csv")))) { $reasons.Add('render_tasks_artifact_missing') }
-            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline -RenderSpanLimit $renderBudget -RenderTasks:$RenderTasks -ComputeWorkers $ComputeWorkers -PhysicsWorkers $PhysicsWorkers -NavigationWorkers $NavigationWorkers -CameraTour:$CameraTour -OsPressure:$OsPressure
+            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline -RenderSpanLimit $renderBudget -RenderTasks:$RenderTasks -ComputeWorkers $ComputeWorkers -PhysicsWorkers $PhysicsWorkers -NavigationWorkers $NavigationWorkers -CameraTour:$CameraTour -OsPressure:$OsPressure -Maximized:$Maximized
             $manifest.Validity = $validity
-            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|render_timeline_schema|render_tasks_|stall_retained_frame|physics_task_sampling=|tick_rate=|camera_tour_|adapter|state_hash=|battle=|compute_workers=|compute_override=|physics_workers=|physics_override=|navigation_override=|simulation_ticks=|render_context)' })
+            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|render_timeline_schema|render_tasks_|stall_retained_frame|physics_task_sampling=|tick_rate=|camera_tour_|adapter|state_hash=|battle=|compute_workers=|compute_override=|physics_workers=|physics_override=|navigation_override=|simulation_ticks=|render_context|window_maximize_requested=)' })
             $manifest.Status = 'completed'
             $manifest.FinishedUtc = (Get-Date).ToUniversalTime().ToString('o')
             Save-RangeManifest $manifest $manifestPath

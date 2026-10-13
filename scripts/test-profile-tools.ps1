@@ -23,6 +23,13 @@ $valid = Get-RangeValidity $rows -Scenario world-battle -Log $log
 $pressure = Get-RangeValidity $rows -Scenario world-battle -Log $log -OsPressure
 Assert-Profile ($pressure.ValidForComparison -and -not $pressure.AcceptanceEligible -and $pressure.Mode -eq 'os_pressure_diagnostic') 'OS pressure capture accepted as FPS benchmark'
 Assert-Profile ($valid.ValidForComparison -and $valid.AcceptanceEligible -and $valid.MeetsSimulationRate) 'Good run rejected'
+$maximizedLog = $log + "`nPROFILE window_maximize_requested=true"
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log $maximizedLog -Maximized).AcceptanceEligible) 'Declared maximized run rejected'
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log $log -Maximized).Reasons -contains 'window_maximize_mode_mismatch') 'Legacy executable silently ignoring maximization accepted'
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log $maximizedLog).Reasons -contains 'window_maximize_mode_mismatch') 'Maximized executable compared as restored window'
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($log + "`nPROFILE window_maximize_requested=false") -Maximized).Reasons -contains 'window_maximize_mode_mismatch') 'Rejected maximize request accepted'
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($log + "`nPROFILE window_maximize_requested=false")).AcceptanceEligible) 'Explicit restored window rejected'
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($maximizedLog + "`nPROFILE window_maximize_requested=true") -Maximized).Reasons -contains 'window_maximize_mode_mismatch') 'Duplicate maximize acknowledgement accepted'
 $tourLog = $log + "`nPROFILE camera_tour_schema=1 camera_tour_clock=wall camera_tour_route=bases_pan_zoom_v1"
 $tour = Get-RangeValidity $rows -Scenario world-battle -Log $tourLog -CameraTour
 Assert-Profile $tour.ValidForComparison 'Declared camera tour rejected'

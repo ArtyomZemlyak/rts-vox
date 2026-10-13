@@ -380,6 +380,7 @@ fn main() {
     let mut camera_zoom = 1.0;
     let mut projectile_markers = true;
     let mut window_size = [1600, 900];
+    let mut maximized = false;
     let mut ai_rules_file = None;
     let mut attack_unit: Option<usize> = None;
     let mut go: Option<[i32; 2]> = None;
@@ -481,6 +482,7 @@ fn main() {
                 i += 1;
                 profile_seconds = args[i].parse().expect("profile seconds");
             }
+            "--maximized" => maximized = true,
             "--window" => {
                 i += 1;
                 let (w, h) = args[i].split_once(',').expect("--window width,height");
@@ -945,22 +947,29 @@ fn main() {
         custom_layer: render::timeline::tasks::layer,
         ..log_plugin
     };
+    let mut primary_window = Window {
+        title: "RTS VOX / BLAST RANGE — Space: pause · R: replay".into(),
+        resolution: bevy::window::WindowResolution::new(window_size[0], window_size[1])
+            .with_scale_factor_override(1.0),
+        present_mode: if realtime && profile_output.is_none() {
+            PresentMode::AutoVsync
+        } else {
+            PresentMode::AutoNoVsync
+        },
+        ..default()
+    };
+    if maximized {
+        primary_window.set_maximized(true);
+    }
+    if profile_output.is_some() {
+        println!("PROFILE window_maximize_requested={maximized}");
+    }
     app.add_plugins(
         DefaultPlugins
             .set(compute::plugin(compute_workers))
             .set(log_plugin)
             .set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "RTS VOX / BLAST RANGE — Space: pause · R: replay".into(),
-                    resolution: bevy::window::WindowResolution::new(window_size[0], window_size[1])
-                        .with_scale_factor_override(1.0),
-                    present_mode: if realtime && profile_output.is_none() {
-                        PresentMode::AutoVsync
-                    } else {
-                        PresentMode::AutoNoVsync
-                    },
-                    ..default()
-                }),
+                primary_window: Some(primary_window),
                 ..default()
             }),
     );
