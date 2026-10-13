@@ -40,6 +40,8 @@ pub(super) fn capture(
     if budget == 0 {
         return false;
     }
+    // Fix the logical slice before building its immutable geometry cache.
+    let (next, spent) = slice_end(e, budget);
     let half = n / 2;
     let origin = e.origin;
     let radius2 = (half * half) as i32;
@@ -58,14 +60,10 @@ pub(super) fn capture(
             (0..3)
                 .all(|a| far[a] >= lo[a] && origin[a] <= hi[a])
                 .then(|| {
-                    (
-                        u,
-                        lo,
-                        hi,
-                        pose,
-                        segs,
-                        HitFrames::new(u, pose, segs, delta, e.turret_pitches[i]),
-                    )
+                    let frames = HitFrames::new(u, pose, segs, delta, e.turret_pitches[i]);
+                    let terms = (parallel && spent >= 1024 && !e.point_contacts)
+                        .then(|| frames.wave_terms(u, &pose, segs));
+                    (u, lo, hi, pose, segs, frames, terms)
                 })
         })
         .collect();
@@ -103,7 +101,6 @@ pub(super) fn capture(
         .clamp(1, 1_000_000) as u32;
     // Determine exactly the old slice boundary before dispatch. Outside
     // cells are free, but even those wait once the logical quota is spent.
-    let (next, spent) = slice_end(e, budget);
     // The serial test oracle keeps the original per-cell path, so comparing
     // workers also checks row proofs, not merely parallel dispatch of them.
     // Production capture always enables these exact row reductions.
@@ -237,7 +234,7 @@ pub(super) fn capture(
                 }
                 // Body resistance is independent of the terrain reduction. Ask
                 // only the intersecting part of each box, including suspended parts.
-                'bodies: for (u, lo, hi, pose, segments, query) in &queries {
+                'bodies: for (u, lo, hi, pose, segments, query, terms) in &queries {
                     if r >= unit_maximum {
                         break;
                     }
@@ -247,12 +244,13 @@ pub(super) fn capture(
                     if !e.point_contacts {
                         // Same voxel-centre ownership as damage, including thin
                         // rotated plates missed by the old world-point samples.
-                        query.visit_wave_cells(
+                        query.visit_wave_cells_with_terms(
                             u,
                             pose,
                             segments,
                             p,
                             c.cell_units,
+                            terms.as_ref(),
                             |(part, cell)| {
                                 let occupied = if part == 0 {
                                     u.body.vol.get(cell[0], cell[1], cell[2])
@@ -380,7 +378,12 @@ mod tests {
                 .num_threads(workers)
                 .build()
                 .unwrap();
-            for (at, edge) in [([0, 4, 0], 1), ([100, 28, 96], 2), ([191, 62, 191], 4)] {
+            for (at, edge) in [
+                ([0, 4, 0], 1),
+                ([100, 28, 96], 2),
+                ([100, 28, 96], 3),
+                ([191, 62, 191], 4),
+            ] {
                 c.cell_units = edge;
                 let mut w = World::new(192, 64, 192, 100, Box::new(Ground));
                 let mut units = vec![

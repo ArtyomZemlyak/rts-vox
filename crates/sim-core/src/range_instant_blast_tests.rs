@@ -419,15 +419,25 @@ fn body_map_lists_what_wave_cells_lists() {
     let r = salvo_range();
     for (k, u) in r.units.iter().enumerate() {
         for (yaw, delta, pitch) in [(0, 0, 0), (5000, 9000, 0), (11000, -3000, 2500)] {
-            let pose = crate::damage::turned(&u.pose, yaw, 0);
-            let segs: Vec<_> = u
+            let mut pose = crate::damage::turned(&u.pose, yaw, 0);
+            let mut segs: Vec<_> = u
                 .seg_frames
                 .iter()
                 .map(|f| crate::damage::turned(f, yaw, 0))
                 .collect();
+            if pitch != 0 {
+                // Negative coordinates exercise floor division and the
+                // half-open ownership boundary on every axis.
+                let offset = phys::V3::new(Fx::from_int(512), Fx::from_int(64), Fx::from_int(512));
+                pose.base = pose.base.sub(offset);
+                for frame in &mut segs {
+                    frame.base = frame.base.sub(offset);
+                }
+            }
             let frames = HitFrames::new(u, pose, &segs, delta, pitch);
+            let terms = frames.wave_terms(u, &pose, &segs);
             let (lo, hi) = u.bounds_aimed(Some(&pose), &segs, delta, pitch);
-            for edge in [2, 3] {
+            for edge in [1, 2, 3, 4] {
                 let n = ((0..3).map(|a| hi[a] - lo[a]).max().unwrap() / edge + 4) as usize;
                 let origin = lo.map(|v| v - edge * 2 + k as i32 % edge);
                 let grid = Grid { origin, edge, n };
@@ -440,6 +450,40 @@ fn body_map_lists_what_wave_cells_lists() {
                     let cell = [i % n, i / n % n, i / (n * n)].map(|v| v as i32);
                     let low = std::array::from_fn(|a| origin[a] + cell[a] * edge);
                     frames.wave_cells(u, &pose, &segs, low, edge, &mut listed);
+                    let mut cached = Vec::new();
+                    frames.visit_wave_cells_with_terms(
+                        u,
+                        &pose,
+                        &segs,
+                        low,
+                        edge,
+                        Some(&terms),
+                        |contact| {
+                            cached.push(contact);
+                            true
+                        },
+                    );
+                    assert_eq!(
+                        cached, listed,
+                        "cached terms: unit {k} yaw {yaw} edge {edge} cell {cell:?}"
+                    );
+                    if !listed.is_empty() {
+                        cached.clear();
+                        let limit = 1 + i % listed.len().min(4);
+                        frames.visit_wave_cells_with_terms(
+                            u,
+                            &pose,
+                            &segs,
+                            low,
+                            edge,
+                            Some(&terms),
+                            |contact| {
+                                cached.push(contact);
+                                cached.len() < limit
+                            },
+                        );
+                        assert_eq!(cached, listed[..limit], "visitor stop prefix");
+                    }
                     let (start, len) = map.range(grid.index(cell));
                     let mapped: Vec<_> = (start..start + len).map(|k| map.contact(k)).collect();
                     assert_eq!(
@@ -450,6 +494,62 @@ fn body_map_lists_what_wave_cells_lists() {
                 }
                 assert!(total > 0, "unit {k}: the field holds no body cell");
             }
+        }
+    }
+}
+
+#[test]
+#[ignore = "measurement probe for exact wave geometry"]
+fn probe_wave_body_maps() {
+    use crate::blast::wave_cells::Grid;
+    use std::{hint::black_box, time::Instant};
+    let r = salvo_range();
+    for (id, u) in r.units.iter().enumerate() {
+        let yaw = 5000;
+        let pose = crate::damage::turned(&u.pose, yaw, 0);
+        let segs: Vec<_> = u
+            .seg_frames
+            .iter()
+            .map(|f| crate::damage::turned(f, yaw, 0))
+            .collect();
+        let frames = HitFrames::new(u, pose, &segs, 9000, 2500);
+        let (lo, hi) = u.bounds_aimed(Some(&pose), &segs, 9000, 2500);
+        for edge in [1, 2, 3, 4] {
+            let n = ((0..3).map(|a| hi[a] - lo[a]).max().unwrap() / edge + 4) as usize;
+            let grid = Grid {
+                origin: lo.map(|v| v - 2 * edge),
+                edge,
+                n,
+            };
+            let mut times = Vec::new();
+            let mut checksum = 0u64;
+            let mut contacts = 0;
+            for round in 0..12 {
+                let start = Instant::now();
+                let map = black_box(
+                    frames
+                        .body_map(u, &pose, &segs, grid, body_sizes(u))
+                        .unwrap(),
+                );
+                let ns = start.elapsed().as_nanos();
+                if round >= 4 {
+                    times.push(ns);
+                }
+                if round == 0 {
+                    for cell in 0..n * n * n {
+                        let (start, len) = map.range(cell as u32);
+                        contacts += len;
+                        for k in start..start + len {
+                            let (part, at) = map.contact(k);
+                            for value in [cell, part, at[0], at[1], at[2]] {
+                                checksum = checksum.wrapping_mul(31).wrapping_add(value as u64);
+                            }
+                        }
+                    }
+                }
+            }
+            times.sort_unstable();
+            println!("body_map unit={id} edge={edge} n={n} contacts={contacts} mean_ns={} p50_ns={} checksum={checksum:016x}",times.iter().sum::<u128>()/times.len() as u128,times[times.len()/2]);
         }
     }
 }

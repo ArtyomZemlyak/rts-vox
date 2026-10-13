@@ -66,6 +66,20 @@ fn axis_terms(frame: &Frame, a: usize, from: i32, to: i32) -> Vec<V3> {
         .collect()
 }
 
+/// Exact transformed axis terms, shared by all cells of one capture slice.
+/// These are geometry only: live occupancy is still read by the visitor.
+pub(super) struct WaveTerms {
+    root: [Vec<V3>; 3],
+    turret: Option<[Vec<V3>; 3]>,
+    segments: Vec<[Vec<V3>; 3]>,
+}
+
+fn body_terms(body: &UnitBody, frame: &Frame) -> [Vec<V3>; 3] {
+    let size = [body.vol.nx, body.vol.ny, body.vol.nz];
+    std::array::from_fn(|a| axis_terms(frame, a, 0, i32::from(size[a])))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cells(
     body: &UnitBody,
     frame: &Frame,
@@ -73,6 +87,7 @@ fn cells(
     low: [i32; 3],
     edge: i32,
     part: usize,
+    terms: Option<&[Vec<V3>; 3]>,
     visit: &mut impl FnMut(Contact) -> bool,
 ) -> bool {
     let high = low.map(|v| v + edge);
@@ -80,14 +95,20 @@ fn cells(
     if (0..3).any(|a| lo[a] >= hi[a]) {
         return true;
     }
-    let term = |a: usize| axis_terms(frame, a, lo[a], hi[a]);
-    let (tx, ty, tz) = (term(0), term(1), term(2));
+    let owned = terms
+        .is_none()
+        .then(|| std::array::from_fn::<_, 3, _>(|a| axis_terms(frame, a, lo[a], hi[a])));
+    let sliced: [&[V3]; 3] = std::array::from_fn(|a| match terms {
+        Some(terms) => &terms[a][lo[a] as usize..hi[a] as usize],
+        None => &owned.as_ref().unwrap()[a],
+    });
+    let [tx, ty, tz] = sliced;
     let (wlo, whi) = (low.map(Fx::from_int), high.map(Fx::from_int));
-    for (z, dz) in (lo[2]..hi[2]).zip(&tz) {
+    for (z, dz) in (lo[2]..hi[2]).zip(tz) {
         let plane = frame.base.add(*dz);
-        for (y, dy) in (lo[1]..hi[1]).zip(&ty) {
+        for (y, dy) in (lo[1]..hi[1]).zip(ty) {
             let row = plane.add(*dy);
-            for (x, dx) in (lo[0]..hi[0]).zip(&tx) {
+            for (x, dx) in (lo[0]..hi[0]).zip(tx) {
                 let p = [x, y, z];
                 let w = row.add(*dx);
                 if w.x >= wlo[0]
@@ -110,6 +131,25 @@ fn cells(
 }
 
 impl HitFrames {
+    pub(super) fn wave_terms(
+        &self,
+        unit: &RangeUnit,
+        root: &Frame,
+        segments: &[Frame],
+    ) -> WaveTerms {
+        WaveTerms {
+            root: body_terms(&unit.body, root),
+            turret: (!self.shared_root).then(|| body_terms(&unit.body, &self.turret)),
+            segments: unit
+                .body
+                .segments
+                .iter()
+                .zip(segments)
+                .map(|(segment, frame)| body_terms(&segment.body, frame))
+                .collect(),
+        }
+    }
+
     pub(super) fn wave_cells(
         &self,
         unit: &RangeUnit,
@@ -133,20 +173,61 @@ impl HitFrames {
         segments: &[Frame],
         low: [i32; 3],
         edge: i32,
+        visit: impl FnMut(Contact) -> bool,
+    ) {
+        self.visit_wave_cells_with_terms(unit, root, segments, low, edge, None, visit);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn visit_wave_cells_with_terms(
+        &self,
+        unit: &RangeUnit,
+        root: &Frame,
+        segments: &[Frame],
+        low: [i32; 3],
+        edge: i32,
+        terms: Option<&WaveTerms>,
         mut visit: impl FnMut(Contact) -> bool,
     ) {
         let body = &unit.body;
         let split = usize::from(body.turret_y);
         let end = usize::from(body.vol.ny);
         if self.shared_root {
-            if !cells(body, root, [0, end], low, edge, 0, &mut visit) {
+            if !cells(
+                body,
+                root,
+                [0, end],
+                low,
+                edge,
+                0,
+                terms.map(|t| &t.root),
+                &mut visit,
+            ) {
                 return;
             }
         } else {
-            if !cells(body, root, [0, split], low, edge, 0, &mut visit) {
+            if !cells(
+                body,
+                root,
+                [0, split],
+                low,
+                edge,
+                0,
+                terms.map(|t| &t.root),
+                &mut visit,
+            ) {
                 return;
             }
-            if !cells(body, &self.turret, [split, end], low, edge, 0, &mut visit) {
+            if !cells(
+                body,
+                &self.turret,
+                [split, end],
+                low,
+                edge,
+                0,
+                terms.and_then(|t| t.turret.as_ref()),
+                &mut visit,
+            ) {
                 return;
             }
         }
@@ -160,6 +241,7 @@ impl HitFrames {
                     low,
                     edge,
                     i + 1,
+                    terms.map(|t| &t.segments[i]),
                     &mut visit,
                 )
             {
@@ -226,6 +308,53 @@ impl Grid {
     }
 }
 
+/// Bucket's input is already in packed-contact order (layer, z, y, x).
+/// Stable scatter by owning cell therefore gives the same total order as
+/// sorting the full key. Restrict the histogram to dense, bounded spans;
+/// unusual input orders and sparse fields retain the comparison sort.
+fn order_entries(entries: &mut Vec<u64>) {
+    if entries.len() < 1024 {
+        entries.sort_unstable();
+        return;
+    }
+    let (mut first, mut last) = (u32::MAX, 0);
+    let mut previous = 0;
+    for &entry in entries.iter() {
+        let packed = entry as u32;
+        if packed < previous {
+            entries.sort_unstable();
+            return;
+        }
+        previous = packed;
+        let cell = (entry >> 32) as u32;
+        first = first.min(cell);
+        last = last.max(cell);
+    }
+    let span = u64::from(last) - u64::from(first) + 1;
+    if span > entries.len() as u64 {
+        entries.sort_unstable();
+        return;
+    }
+    let key = |entry: u64| ((entry >> 32) as u32 - first) as usize;
+    let mut positions = vec![0usize; span as usize];
+    for &entry in entries.iter() {
+        positions[key(entry)] += 1;
+    }
+    let mut offset = 0;
+    for position in &mut positions {
+        let count = *position;
+        *position = offset;
+        offset += count;
+    }
+    let mut ordered = vec![0; entries.len()];
+    for &entry in entries.iter() {
+        let position = &mut positions[key(entry)];
+        ordered[*position] = entry;
+        *position += 1;
+    }
+    *entries = ordered;
+}
+
 /// Append the cells of one layer of one part, each under the wave cell
 /// owning it, if that cell's conservative box reaches it (as `cells`
 /// requires) and `reaches` admits the cell.
@@ -247,6 +376,10 @@ fn bucket(
     let term = |a: usize| axis_terms(frame, a, min[a], max[a]);
     let (tx, ty, tz) = (term(0), term(1), term(2));
     let span = i64::from(grid.edge) << 32;
+    // Signed arithmetic shift is Euclidean division by a positive power
+    // of two, including negative positions and exact cell boundaries.
+    let shift = (grid.edge > 0 && (grid.edge as u32).is_power_of_two())
+        .then(|| 32 + grid.edge.trailing_zeros());
     let origin = grid.origin.map(|v| i64::from(v) << 32);
     // The box of the last owning cell asked: neighbours share it.
     let mut last: Option<OwnerBox> = None;
@@ -257,8 +390,13 @@ fn bucket(
             for (x, dx) in (min[0]..max[0]).zip(&tx) {
                 let w = row.add(*dx);
                 let w = [w.x.raw(), w.y.raw(), w.z.raw()];
-                let cell: [i32; 3] =
-                    std::array::from_fn(|a| (w[a] - origin[a]).div_euclid(span) as i32);
+                let cell: [i32; 3] = std::array::from_fn(|a| {
+                    let delta = w[a] - origin[a];
+                    match shift {
+                        Some(shift) => (delta >> shift) as i32,
+                        None => delta.div_euclid(span) as i32,
+                    }
+                });
                 if cell.iter().any(|&c| c < 0 || c as usize >= grid.n) {
                     continue;
                 }
@@ -323,7 +461,36 @@ impl HitFrames {
             );
         }
         // Distinct keys; within a wave cell, packed order is walk order.
-        entries.sort_unstable();
+        order_entries(&mut entries);
         Some(BodyMap { sizes, entries })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::order_entries;
+
+    #[test]
+    fn contact_order_matches_full_sort_for_dense_sparse_and_unusual_inputs() {
+        for count in [0, 1, 1023, 1024, 8192] {
+            for (base, stride, reversed) in [
+                (0u32, 1u32, false),
+                (u32::MAX - 100, 1, false),
+                (0, 10000, false),
+                (0, 1, true),
+            ] {
+                let mut entries: Vec<_> = (0..count)
+                    .map(|i| {
+                        let cell = base + ((i * 97) % 100) as u32 * stride;
+                        let packed = if reversed { count - i } else { i } as u32 / 2;
+                        u64::from(cell) << 32 | u64::from(packed)
+                    })
+                    .collect();
+                let mut expected = entries.clone();
+                expected.sort_unstable();
+                order_entries(&mut entries);
+                assert_eq!(entries, expected, "{count} {base} {stride} {reversed}");
+            }
+        }
     }
 }
