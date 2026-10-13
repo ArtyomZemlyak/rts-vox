@@ -59,6 +59,9 @@ pub use hull_queries::HullQueries;
 #[path = "corpse.rs"]
 mod corpse;
 #[cfg(test)]
+#[path = "burst_ground_claim_tests.rs"]
+mod ground_claim_tests;
+#[cfg(test)]
 #[path = "hull_query_tests.rs"]
 mod hull_query_tests;
 #[path = "shape_geometry.rs"]
@@ -4664,6 +4667,34 @@ pub(crate) fn shape_component_count(mut left: u64, side: u8) -> u32 {
     }
     n
 }
+/// Change in component count when one cell joins a group. Only old components
+/// touching that cell can merge: 1 minus their count. Unrelated components
+/// never need visiting, and a flood stops once it connects all remaining
+/// neighbours. No allocation or persistent connectivity cache is needed.
+fn shape_added_components(mask: u64, bit: u64, side: u8) -> i64 {
+    debug_assert!(bit.is_power_of_two());
+    if mask & bit != 0 {
+        return 0;
+    }
+    let mut neighbours = shape_grow(bit, side) & mask;
+    let mut delta = 1;
+    while neighbours != 0 {
+        delta -= 1;
+        let mut component = 1u64 << neighbours.trailing_zeros();
+        loop {
+            neighbours &= !component;
+            if neighbours == 0 {
+                return delta;
+            }
+            let next = shape_grow(component, side) & mask;
+            if next == component {
+                break;
+            }
+            component = next;
+        }
+    }
+    delta
+}
 /// The component of `left` holding its lowest cell.
 fn shape_component_at(left: u64, side: u8) -> u64 {
     let mut component = 1u64 << left.trailing_zeros();
@@ -4804,10 +4835,13 @@ impl Bursts {
         };
         // With no slot left only a cell joining a held component can be
         // claimed, and a group nobody holds has none (ADR-681).
-        if *room == 0 && !self.groups.contains_key(&Self::claim_group(p, &claim, t).0) {
+        let (key, bit) = Self::claim_group(p, &claim, t);
+        let existing = self.groups.get(&key).copied();
+        if *room == 0 && existing.is_none() {
             return Err(GroundClaimError::NoRoom);
         }
-        let delta = self.claim_delta(p, &claim, t);
+        let mask = existing.unwrap_or(0);
+        let delta = shape_added_components(mask, bit, key.3);
         if delta > 0 && *room == 0 {
             return Err(GroundClaimError::NoRoom);
         }
@@ -4823,7 +4857,14 @@ impl Bursts {
         if world.on_frame(p[0], p[1], p[2]) {
             return Err(GroundClaimError::Frame);
         }
-        self.add_claim(p, claim, t);
+        // Admission has not changed the group. Reuse its exact mask and
+        // delta instead of recomputing fracture_box and connectivity.
+        self.groups.insert(key, mask | bit);
+        self.reserved = self
+            .reserved
+            .checked_add_signed(delta as isize)
+            .expect("ground reservation");
+        self.claims.insert(p, claim);
         world.queue_edit(Edit::dig_if(p[0], p[1], p[2], mat));
         *room = (*room as i64 - delta).max(0) as u32;
         Ok(())
@@ -4858,27 +4899,33 @@ impl Bursts {
     fn claim_delta(&self, p: [u32; 3], c: &Claim, t: &Blast) -> i64 {
         let (key, bit) = Self::claim_group(p, c, t);
         let mask = self.groups.get(&key).copied().unwrap_or(0);
-        i64::from(shape_component_count(mask | bit, key.3))
-            - i64::from(shape_component_count(mask, key.3))
+        shape_added_components(mask, bit, key.3)
     }
     fn add_claim(&mut self, p: [u32; 3], c: Claim, t: &Blast) {
         let (key, bit) = Self::claim_group(p, &c, t);
         let mask = self.groups.entry(key).or_default();
-        let before = shape_component_count(*mask, key.3) as usize;
+        let delta = shape_added_components(*mask, bit, key.3);
         *mask |= bit;
-        let after = shape_component_count(*mask, key.3) as usize;
-        self.reserved = self.reserved + after - before;
+        self.reserved = self
+            .reserved
+            .checked_add_signed(delta as isize)
+            .expect("ground reservation");
         self.claims.insert(p, c);
     }
     fn take_claim(&mut self, p: [u32; 3], t: &Blast) -> Option<Claim> {
         let c = self.claims.remove(&p)?;
         let (key, bit) = Self::claim_group(p, &c, t);
         if let Some(mask) = self.groups.get_mut(&key) {
-            let before = shape_component_count(*mask, key.3) as usize;
+            let present = *mask & bit != 0;
             *mask &= !bit;
-            let after = shape_component_count(*mask, key.3) as usize;
             // Taking a bridge splits its component: the rest holds more.
-            self.reserved = self.reserved + after - before;
+            if present {
+                let delta = -shape_added_components(*mask, bit, key.3);
+                self.reserved = self
+                    .reserved
+                    .checked_add_signed(delta as isize)
+                    .expect("ground reservation");
+            }
             if *mask == 0 {
                 self.groups.remove(&key);
             }

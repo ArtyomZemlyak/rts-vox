@@ -29,6 +29,81 @@ fn fracture_price_memo_tracks_every_input_and_collisions() {
     assert!(m.economy.ledger.balanced());
 }
 
+/// The serial ground claim stage, excluding field propagation, units and
+/// rendering. Setup and state checks stay outside the timed section.
+#[test]
+#[ignore = "ground claim/confirmation measurement; run serially"]
+fn probe_ground_claim_pipeline() {
+    struct Ground;
+    impl voxel::Generator for Ground {
+        fn material(&self, _: u32, y: u32, _: u32) -> u16 {
+            if y < 20 {
+                1
+            } else {
+                0
+            }
+        }
+    }
+    let cells: Vec<[i32; 3]> = (8..72)
+        .flat_map(|z| (4..14).flat_map(move |y| (8..72).map(move |x| [x, y, z])))
+        .collect();
+    for cap in [0, 4096, 65536] {
+        let mut times = Vec::new();
+        let mut confirmations = Vec::new();
+        let mut expected = None;
+        for run in 0..10 {
+            let mut m = Matter::new(&[]);
+            m.tuning.max_claims = cap;
+            m.tuning.max_flying = 65536;
+            m.tuning.max_fragments = 65536;
+            m.begin(u32::MAX, 4);
+            let mut w = World::new(96, 32, 96, 65536, Box::new(Ground));
+            // Prebuilt chunks isolate claim/confirm from terrain generation.
+            for z in (0..96).step_by(32) {
+                for x in (0..96).step_by(32) {
+                    let ci = w.chunk_of(x, 8, z).unwrap();
+                    let chunk = w.build_chunk(ci);
+                    w.install_chunk(ci, chunk);
+                }
+            }
+            m.begin_body_batch();
+            let start = std::time::Instant::now();
+            for &p in &cells {
+                assert!(matches!(
+                    m.ground_or_pulverize(&mut w, p, 1, [40, 16, 40]),
+                    ClaimResult::Applied
+                ));
+            }
+            let ns = start.elapsed().as_nanos();
+            m.finish_body_batch();
+            w.flush();
+            let start = std::time::Instant::now();
+            m.debris.confirm(w.completed(), &mut m.economy, &m.tuning);
+            let confirm_ns = start.elapsed().as_nanos();
+            assert!(m.economy.ledger.balanced());
+            assert_eq!(w.edits().len(), cells.len());
+            let mut bytes = Blob::new();
+            m.save(&mut bytes);
+            let state = (bytes.v, w.edits().to_vec());
+            if let Some(ref expected) = expected {
+                assert_eq!(&state, expected);
+            } else {
+                expected = Some(state);
+            }
+            if run >= 2 {
+                times.push(ns);
+                confirmations.push(confirm_ns);
+            }
+        }
+        println!(
+            "ground cap={cap} cells={} claim_mean_ns={} confirm_mean_ns={}",
+            cells.len(),
+            times.iter().sum::<u128>() / times.len() as u128,
+            confirmations.iter().sum::<u128>() / confirmations.len() as u128
+        );
+    }
+}
+
 #[test]
 #[ignore = "fracture price microbenchmark; run serially"]
 fn measure_fracture_price_memo() {
