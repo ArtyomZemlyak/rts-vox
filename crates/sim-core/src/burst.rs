@@ -61,6 +61,8 @@ mod corpse;
 #[cfg(test)]
 #[path = "hull_query_tests.rs"]
 mod hull_query_tests;
+#[path = "shape_geometry.rs"]
+mod shape_geometry;
 #[path = "unit_debris.rs"]
 mod unit_debris;
 
@@ -1064,10 +1066,34 @@ mod tests {
     }
     #[test]
     fn bit_plane_geometry_matches_cell_walk_for_dense_sparse_and_empty_shapes() {
-        for side in 1..=4 {
+        for input_side in [0u8, 1, 2, 3, 4, 5, 255] {
+            let side = input_side.clamp(1, 4);
             let cells = u32::from(side).pow(3);
             let full = u64::MAX >> (64 - cells);
             let mut shapes = vec![0, full];
+            if cells < 64 {
+                // Out-of-domain bits still count in the former denominator;
+                // they must retain the scalar path rather than truncate.
+                shapes.extend([full | (1 << cells), u64::MAX]);
+            }
+            if side == 4 {
+                for count in 0..=64 {
+                    let mut shape = 0u64;
+                    let mut placed = 0;
+                    for y in 0..4 {
+                        for z in 0..4 {
+                            for x in 0..4 {
+                                if placed < count {
+                                    shape |= 1u64 << (x + 4 * y + 16 * z);
+                                    placed += 1;
+                                }
+                            }
+                        }
+                    }
+                    assert_eq!(shape_geometry::STACKED[count], shape);
+                    shapes.push(shape);
+                }
+            }
             for i in 0..cells {
                 shapes.extend([1 << i, full ^ (1 << i)]);
             }
@@ -1085,12 +1111,12 @@ mod tests {
             for shape in shapes {
                 let (centre, bounds) = walked_shape_geometry(shape, side);
                 assert_eq!(
-                    shape_centre(shape, side),
+                    shape_centre(shape, input_side),
                     centre,
                     "side={side} shape={shape:x}"
                 );
                 assert_eq!(
-                    shape_bounds(shape, side),
+                    shape_bounds(shape, input_side),
                     bounds,
                     "side={side} shape={shape:x}"
                 );
@@ -4612,6 +4638,9 @@ fn shape_sums(shape: u64, planes: &[[u64; 4]; 3]) -> [i32; 3] {
 }
 /// Centre of mass of a piece in its box, cell units.
 pub fn shape_centre(shape: u64, side: u8) -> V3 {
+    if let Some(geometry) = shape_geometry::known(shape, side) {
+        return v3(geometry.centre);
+    }
     let planes = &SHAPE_PLANES[usize::from(side.clamp(1, 4)) - 1];
     let sum = shape_sums(shape, planes);
     v3(sum.map(|v| Fx::from_ratio(v, shape.count_ones().max(1) as i32)))
@@ -4659,6 +4688,9 @@ fn shape_grow(m: u64, side: u8) -> u64 {
     out
 }
 fn shape_bounds(shape: u64, side: u8) -> ([Fx; 3], [Fx; 3]) {
+    if let Some(geometry) = shape_geometry::known(shape, side) {
+        return geometry.bounds;
+    }
     let side = side.clamp(1, 4);
     let planes = &SHAPE_PLANES[usize::from(side) - 1];
     let sum = shape_sums(shape, planes);
@@ -6500,19 +6532,7 @@ fn world_floor(f: &Fragment, world: &voxel::World) -> Option<Fx> {
 /// (ADR-457).
 fn restack(f: &mut Fragment) {
     let n = f.count.min(box_cells(4));
-    let mut shape = 0u64;
-    let mut placed = 0;
-    for y in 0..4 {
-        for z in 0..4 {
-            for x in 0..4 {
-                if placed < n {
-                    shape |= 1u64 << (x + 4 * y + 16 * z);
-                    placed += 1;
-                }
-            }
-        }
-    }
-    f.shape = shape;
+    f.shape = shape_geometry::STACKED[n as usize];
     f.side = 4;
     f.basis = IDENTITY;
 }
