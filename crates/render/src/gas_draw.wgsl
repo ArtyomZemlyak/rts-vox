@@ -7,6 +7,16 @@
 // Maximum omitted direct-light contribution per HDR channel and region.
 // Cloud opacity, cloud shadows, soot and hot fissures are not culled.
 const LIGHT_EPSILON:f32=0.00001;
+// Only the terrain's transient impact glow is approximated. Use its final
+// HDR contribution (after fog and region fade), not distance or explosion size.
+// Bright light retains exact visibility; smoothly extinguish negligible light
+// before spending a terrain ray. Per-channel loss is less than 0.0005 per region.
+// Soot still requires visibility independently, even after the glow has faded.
+const IMPACT_LIGHT_EPSILON:f32=0.00025;
+fn impact_light_weight(contribution:vec3<f32>)->f32 {
+    let peak=max(contribution.x,max(contribution.y,contribution.z));
+    return smoothstep(IMPACT_LIGHT_EPSILON,2.0*IMPACT_LIGHT_EPSILON,peak);
+}
 fn hot(t:f32)->vec3<f32> {
     if p.weapon.x>1.5 {
         // The annihilation bolt (ADR-289): its dust never glows white.
@@ -183,7 +193,8 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
             let direct=flash*exp(-age*decay)*reach/(110.0+dot(delta,delta))
                 *max(0.05,dot(ground.normal,normalize(delta)));
             let needs_soot=ground.material!=4u && soot>0.0;
-            let needs_light=any(direct*p.control.z*exp(-ground.t*p.sky.w)>vec3(LIGHT_EPSILON));
+            let light_weight=impact_light_weight(direct*p.control.z*exp(-ground.t*p.sky.w));
+            let needs_light=light_weight>0.0;
             if needs_soot || needs_light {
                 let visible=trace_terrain(pos+ground.normal*surface_offset,normalize(delta),max(0.0,length(delta)-5.0),true).material==0u;
                 // Hot shell residue stains the surface without turning the
@@ -191,7 +202,7 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
                 // rather than the same carbon ring.
                 let soot_strength=select(0.55,0.14,p.weapon.x>0.5);
                 if needs_soot && visible {bg=vec4(bg.rgb*(1.0-soot*soot_strength*p.control.z),bg.a);}
-                lit+=direct*select(0.06,1.0,visible);
+                lit+=direct*light_weight*select(0.06,1.0,visible);
             }
             if ground.material==1u && age>0.25 && r<24.0 {
                 let fissure=smoothstep(0.73,0.82,noise(pos*0.6));
