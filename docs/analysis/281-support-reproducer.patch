@@ -1,0 +1,58 @@
+diff --git a/crates/sim-core/src/burst.rs b/crates/sim-core/src/burst.rs
+index 0c137e0..95d1621 100644
+--- a/crates/sim-core/src/burst.rs
++++ b/crates/sim-core/src/burst.rs
+@@ -101,6 +101,53 @@ mod tests {
+     use super::*;
+     use std::collections::HashMap;
+
++    #[test]
++    fn review_281_damage_waiting_support_matches_full_index() {
++        let (mut b, mut e) = (Bursts::default(), economy());
++        let mut w = world();
++        let t = tuning();
++        w.queue_edit(Edit::put(48, 15, 48, 2));
++        w.flush();
++        for (id, x, y, mm, material, shape, side) in [
++            (3, 487, 1610, 20, 2, 0x000f000f000f000fu64, 4),
++            (2, 4905, 1625, 10, 3, 1, 1),
++        ] {
++            b.fragments.push(Fragment {
++                id,
++                position: V3::new(
++                    Fx::from_ratio(x, if id == 3 { 10 } else { 100 }),
++                    Fx::from_ratio(y, 100),
++                    Fx::from_ratio(485, 10),
++                ),
++                velocity: V3::ZERO,
++                material,
++                paint: None,
++                mm,
++                basis: IDENTITY,
++                mass_g: 1,
++                count: shape.count_ones(),
++                shape,
++                side,
++                chunk: None,
++                held: e.ledger.create(matter::Kind::Debris, 0, u64::MAX),
++                resting: true,
++            });
++        }
++        let tick = 7;
++        assert!(due(b.fragments[1].id, tick - 1, &t.blast));
++        assert!(b.fragments.iter().all(|f| !due(f.id, tick, &t.blast)));
++        let full = Settled::around(&b.fragments, &[], |_, _| true);
++        let expected = supported(&b.fragments[1], &w, &[], &full, 1);
++        assert!(expected, "the upper piece rests on the plate");
++        let mut actual = Settled::default();
++        Settled::of_into(
++            &b.fragments, &[], tick, &t.blast, &mut actual,
++            &mut SettledQueries::default(), &mut |_| {}, &|_, _| {},
++        );
++        assert_eq!(supported(&b.fragments[1], &w, &[], &actual, 1), expected,
++            "damage_waiting checks tick-1 but the prepared index omits its support");
++    }
++
+     #[test]
+     fn sleeping_history_keeps_its_matter_and_does_not_block_new_claims() {
+         let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
