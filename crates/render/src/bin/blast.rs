@@ -1789,6 +1789,9 @@ fn advance(
         // Retain the fractional remainder and run every elapsed fixed tick.
         // At low FPS the old single-step path silently slowed the whole scene.
         scene.acc += time.delta_secs();
+        profile.record_dropped_ticks(
+            (scene.acc - render::realtime::MAX_DEBT_TICKS as f32 / 30.0).max(0.0) * 30.0,
+        );
         // Bounded debt (analysis 240, B5): a long overload slows the scene
         // rather than replaying the backlog as a later fast-forward.
         scene.acc = scene
@@ -1805,6 +1808,7 @@ fn advance(
     // A long tick must not be multiplied by an eight-tick catch-up burst.
     // Debt is subtracted only for completed work and stays for later frames.
     let batch_started = std::time::Instant::now();
+    let mut completed = 0;
     for batch_step in 0..steps {
         if scene.realtime
             && batch_step > 0
@@ -2159,7 +2163,9 @@ fn advance(
                 scene.step_us as f64 / 1000.0
             );
         }
+        completed += 1;
     }
+    profile.record_batch(batch_started.elapsed(), steps - completed);
 }
 
 fn orient_gun(

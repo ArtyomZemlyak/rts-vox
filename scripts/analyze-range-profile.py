@@ -43,6 +43,27 @@ def stats(values):
             "max": values[-1]}
 
 
+def pacing_summary(frames):
+    keys = ("simulation_debt_ticks", "simulation_dropped_ticks",
+            "simulation_batch_ms", "simulation_budget_limited_steps")
+    if not any(key in row for row in frames for key in keys):
+        return dict(status="unavailable_legacy")
+    values = {key: [] for key in keys}
+    histogram = {}
+    for row in frames:
+        for key in keys:
+            value = float(row[key])
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"invalid pacing value: {key}")
+            values[key].append(value)
+        steps = int(row["simulation_ticks"])
+        histogram[str(steps)] = histogram.get(str(steps), 0) + 1
+    return dict(status="observed", debt_ticks=stats(values[keys[0]]),
+                final_debt_ticks=values[keys[0]][-1],
+                dropped_ticks=sum(values[keys[1]]), batch_ms=stats(values[keys[2]]),
+                budget_limited_steps=sum(values[keys[3]]), steps_per_frame=histogram)
+
+
 def render_context(log):
     initial = re.search(r"^PROFILE render_context=(RenderContext \{[^\r\n]+\})$", log, re.M)
     steps = [dict(step=int(step), value=value) for step, value in
@@ -1504,6 +1525,7 @@ def analyze(directory, scenario="world-battle", top=12):
         state_hash=hash_match[1] if hash_match else None, actual_adapter=adapter[0] if adapter else None,
         actual_workers=[int(pools[1]), int(pools[2])] if pools else None,
         actual_compute_workers=compute,
+        simulation_pacing=pacing_summary(frames),
         actual_render_context=context,
         camera_tour=camera_tour,
         gpu=gpu, main_wall_accounting=range_gpu_profile.frame_accounting(frames),
@@ -1616,6 +1638,7 @@ def markdown(report):
              f"Frame alignment: {report['frame_alignment']}; duration metric: {report['frame_timing_metric']}. Core ms per actual step: {report['core_ms_per_step']}.", "",
              f"Requested compute workers: {int((report['manifest'] or {}).get('ComputeWorkers') or 0)} (0 = default); actual compute workers: {report.get('actual_compute_workers')}. Actual physics/navigation workers: {report['actual_workers']}.", "",
              f"Observed render context: {report['actual_render_context']['initial'] or 'unavailable'}.",
+             f"Simulation pacing: {report.get('simulation_pacing', {'status': 'unavailable_legacy'})}.",
              f"Render context records: {len(report['actual_render_context']['steps'])}; invalid change: {report['actual_render_context']['invalid_change']}.", "",
              "| Phase | Mean per actual traced tick, ms | p99 occurrence, ms | CPU counter samples |",
              "|---|---:|---:|---:|"]

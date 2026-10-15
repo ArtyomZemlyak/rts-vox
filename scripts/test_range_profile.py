@@ -1814,5 +1814,28 @@ class ReportTests(unittest.TestCase):
             profile.analyze(self.path)
 
 
+class PacingTests(unittest.TestCase):
+    def test_legacy_is_unavailable_and_new_rows_preserve_debt_and_drops(self):
+        self.assertEqual(profile.pacing_summary([{"simulation_ticks": "1"}]),
+                         {"status": "unavailable_legacy"})
+        rows = [dict(simulation_debt_ticks=str(debt), simulation_dropped_ticks=str(drop),
+                     simulation_batch_ms=str(wall), simulation_budget_limited_steps=str(limited),
+                     simulation_ticks=str(steps))
+                for debt, drop, wall, limited, steps in [(2, 0, 21, 2, 1), (0.5, 3, 42, 0, 2)]]
+        result = profile.pacing_summary(rows)
+        self.assertEqual(result["debt_ticks"]["max"], 2)
+        self.assertEqual(result["final_debt_ticks"], 0.5)
+        self.assertEqual(result["dropped_ticks"], 3)
+        self.assertEqual(result["budget_limited_steps"], 2)
+        self.assertEqual(result["steps_per_frame"], {"1": 1, "2": 1})
+        for invalid in ["nan", "inf", "-1"]:
+            rows[0]["simulation_batch_ms"] = invalid
+            with self.assertRaises(ValueError):
+                profile.pacing_summary(rows)
+        del rows[0]["simulation_batch_ms"]
+        with self.assertRaises(KeyError):
+            profile.pacing_summary(rows)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -37,6 +37,9 @@ pub struct Profile {
     phases: Vec<f64>,
     detail: [f64; 5],
     simulation_ticks: u32,
+    dropped_ticks: f32,
+    batch_ms: f64,
+    budget_limited_steps: u32,
     rows: Vec<Frame>,
     epoch: Option<Instant>,
     frame_start_ns: u128,
@@ -81,6 +84,7 @@ struct Frame {
     end_ns: u128,
     gap_ns: u128,
     observed_frame_ms: Option<f64>,
+    pacing: [f64; 4],
 }
 /// Capture requested camera controls, not animated/following camera poses.
 /// Keep changes in memory and print after measurement, not in a slow frame.
@@ -298,6 +302,17 @@ impl Profile {
             self.detail[4] += duration.as_secs_f64() * 1000.0;
         }
     }
+    pub fn record_dropped_ticks(&mut self, ticks: f32) {
+        if self.start.is_some() {
+            self.dropped_ticks += ticks;
+        }
+    }
+    pub fn record_batch(&mut self, duration: std::time::Duration, limited: u32) {
+        if self.start.is_some() {
+            self.batch_ms += duration.as_secs_f64() * 1000.0;
+            self.budget_limited_steps += limited;
+        }
+    }
     fn stamp(&mut self) {
         let now = Instant::now();
         if let Some(last) = self.mark.replace(now) {
@@ -415,6 +430,9 @@ pub fn begin(
     p.phases.clear();
     p.detail.fill(0.0);
     p.simulation_ticks = 0;
+    p.dropped_ticks = 0.0;
+    p.batch_ms = 0.0;
+    p.budget_limited_steps = 0;
     p.mark = Some(Instant::now());
 }
 pub fn stamp(mut p: ResMut<Profile>) {
@@ -487,6 +505,12 @@ pub fn end(
         let gap_ns = p
             .last_end_ns
             .map_or(0, |last| start_ns.saturating_sub(last));
+        let pacing = [
+            f64::from(scene.acc) * 30.0,
+            f64::from(p.dropped_ticks),
+            p.batch_ms,
+            f64::from(p.budget_limited_steps),
+        ];
         p.rows.push(Frame {
             seconds: elapsed,
             tick: scene.sim.tick,
@@ -496,6 +520,7 @@ pub fn end(
             end_ns,
             gap_ns,
             observed_frame_ms,
+            pacing,
         });
         if let Some(mut source) = source {
             source.0 = Some(render::timeline::FrameTag {
@@ -558,7 +583,7 @@ pub fn end(
         let mut out = std::io::BufWriter::new(std::fs::File::create(p.output.as_ref().unwrap())?);
         writeln!(
             out,
-            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions,render_extract_ms,occupancy_ms,simulation_ticks,simulation_core_ms,generation,frame_start_ns,frame_end_ns,frame_gap_ns,observed_frame_ms"
+            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions,render_extract_ms,occupancy_ms,simulation_ticks,simulation_core_ms,generation,frame_start_ns,frame_end_ns,frame_gap_ns,observed_frame_ms,simulation_debt_ticks,simulation_dropped_ticks,simulation_batch_ms,simulation_budget_limited_steps"
         )?;
         for row in &p.rows {
             let Frame {
@@ -570,10 +595,11 @@ pub fn end(
                 end_ns,
                 gap_ns,
                 observed_frame_ms,
+                pacing,
             } = row;
             writeln!(
                 out,
-                "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.0},{:.6},{:.6},{:.0},{:.6},{generation},{start_ns},{end_ns},{gap_ns},{}",
+                "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.0},{:.6},{:.6},{:.0},{:.6},{generation},{start_ns},{end_ns},{gap_ns},{},{:.6},{:.6},{:.6},{:.0}",
                 ms[0],
                 ms[1],
                 ms[2],
@@ -589,7 +615,8 @@ pub fn end(
                 ms[12],
                 ms[13],
                 ms[14],
-                observed_frame_ms.map_or(String::new(), |value| format!("{value:.6}"))
+                observed_frame_ms.map_or(String::new(), |value| format!("{value:.6}")),
+                pacing[0], pacing[1], pacing[2], pacing[3]
             )?;
         }
         let saved = out
