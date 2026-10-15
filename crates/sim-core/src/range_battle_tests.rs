@@ -3560,6 +3560,7 @@ fn world_ai_armies_fire_standard_ammunition_without_annihilation() {
             Weapon::Energy,
             Weapon::Laser,
             Weapon::Canister,
+            Weapon::Siege,
         ]
         .into_iter()
         .map(|weapon| weapon as u8)
@@ -3576,7 +3577,12 @@ fn world_ai_armies_fire_standard_ammunition_without_annihilation() {
         }
     }
     for side in [true, false] {
-        for weapon in [Weapon::Kinetic, Weapon::Energy, Weapon::Canister] {
+        for weapon in [
+            Weapon::Kinetic,
+            Weapon::Energy,
+            Weapon::Canister,
+            Weapon::Siege,
+        ] {
             assert!(
                 observed.contains(&(side, weapon as u8)),
                 "{weapon:?} never flew on side {side}; tick={}, observed={observed:?}",
@@ -3602,6 +3608,7 @@ fn battle_weapon_codes_fit_diagnostic_counters() {
         Weapon::Annihilation,
         Weapon::Laser,
         Weapon::Canister,
+        Weapon::Siege,
     ] {
         assert_eq!(Weapon::from_code(weapon as u8), Some(weapon));
         counts[weapon as usize] += 1;
@@ -4486,3 +4493,6 @@ fn t2_canister_finishes_a_stock_tank_with_at_most_three_salvos() {
         assert!(r.matter.economy.ledger.balanced());
     }
 }
+
+#[path = "range_siege_tests.rs"]
+mod siege_tests;

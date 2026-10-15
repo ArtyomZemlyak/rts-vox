@@ -5,7 +5,7 @@ use fx::blob::{Blob, Scan};
 use modding::battle_ai::Tuning;
 use modding::range::RangeRoad;
 
-pub const OBSERVATION_VERSION: u32 = 2;
+pub const OBSERVATION_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnitObservation {
@@ -79,13 +79,13 @@ mod support_tests {
     fn rules_filters_emplacement_targets_by_attack_range() {
         let tuning = Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
         let radii = modding::battle_ai::Radii::stock();
-        let unit = |id, allied, kind, position: [i32; 2], range| UnitObservation {
+        let unit = |id, allied, kind: RangeUnitKind, position: [i32; 2], range| UnitObservation {
             id,
             allied,
             alive: true,
             armed: range > 0,
-            mobile: !matches!(kind, RangeUnitKind::Base | RangeUnitKind::ArtilleryTurretT2),
-            can_reposition: !matches!(kind, RangeUnitKind::Base | RangeUnitKind::ArtilleryTurretT2),
+            mobile: !kind.emplacement(),
+            can_reposition: !kind.emplacement(),
             kind,
             position,
             ordered_target: None,

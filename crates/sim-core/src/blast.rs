@@ -164,11 +164,18 @@ fn mounts_of(body: &UnitBody) -> Vec<Vec<[u8; 3]>> {
         })
         .collect()
 }
+/// An L1 radius encloses this body's rotated volume about its frame base.
+/// Keep the old small-body fast rejection; large templates must not lose tips.
+fn body_query_radius(body: &UnitBody) -> i32 {
+    let cells = u64::from(body.vol.nx) + 2 * u64::from(body.vol.ny) + u64::from(body.vol.nz);
+    ((cells * u64::from(body.mm)).div_ceil(2 * u64::from(voxel::unit::WORLD_MM)) as i32 + 2).max(80)
+}
 /// A world point in a body's own cells through the given frame.
 fn local_in(body: &UnitBody, p: [i32; 3], pose: &crate::damage::Frame) -> Option<[usize; 3]> {
-    if (p[0] - pose.base.x.to_int_trunc()).abs() > 80
-        || (p[2] - pose.base.z.to_int_trunc()).abs() > 80
-    {
+    let distance = (p[0] - pose.base.x.to_int_trunc())
+        .abs()
+        .max((p[2] - pose.base.z.to_int_trunc()).abs());
+    if distance > 80 && distance > body_query_radius(body) {
         return None;
     }
     let v = p.map(|v| Fx::from_int(v).add(Fx::from_ratio(1, 2)));
@@ -185,13 +192,14 @@ fn local_in(body: &UnitBody, p: [i32; 3], pose: &crate::damage::Frame) -> Option
 /// the fractional offset and frame translation are constant for this pose.
 struct LocalMap {
     base_xz: [i32; 2],
+    radius: i32,
     axes: [[i64; 3]; 3],
     offset: [i64; 3],
     scale: Fx,
     centre: [Fx; 3],
 }
 impl LocalMap {
-    fn new(frame: &crate::damage::Frame) -> Self {
+    fn new(frame: &crate::damage::Frame, body: &UnitBody) -> Self {
         let base = [frame.base.x.raw(), frame.base.y.raw(), frame.base.z.raw()];
         let bias = base.map(|v| (1i64 << 31).wrapping_sub(v));
         let axes =
@@ -203,6 +211,7 @@ impl LocalMap {
         });
         Self {
             base_xz: [frame.base.x.to_int_trunc(), frame.base.z.to_int_trunc()],
+            radius: body_query_radius(body),
             axes,
             offset,
             scale: frame.scale,
@@ -211,7 +220,9 @@ impl LocalMap {
     }
     #[inline]
     fn local_in(&self, body: &UnitBody, p: [i32; 3]) -> Option<[usize; 3]> {
-        if (p[0] - self.base_xz[0]).abs() > 80 || (p[2] - self.base_xz[1]).abs() > 80 {
+        if (p[0] - self.base_xz[0]).abs() > self.radius
+            || (p[2] - self.base_xz[1]).abs() > self.radius
+        {
             return None;
         }
         let mut q = [0; 3];
@@ -272,11 +283,15 @@ impl HitFrames {
             .collect();
         let turret = u.aimed_frame(&root, delta, pitch);
         Self {
-            root: LocalMap::new(&root),
+            root: LocalMap::new(&root, &u.body),
             turret,
-            turret_map: LocalMap::new(&turret),
+            turret_map: LocalMap::new(&turret, &u.body),
             shared_root: delta == 0 && pitch == 0,
-            segments: segments.iter().map(LocalMap::new).collect(),
+            segments: segments
+                .iter()
+                .zip(&u.body.segments)
+                .map(|(frame, s)| LocalMap::new(frame, &s.body))
+                .collect(),
             boxes,
         }
     }
@@ -496,6 +511,7 @@ impl RangeUnit {
         static ARTILLERY_T2: std::sync::OnceLock<voxel::unit::UnitBody> =
             std::sync::OnceLock::new();
         static ARTILLERY_TURRET_T2: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static ARTILLERY_TURRET_T3: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static ARTILLERY: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static TURRET_T1: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static TURRET_T2: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
@@ -510,6 +526,9 @@ impl RangeUnit {
             }
             RangeUnitKind::ArtilleryTurretT2 => ARTILLERY_TURRET_T2
                 .get_or_init(voxel::unit::artillery_turret_t2)
+                .clone(),
+            RangeUnitKind::ArtilleryTurretT3 => ARTILLERY_TURRET_T3
+                .get_or_init(voxel::unit::artillery_turret_t3)
                 .clone(),
             RangeUnitKind::TurretT1 => TURRET_T1.get_or_init(voxel::unit::turret_t1).clone(),
             RangeUnitKind::TurretT2 => TURRET_T2.get_or_init(voxel::unit::turret_t2).clone(),
@@ -4998,6 +5017,9 @@ impl BlastRange {
                     3 if version >= 43 => Some(battle::Weapon::Energy),
                     4 if version >= 43 => Some(battle::Weapon::Annihilation),
                     6 if version >= 51 && unit.kind.canister() => Some(battle::Weapon::Canister),
+                    7 if unit.kind == RangeUnitKind::ArtilleryTurretT3 => {
+                        Some(battle::Weapon::Siege)
+                    }
                     _ => return None,
                 };
                 if !matches!(
@@ -5006,7 +5028,13 @@ impl BlastRange {
                         | RangeUnitKind::Artillery
                         | RangeUnitKind::ArtilleryT2
                         | RangeUnitKind::ArtilleryTurretT2
+                        | RangeUnitKind::ArtilleryTurretT3
                 ) && actor.weapon.is_some()
+                {
+                    return None;
+                }
+                if unit.kind == RangeUnitKind::ArtilleryTurretT3
+                    && !matches!(actor.weapon, None | Some(battle::Weapon::Siege))
                 {
                     return None;
                 }
@@ -7192,7 +7220,7 @@ mod tests {
                         .map(|(seg, frame)| (&seg.body, *frame)),
                 );
             for (body, frame) in frames {
-                let map = LocalMap::new(&frame);
+                let map = LocalMap::new(&frame, body);
                 let centre = [
                     frame.base.x.to_int_trunc(),
                     frame.base.y.to_int_trunc(),

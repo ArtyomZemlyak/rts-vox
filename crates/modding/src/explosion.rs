@@ -303,6 +303,7 @@ mod gravity_tests {
                 "canister-shell",
                 include_str!("../../../data/canister-shell.ron"),
             ),
+            ("siege-shell", include_str!("../../../data/siege-shell.ron")),
             (
                 "energy-cannon",
                 include_str!("../../../data/energy-cannon.ron"),

@@ -73,18 +73,8 @@ mod tests {
         let preset = WorldBattle::from_ron(include_str!("../../../data/battle-world.ron")).unwrap();
         for side in [true, false] {
             let army: Vec<_> = preset.units.iter().filter(|u| u.allied == side).collect();
-            assert_eq!(army.len(), 30);
-            for kind in [
-                RangeUnitKind::Tank,
-                RangeUnitKind::Strider,
-                RangeUnitKind::Spider,
-                RangeUnitKind::Artillery,
-                RangeUnitKind::ArtilleryT2,
-                RangeUnitKind::ArtilleryTurretT2,
-                RangeUnitKind::TurretT1,
-                RangeUnitKind::TurretT2,
-                RangeUnitKind::Base,
-            ] {
+            assert_eq!(army.len(), 31);
+            for kind in RangeUnitKind::ALL {
                 assert!(
                     army.iter().any(|u| u.kind == kind),
                     "missing {kind:?} on side {side}"
@@ -141,6 +131,7 @@ mod tests {
             RangeUnitKind::Spider,
             RangeUnitKind::ArtilleryT2,
             RangeUnitKind::ArtilleryTurretT2,
+            RangeUnitKind::ArtilleryTurretT3,
             RangeUnitKind::TurretT1,
             RangeUnitKind::TurretT2,
             RangeUnitKind::Base,

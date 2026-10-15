@@ -402,6 +402,7 @@ fn weapon_name(w: BattleWeapon) -> &'static str {
         BattleWeapon::Annihilation => "Аннигиляционная пушка",
         BattleWeapon::Laser => "Тяжёлый лазер",
         BattleWeapon::Canister => "Картечь",
+        BattleWeapon::Siege => "Осадный фугас T3",
     }
 }
 
@@ -601,6 +602,8 @@ pub fn refresh(
                             "П"
                         } else if u.kind == RangeUnitKind::Tank {
                             "Т"
+                        } else if u.kind == RangeUnitKind::ArtilleryTurretT3 {
+                            "ОСАДНАЯ ТУРЕЛЬ T3"
                         } else if u.kind == RangeUnitKind::ArtilleryTurretT2 {
                             "АТ2"
                         } else if u.kind == RangeUnitKind::ArtilleryT2 {
@@ -684,9 +687,17 @@ pub fn refresh(
                             u.integrity.core.mul(fx::Fx::from_int(100)).to_int_trunc()
                         );
                     }
-                    if u.kind == RangeUnitKind::ArtilleryTurretT2 {
+                    if matches!(
+                        u.kind,
+                        RangeUnitKind::ArtilleryTurretT2 | RangeUnitKind::ArtilleryTurretT3
+                    ) {
                         return format!(
-                            "АРТ. ТУРЕЛЬ T2 {:02}  ·  {}\nЯдро {}%",
+                            "{} {:02}  ·  {}\nЯдро {}%",
+                            if u.kind == RangeUnitKind::ArtilleryTurretT3 {
+                                "ОСАДНАЯ ТУРЕЛЬ T3"
+                            } else {
+                                "АРТ. ТУРЕЛЬ T2"
+                            },
                             id + 1,
                             if u.status.alive {
                                 "В СТРОЮ"
@@ -702,6 +713,8 @@ pub fn refresh(
                             "ПАУК"
                         } else if u.kind == RangeUnitKind::Tank {
                             "ТАНК"
+                        } else if u.kind == RangeUnitKind::ArtilleryTurretT3 {
+                            "ОСАДНАЯ ТУРЕЛЬ T3"
                         } else if u.kind == RangeUnitKind::ArtilleryTurretT2 {
                             "АТ2"
                         } else if u.kind == RangeUnitKind::ArtilleryT2 {
@@ -1585,7 +1598,7 @@ pub(crate) mod tests {
     #[test]
     fn authored_battles_load_through_hud_and_enemy_ai_acquires_targets() {
         let mut app = app();
-        for (id, expected) in [(0, [3, 3]), (1, [3, 4])] {
+        for (id, expected) in [(0, [3, 3]), (1, [3, 4]), (5, [3, 4])] {
             click(&mut app, Action::Skirmish(id));
             assert!(app.world().resource::<Panel>().battle_launch);
             let (cfg, layout) = app
@@ -1630,13 +1643,13 @@ pub(crate) mod tests {
             .pending
             .take()
             .expect("world battle rebuild");
-        assert_eq!(layout.units.len(), 60);
+        assert_eq!(layout.units.len(), 62);
         let block_count = layout.blocks.len();
         app.world_mut().resource_mut::<Scene>().sim =
             BlastRange::with_layout(config, layout).unwrap();
         app.update();
         let scene = app.world().resource::<Scene>();
-        assert_eq!(scene.sim.battle_counts(), [30, 30]);
+        assert_eq!(scene.sim.battle_counts(), [31, 31]);
         assert_eq!(scene.sim.battle_base_integrity(), Some([100, 100]));
         assert_eq!(
             scene.sim.battle.phase,
@@ -1649,6 +1662,8 @@ pub(crate) mod tests {
             (10, BattleWeapon::Kinetic),
             (41, BattleWeapon::Energy),
             (40, BattleWeapon::Canister),
+            (60, BattleWeapon::Siege),
+            (61, BattleWeapon::Siege),
         ] {
             assert_eq!(scene.sim.battle_weapon(id), Some(weapon));
         }
@@ -1683,13 +1698,13 @@ pub(crate) mod tests {
             .pending
             .take()
             .expect("world battle reset rebuild");
-        assert_eq!(layout.units.len(), 60);
+        assert_eq!(layout.units.len(), 62);
         assert_eq!(layout.blocks.len(), block_count);
         app.world_mut().resource_mut::<Scene>().sim =
             BlastRange::with_layout(config, layout).unwrap();
         app.update();
         let scene = app.world().resource::<Scene>();
-        assert_eq!(scene.sim.battle_counts(), [30, 30]);
+        assert_eq!(scene.sim.battle_counts(), [31, 31]);
         assert_eq!(scene.sim.battle_base_integrity(), Some([100, 100]));
         assert_eq!(
             scene.sim.battle.phase,

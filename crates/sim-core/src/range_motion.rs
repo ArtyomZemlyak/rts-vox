@@ -334,6 +334,7 @@ impl Motion {
             | modding::range::RangeUnitKind::Artillery
             | modding::range::RangeUnitKind::ArtilleryT2
             | modding::range::RangeUnitKind::ArtilleryTurretT2
+            | modding::range::RangeUnitKind::ArtilleryTurretT3
             | modding::range::RangeUnitKind::TurretT1
             | modding::range::RangeUnitKind::TurretT2
             | modding::range::RangeUnitKind::Base => t.tracked,
@@ -4154,6 +4155,7 @@ mod tests {
                 RangeUnitKind::Artillery => voxel::unit::artillery(),
                 RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
                 RangeUnitKind::ArtilleryTurretT2 => voxel::unit::artillery_turret_t2(),
+                RangeUnitKind::ArtilleryTurretT3 => voxel::unit::artillery_turret_t3(),
                 RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                 RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
                 RangeUnitKind::Base => voxel::unit::command_base(),
@@ -4347,6 +4349,7 @@ mod tests {
                 RangeUnitKind::Artillery => voxel::unit::artillery(),
                 RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
                 RangeUnitKind::ArtilleryTurretT2 => voxel::unit::artillery_turret_t2(),
+                RangeUnitKind::ArtilleryTurretT3 => voxel::unit::artillery_turret_t3(),
                 RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                 RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
                 RangeUnitKind::Base => voxel::unit::command_base(),
@@ -5215,6 +5218,7 @@ mod tests {
                         RangeUnitKind::Artillery => voxel::unit::artillery(),
                         RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
                         RangeUnitKind::ArtilleryTurretT2 => voxel::unit::artillery_turret_t2(),
+                        RangeUnitKind::ArtilleryTurretT3 => voxel::unit::artillery_turret_t3(),
                         RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                         RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
                         RangeUnitKind::Base => voxel::unit::command_base(),

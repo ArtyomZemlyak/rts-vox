@@ -106,8 +106,8 @@ struct Witness(usize, Transform, Option<usize>, bool);
 struct WitnessArt {
     materials: [Handle<StandardMaterial>; look::FINISHES],
     burned_materials: [Handle<StandardMaterial>; look::FINISHES],
-    pristine: Arc<[voxel::unit::UnitBody; 9]>,
-    skins: Arc<[SkinBindings; 9]>,
+    pristine: Arc<[voxel::unit::UnitBody; RangeUnitKind::COUNT]>,
+    skins: Arc<[SkinBindings; RangeUnitKind::COUNT]>,
     seen: Vec<Option<witness::Revision>>,
     pending: Vec<Option<witness::Pending>>,
     emitted: Vec<usize>,
@@ -502,7 +502,7 @@ fn main() {
             }
             "--skirmish" => {
                 i += 1;
-                skirmish = Some(args[i].parse::<u8>().expect("skirmish 0..=4"));
+                skirmish = Some(args[i].parse::<u8>().expect("skirmish 0..=5"));
             }
             "--no-projectile-markers" => projectile_markers = false,
             "--zoom" => {
@@ -799,7 +799,7 @@ fn main() {
         .expect("valid range"),
     };
     if ai_vs_ai {
-        assert!(world_battle, "--ai-vs-ai requires --world-battle");
+        assert!(sim.battle_mode(), "--ai-vs-ai requires a battle preset");
         assert!(sim.set_ai_vs_ai(true));
     }
     if let Some(file) = ai_rules_file {
@@ -1412,6 +1412,7 @@ fn setup(
             SkinBindings::new(&voxel::unit::command_base()),
             SkinBindings::new(&voxel::unit::artillery_t2()),
             SkinBindings::new(&voxel::unit::artillery_turret_t2()),
+            SkinBindings::new(&voxel::unit::artillery_turret_t3()),
         ]),
         pristine: Arc::new([
             voxel::unit::tank(),
@@ -1423,6 +1424,7 @@ fn setup(
             voxel::unit::command_base(),
             voxel::unit::artillery_t2(),
             voxel::unit::artillery_turret_t2(),
+            voxel::unit::artillery_turret_t3(),
         ]),
         seen: Vec::new(),
         pending: Vec::new(),

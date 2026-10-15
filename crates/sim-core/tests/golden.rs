@@ -39,7 +39,8 @@ use sim_core::blast::BlastRange;
 // removing feedback from the previous pitched muzzle. Windows CLI 1/4/8.
 // ADR-721: buried destructible concrete foundations and rigid support
 // of stationary buildings intentionally change terrain and combat.
-const GOLDEN_600: u64 = 0x26f5_858e_9efb_b1fe;
+// ADR-722: T3 siege guns and cleared pads are appended to both armies.
+const GOLDEN_600: u64 = 0x1361_6247_0325_5c09;
 
 /// Сценарий собирается **из тех же данных, что у игры**: `include_str!`
 /// разворачивается на сборке, ввода-вывода в тесте нет, а литералы
@@ -64,7 +65,11 @@ fn the_reference_battle_hashes_what_was_recorded() {
         blast |= sim.battle.impacts.iter().any(|i| {
             matches!(
                 i.weapon,
-                Weapon::Blast | Weapon::Canister | Weapon::Energy | Weapon::Annihilation
+                Weapon::Blast
+                    | Weapon::Canister
+                    | Weapon::Siege
+                    | Weapon::Energy
+                    | Weapon::Annihilation
             )
         });
     }

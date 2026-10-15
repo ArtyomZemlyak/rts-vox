@@ -288,7 +288,7 @@ impl Reader<'_> {
                 actor,
                 weapon: match self.0.u8() {
                     0 => None,
-                    code @ 1..=7 => Some(crate::blast::battle::Weapon::from_code(code - 1)?),
+                    code @ 1..=8 => Some(crate::blast::battle::Weapon::from_code(code - 1)?),
                     _ => return None,
                 },
             },

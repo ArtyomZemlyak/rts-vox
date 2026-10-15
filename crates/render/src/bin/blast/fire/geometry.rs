@@ -142,12 +142,15 @@ fn hot(input: Input<'_>) -> MeshBuf {
         for r in sim.battle.rounds.iter().filter(|r| {
             matches!(
                 r.weapon,
-                BattleWeapon::Blast | BattleWeapon::Kinetic | BattleWeapon::Canister
+                BattleWeapon::Blast
+                    | BattleWeapon::Kinetic
+                    | BattleWeapon::Canister
+                    | BattleWeapon::Siege
             )
         }) {
             let t = fraction;
             let at = point(r.previous).lerp(point(r.pos), t);
-            if r.weapon == BattleWeapon::Canister {
+            if matches!(r.weapon, BattleWeapon::Canister | BattleWeapon::Siege) {
                 let direction = (point(r.pos) - point(r.previous)).normalize_or_zero();
                 beam(
                     &mut hot,
@@ -160,8 +163,12 @@ fn hot(input: Input<'_>) -> MeshBuf {
             cube(
                 &mut hot,
                 at,
-                if r.weapon == BattleWeapon::Canister {
-                    2.1
+                if matches!(r.weapon, BattleWeapon::Canister | BattleWeapon::Siege) {
+                    if r.weapon == BattleWeapon::Siege {
+                        3.2
+                    } else {
+                        2.1
+                    }
                 } else {
                     2.0
                 },

@@ -1508,6 +1508,60 @@ pub fn artillery_turret_t2() -> UnitBody {
     u
 }
 
+/// Fixed T3 siege gun: broad plinth, heavy single barrel and recoil rails.
+/// All silhouettes are connected, damageable voxels; the engine supplies its footing.
+pub fn artillery_turret_t3() -> UnitBody {
+    let mut u = UnitBody::new_scaled(80, 52, 56, 16, 150);
+    let a = Part::Armour;
+    fill_f(&mut u, (2, 78), (1, 7), (2, 54), a, FINISH_STEEL);
+    fill_f(&mut u, (7, 65), (7, 20), (6, 50), a, FINISH_PLATE);
+    fill(&mut u, (28, 48), (3, 19), (18, 38), Part::Core);
+    ring(&mut u, (40, 28), 21, 15, (19, 23), a);
+    fill_f(&mut u, (17, 65), (22, 39), (12, 44), a, FINISH_PLATE);
+    fill_f(&mut u, (19, 49), (39, 44), (15, 41), a, FINISH_STEEL);
+    fill_f(
+        &mut u,
+        (43, 80),
+        (33, 41),
+        (24, 32),
+        Part::Weapon,
+        FINISH_GUN,
+    );
+    fill_f(&mut u, (75, 80), (32, 42), (23, 33), a, FINISH_STEEL);
+    fill_f(
+        &mut u,
+        (75, 80),
+        (34, 40),
+        (25, 31),
+        Part::Weapon,
+        FINISH_GUN,
+    );
+    carve(&mut u, (78, 80), (36, 38), (27, 29));
+    for z in [20, 33] {
+        fill_f(&mut u, (35, 73), (30, 35), (z, z + 3), a, FINISH_STEEL);
+    }
+    for z in [8, 40] {
+        crate_box(&mut u, (10, 23), (18, 33), (z, z + 8), a);
+    }
+    fill_f(
+        &mut u,
+        (21, 27),
+        (44, 50),
+        (24, 32),
+        Part::Sensor,
+        FINISH_OPTIC,
+    );
+    pack(&mut u, (24, 56), (20, 22), (12, 44));
+    let mut u = seat(u, "осадная артиллерийская турель T3");
+    u.turret_y = 21;
+    u.push_weapon_path(WeaponPath {
+        min: [43, 33, 24],
+        max: [80, 41, 32],
+        axis: 0,
+    });
+    u
+}
+
 /// T1 point-defence turret: a low armoured socket and one conventional gun.
 /// The base stays fixed; only the upper voxels traverse toward a target.
 pub fn turret_t1() -> UnitBody {
@@ -1699,6 +1753,7 @@ mod command_base_tests {
             ("artillery", artillery()),
             ("turret T1", turret_t1()),
             ("turret T2", turret_t2()),
+            ("artillery T3", artillery_turret_t3()),
             ("base", command_base()),
             ("strider", strider()),
             ("spider", spider()),

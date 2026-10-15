@@ -34,6 +34,18 @@ impl Default for Canister {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct Siege {
+    pub range: i32,
+    pub reload_ticks: u32,
+    pub flight_time_milli: i32,
+}
+impl Default for Siege {
+    fn default() -> Self {
+        ron::from_str(include_str!("../../../data/range-siege.ron")).expect("siege tuning")
+    }
+}
+
 /// Which round a tank loads for what it aims at (ADR-456): `Blast` is the
 /// high-explosive shell, `Kinetic` the armour-piercing one.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -57,6 +69,8 @@ pub struct Tuning {
     pub artillery_range: i32,
     #[serde(default)]
     pub canister: Canister,
+    #[serde(default)]
+    pub siege: Siege,
     pub kinetic_range: i32,
     pub energy_range: i32,
     pub anni_range: i32,
@@ -127,6 +141,9 @@ impl Tuning {
             || !(10..=150).contains(&t.canister.footprint_radius)
             || !(100..=3000).contains(&t.canister.range)
             || !(1..=1800).contains(&t.canister.reload_ticks)
+            || !(100..=3000).contains(&t.siege.range)
+            || !(1..=1800).contains(&t.siege.reload_ticks)
+            || !(1000..=4000).contains(&t.siege.flight_time_milli)
             || !(100..=3000).contains(&t.kinetic_range)
             || !(100..=3000).contains(&t.energy_range)
             || !(100..=3000).contains(&t.anni_range)
@@ -157,6 +174,23 @@ impl Tuning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn siege_defaults_and_authored_limits_are_validated() {
+        let text = include_str!("../../../data/range-battle.ron");
+        let t = Tuning::from_ron(text).unwrap();
+        assert_eq!(t.siege.range, 2400);
+        assert_eq!(t.siege.reload_ticks, 210);
+        assert_eq!(t.siege.flight_time_milli, 1800);
+        for fields in [
+            "range: 0, reload_ticks: 210, flight_time_milli: 1800",
+            "range: 2400, reload_ticks: 0, flight_time_milli: 1800",
+            "range: 2400, reload_ticks: 210, flight_time_milli: 4001",
+        ] {
+            let bad = text.replacen('(', &format!("(siege: ({fields}),"), 1);
+            assert!(Tuning::from_ron(&bad).is_err());
+        }
+    }
 
     #[test]
     fn canister_defaults_and_budget_validation() {

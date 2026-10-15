@@ -123,6 +123,10 @@ fn lifecycle_wire_is_strict_and_pending_values_participate_in_hash() {
             actor: 0,
             weapon: Some(Weapon::Canister),
         },
+        Command::SetBattleWeapon {
+            actor: 0,
+            weapon: Some(Weapon::Siege),
+        },
     ] {
         let mut r = CommandRuntime::new(arena(RangeUnitKind::Tank), 7, bounds().runtime).unwrap();
         r.submit(request(0, 0, command)).unwrap();

@@ -77,11 +77,12 @@ pub enum RangeUnitKind {
     Base,
     ArtilleryT2,
     ArtilleryTurretT2,
+    ArtilleryTurretT3,
 }
 
 impl RangeUnitKind {
     /// Canonical order for kind-indexed capability tables.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Tank,
         Self::Strider,
         Self::Spider,
@@ -91,6 +92,7 @@ impl RangeUnitKind {
         Self::Base,
         Self::ArtilleryT2,
         Self::ArtilleryTurretT2,
+        Self::ArtilleryTurretT3,
     ];
     pub const COUNT: usize = Self::ALL.len();
     pub const fn index(self) -> usize {
@@ -104,13 +106,18 @@ impl RangeUnitKind {
             Self::Base => 6,
             Self::ArtilleryT2 => 7,
             Self::ArtilleryTurretT2 => 8,
+            Self::ArtilleryTurretT3 => 9,
         }
     }
 
     pub const fn emplacement(self) -> bool {
         matches!(
             self,
-            Self::TurretT1 | Self::TurretT2 | Self::ArtilleryTurretT2 | Self::Base
+            Self::TurretT1
+                | Self::TurretT2
+                | Self::ArtilleryTurretT2
+                | Self::ArtilleryTurretT3
+                | Self::Base
         )
     }
     pub const fn canister(self) -> bool {
@@ -119,7 +126,7 @@ impl RangeUnitKind {
     pub const fn artillery(self) -> bool {
         matches!(
             self,
-            Self::Artillery | Self::ArtilleryT2 | Self::ArtilleryTurretT2
+            Self::Artillery | Self::ArtilleryT2 | Self::ArtilleryTurretT2 | Self::ArtilleryTurretT3
         )
     }
 }

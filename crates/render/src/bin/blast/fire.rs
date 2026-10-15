@@ -49,7 +49,7 @@ struct Tracer {
 #[derive(Resource, Default)]
 pub struct Effects {
     alive: Vec<bool>,
-    canister_fired: Vec<u32>,
+    shell_fired: Vec<u32>,
     deaths: Vec<(Vec3, f32)>,
     particles: Vec<Particle>,
     tracers: Vec<Tracer>,
@@ -150,7 +150,7 @@ fn destruction_origin(u: &sim_core::blast::RangeUnit) -> Vec3 {
 impl Effects {
     pub fn clear(&mut self) {
         self.alive.clear();
-        self.canister_fired.clear();
+        self.shell_fired.clear();
         self.deaths.clear();
         self.particles.clear();
         self.tracers.clear();
@@ -166,8 +166,8 @@ impl Effects {
     /// Capture the live flags before the first tick too; loading a wreck
     /// establishes a baseline, it does not replay its destruction.
     pub fn before(&mut self, sim: &BlastRange) {
-        self.canister_fired.clear();
-        self.canister_fired
+        self.shell_fired.clear();
+        self.shell_fired
             .extend(sim.battle.actors.iter().map(|a| a.fired));
         self.alive.clear();
         self.alive.extend(
@@ -468,9 +468,14 @@ impl Effects {
                 self.energy_impacts.push((*i, sim.tick));
             }
             let at = Vec3::from(i.at.map(|v| v as f32));
-            if matches!(i.weapon, BattleWeapon::Blast | BattleWeapon::Canister) {
+            if matches!(
+                i.weapon,
+                BattleWeapon::Blast | BattleWeapon::Canister | BattleWeapon::Siege
+            ) {
                 let energy = if i.weapon == BattleWeapon::Canister {
                     sim.battle.canister_config.energy
+                } else if i.weapon == BattleWeapon::Siege {
+                    sim.battle.siege_config.energy
                 } else {
                     sim.battle.shell_config.energy
                 };
@@ -680,9 +685,12 @@ impl Effects {
         }
         if sim.battle_mode() {
             for (id, unit) in sim.units.iter().enumerate() {
-                if unit.kind.canister() {
+                if matches!(
+                    sim.battle_weapon(id),
+                    Some(BattleWeapon::Canister | BattleWeapon::Siege)
+                ) {
                     let fired = sim.battle.actors[id].fired;
-                    if self.canister_fired.get(id).copied().unwrap_or(fired) != fired {
+                    if self.shell_fired.get(id).copied().unwrap_or(fired) != fired {
                         if let Some(at) = sim.battle_muzzles(id).first() {
                             self.add(point(*at), Vec3::ZERO, now, 0.11, 6.5, false);
                         }
@@ -703,8 +711,8 @@ impl Effects {
                 }
             }
         }
-        self.canister_fired.clear();
-        self.canister_fired
+        self.shell_fired.clear();
+        self.shell_fired
             .extend(sim.battle.actors.iter().map(|a| a.fired));
         self.capture_dust(sim, now);
         self.kinetic_paths.clear();

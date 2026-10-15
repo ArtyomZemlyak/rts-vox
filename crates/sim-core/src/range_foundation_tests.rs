@@ -179,11 +179,8 @@ fn ordinary_ground_blast_keeps_all_buildings_rigid_in_both_modes() {
 
 #[test]
 fn heavy_ground_blast_can_destroy_a_turrets_footing() {
-    let mut c =
-        ExplosionConfig::from_ron(include_str!("../../../data/canister-shell.ron")).unwrap();
-    // A siege-sized charge, not a class-specific bypass of concrete strength.
-    c.energy *= 2;
-    c.material_energy_j *= 2;
+    let c = ExplosionConfig::from_ron(include_str!("../../../data/siege-shell.ron")).unwrap();
+    // The actual T3 charge, without a class-specific concrete bypass.
     c.validate().unwrap();
     let mut r = scene(RangeUnitKind::TurretT1, true, c);
     let before = r.units[0].motion.pos[1];

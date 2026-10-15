@@ -209,6 +209,15 @@ fn explosive_presets_at_one_two_and_four_power_finish_within_five_ticks() {
 }
 
 #[test]
+fn siege_shell_terrain_destruction_lands_within_five_ticks() {
+    let c = ExplosionConfig::from_ron(include_str!("../../../data/siege-shell.ron")).unwrap();
+    let (ticks, removed) = single_blast_latency(c, BlastRange::step);
+    assert!(removed > 0, "T3 did not dig soil");
+    assert!(ticks <= 5, "T3 destruction took {ticks} ticks");
+    eprintln!("T3 terrain completion: ticks={ticks}, removed_soil={removed}");
+}
+
+#[test]
 #[ignore = "latency and peak CPU measurement for blast pacing"]
 fn probe_explosive_preset_latency() {
     for (name, text) in soil_presets().into_iter().filter(|(name, _)| {

@@ -1,6 +1,6 @@
 param(
     [ValidateRange(5, 3600)][int]$Seconds = 30,
-    [ValidateSet('battle', 'battle-eight', 'world-battle', 'canister', 'energy', 'shell', 'clouds', 'drive', 'stream', 'flame', 'actions')]
+    [ValidateSet('battle', 'battle-eight', 'world-battle', 'canister', 'siege', 'energy', 'shell', 'clouds', 'drive', 'stream', 'flame', 'actions')]
     [string[]]$Scenarios = @('battle', 'battle-eight', 'energy', 'shell', 'clouds', 'drive', 'flame'),
     [string]$Output = '',
     [switch]$SkipBuild,
@@ -113,6 +113,7 @@ try {
                 'battle-eight' { @('--battle-eight') }
                 'world-battle' { @('--world-battle', '--ai-vs-ai') }
                 'canister'     { @('--skirmish', '4') }
+                'siege'        { @('--skirmish', '5', '--ai-vs-ai') }
                 'energy'       { @('--weapon', 'energy', '--power', '4000', '--open', '--view', 'exposed') }
                 'shell'        { @('--weapon', 'shell', '--power', '4000', '--view', 'overview') }
                 'clouds'       { @('--drive', '--profile-clouds', '8') }

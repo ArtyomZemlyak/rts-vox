@@ -255,7 +255,7 @@ fn emplacements_reject_movement_and_do_not_remotely_fell_trees() {
         assert_eq!(r.removed_materials[4] + r.removed_materials[5], 0);
         checked += 1;
     }
-    assert_eq!(checked, 4);
+    assert_eq!(checked, 5);
 }
 
 #[test]

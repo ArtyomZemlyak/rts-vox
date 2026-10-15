@@ -400,23 +400,18 @@ fn artillery_solution_matches_the_actual_muzzle_on_slopes_and_at_different_heigh
         RangeUnitKind::Artillery,
         RangeUnitKind::ArtilleryT2,
         RangeUnitKind::ArtilleryTurretT2,
+        RangeUnitKind::ArtilleryTurretT3,
     ] {
         let mut r = arena(kind);
-        let weapon = if kind.canister() {
+        let weapon = if kind == RangeUnitKind::ArtilleryTurretT3 {
+            Weapon::Siege
+        } else if kind.canister() {
             Weapon::Canister
         } else {
             Weapon::Blast
         };
-        let config = if kind.canister() {
-            &r.battle.canister_config
-        } else {
-            &r.battle.shell_config
-        };
-        let milli = if kind.canister() {
-            r.battle.tuning.canister.flight_time_milli
-        } else {
-            1000
-        };
+        let config = r.battle.config(weapon);
+        let milli = super::loft(&r.battle.tuning, weapon);
         for up in [
             V3::UP,
             V3::new(Fx::from_ratio(1, 4), Fx::ONE, Fx::from_ratio(-1, 5)),
@@ -453,6 +448,7 @@ fn artillery_elevates_before_launch_and_replays_during_the_slew_and_flight() {
         RangeUnitKind::Artillery,
         RangeUnitKind::ArtilleryT2,
         RangeUnitKind::ArtilleryTurretT2,
+        RangeUnitKind::ArtilleryTurretT3,
     ] {
         let mut r = arena(kind);
         assert!(r.battle_order(0, Order::Ground([450, 100, 400]), None));
@@ -472,11 +468,7 @@ fn artillery_elevates_before_launch_and_replays_during_the_slew_and_flight() {
                 // Flight has already applied one gravity tick; previous is
                 // the muzzle and reconstructing the initial velocity removes it.
                 let p = r.battle.rounds.iter().find(|p| p.owner == 0).unwrap();
-                let config = if kind.canister() {
-                    &r.battle.canister_config
-                } else {
-                    &r.battle.shell_config
-                };
+                let config = r.battle.config(p.weapon);
                 let mut v = p.velocity;
                 v[1] = v[1].add(Fx::from_ratio(config.gravity, crate::TICKS_PER_SECOND));
                 let axis = r.units[0]

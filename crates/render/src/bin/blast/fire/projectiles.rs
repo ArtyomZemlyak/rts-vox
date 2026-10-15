@@ -92,6 +92,7 @@ pub(super) fn append(
             let edge = match round.weapon {
                 BattleWeapon::MachineGun => 0.7,
                 BattleWeapon::Canister => 2.1,
+                BattleWeapon::Siege => 3.2,
                 BattleWeapon::Blast | BattleWeapon::Kinetic => 2.0,
                 BattleWeapon::Energy => 4.0,
                 BattleWeapon::Annihilation => 6.0,

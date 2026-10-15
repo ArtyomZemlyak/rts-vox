@@ -28,6 +28,7 @@ pub enum Tool {
     Artillery,
     ArtilleryT2,
     ArtilleryTurretT2,
+    ArtilleryTurretT3,
     TurretT1,
     TurretT2,
     Base,
@@ -267,6 +268,7 @@ impl Workshop {
             2 => include_str!("../../../../../data/skirmish-spider.ron"),
             3 => include_str!("../../../../../data/skirmish-turrets.ron"),
             4 => include_str!("../../../../../data/skirmish-canister.ron"),
+            5 => include_str!("../../../../../data/skirmish-siege.ron"),
             _ => return Err("Неизвестный сценарий боя".into()),
         })?;
         let mut layout = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"))?;
@@ -552,6 +554,7 @@ impl Workshop {
             | Tool::Artillery
             | Tool::ArtilleryT2
             | Tool::ArtilleryTurretT2
+            | Tool::ArtilleryTurretT3
             | Tool::TurretT1
             | Tool::TurretT2
             | Tool::Base => {
@@ -562,6 +565,8 @@ impl Workshop {
                         RangeUnitKind::Tank
                     } else if self.tool == Tool::Spider {
                         RangeUnitKind::Spider
+                    } else if self.tool == Tool::ArtilleryTurretT3 {
+                        RangeUnitKind::ArtilleryTurretT3
                     } else if self.tool == Tool::ArtilleryTurretT2 {
                         RangeUnitKind::ArtilleryTurretT2
                     } else if self.tool == Tool::ArtilleryT2 {
@@ -1773,7 +1778,7 @@ mod tests {
             .expect("whole-map battle placement");
         for allied in [true, false] {
             let side: Vec<_> = preset.units.iter().filter(|u| u.allied == allied).collect();
-            assert_eq!(side.len(), 30);
+            assert_eq!(side.len(), 31);
             for kind in [
                 RangeUnitKind::Base,
                 RangeUnitKind::Tank,
@@ -1781,6 +1786,7 @@ mod tests {
                 RangeUnitKind::Spider,
                 RangeUnitKind::Artillery,
                 RangeUnitKind::ArtilleryT2,
+                RangeUnitKind::ArtilleryTurretT3,
                 RangeUnitKind::TurretT1,
                 RangeUnitKind::TurretT2,
             ] {
@@ -1793,7 +1799,7 @@ mod tests {
         assert!(edit.editing);
         assert!(edit.layout.as_ref().unwrap().battle);
         assert!(edit.sector().unwrap().contains([4850, 5580], 0));
-        assert_eq!(edit.layout.as_ref().unwrap().units.len(), 60);
+        assert_eq!(edit.layout.as_ref().unwrap().units.len(), 62);
         assert_eq!(edit.controlled, Some(1));
         assert_eq!(
             edit.layout
@@ -1821,6 +1827,11 @@ mod tests {
         let preview = edit.preview.as_ref().unwrap();
         assert_eq!(preview.issue, None, "{:?}", preview.issue);
         edit.commit(preview.next.clone(), config.clone()).unwrap();
+        // Leave room for the three placement probes under the 64-unit limit.
+        // The untouched 62-unit roster is checked above and by the HUD tests.
+        let mut probe_layout = edit.layout.clone().unwrap();
+        probe_layout.units.truncate(60);
+        edit.commit(probe_layout, config).unwrap();
         edit.tool = Tool::Tank;
         edit.preview(remote_unit, 60);
         let preview = edit.preview.as_ref().unwrap();
@@ -1849,7 +1860,7 @@ mod tests {
             placed
         );
         // Keep this long movement check at its original 15-unit size. The
-        // full 60-unit build and combat start are exercised by the HUD test.
+        // full 62-unit build and combat start are exercised by the HUD test.
         let mut sim_layout = placed;
         sim_layout.units = sim_layout
             .units
@@ -2158,6 +2169,31 @@ mod tests {
             sim.battle_weapon(0),
             Some(sim_core::blast::battle::Weapon::Canister)
         );
+    }
+
+    #[test]
+    fn siege_skirmish_places_both_sides_and_runs_shared_ai() {
+        let (mut workshop, config) = fixture();
+        assert!(workshop.skirmish(5, config).unwrap().contains("T3"));
+        let layout = workshop.layout.as_ref().unwrap();
+        assert_eq!(layout.units.len(), 7);
+        assert_eq!(layout.units[0].kind, RangeUnitKind::ArtilleryTurretT3);
+        assert_eq!(layout.units[6].kind, RangeUnitKind::ArtilleryTurretT3);
+        let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
+        assert!(sim.set_ai_vs_ai(true));
+        sim.start_battle().unwrap();
+        for _ in 0..600 {
+            sim.step();
+            if [0, 6].iter().all(|&id| sim.battle.actors[id].fired > 0) {
+                break;
+            }
+        }
+        assert!(
+            [0, 6].iter().all(|&id| sim.battle.actors[id].fired > 0),
+            "both T3 guns must fire: {:?}",
+            [sim.battle.actors[0].fired, sim.battle.actors[6].fired]
+        );
+        assert!(sim.matter.economy.ledger.balanced());
     }
 
     fn fixture() -> (Workshop, ExplosionConfig) {
