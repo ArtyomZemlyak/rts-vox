@@ -869,30 +869,7 @@ pub fn issue_battle_group_order(
             .count();
     }
     let Some(centre) = destination else { return 0 };
-    let movers: Vec<_> = ids
-        .iter()
-        .copied()
-        .filter(|&id| sim.units.get(id).is_some_and(|u| !u.kind.emplacement()))
-        .collect();
-    let columns = (1..=movers.len())
-        .find(|n| n * n >= movers.len())
-        .unwrap_or(1) as i32;
-    let rows = (movers.len() as i32 + columns - 1) / columns;
-    let size = sim.size();
-    let destinations: Vec<_> = movers
-        .into_iter()
-        .enumerate()
-        .map(|(slot, id)| {
-            let (col, row) = (slot as i32 % columns, slot as i32 / columns);
-            (
-                id,
-                [
-                    (centre[0] + (2 * col - columns + 1) * 45).clamp(0, size[0] as i32 - 1),
-                    (centre[1] + (2 * row - rows + 1) * 45).clamp(0, size[2] as i32 - 1),
-                ],
-            )
-        })
-        .collect();
+    let destinations = sim.battle_formation_destinations(ids, centre);
     sim.battle_group_move(&destinations, centre)
 }
 

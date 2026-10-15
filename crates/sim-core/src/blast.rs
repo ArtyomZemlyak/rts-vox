@@ -7,10 +7,15 @@ use fx::Fx;
 mod blast_source;
 #[path = "range_capture.rs"]
 mod capture;
+#[cfg(test)]
+#[path = "range_crowd_tests.rs"]
+mod crowd_tests;
 #[path = "range_debris_tuning.rs"]
 mod debris_tuning;
 #[path = "range_economy.rs"]
 pub mod economy;
+#[path = "range_formation.rs"]
+mod formation;
 #[path = "range_gun_commands.rs"]
 mod gun_commands;
 #[path = "range_material_tuning.rs"]
@@ -5655,6 +5660,23 @@ impl BlastRange {
         let battle_mode = self.battle_mode();
         let mut starts = self.navigation.searches_started_per_tick;
         let driven = self.patrols_running && (!battle_mode || self.battle_movement_active());
+        let traffic: Vec<_> = self
+            .units
+            .iter()
+            .map(|u| {
+                motion::Traffic::of(
+                    &u.motion,
+                    &u.body,
+                    u.status.alive && u.status.engine && u.motion.can_drive(u.mobility),
+                )
+            })
+            .collect();
+        let traffic_hints: Vec<_> = self
+            .units
+            .iter()
+            .enumerate()
+            .map(|(id, u)| u.motion.traffic_hint(&u.body, id, &traffic, u.mobility))
+            .collect();
         // Whole-map searches in flight walk on before any hull moves
         // (ADR-680): one shared work allowance a tick, the oldest search
         // first, ties by slot, each up to its ceiling; what the first round
@@ -5883,6 +5905,7 @@ impl BlastRange {
         for id in motion_order {
             unit_detail(id, "begin");
             let u = &mut self.units[id];
+            u.motion.set_traffic_hint(traffic_hints[id]);
             if parallel_feet {
                 u.motion.defer_feet();
             }

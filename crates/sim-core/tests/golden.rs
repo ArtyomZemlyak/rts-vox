@@ -42,7 +42,9 @@ use sim_core::blast::BlastRange;
 // ADR-722: T3 siege guns and cleared pads are appended to both armies.
 // ADR-723: rounded terrain, trench routes and the industrial district change
 // the authored map; Windows headless 1/4/8 agree (analysis/298).
-const GOLDEN_600: u64 = 0x4e3a_df0a_4b09_a8ab;
+// ADR-724: snapshot-based following changes accepted motion; Windows
+// headless 1/4/8 agree (analysis/299). Wire format is unchanged.
+const GOLDEN_600: u64 = 0x71db_75e1_adce_cd7d;
 
 /// Сценарий собирается **из тех же данных, что у игры**: `include_str!`
 /// разворачивается на сборке, ввода-вывода в тесте нет, а литералы

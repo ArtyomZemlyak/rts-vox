@@ -17,6 +17,35 @@ pub struct Obstacle {
     pub half: [Fx; 2],
 }
 
+/// Immutable beginning-of-motion traffic sample; physical admission still uses
+/// the live, serially accepted hull positions. Rebuilt, never saved.
+pub(super) struct Traffic {
+    obstacle: Obstacle,
+    direction: [Fx; 2],
+    velocity: Fx,
+    moving: bool,
+}
+impl Traffic {
+    pub(super) fn of(m: &Motion, b: &UnitBody, active: bool) -> Self {
+        Self {
+            obstacle: Obstacle::of(m, b),
+            direction: [angle::cos(m.drive.head), angle::sin(m.drive.head)],
+            velocity: m.drive.vel,
+            moving: active
+                && m.enabled
+                && m.destination.is_some()
+                && m.escape_left == 0
+                && !m.blocked
+                && !m.partial_path
+                && (m.path.is_empty() || m.cursor + 1 == m.path.len()),
+        }
+    }
+}
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TrafficHint {
+    speed: Fx,
+}
+
 /// A local continuation computed against the pre-commit obstacle snapshot.
 /// The original motion/search stays untouched until its blockers are validated.
 pub(super) struct PreparedLocalHunt {
@@ -86,7 +115,18 @@ impl Obstacle {
             ],
         }
     }
-    fn penetration(&self, other: &Self) -> Fx {
+    pub(super) fn penetration(&self, other: &Self) -> Fx {
+        // A rotation cannot extend either hull beyond the sum of its half
+        // extents. Reject distant pairs before trigonometry and four SAT axes.
+        let reach = self.half[0]
+            .add(self.half[1])
+            .add(other.half[0])
+            .add(other.half[1]);
+        if other.pos[0].sub(self.pos[0]).abs() > reach
+            || other.pos[2].sub(self.pos[2]).abs() > reach
+        {
+            return Fx::ZERO;
+        }
         let axes = |head: i32| {
             let c = angle::cos(head);
             let s = angle::sin(head);
@@ -134,7 +174,7 @@ const IMPULSE_REACH: i32 = 64;
 /// How far from the edge of the world an order may still be given, world
 /// units (ADR-315). A hull needs room to turn at the far end of a route,
 /// and the planner's goal ring reaches four cells.
-const EDGE: i32 = 40;
+pub(super) const EDGE: i32 = 40;
 /// The widest world these checks accept when the world itself is not at
 /// hand: they guard a restored snapshot against nonsense, and the exact
 /// bound is the world's own, where the world is known.
@@ -189,6 +229,8 @@ pub struct Motion {
     /// incoming velocity along the line to that hull. Consumed by the
     /// range after all actors have committed their positions, never saved.
     contact: Option<(usize, V3)>,
+    /// Consumed by the next step; derived from the immutable traffic phase.
+    traffic_hint: Option<TrafficHint>,
     /// Legs computed once from the body.
     rigs: Vec<crate::gait::LegRig>,
     /// Share of a buckled leg's rest reach its foot keeps, thousandths
@@ -326,6 +368,104 @@ fn stock_packs() -> &'static StockPacks {
     })
 }
 impl Motion {
+    /// Cheap local traffic advice, without any terrain search or route edit.
+    pub(super) fn traffic_hint(
+        &self,
+        b: &UnitBody,
+        id: usize,
+        traffic: &[Traffic],
+        response: crate::mobility::Mobility,
+    ) -> Option<TrafficHint> {
+        if !self.enabled
+            || self.escape_left != 0
+            || self.destination.is_none()
+            || !self.can_drive(response)
+            || self.partial_path
+            || self.cursor + 1 != self.path.len()
+        {
+            return None;
+        }
+        let goal = self.path.get(self.cursor).copied().or(self.destination)?;
+        let want = angle::atan2(
+            Fx::from_int(goal[1]).sub(self.pos[2]).raw(),
+            Fx::from_int(goal[0]).sub(self.pos[0]).raw(),
+        );
+        let limits = Limits::of(&self.chassis, TICKS);
+        if angle::diff(want, self.drive.head).abs() > limits.turn {
+            return None;
+        }
+        let forward = [angle::cos(want), angle::sin(want)];
+        let dot = |a: [Fx; 2], b: [Fx; 2]| a[0].mul(b[0]).add(a[1].mul(b[1]));
+        let own = Obstacle::of(self, b);
+        let reach = Fx::from_int(
+            4 * (self.shape(b).half[0].max(self.shape(b).half[1]) + self.navigation.cell_units),
+        );
+        let margin = Fx::from_int(self.navigation.plan_margin);
+        let own_radius = own.half[0].max(own.half[1]);
+        let mut hint = TrafficHint {
+            speed: Fx::from_int(self.speed),
+        };
+        let turn = self.navigation.recovery_turn_deg * angle::FULL / 360;
+        let aligned = angle::cos(turn);
+        let brake = response
+            .limits(&limits, false)
+            .brake
+            .mul(self.drive_scale.mul(self.hull.load));
+        for (other_id, other) in traffic.iter().enumerate() {
+            if other_id == id
+                || !other.moving
+                || other.velocity < Fx::ZERO
+                || other.velocity >= hint.speed
+                || !other.obstacle.within([self.pos[0], self.pos[2]], reach)
+            {
+                continue;
+            }
+            let delta = [
+                other.obstacle.pos[0].sub(self.pos[0]),
+                other.obstacle.pos[2].sub(self.pos[2]),
+            ];
+            let ahead = dot(delta, forward);
+            if ahead <= Fx::ZERO {
+                continue;
+            }
+            let across = delta[1].mul(forward[0]).sub(delta[0].mul(forward[1])).abs();
+            let facing = dot(forward, other.direction);
+            let side = forward[0]
+                .mul(other.direction[1])
+                .sub(forward[1].mul(other.direction[0]))
+                .abs();
+            let width = facing
+                .abs()
+                .mul(other.obstacle.half[1])
+                .add(side.mul(other.obstacle.half[0]));
+            let own_side = angle::sin(angle::diff(self.drive.head, want))
+                .abs()
+                .mul(own.half[0])
+                .add(
+                    angle::cos(angle::diff(self.drive.head, want))
+                        .abs()
+                        .mul(own.half[1]),
+                );
+            if across >= own_side.add(width).add(margin) {
+                continue;
+            }
+            if facing >= aligned {
+                let length = facing
+                    .abs()
+                    .mul(other.obstacle.half[0])
+                    .add(side.mul(other.obstacle.half[1]));
+                let gap = ahead.sub(own_radius).sub(length).sub(margin);
+                let closing = drive::stopping_speed(gap, brake, TICKS, hint.speed);
+                hint.speed = hint
+                    .speed
+                    .min(other.velocity.mul(facing).max(Fx::ZERO).add(closing));
+            }
+        }
+        Some(hint)
+    }
+    pub(super) fn set_traffic_hint(&mut self, hint: Option<TrafficHint>) {
+        self.traffic_hint = hint;
+    }
     pub fn new(at: [i32; 3], kind: modding::range::RangeUnitKind, body: &UnitBody) -> Self {
         let packs = stock_packs();
         let t = &packs.sim;
@@ -430,6 +570,7 @@ impl Motion {
             legs_buckled,
             shove: V3::ZERO,
             contact: None,
+            traffic_hint: None,
             rigs,
             fold_milli,
             collapse_pct,
@@ -2283,6 +2424,7 @@ impl Motion {
     ) {
         self.cut.clear();
         self.contact = None;
+        let traffic_hint = self.traffic_hint.take();
         if self.enabled && self.hold_foundation(w, b) {
             self.drive.vel = Fx::ZERO;
             self.drive.yaw_rate = 0;
@@ -2401,6 +2543,9 @@ impl Motion {
                 speed = Fx::from_int(self.speed)
                     .mul(response.engine)
                     .mul(response.traction);
+                if let Some(hint) = traffic_hint {
+                    speed = speed.min(hint.speed);
+                }
                 let alignment = angle::cos(angle::diff(want, self.drive.head)).max(Fx::ZERO);
                 // Keep the existing conservative axis-distance bound on
                 // diagonals. Braking includes this tick and the full tail.
@@ -3112,6 +3257,62 @@ mod tests {
 
     fn ground(depth: i32) -> World {
         World::new(640, 64, 640, 100, Box::new(Ground { depth }))
+    }
+
+    #[test]
+    fn traffic_following_avoids_waiting_on_static_or_turning_blockers() {
+        let body = voxel::unit::tank();
+        let mut follower = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
+        follower.enabled = true;
+        follower.destination = Some([500, 300]);
+        follower.path = vec![[500, 300]];
+        let mut leader = Motion::new([262, 16, 300], RangeUnitKind::Tank, &body);
+        leader.enabled = true;
+        leader.destination = Some([570, 300]);
+        leader.drive.vel = Fx::from_int(20);
+        leader.path = vec![[570, 300]];
+        let response = crate::mobility::Mobility::intact(true);
+        let hint = |f: &Motion, l: &Motion| {
+            f.traffic_hint(
+                &body,
+                0,
+                &[Traffic::of(f, &body, true), Traffic::of(l, &body, true)],
+                response,
+            )
+            .map(|h| h.speed)
+        };
+        assert!(hint(&follower, &leader).unwrap() < Fx::from_int(follower.speed));
+        leader.drive.vel = Fx::ZERO;
+        assert!(hint(&follower, &leader).unwrap() < Fx::from_int(follower.speed));
+        leader.destination = None;
+        assert_eq!(hint(&follower, &leader), Some(Fx::from_int(follower.speed)));
+        leader.destination = Some([570, 300]);
+        leader.blocked = true;
+        assert_eq!(hint(&follower, &leader), Some(Fx::from_int(follower.speed)));
+        leader.blocked = false;
+        let inactive = [
+            Traffic::of(&follower, &body, true),
+            Traffic::of(&leader, &body, false),
+        ];
+        assert_eq!(
+            follower
+                .traffic_hint(&body, 0, &inactive, response)
+                .unwrap()
+                .speed,
+            Fx::from_int(follower.speed)
+        );
+        follower.partial_path = true;
+        assert!(hint(&follower, &leader).is_none());
+        follower.partial_path = false;
+        follower.path = vec![[300, 350], [500, 300]];
+        assert!(hint(&follower, &leader).is_none());
+        follower.path = vec![[300, 300]];
+        leader.drive.head = angle::HALF;
+        leader.drive.vel = Fx::ONE;
+        assert!(
+            hint(&follower, &leader).unwrap() >= Fx::ZERO,
+            "retargeted leader requested reverse"
+        );
     }
 
     #[test]
@@ -4234,7 +4435,9 @@ mod tests {
                 .min()
                 .unwrap()
         }
-        let offsets = [-801, -600, -599, -300, -1, 0, 1, 300, 599, 600, 801];
+        let offsets = [
+            -1801, -901, -851, -801, -600, -599, -300, -1, 0, 1, 300, 599, 600, 801, 851, 901, 1801,
+        ];
         let mut touching = 0;
         let mut apart = 0;
         for heading in (0..angle::FULL).step_by(4096) {
