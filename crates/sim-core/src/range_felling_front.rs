@@ -1,5 +1,5 @@
 //! Ordered (position, seed) frontier. Pending hull contacts share spatial
-//! bitmap words; propagation records retain their full independent seeds.
+//! bitmap words; nearby propagation seeds share a bounded inline word.
 use std::collections::{BTreeMap, BTreeSet};
 
 type Pair = (u64, u64);
@@ -8,6 +8,8 @@ type Pair = (u64, u64);
 pub(super) struct Front {
     words: BTreeMap<u64, u64>,
     contacts: usize,
+    nearby: BTreeMap<u64, u128>,
+    nearby_len: usize,
     branches: BTreeSet<Pair>,
     #[cfg(test)]
     reference: Option<BTreeSet<Pair>>,
@@ -19,10 +21,10 @@ impl Front {
         if let Some(reference) = &self.reference {
             return reference.len();
         }
-        self.contacts + self.branches.len()
+        self.contacts + self.nearby_len + self.branches.len()
     }
     pub fn words(&self) -> usize {
-        self.words.len() + self.branches.len()
+        self.words.len() + self.nearby.len() + self.branches.len()
     }
     pub fn clear(&mut self) {
         *self = Self::default();
@@ -30,12 +32,60 @@ impl Front {
     fn word(p: u64) -> (u64, u64) {
         (p >> 6, 1 << (p & 63))
     }
+    // Storage only, independent of the configured propagation radius. Eight
+    // sorted nonzero u16 lanes fit one word. Far seeds and a ninth nearby
+    // seed retain their full identity in `branches`; nothing is discarded.
+    fn relative((p, seed): Pair) -> Option<u16> {
+        if (p | seed) >> 63 != 0 {
+            return None;
+        }
+        let delta = std::array::from_fn::<_, 3, _>(|a| {
+            let shift = [42, 21, 0][a];
+            ((seed >> shift) & super::FELL_MASK) as i32 - ((p >> shift) & super::FELL_MASK) as i32
+        });
+        if delta.iter().any(|&v| !(-16..16).contains(&v)) {
+            return None;
+        }
+        Some(
+            delta
+                .into_iter()
+                .fold(0u16, |key, v| (key << 5) | (v + 16) as u16)
+                + 1,
+        )
+    }
+    fn absolute(p: u64, relative: u16) -> Pair {
+        let code = relative - 1;
+        let cell = super::fell_cell(p);
+        let seed = std::array::from_fn(|a| cell[a] + i32::from((code >> [10, 5, 0][a]) & 31) - 16);
+        (p, super::fell_key(seed))
+    }
+    fn lane(word: u128, index: usize) -> u16 {
+        (word >> (index * 16)) as u16
+    }
+    fn locate(word: u128, code: u16) -> (usize, bool) {
+        for i in 0..8 {
+            let lane = Self::lane(word, i);
+            if lane == 0 || lane >= code {
+                return (i, lane == code);
+            }
+        }
+        (8, false)
+    }
     pub fn contains(&self, pair: &Pair) -> bool {
         #[cfg(test)]
         if let Some(reference) = &self.reference {
             return reference.contains(pair);
         }
         if pair.0 != pair.1 {
+            if let Some(code) = Self::relative(*pair) {
+                if self
+                    .nearby
+                    .get(&pair.0)
+                    .is_some_and(|&word| Self::locate(word, code).1)
+                {
+                    return true;
+                }
+            }
             return self.branches.contains(pair);
         }
         let (key, bit) = Self::word(pair.0);
@@ -47,6 +97,26 @@ impl Front {
             return reference.insert(pair);
         }
         if pair.0 != pair.1 {
+            if let Some(code) = Self::relative(pair) {
+                // Overflow records stay there even when inline room opens.
+                if self.branches.contains(&pair) {
+                    return false;
+                }
+                let word = self.nearby.entry(pair.0).or_default();
+                let (index, present) = Self::locate(*word, code);
+                if present {
+                    return false;
+                }
+                if Self::lane(*word, 7) == 0 {
+                    let shift = index * 16;
+                    let low = *word & ((1u128 << shift) - 1);
+                    *word = low
+                        | (u128::from(code) << shift)
+                        | ((*word & !((1u128 << shift) - 1)) << 16);
+                    self.nearby_len += 1;
+                    return true;
+                }
+            }
             return self.branches.insert(pair);
         }
         let (key, bit) = Self::word(pair.0);
@@ -62,6 +132,28 @@ impl Front {
             return reference.remove(pair);
         }
         if pair.0 != pair.1 {
+            if let Some(code) = Self::relative(*pair) {
+                if let std::collections::btree_map::Entry::Occupied(mut entry) =
+                    self.nearby.entry(pair.0)
+                {
+                    let (index, present) = Self::locate(*entry.get(), code);
+                    if present {
+                        let shift = index * 16;
+                        let low = *entry.get() & ((1u128 << shift) - 1);
+                        let high = if index == 7 {
+                            0
+                        } else {
+                            (*entry.get() >> (shift + 16)) << shift
+                        };
+                        *entry.get_mut() = low | high;
+                        if *entry.get() == 0 {
+                            entry.remove();
+                        }
+                        self.nearby_len -= 1;
+                        return true;
+                    }
+                }
+            }
             return self.branches.remove(pair);
         }
         let (key, bit) = Self::word(pair.0);
@@ -88,10 +180,16 @@ impl Front {
         if let Some(reference) = &self.reference {
             return reference.first().copied();
         }
-        match (self.first_contact(), self.branches.first().copied()) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        [
+            self.first_contact(),
+            self.nearby
+                .first_key_value()
+                .map(|(&p, &word)| Self::absolute(p, word as u16)),
+            self.branches.first().copied(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
     pub fn pop_first(&mut self) -> Option<Pair> {
         #[cfg(test)]
@@ -100,6 +198,16 @@ impl Front {
         }
         let pair = self.first()?;
         if pair.0 != pair.1 {
+            if let Some(mut entry) = self.nearby.first_entry() {
+                if Self::absolute(*entry.key(), *entry.get() as u16) == pair {
+                    *entry.get_mut() >>= 16;
+                    if *entry.get() == 0 {
+                        entry.remove();
+                    }
+                    self.nearby_len -= 1;
+                    return Some(pair);
+                }
+            }
             return self.branches.pop_first();
         }
         let mut entry = self.words.first_entry().expect("contact head");
@@ -126,6 +234,16 @@ impl Front {
         })
         .peekable();
         let mut branches = self.branches.iter().copied().peekable();
+        let mut nearby = self
+            .nearby
+            .iter()
+            .flat_map(|(&p, &word)| {
+                (0..8)
+                    .map(move |i| Self::lane(word, i))
+                    .take_while(|&code| code != 0)
+                    .map(move |code| Self::absolute(p, code))
+            })
+            .peekable();
         #[cfg(test)]
         let mut reference = self.reference.as_ref().map(|r| r.iter());
         std::iter::from_fn(move || {
@@ -133,10 +251,17 @@ impl Front {
             if let Some(reference) = &mut reference {
                 return reference.next().copied();
             }
-            match (contacts.peek(), branches.peek()) {
-                (Some(a), Some(b)) if a < b => contacts.next(),
-                (_, Some(_)) => branches.next(),
-                _ => contacts.next(),
+            let next = [contacts.peek(), nearby.peek(), branches.peek()]
+                .into_iter()
+                .flatten()
+                .min()
+                .copied()?;
+            if contacts.peek() == Some(&next) {
+                contacts.next()
+            } else if nearby.peek() == Some(&next) {
+                nearby.next()
+            } else {
+                branches.next()
             }
         })
     }
