@@ -349,6 +349,7 @@ mod tests {
         b.save(&mut bytes);
         b.wakeups += 100;
         b.settled_queries = usize::MAX;
+        b.settled_query_words = [usize::MAX; 2];
         assert_eq!(b.hash(), expected);
         let mut again = Blob::new();
         b.save(&mut again);
@@ -356,6 +357,7 @@ mod tests {
         let restored = Bursts::load(&mut Scan::new(&bytes.v), Some(&w), &t).unwrap();
         assert_eq!(restored.wakeups, 0);
         assert_eq!(restored.settled_queries, 0);
+        assert_eq!(restored.settled_query_words, [0; 2]);
         assert_eq!(restored.hash(), expected);
         assert_eq!(b.fragment_pools(&t).working, 1);
         assert_eq!(e.wrecks.len(), 2);
@@ -1335,6 +1337,55 @@ mod tests {
             }
         }
         assert!(!SettledQueries::default().contains([0; 3]));
+    }
+    #[test]
+    fn split_query_words_preserve_signed_coordinates_and_both_planes_on_reuse() {
+        let xs = [i32::MIN + 8, -100, -1, 0, 123, i32::MAX - 8];
+        let zs = [i32::MIN, -100, -1, 0, 123, i32::MAX];
+        let ranges: Vec<_> = xs
+            .into_iter()
+            .flat_map(|x| {
+                zs.into_iter().flat_map(move |z| {
+                    [-129, -65, -1, 0, 62, 63, 64, 127, 128, 1023]
+                        .map(|y| ([x, y, z], [x, y + 1, z]))
+                })
+            })
+            .collect();
+        let mut expected = BTreeSet::new();
+        for &(lo, hi) in &ranges {
+            for y in lo[1]..=hi[1] {
+                expected.insert([lo[0], y, lo[2]]);
+            }
+        }
+        for workers in [1, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            let mut queries = SettledQueries::default();
+            for parallel in [false, true] {
+                pool.install(|| queries.build(&ranges, parallel, &|_, _| {}));
+                let counts = queries.word_counts();
+                assert_eq!(counts[0], xs.len() * zs.len());
+                assert!(counts[1] > 0);
+                for x in xs {
+                    for z in zs {
+                        for y in -132..=1026 {
+                            let p = [x, y, z];
+                            assert_eq!(queries.contains(p), expected.contains(&p));
+                        }
+                    }
+                }
+                queries.clear();
+                assert_eq!(queries.word_counts(), [0; 2]);
+                assert!(queries.is_empty());
+                queries.build(&[([2, 0, 3], [2, 0, 3])], false, &|_, _| {});
+                assert_eq!(queries.word_counts(), [1, 0]);
+                assert!(queries.contains([2, 0, 3]));
+                assert!(!queries.contains([2, 64, 3]));
+                queries.clear();
+            }
+        }
     }
     #[test]
     fn settled_index_matches_unpacked_requests_and_preserves_piece_indices() {
@@ -3406,16 +3457,8 @@ mod tests {
                     &mut |_| {},
                     &|_, _| {},
                 );
-                let masks: Vec<Vec<([i32; 3], u64)>> = queries
-                    .0
-                    .iter()
-                    .map(|t| {
-                        t.sorted_entries()
-                            .into_iter()
-                            .map(|(k, v)| (*k, *v))
-                            .collect()
-                    })
-                    .collect();
+                let masks: Vec<Vec<([i32; 3], u64)>> =
+                    queries.0.iter().map(SettledQueryStripe::ordered).collect();
                 (index.boxes, index.cells.ordered(), masks)
             })
         };
@@ -4595,6 +4638,8 @@ pub struct Bursts {
     pub body_removed: u64,
     /// Diagnostic only: actual resting-to-flying transitions; not saved or hashed.
     pub wakeups: u64,
+    /// Last motion mask's zero-word/other-word entries; not saved or hashed.
+    pub settled_query_words: [usize; 2],
     /// Diagnostic only: confirmed cells pulverised for want of a slot
     /// (ADR-659); not saved or hashed.
     pub dusted: u64,
@@ -5775,6 +5820,7 @@ impl Bursts {
             task,
         );
         self.settled_queries = settled.requests;
+        self.settled_query_words = queries.word_counts();
         completed("debris_settled");
         // Waking pieces count against the flying budget like new ones; a
         // piece without room waits for its next turn. A claim holds its
@@ -7095,15 +7141,51 @@ impl SettledCells {
 /// insertion ORs a range instead of hashing every Y coordinate. No path
 /// iterates the hash table: contact order comes from the fragment slice.
 #[derive(Default)]
-struct SettledQueries([FxLookup<[i32; 3], u64>; 8]);
+struct SettledQueries([SettledQueryStripe; 8]);
+#[derive(Default)]
+struct SettledQueryStripe {
+    // Word zero covers 64 index cells (256 world units). Its word coordinate
+    // is implicit; full signed X/Z still take exactly eight bytes. The tuple
+    // hashes both coordinates separately, avoiding the poor low-bit spread
+    // of concatenating them into one integer with FxHasher 1.1.
+    base: FxLookup<(i32, i32), u64>,
+    // Other heights, including negative margins, retain the exact 3D key.
+    other: FxLookup<[i32; 3], u64>,
+}
+#[cfg(test)]
+impl SettledQueryStripe {
+    fn ordered(&self) -> Vec<([i32; 3], u64)> {
+        let mut words: BTreeMap<_, _> = self
+            .base
+            .sorted_entries()
+            .into_iter()
+            .map(|(&(x, z), &mask)| ([x, 0, z], mask))
+            .collect();
+        for (&key, &mask) in self.other.sorted_entries() {
+            assert!(words.insert(key, mask).is_none());
+        }
+        words.into_iter().collect()
+    }
+}
 impl SettledQueries {
     fn clear(&mut self) {
         for stripe in &mut self.0 {
-            stripe.clear();
+            stripe.base.clear();
+            stripe.other.clear();
         }
     }
     fn is_empty(&self) -> bool {
-        self.0.iter().all(FxLookup::is_empty)
+        self.0
+            .iter()
+            .all(|stripe| stripe.base.is_empty() && stripe.other.is_empty())
+    }
+    fn word_counts(&self) -> [usize; 2] {
+        let mut counts = [0; 2];
+        for stripe in &self.0 {
+            counts[0] += stripe.base.len();
+            counts[1] += stripe.other.len();
+        }
+        counts
     }
     fn build(
         &mut self,
@@ -7113,7 +7195,7 @@ impl SettledQueries {
     ) {
         // X modulo eight owns the word, so workers never share a table and
         // need no unordered merge. Ranges are captured in fragment order.
-        let fill = |(stripe, table): (usize, &mut FxLookup<[i32; 3], u64>)| {
+        let fill = |(stripe, table): (usize, &mut SettledQueryStripe)| {
             let _task = PhysicsTask::new(task, "physics_queries_begin", "physics_queries_end");
             for &(lo, hi) in ranges {
                 Self::include(table, stripe as i32, lo, hi);
@@ -7125,7 +7207,7 @@ impl SettledQueries {
             self.0.iter_mut().enumerate().for_each(fill);
         }
     }
-    fn include(table: &mut FxLookup<[i32; 3], u64>, stripe: i32, lo: [i32; 3], hi: [i32; 3]) {
+    fn include(table: &mut SettledQueryStripe, stripe: i32, lo: [i32; 3], hi: [i32; 3]) {
         let x0 = lo[0] + (stripe - lo[0]).rem_euclid(8);
         if x0 > hi[0] {
             return;
@@ -7145,16 +7227,27 @@ impl SettledQueries {
                     63
                 };
                 let mask = (u64::MAX << low) & (u64::MAX >> (63 - high));
-                for x in (x0..=hi[0]).step_by(8) {
-                    *table.entry([x, word, z]).or_default() |= mask;
+                if word == 0 {
+                    for x in (x0..=hi[0]).step_by(8) {
+                        *table.base.entry((x, z)).or_default() |= mask;
+                    }
+                } else {
+                    for x in (x0..=hi[0]).step_by(8) {
+                        *table.other.entry([x, word, z]).or_default() |= mask;
+                    }
                 }
             }
         }
     }
     fn contains(&self, [x, y, z]: [i32; 3]) -> bool {
-        self.0[x.rem_euclid(8) as usize]
-            .get(&[x, y.div_euclid(64), z])
-            .is_some_and(|word| word & (1 << y.rem_euclid(64)) != 0)
+        let stripe = &self.0[x.rem_euclid(8) as usize];
+        let word = y.div_euclid(64);
+        let mask = if word == 0 {
+            stripe.base.get(&(x, z))
+        } else {
+            stripe.other.get(&[x, word, z])
+        };
+        mask.is_some_and(|word| word & (1 << y.rem_euclid(64)) != 0)
     }
 }
 /// Loose cells grouped by fragment box and material, as cell masks.
