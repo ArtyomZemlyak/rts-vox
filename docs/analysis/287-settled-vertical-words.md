@@ -57,7 +57,7 @@ SDK/registry/generated inputs. Raw — `qualify.ps1`, `qualification.json`,
 `manifest.json`, `source.patch`.
 
 Финальные architecture/docs, `cargo fmt --all -- --check` и
-`git diff --check` проверяются перед push. Проверены 347 локальных
+`git diff --check` прошли. Проверены 347 локальных
 файловых ссылок девяти актуализированных анализов; отсутствующих файлов
 нет, anchors отдельно не проверялись.
 
@@ -106,9 +106,26 @@ Raw, frozen, CSV/логи и агрегатор — `out/settled-y-20261015/`,
 
 ## Полигон
 
-Headless-квалификация завершена. Пересборка установленного полигона
-и короткая maximized native-проверка выполняются отдельно; ранний smoke
-не заменяет позднюю native-приёмку и не является FPS A/B.
+Пересобран и установлен `target/release/blast.exe`. Его SHA256 совпадает
+с frozen `out/settled-y-20261015/blast.exe`:
+**`402CB335CBA0B27CA99EE21FAFEC37F296C75A73BF3D260DFC350578C8FE6B19`**.
+BuildEvidence фиксирует refreshed kernel source и toolchain.
+
+**Native30 smoke прошёл**: world-battle, фактический клиент **3840×1949**,
+focused, scale1, AutoNoVsync, maximized requested (`Windowed` в Bevy),
+Vulkan/RTX 5090, physics4/navigation8/Rayon4/Compute4, target165.
+Контекст и камера не менялись; Core/GPU/Timeline observers не включались.
+2230 строк / 2229 межкадровых интервалов, среднее **13,467 мс**
+(около 74,3 FPS), p99 **36,090 мс**, max **60,492 мс**.
+900 SIM-шагов, core **10,163 мс/шаг**, темп **0,999185590×**;
+context valid, `meets_simulation_rate=true`, `acceptance_eligible=true`
+**для этих ранних 30 секунд**.
+
+Hash900 **`6b248d02309736ad`** независимо воспроизведён headless
+на тех же 900 шагах, physics4/navigation8/Rayon4 (`native-endpoint.log`).
+Raw/context — `native30/`, анализ — `world-battle.analysis.json/md`.
+Ранний smoke **не заменяет позднюю native-приёмку и не является FPS A/B**.
+Его нельзя сравнивать с 51,2 FPS четырёхминутного боя 286 как выигрыш.
 
 ## Оставшиеся работы
 
