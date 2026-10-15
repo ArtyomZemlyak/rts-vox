@@ -161,7 +161,7 @@ grep -rn 'QUESTION' docs/ | grep stage-0
 
 ```
 sim-cli --ticks 600 --dump-hash
-battle ticks=600 threads=1 hash=f805b33fae206b54
+battle ticks=600 threads=1 hash=dcd749eb91e2d410
 ```
 
 Число записано свежим `sim-cli` на Windows после ADR-697:

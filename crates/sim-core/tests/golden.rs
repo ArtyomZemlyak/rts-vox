@@ -35,7 +35,9 @@ use sim_core::blast::BlastRange;
 // разрушения. Windows 1/4/8 — analysis/268, формат снимка прежний.
 // ADR-718: contact capture survives a full claim queue; blocked felling
 // records no longer prevent bounded cleanup of later stale entries.
-const GOLDEN_600: u64 = 0xf805_b33f_ae20_6b54;
+// ADR-719: spider elevation solves the fixed mount and barrel offset,
+// removing feedback from the previous pitched muzzle. Windows CLI 1/4/8.
+const GOLDEN_600: u64 = 0xdcd7_49eb_91e2_d410;
 
 /// Сценарий собирается **из тех же данных, что у игры**: `include_str!`
 /// разворачивается на сборке, ввода-вывода в тесте нет, а литералы

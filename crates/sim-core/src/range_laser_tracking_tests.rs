@@ -45,6 +45,74 @@ fn beam(r: &mut BlastRange) {
     }
     panic!("siege beam never started");
 }
+
+#[test]
+fn spider_laser_tracking_settles_on_close_and_low_final_points_without_hunting() {
+    for point in [[300, 100, 360], [450, 18, 400]] {
+        let mut r = trial(&[(RangeUnitKind::Tank, [540, 16, 540])], vec![]);
+        // Isolate head tracking from suspension motion and incoming damage.
+        // The actual battle servos, beam, heat and pulse/reload still run.
+        r.units[0].motion.enabled = false;
+        r.units[1].motion.enabled = false;
+        r.units[1].status.weapon = false;
+        assert!(r.battle_order(0, Order::Ground(point), None));
+        for _ in 0..350 {
+            step(&mut r);
+        }
+        let settled = (r.battle.actors[0].turret.angle, r.units[0].turret_pitch);
+        let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+        assert!(replay.set_physics_workers(1));
+        assert!(replay.set_navigation_workers(1));
+        let mut live = 0;
+        for _ in 0..120 {
+            step(&mut r);
+            step(&mut replay);
+            let actor = &r.battle.actors[0];
+            assert_eq!(
+                (actor.turret.angle, r.units[0].turret_pitch),
+                settled,
+                "head hunted a stationary final point {point:?}"
+            );
+            assert_eq!((actor.turret.rate, actor.elevation.rate), (0, 0));
+            assert_eq!(r.state_hash(), replay.state_hash());
+            assert!(r.matter.economy.ledger.balanced());
+            live += r.battle.lasers.len();
+        }
+        assert!(live > 0, "a stopped beam cannot prove stable live tracking");
+    }
+}
+
+#[test]
+fn spider_laser_tracking_pitch_depends_on_mount_geometry_not_previous_head_pose() {
+    let mut u = RangeUnit::of_kind(RangeUnitKind::Spider, [200, 16, 336]);
+    for target in [
+        [300, 100, 336],
+        [450, 18, 336],
+        [560, 100, 336],
+        [400, 100, 500],
+    ] {
+        let pitch = spider_laser_pitch(&u, target);
+        for previous in [-12000, -1000, 0, 1000, 12000] {
+            u.turret_pitch = previous;
+            u.update_pose(previous);
+            assert_eq!(spider_laser_pitch(&u, target), pitch);
+        }
+        let yaw = fx::angle::atan2(i64::from(target[2] - 336), i64::from(target[0] - 200));
+        u.update_pose(yaw);
+        u.turret_pitch = pitch;
+        let from = weapons::muzzles(&u, yaw)[0];
+        let f = u.root_frame(usize::from(u.body.turret_y));
+        let delta = phys::V3::new(
+            Fx::from_int(target[0]).sub(from[0]),
+            Fx::from_int(target[1]).sub(from[1]),
+            Fx::from_int(target[2]).sub(from[2]),
+        );
+        // Independent geometric check: the actual muzzle axis reaches the
+        // authored point within one world cell, including the barrel offset.
+        assert!(delta.dot(f.x) > Fx::ZERO);
+        assert!(delta.dot(f.y).abs() < Fx::ONE);
+    }
+}
 #[test]
 fn spider_laser_tracking_starts_before_alignment_and_ray_follows_the_real_barrel() {
     let mut r = trial(&[(RangeUnitKind::Tank, [200, 16, 560])], vec![]);

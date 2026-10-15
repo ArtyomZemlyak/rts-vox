@@ -829,6 +829,40 @@ fn spider_laser_aim(
     })
 }
 
+/// Solve elevation about the fixed mount, not the previous pitched muzzle.
+/// At the target azimuth the barrel line has a fixed normal offset `height`:
+/// -forward * sin(pitch) + up * cos(pitch) = height.
+/// Its longitudinal muzzle offset does not change the required angle.
+fn spider_laser_pitch(u: &RangeUnit, target: [i32; 3]) -> i32 {
+    let frame = &u.pose;
+    let mount = Fx::from_int(i32::from(u.body.turret_y));
+    let pivot = frame.base.add(frame.y.scale(mount.div(frame.scale)));
+    let delta = phys::V3::new(
+        Fx::from_int(target[0]),
+        Fx::from_int(target[1]),
+        Fx::from_int(target[2]),
+    )
+    .sub(pivot);
+    let up = delta.dot(frame.y);
+    // Keep azimuth and elevation independent during a live transfer. Using
+    // the projection onto the current barrel heading would command a near
+    // vertical pitch while the yaw passes 90 degrees from the new target.
+    let horizontal_sq = delta.len_sq().sub(up.mul(up)).max(Fx::ZERO);
+    let forward = horizontal_sq.sqrt();
+    let height = u.body.weapon_paths().first().map_or(Fx::ZERO, |path| {
+        weapons::muzzle_cell(path)[1].sub(mount).div(frame.scale)
+    });
+    let along = horizontal_sq
+        .add(up.mul(up))
+        .sub(height.mul(height))
+        .max(Fx::ZERO)
+        .sqrt();
+    fx::angle::diff(
+        fx::angle::atan2(up.raw(), forward.raw()),
+        fx::angle::atan2(height.raw(), along.raw()),
+    )
+}
+
 /// A unit attack needs a useful firing position, rather than burning a forest
 /// indefinitely. Meltable cover may still be breached in place; point orders
 /// deliberately keep their direct ray. Walk in firing direction, since a
@@ -2399,21 +2433,8 @@ impl BlastRange {
                     spider_laser_aim(&self.world, muzzle, p, a.burst, tuning)
                 };
                 if let Some(t) = tracking {
-                    let frame = crate::damage::turned(
-                        &self.units[id].pose,
-                        a.turret.angle,
-                        self.units[id].motion.drive.head,
-                    );
-                    let delta = phys::V3::new(
-                        Fx::from_int(desired[0]).sub(muzzle[0]),
-                        Fx::from_int(desired[1]).sub(muzzle[1]),
-                        Fx::from_int(desired[2]).sub(muzzle[2]),
-                    );
-                    let y = delta.dot(frame.y);
-                    let horizontal = delta.len_sq().sub(y.mul(y)).max(Fx::ONE).sqrt();
                     let limit = t.elevation_limit_degrees * fx::angle::FULL / 360;
-                    let pitch = fx::angle::diff(fx::angle::atan2(y.raw(), horizontal.raw()), 0)
-                        .clamp(-limit, limit);
+                    let pitch = spider_laser_pitch(&self.units[id], desired).clamp(-limit, limit);
                     a.elevation.step(
                         pitch,
                         crate::turret::Limits::of(t.elevation, crate::TICKS_PER_SECOND),
