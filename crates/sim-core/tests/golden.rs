@@ -40,7 +40,9 @@ use sim_core::blast::BlastRange;
 // ADR-721: buried destructible concrete foundations and rigid support
 // of stationary buildings intentionally change terrain and combat.
 // ADR-722: T3 siege guns and cleared pads are appended to both armies.
-const GOLDEN_600: u64 = 0x1361_6247_0325_5c09;
+// ADR-723: rounded terrain, trench routes and the industrial district change
+// the authored map; Windows headless 1/4/8 agree (analysis/298).
+const GOLDEN_600: u64 = 0x4e3a_df0a_4b09_a8ab;
 
 /// Сценарий собирается **из тех же данных, что у игры**: `include_str!`
 /// разворачивается на сборке, ввода-вывода в тесте нет, а литералы

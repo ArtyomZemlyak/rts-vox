@@ -4,7 +4,7 @@ param(
     [switch]$Build,
     [switch]$Settings,
     [switch]$Battle,
-    [ValidateRange(1, 12)][int]$Zone = 1,
+    [ValidateRange(1, 16)][int]$Zone = 1,
     [ValidateSet('energy', 'shell', 'kinetic', 'anni', 'laser', 'flame', 'machine-gun')][string]$Weapon = 'energy',
     [ValidateSet('tank', 'walker', 'spider')][string]$Chassis = 'tank'
 )

@@ -162,6 +162,31 @@ pub struct RangeBlock {
     pub max: [i32; 3],
     pub material: u16,
 }
+/// Smooth elliptical relief. Bounds describe the base and absolute summit height;
+/// overlapping mounds take the maximum, rather than adding unbounded elevation.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeMound {
+    pub min: [i32; 3],
+    pub max: [i32; 3],
+}
+impl RangeMound {
+    pub fn height(&self, x: i32, z: i32) -> Option<i32> {
+        if x < self.min[0] || x >= self.max[0] || z < self.min[2] || z >= self.max[2] {
+            return None;
+        }
+        // Fixed-point ellipse and squared falloff give a level foot and rounded crest.
+        // All intermediates fit i64 even at the catalogue's maximum dimensions.
+        const Q: i64 = 1024;
+        let norm = |v: i32, axis: usize| {
+            (2 * i64::from(v) - i64::from(self.min[axis]) - i64::from(self.max[axis])).abs() * Q
+                / i64::from(self.max[axis] - self.min[axis])
+        };
+        let nx = norm(x, 0);
+        let nz = norm(z, 2);
+        let t = (Q * Q - nx * nx - nz * nz).max(0);
+        Some(self.min[1] + (i64::from(self.max[1] - self.min[1]) * t * t / (Q * Q * Q * Q)) as i32)
+    }
+}
 /// Ground-level track linking sectors. It follows the natural relief and
 /// clears trees, so vehicles can use it without a raised collision slab.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -216,6 +241,9 @@ pub struct RangeLayout {
     pub blocks: Vec<RangeBlock>,
     #[serde(default)]
     pub roads: Vec<RangeRoad>,
+    /// Optional relief: absent/empty keeps the old layout text and terrain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounds: Vec<RangeMound>,
     #[serde(default)]
     pub shields: Vec<RangeShieldDef>,
     pub power_milli: Vec<u32>,
@@ -320,6 +348,10 @@ impl RangeLayout {
             || r.units.iter().any(|u| !u.valid_loadout())
             || !(1..=100_000).contains(&r.auto_attack_range)
             || r.blocks.len() > MAX_RANGE_BLOCKS
+            || r.mounds.len() > 16
+            || r.mounds
+                .iter()
+                .any(|m| (0..3).any(|a| m.min[a] < 0 || m.max[a] > size[a] || m.min[a] >= m.max[a]))
             || r.roads.len() > 16
             || r.roads.iter().any(|road| {
                 !(16..=96).contains(&road.width)
@@ -439,6 +471,41 @@ impl RangeLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rounded_mounds_are_bounded_symmetric_and_old_layouts_omit_them() {
+        let old = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        assert!(old.mounds.is_empty());
+        assert!(!old.to_ron().unwrap().contains("mounds"));
+        let m = RangeMound {
+            min: [0, 16, 0],
+            max: [16384, 192, 16384],
+        };
+        assert_eq!(m.height(8192, 8192), Some(192));
+        assert_eq!(m.height(0, 8192), Some(16));
+        assert_eq!(m.height(-1, 8192), None);
+        assert_eq!(m.height(16384, 8192), None);
+        for x in (1..8192).step_by(31) {
+            assert_eq!(m.height(x, 8192), m.height(16384 - x, 8192));
+            assert_eq!(m.height(8192, x), m.height(x, 8192));
+        }
+        let mut layout = old;
+        layout.mounds = vec![RangeMound {
+            min: [80, 16, 80],
+            max: [400, 120, 400],
+        }];
+        assert_eq!(
+            RangeLayout::from_ron(&layout.to_ron().unwrap()).unwrap(),
+            layout
+        );
+        layout.mounds[0].max[1] = layout.size[1] as i32 + 1;
+        assert!(layout.validate().is_err());
+        layout.mounds[0].max[1] = 120;
+        layout.mounds[0].max[0] = layout.mounds[0].min[0];
+        assert!(layout.validate().is_err());
+        layout.mounds = vec![m; 17];
+        assert!(layout.validate().is_err());
+    }
+
     #[test]
     fn snapshot_layout_text_is_canonical_across_input_line_endings() {
         let source = include_str!("../../../data/range-km.ron").replace("\r\n", "\n");

@@ -1217,6 +1217,21 @@ impl RangeTerrain {
     // A road must be a drivable cut through procedural hills, including at
     // the edge of an authored flat zone. Fade the cut into the surrounding
     // terrain so it does not create a vertical wall along the verge.
+    fn mound_ground(&self, x: u32, z: u32) -> u32 {
+        self.layout.as_ref().map_or(FLOOR as u32, |r| {
+            self.index
+                .at(x, z)
+                .mounds
+                .iter()
+                .filter_map(|&i| r.mounds[i].height(x as i32, z as i32))
+                .max()
+                .unwrap_or(FLOOR)
+                .max(FLOOR) as u32
+        })
+    }
+    fn relief_ground(&self, x: u32, z: u32) -> u32 {
+        range_height(x, z).max(self.mound_ground(x, z))
+    }
     fn road_ground(&self, x: u32, z: u32, natural: u32) -> u32 {
         if natural <= FLOOR as u32 {
             return natural;
@@ -1282,6 +1297,17 @@ impl RangeTerrain {
             .chain(&next.blocks[next_blocks])
         {
             areas.push(([b.min[0], b.min[2]], [b.max[0], b.max[2]]));
+        }
+        let (old_mounds, next_mounds) = changed_span(&old.mounds, &next.mounds);
+        for m in old.mounds[old_mounds]
+            .iter()
+            .chain(&next.mounds[next_mounds])
+        {
+            // Tree bases move with relief; include crowns reaching outside its bounds.
+            areas.push((
+                [m.min[0] - 28, m.min[2] - 28],
+                [m.max[0] + 28, m.max[2] + 28],
+            ));
         }
         let (old_roads, next_roads) = changed_span(&old.roads, &next.roads);
         for road in old.roads[old_roads].iter().chain(&next.roads[next_roads]) {
@@ -1351,7 +1377,7 @@ impl RangeTerrain {
             && !seed.is_multiple_of(5))
         .then(|| {
             (
-                self.road_ground(tx, tz, range_height(tx, tz)),
+                self.road_ground(tx, tz, self.relief_ground(tx, tz)),
                 19 + (seed >> 13) % 18,
                 tx,
                 tz,
@@ -1436,7 +1462,7 @@ impl RangeTerrain {
                     || self.in_zone(x, z)
             })
             .map(|c| {
-                let mut h = FLOOR;
+                let mut h = self.road_ground(x, z, self.mound_ground(x, z)) as i32;
                 for r in self.index.at(x, z).ramps.iter().map(|&i| &c.ramps[i]) {
                     if (x as i32) >= r.min[0]
                         && (x as i32) < r.max[0]
@@ -1455,14 +1481,17 @@ impl RangeTerrain {
                 }
                 h
             })
-            .or_else(|| self.in_zone(x, z).then_some(FLOOR));
+            .or_else(|| {
+                self.in_zone(x, z)
+                    .then(|| self.road_ground(x, z, self.mound_ground(x, z)) as i32)
+            });
         let pad_surface = course.map_or(8, |_| range_pad_surface(x, z, road));
         let unit_pad = self.extended && (337..415).contains(&x) && (282..322).contains(&z);
         let ground =
             if layout_pad || unit_pad || (self.extended && x < 448 && (298..387).contains(&z)) {
                 FLOOR as u32
             } else {
-                self.road_ground(x, z, range_height(x, z))
+                self.road_ground(x, z, self.relief_ground(x, z))
             };
         let lane = (322..351).contains(&z) && x < 254 + shift;
         let wall = self.layout.is_none()
@@ -1653,7 +1682,7 @@ impl Generator for RangeTerrain {
                 && (z as i32) < c.max[1])
                 || self.in_zone(x, z)
             {
-                let mut h = FLOOR;
+                let mut h = self.road_ground(x, z, self.mound_ground(x, z)) as i32;
                 for r in self.index.at(x, z).ramps.iter().map(|&i| &c.ramps[i]) {
                     if (x as i32) >= r.min[0]
                         && (x as i32) < r.max[0]
@@ -1682,8 +1711,9 @@ impl Generator for RangeTerrain {
             }
         }
         if self.in_zone(x, z) {
-            return if y < FLOOR as u32 {
-                if y + 1 == FLOOR as u32 {
+            let h = self.road_ground(x, z, self.mound_ground(x, z));
+            return if y < h {
+                if y + 1 == h {
                     range_pad_surface(x, z, road)
                 } else {
                     1
@@ -1696,7 +1726,7 @@ impl Generator for RangeTerrain {
         let h = if layout_pad || unit_pad || (self.extended && x < 448 && (298..387).contains(&z)) {
             FLOOR as u32
         } else {
-            self.road_ground(x, z, range_height(x, z))
+            self.road_ground(x, z, self.relief_ground(x, z))
         };
         if y < h {
             let lane = (322..351).contains(&z) && x < 254 + shift;
@@ -1750,7 +1780,7 @@ impl Generator for RangeTerrain {
             && !(tx < 288 + shift && (298..=386).contains(&tz))
             && !seed.is_multiple_of(5)
         {
-            let base = self.road_ground(tx, tz, range_height(tx, tz));
+            let base = self.road_ground(tx, tz, self.relief_ground(tx, tz));
             let tall = 19 + (seed >> 13) % 18;
             let dx = x as i32 - tx as i32;
             let dz = z as i32 - tz as i32;
@@ -4545,7 +4575,9 @@ impl BlastRange {
         };
         let mut r = if s.bool() {
             let data = s.u8s();
-            if data.len() > 65536 {
+            // A valid full catalogue exceeds 64 KiB in canonical pretty RON.
+            // This is a decoder ceiling, not a different snapshot wire format.
+            if data.len() > 256 * 1024 {
                 return None;
             }
             Self::with_layout(
@@ -11883,6 +11915,175 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn full_authored_map_roundtrips_layout_text_above_the_old_64k_ceiling() {
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        let preset = modding::range_skirmish::WorldBattle::from_ron(include_str!(
+            "../../../data/battle-world.ron"
+        ))
+        .unwrap();
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+        let sim = BlastRange::world_battle(c, layout, preset).unwrap();
+        let text = sim.layout.as_ref().unwrap().to_ron().unwrap();
+        assert!(
+            text.len() > 65536 && text.len() < 256 * 1024,
+            "layout bytes {}",
+            text.len()
+        );
+        let bytes = sim.snapshot();
+        let restored = BlastRange::restore(c, &bytes).expect("full supported map snapshot");
+        assert_eq!(restored.snapshot(), bytes);
+        assert_eq!(restored.state_hash(), sim.state_hash());
+        // Keep a finite corruption guard, including a real oversized payload.
+        let pos = bytes
+            .windows(text.len())
+            .position(|w| w == text.as_bytes())
+            .unwrap();
+        let oversized = 256 * 1024 + 1;
+        let mut corrupt = bytes[..pos].to_vec();
+        corrupt[pos - 4..pos].copy_from_slice(&(oversized as u32).to_le_bytes());
+        corrupt.extend_from_slice(text.as_bytes());
+        corrupt.resize(pos + oversized, b' ');
+        corrupt.extend_from_slice(&bytes[pos + text.len()..]);
+        assert!(BlastRange::restore(c, &corrupt).is_none());
+    }
+
+    #[test]
+    fn new_landmarks_have_climbable_crests_clear_saddle_and_grounded_structures() {
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        // Keep a slot for temporary training/editor sectors and for the full war roster.
+        assert!(layout.zones.len() < modding::range::MAX_RANGE_ZONES);
+        let war = modding::range_skirmish::WorldBattle::from_ron(include_str!(
+            "../../../data/battle-world.ron"
+        ))
+        .unwrap();
+        let mut battle = layout.clone();
+        battle.blocks.extend(war.blocks);
+        battle.validate().unwrap();
+        let gen = RangeTerrain::new(true, Some(layout));
+        let top = |x, z| {
+            (0..192)
+                .rev()
+                .find(|&y| gen.material(x, y, z) != 0)
+                .unwrap()
+                + 1
+        };
+        for (a, b, fixed, axis, peak) in [
+            (1000, 1700, 2145, 0, 156),
+            (2500, 3080, 2200, 2, 128),
+            (850, 1670, 3240, 0, 176),
+        ] {
+            let mut previous = 16i32;
+            let mut highest = 0;
+            for v in a..=b {
+                let (x, z) = if axis == 0 { (v, fixed) } else { (fixed, v) };
+                let h = top(x, z) as i32;
+                assert!(
+                    (h - previous).abs() <= 1,
+                    "crest step at {x},{z}: {previous}->{h}"
+                );
+                highest = highest.max(h);
+                previous = h;
+            }
+            assert_eq!(highest, peak);
+            assert_eq!(previous, 16);
+        }
+        for z in (1800..3600).step_by(8) {
+            for x in [1760, 1800, 1840] {
+                assert_eq!(top(x, z), 16, "mountain saddle blocked at {x},{z}");
+            }
+        }
+        // Hall doors/interior and bunker door admit vehicles; roof and tower are real matter.
+        for x in (4870..5640).step_by(8) {
+            for y in 16..70 {
+                assert_eq!(gen.material(x, y, 7860), 0, "hall passage {x},{y}");
+            }
+        }
+        assert_eq!(gen.material(5350, 114, 7860), 0);
+        assert_eq!(gen.material(5350, 114, 7770), 3);
+        assert_eq!(gen.material(5225, 2, 7785), 3);
+        assert_eq!(gen.material(6135, 2, 8095), 3);
+        assert_eq!(gen.material(6170, 180, 8130), 3);
+        assert_eq!(gen.material(6375, 30, 7660), 0);
+        assert_eq!(gen.material(6400, 70, 7660), 2);
+    }
+
+    #[test]
+    fn mound_index_matches_full_walk_and_columns_outside_prepared_sectors() {
+        let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        let gen = RangeTerrain::new(true, Some(layout.clone()));
+        for x in (0..layout.size[0]).step_by(127) {
+            for z in (0..layout.size[2]).step_by(127) {
+                let expected = layout
+                    .mounds
+                    .iter()
+                    .filter_map(|m| m.height(x as i32, z as i32))
+                    .max()
+                    .unwrap_or(FLOOR)
+                    .max(FLOOR) as u32;
+                assert_eq!(gen.mound_ground(x, z), expected, "mound index {x},{z}");
+            }
+        }
+        // Relief is a general terrain primitive, independent of courses and named sectors.
+        layout.zones.clear();
+        layout.course = None;
+        let gen = RangeTerrain::new(true, Some(layout.clone()));
+        let cached = RangeTerrain::new(true, Some(layout.clone())).with_tree_cache(layout.size);
+        for m in &layout.mounds {
+            for x in (m.min[0] - 1..=m.max[0]).step_by(41) {
+                for z in (m.min[2] - 1..=m.max[2]).step_by(37) {
+                    let mut column = [0u16; 192];
+                    let mut other = [0u16; 192];
+                    cached.column(x as u32, z as u32, 0, &mut column);
+                    gen.column(x as u32, z as u32, 0, &mut other);
+                    assert_eq!(column, other, "mound tree cache {x},{z}");
+                    for (y, &mat) in column.iter().enumerate() {
+                        assert_eq!(
+                            mat,
+                            gen.material(x as u32, y as u32, z as u32),
+                            "mound column {x},{y},{z}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn new_trenches_have_stepped_exits_and_vehicle_width_supported_crossings() {
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        let gen = RangeTerrain::new(true, Some(layout));
+        let top = |x, z| {
+            (0..192)
+                .rev()
+                .find(|&y| gen.material(x, y, z) != 0)
+                .unwrap()
+                + 1
+        };
+        for (x0, x1, z0) in [(1250, 1346, 5620), (1900, 2012, 5840), (2490, 2618, 5520)] {
+            let mut previous = 16i32;
+            for x in x0 - 12..x1 + 12 {
+                let h = top(x, z0 + 80) as i32;
+                assert!(
+                    (h - previous).abs() <= 4,
+                    "trench side step {x}: {previous}->{h}"
+                );
+                previous = h;
+            }
+            assert_eq!(top((x0 + x1) / 2, z0 + 80), 4);
+            // Both bridge abutments rest on intact terrain. All 9.2m of deck have headroom.
+            for x in x0 - 8..x1 + 8 {
+                for z in 6154..6246 {
+                    assert_eq!(gen.material(x, 15, z), 3);
+                    assert_eq!(gen.material(x, 40, z), 0);
+                }
+            }
+            for x in [x0 - 4, x1 + 4] {
+                assert_ne!(gen.material(x, 11, 6200), 0);
+            }
+        }
+    }
+
     #[test]
     fn road_centrelines_do_not_run_through_authored_walls() {
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();

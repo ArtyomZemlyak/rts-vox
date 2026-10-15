@@ -25,6 +25,9 @@
             scenario: Some((title: "Эстакада под огнём", description: "Первый выстрел подрезает правую опору стального пролёта, второй проверяет уцелевшую часть.", weapon: Energy, power_milli: 1000, shots: [(8290,42,3490),(8030,96,3490)]))),
         (name: "Лесной склад", min: (7840,5600), max: (8730,6500), spawn: (7970,16,6010), target: (8550,84,5990),
             scenario: Some((title: "Обстрел склада", description: "Два выстрела по деревянной крыше и штабелю; сравните повреждения.", weapon: Energy, power_milli: 1000, shots: [(8550,84,5990),(8520,34,6260)]))),
+        // Explore these landmarks through the same sector selector and free orders.
+        (name: "Три вершины и перевал", min: (800,1750), max: (2600,3650), spawn: (1800,16,2850), target: (1430,85,2220)),
+        (name: "Промышленный узел", min: (4600,7100), max: (6800,9000), spawn: (4870,16,7860), target: (5100,62,7760)),
     ],
     course: Some((
         min: (200, 400), max: (590, 625),
@@ -87,6 +90,19 @@
         (width: 44, points: [(4780,5300),(4850,5580),(5050,5800),(5600,5900),(7100,6500),(8050,7500),(8730,8800)]),
         (width: 36, points: [(8100,3500),(7970,3580),(7800,3590)]),
         (width: 36, points: [(8317,6000),(8140,6010),(7970,6010)]),
+        // Alternate exploration loop: mountain saddle, trench crossings, factory.
+        (width: 60, points: [(1880,4120),(1800,3600),(1800,3100),(1800,2400),(1800,1800),(1600,1500),(1480,460)]),
+        (width: 60, points: [(1880,4120),(1080,5400),(1080,6200),(2860,6200),(3300,7000),(4870,7300),(4870,7860),(4870,7640),(5800,7640),(5800,8500),(7100,8500),(8730,8800)]),
+        (width: 48, points: [(4870,7860),(4780,5300)]),
+    ],
+    // Smooth, asymmetric landforms; the engine uses max-union and indexed columns.
+    mounds: [
+        (min: (1000,16,1900), max: (1700,156,2390)),
+        (min: (1040,16,1840), max: (1460,83,2270)),
+        (min: (1900,16,2500), max: (2500,128,3000)),
+        (min: (2120,16,2620), max: (2550,76,3080)),
+        (min: (950,16,2980), max: (1670,176,3500)),
+        (min: (850,16,3160), max: (1390,99,3570)),
     ],
     blocks: [
         (min: (392, 0, 282), max: (408, 60, 390), material: 2), // concrete jacket
@@ -427,6 +443,49 @@
         (min: (9092,94,8876), max: (9218,102,8888), material: 3),
         (min: (9180,94,8770), max: (9202,116,8792), material: 3),
         (min: (9180,94,8810), max: (9202,110,8832), material: 3),
+        // New large landmarks use only existing indexed blocks and ramps.
+        // Trench field: preserve one spare sector slot for temporary experiments.
+        (min: (900,16,5400), max: (3300,192,7300), material: 0),
+        (min: (1250, 12, 5620), max: (1346, 192, 6800), material: 0), // stepped trench, no trapped tree crowns
+        (min: (1258, 8, 5628), max: (1338, 192, 6792), material: 0), // stepped trench, no trapped tree crowns
+        (min: (1266, 4, 5636), max: (1330, 192, 6784), material: 0), // stepped trench, no trapped tree crowns
+        (min: (1242, 12, 6154), max: (1354, 16, 6246), material: 3), // 9.2m-wide supported crossing
+        (min: (1900, 12, 5840), max: (2012, 192, 7120), material: 0), // stepped trench, no trapped tree crowns
+        (min: (1908, 8, 5848), max: (2004, 192, 7112), material: 0), // stepped trench, no trapped tree crowns
+        (min: (1916, 4, 5856), max: (1996, 192, 7104), material: 0), // stepped trench, no trapped tree crowns
+        (min: (1892, 12, 6154), max: (2020, 16, 6246), material: 3), // 9.2m-wide supported crossing
+        (min: (2490, 12, 5520), max: (2618, 192, 6740), material: 0), // stepped trench, no trapped tree crowns
+        (min: (2498, 8, 5528), max: (2610, 192, 6732), material: 0), // stepped trench, no trapped tree crowns
+        (min: (2506, 4, 5536), max: (2602, 192, 6724), material: 0), // stepped trench, no trapped tree crowns
+        (min: (2482, 12, 6154), max: (2626, 16, 6246), material: 3), // 9.2m-wide supported crossing
+        (min: (5100, 0, 7720), max: (5600, 116, 8000), material: 2), // industrial hall shell, rooted walls
+        (min: (5108, 16, 7728), max: (5592, 110, 7992), material: 0), // hollow interior
+        (min: (5100, 16, 7808), max: (5109, 78, 7912), material: 0), // vehicle portal
+        (min: (5591, 16, 7808), max: (5600, 78, 7912), material: 0), // vehicle portal
+        (min: (5300, 16, 7720), max: (5400, 72, 7729), material: 0), // vehicle portal
+        (min: (5300, 16, 7991), max: (5400, 72, 8000), material: 0), // vehicle portal
+        (min: (5220, 0, 7780), max: (5232, 110, 7792), material: 3), // roof support, linked to ground
+        (min: (5220, 0, 7930), max: (5232, 110, 7942), material: 3), // roof support, linked to ground
+        (min: (5350, 0, 7780), max: (5362, 110, 7792), material: 3), // roof support, linked to ground
+        (min: (5350, 0, 7930), max: (5362, 110, 7942), material: 3), // roof support, linked to ground
+        (min: (5480, 0, 7780), max: (5492, 110, 7792), material: 3), // roof support, linked to ground
+        (min: (5480, 0, 7930), max: (5492, 110, 7942), material: 3), // roof support, linked to ground
+        (min: (5216, 110, 7720), max: (5236, 122, 8000), material: 3), // roof rib
+        (min: (5346, 110, 7720), max: (5366, 122, 8000), material: 3), // roof rib
+        (min: (5476, 110, 7720), max: (5496, 122, 8000), material: 3), // roof rib
+        (min: (5140, 116, 7760), max: (5182, 142, 7796), material: 3), // roof ventilation
+        (min: (5450, 116, 7940), max: (5492, 142, 7976), material: 3), // roof ventilation
+        (min: (5520, 116, 7750), max: (5562, 142, 7786), material: 3), // roof ventilation
+        (min: (6130, 0, 8090), max: (6142, 166, 8102), material: 3), // relay tower leg
+        (min: (6130, 0, 8160), max: (6142, 166, 8172), material: 3), // relay tower leg
+        (min: (6200, 0, 8090), max: (6212, 166, 8102), material: 3), // relay tower leg
+        (min: (6200, 0, 8160), max: (6212, 166, 8172), material: 3), // relay tower leg
+        (min: (6118, 160, 8078), max: (6224, 170, 8184), material: 3), // observation platform
+        (min: (6160, 170, 8120), max: (6180, 188, 8140), material: 3), // relay head
+        (min: (6370, 0, 7560), max: (6570, 78, 7770), material: 2), // armoured bunker
+        (min: (6382, 16, 7572), max: (6558, 66, 7758), material: 0), // bunker interior
+        (min: (6370, 16, 7620), max: (6383, 58, 7710), material: 0), // bunker vehicle entrance
+        (min: (5100, 78, 7808), max: (5600, 192, 7912), material: 0), // open-sky central vehicle aisle
     ],
     power_milli: [500, 1000, 2000, 4000],
     unit_resistance: 180,

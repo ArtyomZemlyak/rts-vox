@@ -595,7 +595,8 @@ impl Workshop {
                 return;
             }
             tool => {
-                next.blocks.push(block(tool, at, self.rotate));
+                let b = block(tool, at, self.rotate, &next);
+                next.blocks.push(b);
                 Selection::Block(next.blocks.len() - 1)
             }
         };
@@ -677,7 +678,20 @@ struct Preview {
 fn snap(v: f32) -> i32 {
     (v / 4.0).round() as i32 * 4
 }
-fn block(tool: Tool, at: [i32; 3], rotate: bool) -> RangeBlock {
+/// Undamaged authored relief for editor clearings and distance guides. The
+/// authoritative edited floor still comes from the world's material queries.
+fn natural_ground(layout: Option<&RangeLayout>, x: i32, z: i32) -> i32 {
+    let base = sim_core::blast::range_height(x as u32, z as u32) as i32;
+    layout.map_or(base, |l| {
+        l.mounds
+            .iter()
+            .filter_map(|m| m.height(x, z))
+            .max()
+            .unwrap_or(base)
+            .max(base)
+    })
+}
+fn block(tool: Tool, at: [i32; 3], rotate: bool, layout: &RangeLayout) -> RangeBlock {
     if tool == Tool::Clear {
         static CLEARING: std::sync::OnceLock<modding::range::RangeEditor> =
             std::sync::OnceLock::new();
@@ -689,7 +703,7 @@ fn block(tool: Tool, at: [i32; 3], rotate: bool) -> RangeBlock {
         });
         let half = cfg.clearing_side / 2;
         let floor = if at[0] >= 0 && at[2] >= 0 {
-            sim_core::blast::range_height(at[0] as u32, at[2] as u32) as i32
+            natural_ground(Some(layout), at[0], at[2])
         } else {
             at[1]
         };
@@ -697,7 +711,7 @@ fn block(tool: Tool, at: [i32; 3], rotate: bool) -> RangeBlock {
             min: [at[0] - half, floor, at[2] - half],
             max: [
                 at[0] + cfg.clearing_side - half,
-                floor + cfg.clearing_height,
+                (floor + cfg.clearing_height).min(layout.size[1] as i32),
                 at[2] + cfg.clearing_side - half,
             ],
             material: 0,
@@ -751,7 +765,7 @@ fn relocate(layout: &mut RangeLayout, selected: Selection, at: [i32; 3]) {
             let dx = at[0] - (b.min[0] + b.max[0]) / 2;
             let dz = at[2] - (b.min[2] + b.max[2]) / 2;
             let dy = if b.material == 0 && at[0] >= 0 && at[2] >= 0 {
-                sim_core::blast::range_height(at[0] as u32, at[2] as u32) as i32 - b.min[1]
+                natural_ground(Some(layout), at[0], at[2]) - b.min[1]
             } else {
                 0
             };
@@ -761,7 +775,10 @@ fn relocate(layout: &mut RangeLayout, selected: Selection, at: [i32; 3]) {
                 b.max[0] += dx;
                 if b.material == 0 {
                     b.min[1] += dy;
-                    b.max[1] += dy;
+                    // A clearing clipped by the ceiling stays open to the sky after moving down.
+                    if b.max[1] != layout.size[1] as i32 {
+                        b.max[1] = (b.max[1] + dy).min(layout.size[1] as i32);
+                    }
                 }
                 b.min[2] += dz;
                 b.max[2] += dz;
@@ -1329,7 +1346,7 @@ fn ground_range(giz: &mut Gizmos, sim: &BlastRange, at: [i32; 2], radius: i32, c
         let x = (at[0] as f32 + angle.cos() * radius as f32).round() as i32;
         let z = (at[1] as f32 + angle.sin() * radius as f32).round() as i32;
         let next = if x >= 0 && z >= 0 && x < sim.size()[0] as i32 && z < sim.size()[2] as i32 {
-            let natural = sim_core::blast::range_height(x as u32, z as u32) as i32;
+            let natural = natural_ground(sim.layout.as_ref(), x, z);
             let floor = sim_core::blast::motion::floor(&sim.world, x, z).min(natural);
             Some(Vec3::new(x as f32, floor as f32 + 0.7, z as f32))
         } else {
@@ -1715,6 +1732,29 @@ pub fn overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rounded_relief_guides_and_clearings_follow_height_and_clip_to_world_ceiling() {
+        let mut l =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        let legacy = natural_ground(Some(&l), 240, 240);
+        assert_eq!(legacy, sim_core::blast::range_height(240, 240) as i32);
+        l.mounds.push(modding::range::RangeMound {
+            min: [80, 16, 80],
+            max: [400, 176, 400],
+        });
+        assert_eq!(natural_ground(Some(&l), 240, 240), 176);
+        let clearing = block(Tool::Clear, [240, 176, 240], false, &l);
+        assert_eq!(clearing.min[1], 176);
+        assert_eq!(clearing.max[1], 192);
+        l.blocks = vec![clearing];
+        relocate(&mut l, Selection::Block(0), [160, 40, 240]);
+        assert_eq!(l.blocks[0].min[1], natural_ground(Some(&l), 160, 240));
+        assert!(l.blocks[0].max[1] <= 192);
+        relocate(&mut l, Selection::Block(0), [240, 176, 240]);
+        assert_eq!(l.blocks[0].min[1], 176);
+        assert!(l.blocks[0].max[1] <= 192);
+    }
+
     #[test]
     fn battle_preset_preserves_map_and_editor_sides_roundtrip() {
         let layout =

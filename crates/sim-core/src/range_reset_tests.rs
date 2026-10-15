@@ -36,6 +36,17 @@ fn restored_experiments_match_fresh_worlds_and_future_ticks() {
     cases.push(next.clone());
     next.clear_min[0] += 8;
     cases.push(next);
+    // Added, moved and removed relief refreshes old/new footprints and tree crowns.
+    let mut relief = layout.clone();
+    relief.mounds.push(modding::range::RangeMound {
+        min: [64, 16, 80],
+        max: [200, 90, 220],
+    });
+    cases.push(relief.clone());
+    relief.mounds[0].min[0] += 120;
+    relief.mounds[0].max[0] += 120;
+    cases.push(relief);
+    cases.push(layout.clone());
     for layout in cases {
         scene.control();
         for _ in 0..3 {

@@ -9,6 +9,7 @@ pub(super) struct Bin {
     pub blocks: Vec<usize>,
     pub zones: Vec<usize>,
     pub ramps: Vec<usize>,
+    pub mounds: Vec<usize>,
     /// Road and segment indices, both in authored order. A nearby segment
     /// must not bring the rest of a kilometre-long road into every query.
     pub roads: Vec<(usize, usize)>,
@@ -40,6 +41,11 @@ impl Index {
             for (i, b) in r.blocks.iter().enumerate() {
                 out.insert([b.min[0], b.min[2]], [b.max[0], b.max[2]], |bin| {
                     bin.blocks.push(i)
+                });
+            }
+            for (i, m) in r.mounds.iter().enumerate() {
+                out.insert([m.min[0], m.min[2]], [m.max[0], m.max[2]], |bin| {
+                    bin.mounds.push(i)
                 });
             }
             for (i, z) in r.zones.iter().enumerate() {

@@ -161,7 +161,7 @@ grep -rn 'QUESTION' docs/ | grep stage-0
 
 ```
 sim-cli --ticks 600 --dump-hash
-battle ticks=600 threads=1 hash=1361624703255c09
+battle ticks=600 threads=1 hash=4e3adf0a4b09a8ab
 ```
 
 Контрольное число соответствует расстановке с осадной T3 (ADR-722),

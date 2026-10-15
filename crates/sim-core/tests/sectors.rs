@@ -27,7 +27,7 @@ fn crop(mut r: RangeLayout, id: usize) -> RangeLayout {
         .collect();
     r.blocks.retain(|b| zone.contains([b.min[0], b.min[2]], 0));
     // Inter-sector roads belong to the full kilometre map, not this small
-    // 1024-cell fixture for one scripted shot.
+    // cropped fixture for one scripted shot.
     r.roads.clear();
     for b in &mut r.blocks {
         b.min = at(b.min);
@@ -45,6 +45,11 @@ fn crop(mut r: RangeLayout, id: usize) -> RangeLayout {
         b.min = at(b.min);
         b.max = at(b.max);
     }
+    r.mounds.retain(|m| zone.contains([m.min[0], m.min[2]], 0));
+    for m in &mut r.mounds {
+        m.min = at(m.min);
+        m.max = at(m.max);
+    }
     c.patrols.retain(|p| units.contains(&p.unit));
     for p in &mut c.patrols {
         p.unit = units.iter().position(|&i| i == p.unit).unwrap();
@@ -56,6 +61,18 @@ fn crop(mut r: RangeLayout, id: usize) -> RangeLayout {
     r.target = at(zone.target);
     r.clear_min = xz(zone.min);
     r.clear_max = xz(zone.max);
+    // Larger exploration sectors keep the same 80-cell margin as the original trials.
+    r.size = [
+        ((zone.max[0] - zone.min[0] + 160) as u32)
+            .max(1024)
+            .div_ceil(32)
+            * 32,
+        192,
+        ((zone.max[1] - zone.min[1] + 160) as u32)
+            .max(1024)
+            .div_ceil(32)
+            * 32,
+    ];
     r.zones = vec![modding::range::RangeZone {
         min: xz(zone.min),
         max: xz(zone.max),
@@ -64,7 +81,6 @@ fn crop(mut r: RangeLayout, id: usize) -> RangeLayout {
         scenario: None,
         ..zone
     }];
-    r.size = [1024, 192, 1024];
     r
 }
 #[test]
@@ -210,4 +226,43 @@ fn the_new_obstacle_patrol_completes_a_lap() {
         "patrol did not complete a lap: at={:?} path={:?} blocked={}",
         u.at, u.motion.path, u.motion.blocked
     );
+}
+
+#[test]
+fn tank_drives_the_new_saddle_three_crossings_and_factory_interior() {
+    let config =
+        modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
+            .unwrap();
+    for (name, start, goal, ticks) in [
+        ("mountain saddle", [1800, 16, 2800], [1800, 3450], 900),
+        (
+            "three trench crossings",
+            [1150, 16, 6200],
+            [2740, 6200],
+            1800,
+        ),
+        ("factory portals", [5000, 16, 7860], [5700, 7860], 1000),
+    ] {
+        let mut r = layout();
+        r.gun = start;
+        r.units.clear();
+        r.shields.clear();
+        r.course.as_mut().unwrap().patrols.clear();
+        let mut sim = BlastRange::with_layout(config, r).unwrap();
+        sim.control();
+        assert!(sim.order_move(goal), "order rejected: {name}");
+        for _ in 0..ticks {
+            sim.step();
+            let p = sim.gun.motion.pos.map(|v| v.to_int_trunc());
+            assert!(p[1] >= 14, "fell below road/deck in {name}: {p:?}");
+            if (p[0] - goal[0]).abs() <= 4 && (p[2] - goal[1]).abs() <= 4 {
+                break;
+            }
+        }
+        let p = sim.gun.motion.pos.map(|v| v.to_int_trunc());
+        assert!(
+            (p[0] - goal[0]).abs() <= 4 && (p[2] - goal[1]).abs() <= 4,
+            "tank did not arrive in {name}: {p:?}"
+        );
+    }
 }
