@@ -391,6 +391,11 @@ fn main() {
     ))
     .unwrap();
     let mut sim = BlastRange::with_layout(config, layout).unwrap_or_else(|e| panic!("layout: {e}"));
+    let verify_frontier = args.iter().any(|a| a == "--verify-collapse-frontier");
+    sim.verify_collapse_frontier_reuse(verify_frontier);
+    if verify_frontier {
+        println!("verify_collapse_frontier=true diagnostic_only=true");
+    }
     if ai_vs_ai || siege.is_some() {
         assert!(sim.set_ai_vs_ai(true));
     }
@@ -1579,11 +1584,11 @@ fn main() {
     }
     if let Some(path) = tick_csv {
         let mut out = std::io::BufWriter::new(std::fs::File::create(path).expect("tick CSV path"));
-        writeln!(out, "tick,total_us,motion_us,route_us,commit_us,contact_us,felling_us,debris_us,battle_ai_us,battle_orders_us,battle_pose_us,battle_los_us,battle_laser_us,battle_beam_us,battle_halo_us,rubble_us,heat_flush_us,searching,moving,blocked,fragments,flying,chunks,felling,feet_us,collapse_us,collapse_queued,collapse_submitted,collapse_blocked_by,collapse_blocked_ticks,collapse_candidates,collapse_buffer_peak,kinetic_resume_us,pending_kinetic,battle_wave_step_us,battle_wave_steps,battle_capture_us,battle_flight_us,battle_damage_us,flight_us,capture_us,wave_us,unit_fire_us,heat_exchange_us,accounting_us,observed_phases_us,unobserved_us,felling_arrivals,felling_visits,felling_retired,felling_released,felling_capacity_deferrals,felling_head_observed_age_ticks,collapse_backlog_observed_age_ticks,ordinary_room_scans,ordinary_room_items,waves,waves_held,battle_frontier_us,battle_read_us,collapse_admit_us,collapse_edits_us,collapse_labels_us,collapse_promote_us,collapse_resolve_us,collapse_detach_us,collapse_crumble_us,collapse_plate_us,collapse_rest_us").unwrap();
+        writeln!(out, "tick,total_us,motion_us,route_us,commit_us,contact_us,felling_us,debris_us,battle_ai_us,battle_orders_us,battle_pose_us,battle_los_us,battle_laser_us,battle_beam_us,battle_halo_us,rubble_us,heat_flush_us,searching,moving,blocked,fragments,flying,chunks,felling,feet_us,collapse_us,collapse_queued,collapse_submitted,collapse_blocked_by,collapse_blocked_ticks,collapse_candidates,collapse_buffer_peak,kinetic_resume_us,pending_kinetic,battle_wave_step_us,battle_wave_steps,battle_capture_us,battle_flight_us,battle_damage_us,flight_us,capture_us,wave_us,unit_fire_us,heat_exchange_us,accounting_us,observed_phases_us,unobserved_us,felling_arrivals,felling_visits,felling_retired,felling_released,felling_capacity_deferrals,felling_head_observed_age_ticks,collapse_backlog_observed_age_ticks,ordinary_room_scans,ordinary_room_items,waves,waves_held,battle_frontier_us,battle_read_us,collapse_admit_us,collapse_edits_us,collapse_labels_us,collapse_promote_us,collapse_resolve_us,collapse_detach_us,collapse_crumble_us,collapse_plate_us,collapse_rest_us,collapse_frontier_walks,collapse_frontier_reuses").unwrap();
         for p in &tick_profiles {
             writeln!(
                 out,
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 p.tick,
                 p.total_us,
                 p.motion_us,
@@ -1652,7 +1657,9 @@ fn main() {
                 p.collapse_parts[5],
                 p.collapse_parts[6],
                 p.collapse_parts[7],
-                p.collapse_parts[8]
+                p.collapse_parts[8],
+                p.collapse_work.frontier_walks,
+                p.collapse_work.frontier_reuses
             )
             .unwrap();
         }

@@ -141,6 +141,9 @@ pub struct CollapseStats {
     /// Чанков, которым переразметка не понадобилась: локальная
     /// проверка доказала, что пачка снятий ничего не расщепила.
     pub probe_skipped: usize,
+    /// Complete bedrock walks and same-pass reuses; diagnostic, not saved.
+    pub frontier_walks: usize,
+    pub frontier_reuses: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -331,9 +334,19 @@ pub struct CollapseLayer {
     faces: usize,
     gathered: usize,
     built: usize,
+    frontier_walks: usize,
+    frontier_reuses: usize,
+    /// Opt-in reference walk in optimized diagnostic builds, never saved.
+    verify_frontier_reuse: bool,
 }
 
 impl CollapseLayer {
+    /// Run the full reference walk after every reuse and assert its frontier.
+    /// Verification adds work only; it never changes authoritative state.
+    pub fn verify_frontier_reuse(&mut self, enabled: bool) {
+        self.verify_frontier_reuse = enabled;
+    }
+
     /// Work survives the edit batch that started it: frontier expansion,
     /// deferred relabels and retries for a full body pool.
     pub fn pending(&self) -> bool {
@@ -395,6 +408,9 @@ impl CollapseLayer {
             faces: 0,
             gathered: 0,
             built: 0,
+            frontier_walks: 0,
+            frontier_reuses: 0,
+            verify_frontier_reuse: false,
             frontier: Vec::new(),
             rooted: Vec::new(),
             rooted_walk: Vec::new(),
@@ -508,6 +524,8 @@ impl CollapseLayer {
         self.faces = 0;
         self.gathered = 0;
         self.built = 0;
+        self.frontier_walks = 0;
+        self.frontier_reuses = 0;
         self.dirty.clear();
         for e in edits {
             let (cx, cy, cz) = (e.x / cs, e.y / cs, e.z / cs);
@@ -654,7 +672,13 @@ impl CollapseLayer {
         // рядом и другой потолок, и повтор каждого тика был бы
         // потолком, срабатывающим каждый тик (ADR-440, ADR-116).
         // Отрыв меняет граф: безопорное ищется заново.
-        self.extend_frontier();
+        if torn_total > 0 {
+            self.extend_frontier();
+        } else {
+            // promote already completed this exact graph. Resolve only writes
+            // its own scratch; a refused/held/oversized group changes no edge.
+            self.reuse_frontier();
+        }
         self.recheck = torn_total > 0 || bodies.refused > refused_before || st.held > 0;
         st.rounds_capped = self.recheck;
         self.report(&mut st);
@@ -666,6 +690,8 @@ impl CollapseLayer {
         st.faces = self.faces;
         st.gathered = self.gathered;
         st.built = self.built;
+        st.frontier_walks = self.frontier_walks;
+        st.frontier_reuses = self.frontier_reuses;
     }
 
     /// Втянуть в граф чанки с фронтира, сколько позволяет потолок.
@@ -689,6 +715,7 @@ impl CollapseLayer {
             }
         }
         let mut done = 0usize;
+        let mut frontier_current = false;
         // Втягивание идёт **пачками**, а не по чанку.
         //
         // Первая редакция пересчитывала грани после каждого чанка,
@@ -698,6 +725,7 @@ impl CollapseLayer {
         // единицы, а не десятки.
         while done < self.max_promote_per_tick {
             self.extend_frontier();
+            frontier_current = true;
             let batch: Vec<u32> = self
                 .frontier
                 .iter()
@@ -712,9 +740,33 @@ impl CollapseLayer {
             self.frontier.retain(|&i| self.nodes[i as usize].is_none());
             self.rebuild_index();
             self.refresh_faces(w);
+            frontier_current = false;
         }
-        self.extend_frontier();
+        if frontier_current {
+            // An empty batch ended the loop on this same graph. At the quota
+            // boundary (including a zero quota), the final walk is still due.
+            self.reuse_frontier();
+        } else {
+            self.extend_frontier();
+        }
         done
+    }
+
+    /// Reuse only across the two locally proven no-topology-change paths.
+    /// There is no cross-tick cache/revision or extra snapshot state.
+    fn reuse_frontier(&mut self) {
+        self.frontier_reuses += 1;
+        self.normalize_frontier();
+        if cfg!(any(test, debug_assertions)) || self.verify_frontier_reuse {
+            let expected = self.frontier.clone();
+            let walks = self.frontier_walks;
+            self.extend_frontier();
+            self.frontier_walks = walks;
+            assert_eq!(
+                self.frontier, expected,
+                "reused frontier differs from a full walk"
+            );
+        }
     }
 
     /// Добавить во фронтир неразмеченных соседей тех компонент, до которых
@@ -727,6 +779,7 @@ impl CollapseLayer {
     /// а разбор каждого тика шёл по растущему графу. Фронтир остаётся
     /// по возрастанию номера чанка, без размеченных.
     fn extend_frontier(&mut self) {
+        self.frontier_walks += 1;
         let total = self.reached.len();
         self.rooted.clear();
         self.rooted.resize(total, false);
@@ -775,6 +828,10 @@ impl CollapseLayer {
                 }
             }
         }
+        self.normalize_frontier();
+    }
+
+    fn normalize_frontier(&mut self) {
         self.frontier.sort_unstable();
         self.frontier.dedup();
         self.frontier.retain(|&i| self.nodes[i as usize].is_none());
@@ -2324,6 +2381,61 @@ mod tests {
 
     fn cut(w: &mut World, y: u32) {
         w.queue_dig(PIER, y, 8);
+    }
+
+    #[test]
+    fn same_pass_frontier_reuse_matches_full_walk_through_quotas_holds_and_restore() {
+        for promote in [0, 1, 64] {
+            for capacity in [0, 16] {
+                let mut w = World::new(64, 64, 64, 100_000, Box::new(Bridge));
+                let mut c = CollapseLayer::new(&w);
+                c.max_promote_per_tick = promote;
+                c.max_relabel_per_tick = 1;
+                let mut b = Bodies::new(capacity, test_gravity());
+                cut(&mut w, 4);
+                w.flush();
+                let mut edits = w.edits().to_vec();
+                let (mut walks, mut reuses, mut detached) = (0, 0, 0);
+                for tick in 0..16 {
+                    if tick == 6 && capacity == 0 {
+                        b = Bodies::new(16, test_gravity());
+                    }
+                    let st =
+                        c.apply_iter_held(&mut w, edits.drain(..), &mut b, |_| {}, &|_| tick < 3);
+                    walks += st.frontier_walks;
+                    reuses += st.frontier_reuses;
+                    detached += st.detached;
+                    // Even a full walk must preserve the exact saved frontier,
+                    // including unknown chunks and its canonical ordering.
+                    let mut saved = fx::blob::Blob::new();
+                    c.save(&mut saved);
+                    c.extend_frontier();
+                    let mut check = fx::blob::Blob::new();
+                    c.save(&mut check);
+                    assert_eq!(saved.v, check.v, "promote={promote} tick={tick}");
+                    if tick == 5 {
+                        let mut restored = CollapseLayer::new(&w);
+                        assert!(restored.load(&mut fx::blob::Scan::new(&saved.v)));
+                        restored.max_promote_per_tick = promote;
+                        restored.max_relabel_per_tick = 1;
+                        c = restored;
+                    }
+                    b.step(&mut w);
+                    if tick == 8 {
+                        w.queue_edit(Edit::put(PIER, 4, 8, 2));
+                    }
+                    if tick == 10 {
+                        cut(&mut w, 4);
+                    }
+                    w.flush();
+                    edits = w.edits().to_vec();
+                }
+                assert!(walks > 0 && reuses > 0, "fixture did not exercise reuse");
+                if promote == 64 {
+                    assert!(detached > 0, "fixture did not exercise topology removal");
+                }
+            }
+        }
     }
 
     /// **Кусок, уходящий за границу чанка, падает.** Настил длиной

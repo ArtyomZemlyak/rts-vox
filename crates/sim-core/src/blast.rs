@@ -3326,6 +3326,8 @@ pub struct CollapseWork {
     pub blocked_ticks: u32,
     pub gather_candidates: usize,
     pub gather_buffer_peak: usize,
+    pub frontier_walks: usize,
+    pub frontier_reuses: usize,
 }
 
 pub struct BlastRange {
@@ -5316,6 +5318,11 @@ impl BlastRange {
         self.execute_command(battle::commands::Command::ConfigureWeapon { config });
     }
 
+    /// Opt-in diagnostic oracle; ordinary execution keeps it disabled.
+    pub fn verify_collapse_frontier_reuse(&mut self, enabled: bool) {
+        self.collapse.verify_frontier_reuse(enabled);
+    }
+
     pub fn step(&mut self) {
         self.step_observed(|_| {});
     }
@@ -6384,6 +6391,8 @@ impl BlastRange {
             }
             self.collapse_work.gather_candidates = collapse_stats.gather_candidates;
             self.collapse_work.gather_buffer_peak = collapse_stats.gather_buffer_peak;
+            self.collapse_work.frontier_walks = collapse_stats.frontier_walks;
+            self.collapse_work.frontier_reuses = collapse_stats.frontier_reuses;
             // Each cell goes by its own matter, not by the body it came
             // off in — else the wave's slicing would decide what crumbles.
             // A body torn off this tick keeps its cohesive cells, rebuilt
@@ -9112,6 +9121,7 @@ mod tests {
         let mut r = BlastRange::new(config());
         let saved = r.snapshot();
         let hash = r.state_hash();
+        r.verify_collapse_frontier_reuse(true);
         r.collapse_work = CollapseWork {
             queued: usize::MAX,
             submitted: usize::MAX,
@@ -9119,6 +9129,8 @@ mod tests {
             blocked_ticks: u32::MAX,
             gather_candidates: usize::MAX,
             gather_buffer_peak: usize::MAX,
+            frontier_walks: usize::MAX,
+            frontier_reuses: usize::MAX,
         };
         assert_eq!(r.snapshot(), saved);
         assert_eq!(r.state_hash(), hash);
