@@ -1388,6 +1388,89 @@ mod tests {
         }
     }
     #[test]
+    fn vertical_word_iteration_matches_flat_cells_and_ordered_contact_lists() {
+        let ranges = [
+            ([-9, -130, -2], [9, -63, 2]),
+            ([-8, -1, -1], [8, 65, 1]),
+            ([-3, 127, 0], [4, 130, 2]),
+            ([1, i32::MIN, 1], [1, i32::MIN + 5, 1]),
+            ([1, i32::MAX - 5, 1], [1, i32::MAX, 1]),
+        ];
+        let expected: BTreeSet<_> = ranges
+            .iter()
+            .flat_map(|&(lo, hi)| {
+                (lo[2]..=hi[2]).flat_map(move |z| {
+                    (lo[1]..=hi[1]).flat_map(move |y| (lo[0]..=hi[0]).map(move |x| [x, y, z]))
+                })
+            })
+            .collect();
+        let selected = [
+            Some(([-11, -135, -3], [10, 135, 3])),
+            None,
+            Some(([-8, -1, -1], [8, 0, 1])),
+            Some(([1, i32::MIN, 1], [1, i32::MIN + 8, 1])),
+            Some(([1, i32::MAX - 8, 1], [1, i32::MAX, 1])),
+        ];
+        let mut reference = BTreeMap::<_, Vec<u32>>::new();
+        for (i, bounds) in selected.iter().enumerate() {
+            let Some((lo, hi)) = bounds else {
+                continue;
+            };
+            for &cell in &expected {
+                if (0..3).all(|a| cell[a] >= lo[a] && cell[a] <= hi[a]) {
+                    reference.entry(cell).or_default().push(i as u32);
+                }
+            }
+        }
+        for workers in [1, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            for parallel in [false, true] {
+                let mut queries = SettledQueries::default();
+                let mut cells = SettledCells::default();
+                for _ in 0..2 {
+                    pool.install(|| queries.build(&ranges, parallel, &|_, _| {}));
+                    for x in -11..=11 {
+                        for z in -3..=3 {
+                            for (low, high) in [
+                                (-140, -129),
+                                (-130, -63),
+                                (-65, 1),
+                                (-1, 0),
+                                (0, 0),
+                                (1, 63),
+                                (63, 65),
+                                (64, 128),
+                                (128, 140),
+                                (65, 64),
+                                (0, -1),
+                                (i32::MIN, i32::MIN + 8),
+                                (i32::MAX - 8, i32::MAX),
+                            ] {
+                                let actual: Vec<_> = queries.column(x, z, low, high).collect();
+                                let ys: Vec<_> = (low..=high)
+                                    .filter(|&y| expected.contains(&[x, y, z]))
+                                    .collect();
+                                assert_eq!(actual, ys, "workers={workers} parallel={parallel} x={x} z={z} low={low} high={high}");
+                                assert_eq!(
+                                    queries.intersects([x, low, z], [x, high, z]),
+                                    !ys.is_empty()
+                                );
+                            }
+                        }
+                    }
+                    pool.install(|| cells.build(&selected, &queries, parallel, &|_, _| {}));
+                    assert_eq!(cells.ordered(), reference);
+                    cells.clear();
+                    queries.clear();
+                    assert_eq!(queries.column(0, 0, -130, 130).next(), None);
+                }
+            }
+        }
+    }
+    #[test]
     fn settled_index_matches_unpacked_requests_and_preserves_piece_indices() {
         let t = tuning().blast;
         let hull = Hull {
@@ -7112,15 +7195,13 @@ impl SettledCells {
             let _task = PhysicsTask::new(task, "physics_cells_begin", "physics_cells_end");
             for &(i, lo, hi) in requests {
                 for z in lo[2]..=hi[2] {
-                    for y in lo[1]..=hi[1] {
-                        for x in (lo[0]..=hi[0]).step_by(8) {
-                            if want.contains([x, y, z]) {
-                                stripe
-                                    .cells
-                                    .entry([x, y, z])
-                                    .or_insert_with(|| stripe.free_lists.pop().unwrap_or_default())
-                                    .push(i);
-                            }
+                    for x in (lo[0]..=hi[0]).step_by(8) {
+                        for y in want.column(x, z, lo[1], hi[1]) {
+                            stripe
+                                .cells
+                                .entry([x, y, z])
+                                .or_insert_with(|| stripe.free_lists.pop().unwrap_or_default())
+                                .push(i);
                         }
                     }
                 }
@@ -7239,15 +7320,45 @@ impl SettledQueries {
             }
         }
     }
-    fn contains(&self, [x, y, z]: [i32; 3]) -> bool {
+    fn word(&self, x: i32, z: i32, word: i32) -> u64 {
         let stripe = &self.0[x.rem_euclid(8) as usize];
-        let word = y.div_euclid(64);
         let mask = if word == 0 {
             stripe.base.get(&(x, z))
         } else {
             stripe.other.get(&[x, word, z])
         };
-        mask.is_some_and(|word| word & (1 << y.rem_euclid(64)) != 0)
+        mask.copied().unwrap_or(0)
+    }
+    #[cfg(test)]
+    fn contains(&self, [x, y, z]: [i32; 3]) -> bool {
+        self.word(x, z, y.div_euclid(64)) & (1 << y.rem_euclid(64)) != 0
+    }
+    /// Read each intersecting word once, then yield only its requested bits.
+    /// The full signed height domain remains available, including word zero.
+    fn column(&self, x: i32, z: i32, low: i32, high: i32) -> impl Iterator<Item = i32> + '_ {
+        let first = low.div_euclid(64);
+        let last = high.div_euclid(64);
+        (first..=last).flat_map(move |word| {
+            let start = if word == first { low.rem_euclid(64) } else { 0 };
+            let end = if word == last {
+                high.rem_euclid(64)
+            } else {
+                63
+            };
+            let mut mask = self.word(x, z, word) & (u64::MAX << start) & (u64::MAX >> (63 - end));
+            std::iter::from_fn(move || {
+                if mask == 0 {
+                    return None;
+                }
+                let y = word * 64 + mask.trailing_zeros() as i32;
+                mask &= mask - 1;
+                Some(y)
+            })
+        })
+    }
+    fn intersects(&self, lo: [i32; 3], hi: [i32; 3]) -> bool {
+        (lo[2]..=hi[2])
+            .any(|z| (lo[0]..=hi[0]).any(|x| self.column(x, z, lo[1], hi[1]).next().is_some()))
     }
 }
 /// Loose cells grouped by fragment box and material, as cell masks.
@@ -7497,12 +7608,7 @@ impl Settled {
             }
             let (lo, hi) = out.boxes[i];
             let (c0, c1) = settled_cells(lo, hi);
-            let cells = || {
-                (c0[2]..=c1[2]).flat_map(move |z| {
-                    (c0[1]..=c1[1]).flat_map(move |y| (c0[0]..=c1[0]).map(move |x| [x, y, z]))
-                })
-            };
-            if !cells().any(|c| want.contains(c)) {
+            if !want.intersects(c0, c1) {
                 return None;
             }
             // The test asked whether the piece's centre lay inside a

@@ -153,9 +153,10 @@ BuildEvidence сохраняет hashes refreshed sources и toolchain;
 physics4/navigation8/Rayon4/Compute4, target165, без Core/GPU/Timeline
 observers. **Проверка не завершена:** приложение вышло с кодом 0
 примерно через 93 секунды после начала профиля. `stderr` пуст,
-финальных CSV, render context и state_hash нет. По этим логам причина
-раннего выхода не установлена; ошибку SIM или пользовательское закрытие
-нельзя объявлять установленными фактами.
+финальных CSV, render context и state_hash нет. По исходным логам причина
+не определялась. **Уточнение 15.10:** пользователь позже подтвердил,
+что закрывал окно во время этого замера. Это ручной выход, не
+подтверждённый сбой SIM; неполные данные не становятся приёмочными.
 
 Runner сохранил evidence в `native240/world-battle.manifest.json`:
 `Status=failed`, `runner_failed`, `ValidForComparison=false`,
