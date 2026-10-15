@@ -115,12 +115,41 @@ inputs — `verify.py`, `qualification.json`, `manifest.json`.
 BuildEvidence не является полной аттестацией SDK/registry/generated inputs.
 
 Финальные architecture/docs, `cargo fmt --all -- --check` и
-`git diff --check` проходят перед push. Проверены 348 локальных файловых
+`git diff --check` прошли. Проверены 348 локальных файловых
 ссылок шести актуализированных анализов; отсутствующих файлов нет,
 anchors отдельно не проверялись.
 
 Полный capture/progress валки, события вкладов завалов, EP-03, GPU-кеши,
 пики волн, group18, масштаб 5000 и длительный soak остаются открытыми.
-Пересборка полигона и длинная maximized native-проверка выполняются
-после headless-квалификации; предыдущие 0,99488× из 286 не закрыты
-этим headless ABBA.
+
+## Установленный полигон и длинный native-прогон
+
+Пересобран и установлен `target/release/blast.exe`, совпадающий с frozen
+`out/rubble-scratch-20261015/blast.exe`, SHA256
+**`5C62F3F21962EB16F749D8380F5BC933BF5F279DE0845A77D420061BC68847C6`**.
+BuildEvidence фиксирует refreshed kernel sources и toolchain.
+
+Native240 завершён: world-battle, фактический клиент **3840×1949**,
+focused, scale1, AutoNoVsync, maximized requested (`Windowed` в Bevy),
+Vulkan/RTX 5090, physics4/navigation8/Rayon4/Compute4, target165.
+Контекст и камера не менялись; Core/GPU/Timeline observers выключены.
+12 982 строки / 12 981 межкадровый интервал, среднее **18,492 мс**
+(около **54,1 FPS**), p99 **40,702 мс**, max **89,957 мс**.
+7182 SIM-шагов, core **16,051 мс/шаг**, темп **0,997173746×**.
+
+**`valid_for_comparison=true`, `meets_simulation_rate=false`,
+`acceptance_eligible=false`.** Проверка кода `analyze-range-profile.py`
+выявила ошибку прежних описаний в 286/287: стенд не использует порог
+0,995×. Его критерий — `steps >= floor(elapsed_seconds * tick_rate) - 1`.
+При 240,078523 с и 30 Гц ожидается 7202 шага, минимум для приёмки —
+7201. Выполнено 7182: до допустимого минимума не хватает **19 шагов**.
+Критерий не ослаблен; ошибочное пояснение в 286/287 исправлено.
+
+Это **один длинный native-прогон, не FPS A/B**. Сравнение с прежними
+51,2 FPS из 286 само по себе не доказывает ускорение. Стабильные 30 Гц,
+пики кадра и длительный soak остаются открытыми. Наблюдаемое приближение
+к целевому темпу не заменяет проверки всех ожидаемых шагов.
+
+Hash7182 **`8349f60d20ee49df`** независимо воспроизведён headless
+на тех же шагах и workers. Raw/context — `native240/`, анализ —
+`world-battle.analysis.json/md`, проверка — `native-endpoint.log`.
