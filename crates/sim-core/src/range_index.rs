@@ -5,6 +5,7 @@ use modding::range::RangeLayout;
 const TILE: usize = 128;
 #[derive(Clone, Default)]
 pub(super) struct Bin {
+    pub foundations: Vec<usize>,
     pub blocks: Vec<usize>,
     pub zones: Vec<usize>,
     pub ramps: Vec<usize>,
@@ -13,6 +14,7 @@ pub(super) struct Bin {
     pub roads: Vec<(usize, usize)>,
 }
 pub(super) struct Index {
+    pub foundations: Vec<modding::range::RangeBlock>,
     nx: usize,
     bins: Vec<Bin>,
     empty: Bin,
@@ -23,10 +25,17 @@ impl Index {
         let nx = (size[0] as usize).div_ceil(TILE);
         let nz = (size[2] as usize).div_ceil(TILE);
         let mut out = Self {
+            foundations: layout.map_or_else(Vec::new, super::foundation::blocks),
             nx,
             bins: vec![Bin::default(); nx * nz],
             empty: Bin::default(),
         };
+        for i in 0..out.foundations.len() {
+            let f = &out.foundations[i];
+            out.insert([f.min[0], f.min[2]], [f.max[0], f.max[2]], |bin| {
+                bin.foundations.push(i)
+            });
+        }
         if let Some(r) = layout {
             for (i, b) in r.blocks.iter().enumerate() {
                 out.insert([b.min[0], b.min[2]], [b.max[0], b.max[2]], |bin| {

@@ -141,6 +141,9 @@ const EDGE: i32 = 40;
 const MAX_SIDE: i32 = 16384;
 #[derive(Clone, Debug)]
 pub struct Motion {
+    /// Immutable template capability, reconstructed before loading motion.
+    /// This is not a tuned speed and does not add saved state.
+    emplaced: bool,
     pub pos: [Fx; 3],
     pub drive: Drive,
     pub hull: Chassis,
@@ -349,6 +352,7 @@ impl Motion {
         let legs_lost = vec![false; rigs.len()];
         let legs_buckled = vec![false; rigs.len()];
         Self {
+            emplaced: kind.emplacement(),
             pos: at.map(Fx::from_int),
             drive: Drive {
                 head: 0,
@@ -875,6 +879,58 @@ impl Motion {
             .y
             .sub(crate::ride::ride_of(&self.chassis).clearance);
     }
+    /// A footing carries a rigid building, not a sprung vehicle. Check the
+    /// actual world columns down to its buried toe; loose rubble cannot
+    /// lift it or supply an attachment. A broken footing uses normal physics.
+    fn hold_foundation(&mut self, w: &World, b: &UnitBody) -> bool {
+        if !self.emplaced || self.pos[1] != Fx::from_int(self.pos[1].to_int_trunc()) {
+            return false;
+        }
+        let t = super::foundation::tuning();
+        let shape = self.shape(b);
+        let y = self.pos[1].to_int_trunc();
+        let (c, s) = crate::ride::heading_of(self.drive.head);
+        let mut count = 0;
+        // A slab distributes load across its footprint. Four vehicle corners
+        // made one shallow side hit release half the apparent supports.
+        for (sx, sz) in [
+            (-1, -1),
+            (-1, 0),
+            (-1, 1),
+            (0, -1),
+            (0, 0),
+            (0, 1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
+        ] {
+            let dx = Fx::from_int(sx * shape.half[0].max(shape.support[0]));
+            let dz = Fx::from_int(sz * shape.half[1].max(shape.support[1]));
+            let x = self.pos[0].add(dx.mul(c)).sub(dz.mul(s)).to_int_trunc();
+            let z = self.pos[2].add(dx.mul(s)).add(dz.mul(c)).to_int_trunc();
+            if x < 0 || z < 0 || y <= 0 || x >= w.nx as i32 || z >= w.nz as i32 {
+                continue;
+            }
+            if w.material(x as u32, (y - 1) as u32, z as u32) == t.material
+                && ((y - t.depth).max(0)..y).all(|h| w.material(x as u32, h as u32, z as u32) == t.material)
+                // A deep cut below the footing must not leave an attached
+                // slab floating on its own. Bedrock at y=0 is the world frame.
+                && (0..(y - t.depth).max(0)).all(|h| w.material(x as u32, h as u32, z as u32) != 0)
+            {
+                count += 1;
+                if count >= t.supports {
+                    break;
+                }
+            }
+        }
+        if count < t.supports {
+            return false;
+        }
+        self.hull = Chassis::resting(self.pos[1], &crate::ride::ride_of(&self.chassis));
+        self.floors = [self.pos[1]; 4];
+        self.shove = V3::ZERO;
+        true
+    }
     pub(super) fn passive(
         &mut self,
         w: &World,
@@ -886,6 +942,12 @@ impl Motion {
     ) {
         self.cut.clear();
         self.contact = None;
+        if self.hold_foundation(w, b) {
+            self.drive.vel = Fx::ZERO;
+            self.drive.yaw_rate = 0;
+            self.terrain_columns = nav::vehicle::Columns::default();
+            return;
+        }
         // Passive motion does not receive the per-tick changed-page set.
         // Its last driven answers must not survive edits made while parked.
         self.terrain_columns = nav::vehicle::Columns::default();
@@ -2220,6 +2282,13 @@ impl Motion {
     ) {
         self.cut.clear();
         self.contact = None;
+        if self.enabled && self.hold_foundation(w, b) {
+            self.drive.vel = Fx::ZERO;
+            self.drive.yaw_rate = 0;
+            self.terrain_columns = nav::vehicle::Columns::default();
+            completed("ride");
+            return;
+        }
         if !self.enabled {
             // A parked hull that a burst pushed slides and rocks (ADR-286);
             // a parked walker still stands on its feet, and its hull on them.

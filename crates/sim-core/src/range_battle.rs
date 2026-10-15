@@ -3122,6 +3122,9 @@ mod wave_admission_tests;
 mod wave_budget_tests;
 
 #[cfg(test)]
+#[path = "range_foundation_tests.rs"]
+mod foundation_tests;
+#[cfg(test)]
 #[path = "range_battle_tests.rs"]
 mod tests;
 

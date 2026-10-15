@@ -982,6 +982,8 @@ pub fn material_work(m: u16, c: &ExplosionConfig) -> u32 {
     }
 }
 
+#[path = "range_foundation.rs"]
+mod foundation;
 #[path = "range_kinetic.rs"]
 mod kinetic;
 #[path = "range_index.rs"]
@@ -1237,10 +1239,16 @@ impl RangeTerrain {
             ox * ox + oz * oz <= radius * radius * len2 * len2
         })
     }
-    /// Conservative XZ domains of changes to authored terrain. Unit rosters,
-    /// firing targets, route speeds and zone labels do not generate terrain.
+    /// Conservative XZ domains of changes to terrain, including footings
+    /// derived from stationary placements. Mobile rosters do not generate terrain.
     fn changed_areas(old: &RangeLayout, next: &RangeLayout) -> Vec<([i32; 2], [i32; 2])> {
         let mut areas = Vec::new();
+        let old_foundations = foundation::blocks(old);
+        let next_foundations = foundation::blocks(next);
+        let (a, b) = changed_span(&old_foundations, &next_foundations);
+        for f in old_foundations[a].iter().chain(&next_foundations[b]) {
+            areas.push(([f.min[0], f.min[2]], [f.max[0], f.max[2]]));
+        }
         if old.clear_min != next.clear_min || old.clear_max != next.clear_max {
             // Trees are selected by their lattice centre outside the queried
             // column. One full tree cell covers both the clearing margin and
@@ -1365,22 +1373,38 @@ impl RangeTerrain {
                 && z as i32 >= r.clear_min[1]
                 && (z as i32) < r.clear_max[1]
         });
-        let blocks = self.layout.as_ref().map_or_else(Vec::new, |r| {
-            self.index
-                .at(x, z)
-                .blocks
-                .iter()
-                .rev()
-                .map(|&i| &r.blocks[i])
-                .filter(|b| {
-                    x as i32 >= b.min[0]
-                        && (x as i32) < b.max[0]
-                        && z as i32 >= b.min[2]
-                        && (z as i32) < b.max[2]
-                })
-                .map(|b| (b.min[1], b.max[1], b.material))
-                .collect()
-        });
+        let mut blocks: Vec<_> = self
+            .index
+            .at(x, z)
+            .foundations
+            .iter()
+            .rev()
+            .map(|&i| &self.index.foundations[i])
+            .filter(|b| {
+                x as i32 >= b.min[0]
+                    && (x as i32) < b.max[0]
+                    && z as i32 >= b.min[2]
+                    && (z as i32) < b.max[2]
+            })
+            .map(|b| (b.min[1], b.max[1], b.material))
+            .collect();
+        if let Some(r) = &self.layout {
+            blocks.extend(
+                self.index
+                    .at(x, z)
+                    .blocks
+                    .iter()
+                    .rev()
+                    .map(|&i| &r.blocks[i])
+                    .filter(|b| {
+                        x as i32 >= b.min[0]
+                            && (x as i32) < b.max[0]
+                            && z as i32 >= b.min[2]
+                            && (z as i32) < b.max[2]
+                    })
+                    .map(|b| (b.min[1], b.max[1], b.material)),
+            );
+        }
         let course = self
             .layout
             .as_ref()
@@ -1568,6 +1592,17 @@ impl Generator for RangeTerrain {
         sky.fill(0);
     }
     fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+        if let Some(b) = self
+            .index
+            .at(x, z)
+            .foundations
+            .iter()
+            .rev()
+            .map(|&i| &self.index.foundations[i])
+            .find(|b| b.contains([x as i32, y as i32, z as i32]))
+        {
+            return b.material;
+        }
         let shift = if self.extended { 160 } else { 0 };
         let layout_pad = self.layout.as_ref().is_some_and(|r| {
             x as i32 >= r.clear_min[0]

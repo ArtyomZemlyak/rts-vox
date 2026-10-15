@@ -1,0 +1,9 @@
+// Common to every stationary building, including the test gun.
+// World units = 0.1 m. Footprint covers both the body and its load points.
+// This is ordinary concrete terrain, not an indestructible attachment.
+(
+    material: 2,
+    depth: 12,
+    margin: 4,
+    supports: 5,
+)

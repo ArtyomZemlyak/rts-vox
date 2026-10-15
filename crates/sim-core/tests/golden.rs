@@ -37,7 +37,9 @@ use sim_core::blast::BlastRange;
 // records no longer prevent bounded cleanup of later stale entries.
 // ADR-719: spider elevation solves the fixed mount and barrel offset,
 // removing feedback from the previous pitched muzzle. Windows CLI 1/4/8.
-const GOLDEN_600: u64 = 0xdcd7_49eb_91e2_d410;
+// ADR-721: buried destructible concrete foundations and rigid support
+// of stationary buildings intentionally change terrain and combat.
+const GOLDEN_600: u64 = 0x26f5_858e_9efb_b1fe;
 
 /// Сценарий собирается **из тех же данных, что у игры**: `include_str!`
 /// разворачивается на сборке, ввода-вывода в тесте нет, а литералы

@@ -350,6 +350,10 @@ fn owned_whole_plans_match_direct_delivery_through_real_tank_and_spider_battles(
                         .units
                         .iter()
                         .any(|unit| unit.id == 1 && unit.alive)
+                    // Real combat may kill the target before the next AI
+                    // decision. The admission API correctly rejects Attack
+                    // on a dead target; this fixture compares valid delivery.
+                    && observation.units.iter().any(|unit| unit.id == 0 && unit.alive)
                 {
                     let envelope = plan(sequence, observation.decision_tick, AiOrder::Attack(0));
                     direct

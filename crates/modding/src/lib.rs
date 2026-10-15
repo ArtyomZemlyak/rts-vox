@@ -15,6 +15,7 @@
 pub mod battle_ai;
 pub mod data;
 pub mod explosion;
+pub mod foundation;
 pub mod heat;
 pub mod integrity;
 pub mod kinds;
