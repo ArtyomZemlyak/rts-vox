@@ -3408,6 +3408,9 @@ pub struct BlastRange {
     /// until the first step of a new or restored range, whose `rubble`
     /// holds nothing (ADR-465). Derived, not saved.
     rubble_fresh: bool,
+    /// Diagnostic reference path and last publication work, not saved/hashed.
+    full_rubble_print: bool,
+    pub rubble_print_work: nav::vehicle::RubblePrintWork,
     /// The batch's support graph over the range's world (ADR-299): what
     /// the tick's edits leave hanging is dug out and becomes pieces.
     collapse: CollapseLayer,
@@ -3925,6 +3928,8 @@ impl BlastRange {
             rubble: nav::vehicle::Rubble::new(),
             rubble_print: nav::vehicle::RubblePrint::default(),
             rubble_fresh: false,
+            full_rubble_print: false,
+            rubble_print_work: Default::default(),
             collapse,
             bodies,
             collapsed_cells: 0,
@@ -5323,6 +5328,11 @@ impl BlastRange {
         self.collapse.verify_frontier_reuse(enabled);
     }
 
+    /// Diagnostic full-publication reference, with identical navigation state.
+    pub fn use_full_rubble_print(&mut self, enabled: bool) {
+        self.full_rubble_print = enabled;
+    }
+
     pub fn step(&mut self) {
         self.step_observed(|_| {});
     }
@@ -5377,19 +5387,31 @@ impl BlastRange {
     fn refresh_rubble(
         &mut self,
         task: &(impl Fn(usize, &'static str) + Sync),
+        detail: &mut impl FnMut(&'static str),
     ) -> nav::vehicle::Changed {
         let rubble = self.current_rubble_observed(task);
+        detail("rubble_print_begin");
         let mut changed = self.world_changed.clone();
+        self.rubble_print_work = Default::default();
         // The print is a function of the map: an unchanged map has the
         // print it had and changes no page (ADR-465). Most steps leave
         // the heap as it lay.
         if !(self.rubble_fresh && rubble == self.rubble) {
-            let print = nav::vehicle::RubblePrint::of(&rubble, [self.size[0], self.size[2]]);
-            self.rubble_print.changes(&print, &mut changed);
-            self.rubble_print = print;
+            let size = [self.size[0], self.size[2]];
+            if self.rubble_fresh && !self.full_rubble_print {
+                self.rubble_print_work =
+                    self.rubble_print
+                        .update(&self.rubble, &rubble, size, &mut changed);
+            } else {
+                let (print, work) = nav::vehicle::RubblePrint::of_counted(&rubble, size);
+                self.rubble_print.changes(&print, &mut changed);
+                self.rubble_print = print;
+                self.rubble_print_work = work;
+            }
         }
         self.rubble = rubble;
         self.rubble_fresh = true;
+        detail("rubble_print_end");
         changed
     }
     /// The rubble map of the present state, for a command given between
@@ -5484,7 +5506,7 @@ impl BlastRange {
         self.shield_hits.clear();
         self.reserve_pending_damage();
         self.reserve_thermal_fragments();
-        let changed = self.refresh_rubble(&physics_detail);
+        let changed = self.refresh_rubble(&physics_detail, &mut detail);
         completed("rubble");
         self.step_kinetic_jobs();
         completed("kinetic_resume");
@@ -9000,6 +9022,7 @@ mod tests {
         drop_heap(&mut a, [GUN[0] + 30, FLOOR, GUN[2] + belt], 500, 32);
         a.step();
         let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
+        b.use_full_rubble_print(true);
         let goal = [GUN[0] + 60, GUN[2]];
         assert!(a.order_move(goal));
         assert!(b.order_move(goal));
@@ -9007,6 +9030,7 @@ mod tests {
             a.step();
             b.step();
             assert_eq!(a.state_hash(), b.state_hash(), "diverged at {tick}");
+            assert_eq!(a.rubble_print, b.rubble_print, "print at {tick}");
         }
     }
     /// **A search in flight forgets what it probed when the rubble
@@ -9046,10 +9070,12 @@ mod tests {
         assert!(fine_order(&mut a, [450, 336]), "the order was refused");
         assert!(a.gun.motion.searching(), "the route was found at once");
         let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
+        b.use_full_rubble_print(true);
         for tick in 0..40 {
             a.step();
             b.step();
             assert_eq!(a.state_hash(), b.state_hash(), "diverged at {tick}");
+            assert_eq!(a.rubble_print, b.rubble_print, "print at {tick}");
         }
     }
     /// **Edits far from a search leave it alone** (ADR-427). Any applied
@@ -9104,12 +9130,14 @@ mod tests {
         }
         assert!(a.gun.motion.searching(), "the search ended early");
         let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
+        b.use_full_rubble_print(true);
         for tick in 4..60 {
             dig(&mut a, tick);
             dig(&mut b, tick);
             a.step();
             b.step();
             assert_eq!(a.state_hash(), b.state_hash(), "diverged at {tick}");
+            assert_eq!(a.rubble_print, b.rubble_print, "print at {tick}");
         }
     }
     /// **A snapshot with a round flight cannot hold is refused**
@@ -9122,6 +9150,13 @@ mod tests {
         let saved = r.snapshot();
         let hash = r.state_hash();
         r.verify_collapse_frontier_reuse(true);
+        r.use_full_rubble_print(true);
+        r.rubble_print_work = nav::vehicle::RubblePrintWork {
+            changed_columns: usize::MAX,
+            dirty_pages: usize::MAX,
+            hashed_columns: usize::MAX,
+            full_builds: usize::MAX,
+        };
         r.collapse_work = CollapseWork {
             queued: usize::MAX,
             submitted: usize::MAX,
@@ -9136,6 +9171,8 @@ mod tests {
         assert_eq!(r.state_hash(), hash);
         let restored = BlastRange::restore(r.config, &saved).unwrap();
         assert_eq!(restored.collapse_work, CollapseWork::default());
+        assert!(!restored.full_rubble_print);
+        assert_eq!(restored.rubble_print_work, Default::default());
         assert_eq!(restored.state_hash(), hash);
     }
 

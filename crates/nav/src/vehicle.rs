@@ -305,6 +305,16 @@ impl Changed {
 /// where the map itself is not.
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct RubblePrint(BTreeMap<[i32; 2], u64>);
+/// Last publication's diagnostic work; never saved or used by navigation.
+/// Changed columns/pages count a completed delta only; a full fallback
+/// discards its partial discovery counts and reports full_builds instead.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct RubblePrintWork {
+    pub changed_columns: usize,
+    pub dirty_pages: usize,
+    pub hashed_columns: usize,
+    pub full_builds: usize,
+}
 impl RubblePrint {
     /// Columns off the `size` of the world are left out: no probe reads
     /// them.
@@ -316,7 +326,14 @@ impl RubblePrint {
     /// before (ADR-465). A lookup in a tree per column cost a third of a
     /// millisecond a step on a battlefield.
     pub fn of(rubble: &Rubble, size: [u32; 2]) -> Self {
+        Self::of_counted(rubble, size).0
+    }
+    pub fn of_counted(rubble: &Rubble, size: [u32; 2]) -> (Self, RubblePrintWork) {
         const SEED: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut work = RubblePrintWork {
+            full_builds: 1,
+            ..Default::default()
+        };
         let mut band = vec![SEED; pages_across(size)[1].max(0) as usize];
         let mut touched: Vec<usize> = Vec::new();
         let mut pages: Vec<([i32; 2], u64)> = Vec::new();
@@ -344,6 +361,7 @@ impl RubblePrint {
                 touched.push(bz);
             }
             let h = &mut band[bz];
+            work.hashed_columns += 1;
             for byte in x
                 .to_le_bytes()
                 .into_iter()
@@ -356,7 +374,139 @@ impl RubblePrint {
         if let Some(done) = current {
             hand_on(done, &mut band, &mut touched);
         }
-        Self(pages.into_iter().collect())
+        (Self(pages.into_iter().collect()), work)
+    }
+    /// Update a print built from `old` at this same `size`. Only changed
+    /// pages are rehashed, in precisely the full builder's column order.
+    /// A cold/restored caller without that old map must use `of` instead.
+    /// Changed pages are still determined by print comparison, including
+    /// the full builder's collision semantics and empty-page removal.
+    pub fn update(
+        &mut self,
+        old: &Rubble,
+        next: &Rubble,
+        size: [u32; 2],
+        changed: &mut Changed,
+    ) -> RubblePrintWork {
+        let mut work = RubblePrintWork::default();
+        let mut dirty = BTreeSet::new();
+        // A tiny map gains nothing by hashing its only page selectively.
+        // Dense changes stop discovery early, before per-column set work
+        // can cost more than the full print. These are cost heuristics,
+        // not limits on navigation changes or authoritative work.
+        let tiny = self.0.len() <= 1;
+        let dense = old.len().max(next.len()).div_ceil(16).max(64);
+        let mut mark = |[x, z]: [i32; 2]| {
+            if x >= 0 && z >= 0 && x < size[0] as i32 && z < size[1] as i32 {
+                work.changed_columns += 1;
+                dirty.insert(page_of(x, z));
+                tiny || (work.changed_columns >= dense && dirty.len() > 1)
+            } else {
+                false
+            }
+        };
+        let (mut a, mut b) = (0, 0);
+        while a < old.0.len() && b < next.0.len() {
+            let full = match old.0[a].0.cmp(&next.0[b].0) {
+                std::cmp::Ordering::Less => {
+                    let full = mark(old.0[a].0);
+                    a += 1;
+                    full
+                }
+                std::cmp::Ordering::Greater => {
+                    let full = mark(next.0[b].0);
+                    b += 1;
+                    full
+                }
+                std::cmp::Ordering::Equal => {
+                    let full = old.0[a].1 != next.0[b].1 && mark(old.0[a].0);
+                    a += 1;
+                    b += 1;
+                    full
+                }
+            };
+            if full {
+                return self.rebuild(next, size, changed);
+            }
+        }
+        for &(at, _) in &old.0[a..] {
+            if mark(at) {
+                return self.rebuild(next, size, changed);
+            }
+        }
+        for &(at, _) in &next.0[b..] {
+            if mark(at) {
+                return self.rebuild(next, size, changed);
+            }
+        }
+        work.dirty_pages = dirty.len();
+        if dirty.is_empty() {
+            return work;
+        }
+        // A page's columns are interleaved with other Z pages within an X
+        // band. Scan each affected band once, hashing only its dirty pages;
+        // never binary-search every X column or scan the map per page.
+        const SEED: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut wanted = vec![false; pages_across(size)[1].max(0) as usize];
+        let mut prints = vec![None; wanted.len()];
+        let mut dirty = dirty.into_iter().peekable();
+        while let Some([bx, bz]) = dirty.next() {
+            let mut pages = vec![bz as usize];
+            while let Some(&[x, z]) = dirty.peek() {
+                if x != bx {
+                    break;
+                }
+                pages.push(z as usize);
+                dirty.next();
+            }
+            for &z in &pages {
+                wanted[z] = true;
+            }
+            let lo = i64::from(bx) * PAGE_SIDE as i64;
+            let hi = lo + PAGE_SIDE as i64;
+            let start = next.0.partition_point(|(at, _)| i64::from(at[0]) < lo);
+            let band = &next.0[start..];
+            let end = band.partition_point(|(at, _)| i64::from(at[0]) < hi);
+            for &([x, z], top) in &band[..end] {
+                if z < 0 || z >= size[1] as i32 || x >= size[0] as i32 {
+                    continue;
+                }
+                let bz = page_of(x, z)[1] as usize;
+                if !wanted[bz] {
+                    continue;
+                }
+                let h = prints[bz].get_or_insert(SEED);
+                for byte in x
+                    .to_le_bytes()
+                    .into_iter()
+                    .chain(z.to_le_bytes())
+                    .chain(top.to_le_bytes())
+                {
+                    *h = (*h ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+                }
+                work.hashed_columns += 1;
+            }
+            for z in pages {
+                let key = [bx, z as i32];
+                let next = prints[z].take();
+                if self.0.get(&key).copied() != next {
+                    changed.pages.insert(key);
+                    if let Some(print) = next {
+                        self.0.insert(key, print);
+                    } else {
+                        self.0.remove(&key);
+                    }
+                }
+                wanted[z] = false;
+            }
+        }
+        work
+    }
+    fn rebuild(&mut self, next: &Rubble, size: [u32; 2], changed: &mut Changed) -> RubblePrintWork {
+        let (print, work) = Self::of_counted(next, size);
+        self.changes(&print, changed);
+        *self = print;
+        work
     }
     /// Mark in `changed` every page where `self` and `next` differ.
     pub fn changes(&self, next: &Self, changed: &mut Changed) {
@@ -4462,6 +4612,101 @@ mod tests {
         let back = RubblePrint::load(&mut fx::blob::Scan::new(&b.v), [128, 128]);
         assert_eq!(back, Some(after));
         assert!(RubblePrint::load(&mut fx::blob::Scan::new(&b.v), [40, 40]).is_none());
+    }
+
+    #[test]
+    fn delta_rubble_print_matches_full_build_across_edits_and_restore() {
+        for size in [[0, 0], [1, 1], [33, 65], [128, 128], [2048, 2048]] {
+            let mut columns = BTreeMap::new();
+            for x in [-1, 0, 1, 30, 31, 32, 33, 63, 64, 127, 128, 2047, 2048] {
+                for z in [-1, 0, 31, 32, 33, 63, 64, 65, 127, 128, 2047, 2048] {
+                    columns.insert([x, z], ((x ^ z) & 65535) as u16);
+                }
+            }
+            let mut old: Rubble = columns.iter().map(|(&p, &h)| (p, h)).collect();
+            let mut print = RubblePrint::of(&old, size);
+            let mut state = 19u64;
+            for step in 0..400 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let keys: Vec<_> = columns.keys().copied().collect();
+                let at = if step % 3 == 0 {
+                    keys[state as usize % keys.len()]
+                } else {
+                    [(state >> 12) as i32 % 150, (state >> 37) as i32 % 150]
+                };
+                if step % 4 == 0 {
+                    columns.remove(&at);
+                } else {
+                    columns.insert(at, (state >> 20) as u16);
+                }
+                let next: Rubble = columns.iter().map(|(&p, &h)| (p, h)).collect();
+                let full = RubblePrint::of(&next, size);
+                let mut expected = Changed::default();
+                expected.column(0, 0); // Existing world changes must survive.
+                let mut actual = expected.clone();
+                print.changes(&full, &mut expected);
+                print.update(&old, &next, size, &mut actual);
+                assert_eq!(actual, expected, "size={size:?} step={step}");
+                assert_eq!(print, full, "size={size:?} step={step}");
+                let mut bytes = fx::blob::Blob::new();
+                print.save(&mut bytes);
+                print = RubblePrint::load(&mut fx::blob::Scan::new(&bytes.v), size).unwrap();
+                old = next;
+            }
+            let mut unchanged = Changed::default();
+            assert_eq!(
+                print.update(&old, &old, size, &mut unchanged),
+                RubblePrintWork::default()
+            );
+            assert!(unchanged.is_empty());
+            let empty = Rubble::new();
+            print.update(&old, &empty, size, &mut unchanged);
+            assert_eq!(print, RubblePrint::of(&empty, size));
+        }
+    }
+
+    #[test]
+    fn delta_rubble_print_hashes_only_dirty_pages_and_preserves_full_bytes() {
+        let size = [128, 128];
+        let old = Rubble::from_sorted(
+            (0..128)
+                .flat_map(|x| (0..128).map(move |z| ([x, z], 5)))
+                .collect(),
+        );
+        let mut next = old.clone();
+        next.insert([31, 31], u16::MAX);
+        let mut print = RubblePrint::of(&old, size);
+        let mut changed = Changed::default();
+        let work = print.update(&old, &next, size, &mut changed);
+        assert_eq!(work.changed_columns, 1);
+        assert_eq!(work.dirty_pages, 1);
+        assert_eq!(work.hashed_columns, PAGE_SIDE * PAGE_SIDE);
+        assert_eq!(work.full_builds, 0);
+        assert_eq!(changed.pages, BTreeSet::from([[0, 0]]));
+        let mut delta = fx::blob::Blob::new();
+        let mut full = fx::blob::Blob::new();
+        print.save(&mut delta);
+        RubblePrint::of(&next, size).save(&mut full);
+        assert_eq!(delta.v, full.v);
+
+        let dense = Rubble::from_sorted(old.0.iter().map(|&(p, _)| (p, 6)).collect());
+        let mut print = RubblePrint::of(&old, size);
+        let mut changed = Changed::default();
+        let work = print.update(&old, &dense, size, &mut changed);
+        assert_eq!(work.full_builds, 1, "dense discovery must stop early");
+        assert_eq!(work.hashed_columns, dense.len());
+        assert_eq!(print, RubblePrint::of(&dense, size));
+        assert_eq!(changed.pages.len(), 16);
+
+        // The last column leaves a page; zero-height columns still count
+        // as present until removed, including on a partial edge page.
+        let old = Rubble::from([([32, 64], 0), ([0, 0], 1), ([33, 64], 9)]);
+        let next = Rubble::from([([0, 0], 1), ([33, 64], 10)]);
+        let mut print = RubblePrint::of(&old, [33, 65]);
+        let work = print.update(&old, &next, [33, 65], &mut Changed::default());
+        assert_eq!(work.changed_columns, 1);
+        assert_eq!(work.hashed_columns, 0);
+        assert_eq!(print, RubblePrint::of(&next, [33, 65]));
     }
     #[test]
     fn rubble_raises_the_floor_of_its_columns_and_blocks_a_hull_below_its_step() {
