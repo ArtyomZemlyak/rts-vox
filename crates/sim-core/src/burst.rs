@@ -1532,9 +1532,14 @@ mod tests {
     }
     #[test]
     fn dense_queries_match_sparse_words_columns_and_contact_order() {
-        for count in [127, 128, 129] {
+        for count in [
+            SettledQueries::PAGED_MIN_RANGES - 1,
+            SettledQueries::PAGED_MIN_RANGES,
+            SettledQueries::PAGED_MIN_RANGES + 1,
+        ] {
             let ranges: Vec<_> = (0..count)
                 .map(|i| {
+                    let i = i as i32;
                     let x = i % 25 - 12;
                     let z = i % 21 - 10;
                     let y = [-65, -1, 0, 63, 64, 127][i as usize % 6];
@@ -1558,7 +1563,7 @@ mod tests {
                     assert_eq!(a.ordered(), b.ordered());
                     assert_eq!(
                         a.dense.as_ref().is_some_and(|d| d.plane.is_some()),
-                        count >= 128
+                        count >= SettledQueries::PAGED_MIN_RANGES
                     );
                 }
                 for x in -15..=17 {
@@ -1577,9 +1582,10 @@ mod tests {
     }
     #[test]
     fn dense_queries_preserve_additive_build_and_clear_across_layout_changes() {
-        let compact = vec![([-12, -1, -3], [19, 65, 4]); 128];
-        let sparse = vec![([10000, 0, -10000], [10000, 0, -10000]); 128];
-        let small = vec![([1, 0, 1], [2, 128, 2]); 128];
+        let compact = vec![([-12, -1, -3], [19, 65, 4]); SettledQueries::PAGED_MIN_RANGES];
+        let sparse =
+            vec![([10000, 0, -10000], [10000, 0, -10000]); SettledQueries::PAGED_MIN_RANGES];
+        let small = vec![([1, 0, 1], [2, 128, 2]); SettledQueries::PAGED_MIN_RANGES];
         let mut actual = SettledQueries::default();
         let mut reference = SettledQueries::default();
         for ranges in [&compact, &sparse, &small] {
@@ -1650,8 +1656,17 @@ mod tests {
         ])
         .is_some());
         for (ranges, mode) in [
-            (vec![([-12, -1, -3], [19, 65, 4]); 128], "dense"),
-            (far.into_iter().cycle().take(128).collect(), "sparse"),
+            (
+                vec![([-12, -1, -3], [19, 65, 4]); SettledQueries::PAGED_MIN_RANGES],
+                "dense",
+            ),
+            (
+                far.into_iter()
+                    .cycle()
+                    .take(SettledQueries::PAGED_MIN_RANGES)
+                    .collect(),
+                "sparse",
+            ),
         ] {
             let events = std::sync::Mutex::new(BTreeMap::new());
             let task = |_: usize, name: &'static str| {
@@ -7844,6 +7859,10 @@ impl SettledQueryStripe {
     }
 }
 impl SettledQueries {
+    // Page-directory initialization is a fixed cost across the whole bbox.
+    // Keep smaller batches on the hash path, including ordinary early battles.
+    const PAGED_MIN_RANGES: usize = 8192;
+
     fn clear(&mut self) {
         for stripe in &mut self.0 {
             stripe.clear();
@@ -7874,7 +7893,7 @@ impl SettledQueries {
                 "physics_queries_layout_begin",
                 "physics_queries_layout_end",
             );
-            if parallel && ranges.len() >= 128 {
+            if parallel && ranges.len() >= Self::PAGED_MIN_RANGES {
                 Self::dense_bounds(ranges)
             } else {
                 None
