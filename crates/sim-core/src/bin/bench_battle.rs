@@ -6,6 +6,8 @@ use std::time::Instant;
 
 #[path = "bench_battle/drain.rs"]
 mod drain;
+#[path = "bench_battle/rubble.rs"]
+mod rubble;
 #[path = "bench_battle/workers.rs"]
 mod workers;
 
@@ -205,6 +207,13 @@ fn main() {
     let fire_trace = args.iter().any(|a| a == "--fire-trace");
     let wave_trace = args.iter().any(|a| a == "--wave-trace");
     let profile_workers = args.iter().any(|a| a == "--profile-workers");
+    let rubble_profile = args
+        .iter()
+        .any(|a| a == "--profile-rubble")
+        .then(rubble::Profile::default);
+    if rubble_profile.is_some() {
+        println!("rubble_parent_spans=true diagnostic_only=true inclusive_overlapping=true");
+    }
     let tick_csv = args
         .windows(2)
         .find(|w| w[0] == "--tick-csv")
@@ -404,6 +413,8 @@ fn main() {
     println!("felling_front_layout=relative_inline_8_with_full_pair_overflow");
     println!("settled_membership=vertical_word_iteration");
     println!("rubble_support_storage=reused_empty_buffers");
+    println!("rubble_support_membership=rebuilt_source_bitset");
+    println!("rubble_column_merge=ordered_parallel_rows");
     if verify_frontier {
         println!("verify_collapse_frontier=true diagnostic_only=true");
     }
@@ -878,161 +889,178 @@ fn main() {
         let terrain_phases = &mut terrain_phase_windows[tick_index / 300];
         let local_hunts = &mut local_hunt_windows[tick_index / 300];
         let ground_counts = &mut ground_windows[tick_index / 300].1;
-        sim.step_observed_tasks(
-            |phase| {
-                if damage_trace {
-                    if let Some(kind) = match phase {
-                        "orders_laser_contact_unit" => Some(0),
-                        "orders_laser_contact_world" => Some(1),
-                        "orders_laser_contact_shield" => Some(2),
-                        "orders_laser_contact_miss" => Some(3),
-                        _ => None,
-                    } {
-                        laser_contact_kinds[kind] += 1;
+        let completed = |phase: &'static str| {
+            if damage_trace {
+                if let Some(kind) = match phase {
+                    "orders_laser_contact_unit" => Some(0),
+                    "orders_laser_contact_world" => Some(1),
+                    "orders_laser_contact_shield" => Some(2),
+                    "orders_laser_contact_miss" => Some(3),
+                    _ => None,
+                } {
+                    laser_contact_kinds[kind] += 1;
+                }
+            }
+            let now = Instant::now();
+            let elapsed = now.duration_since(last).as_micros();
+            last = now;
+            phases.entry(phase).or_default().push(elapsed);
+            if order_trace_tick == Some(tick_index + 1) && phase.starts_with("orders_") {
+                println!(
+                    "order_trace tick={} phase={phase} us={elapsed}",
+                    tick_index + 1
+                );
+            }
+            if tick_csv.is_some() {
+                profile.record_phase(phase, elapsed);
+            }
+        };
+        let detail = |name: &'static str| {
+            if tick_csv.is_some() {
+                let now = Instant::now();
+                if name == "rubble_print_begin" {
+                    rubble_print_last = Some(now);
+                    return;
+                }
+                if name == "rubble_print_end" {
+                    rubble_print_us = now
+                        .duration_since(rubble_print_last.expect("publication begin"))
+                        .as_micros();
+                    return;
+                }
+                let settled_phase = match name {
+                    "settled_clear" => Some(0),
+                    "settled_boxes" => Some(1),
+                    "settled_ranges" => Some(2),
+                    "settled_queries" => Some(3),
+                    "settled_candidates" => Some(4),
+                    "settled_cells" => Some(5),
+                    _ => None,
+                };
+                if let Some(phase) = settled_phase {
+                    settled_detail[phase] = now
+                        .duration_since(settled_last.unwrap_or(detail_last))
+                        .as_micros();
+                    settled_last = Some(now);
+                    return;
+                }
+                let elapsed = now.duration_since(detail_last).as_micros();
+                detail_last = now;
+                match name {
+                    "motion_begin" => {}
+                    // The coarse continuation (ADR-680) counts as route work.
+                    "motion_coarse" => {
+                        motion_detail[0] = elapsed;
+                        coarse_us = elapsed;
                     }
+                    "motion_routes" => motion_detail[0] += elapsed,
+                    "motion_ground" => ground_us = elapsed,
+                    "motion_commit" => motion_detail[1] = elapsed,
+                    "motion_feet" => feet_us = elapsed,
+                    "motion_contacts" => motion_detail[2] = elapsed,
+                    "motion_felling" => motion_detail[3] = elapsed,
+                    "debris_begin" => {}
+                    "debris_bodies" => debris_detail[0] = elapsed,
+                    "debris_sections" => debris_detail[1] = elapsed,
+                    "debris_hulls" => debris_detail[2] = elapsed,
+                    "debris_confirm" => debris_detail[3] = elapsed,
+                    "debris_settled" => debris_detail[4] = elapsed,
+                    "debris_wake" => debris_detail[5] = elapsed,
+                    "debris_translate" => debris_detail[6] = elapsed,
+                    "debris_merge_keys" => debris_detail[7] = elapsed,
+                    "debris_merge_groups" => debris_detail[8] = elapsed,
+                    "debris_advance" => debris_detail[9] = elapsed,
+                    "debris_compact" => debris_detail[10] = elapsed,
+                    "debris_wreck_prune" => debris_detail[11] = elapsed,
+                    "debris_wreck_append" => debris_detail[12] = elapsed,
+                    "debris_retire" => debris_detail[13] = elapsed,
+                    "debris_corpses" => debris_detail[14] = elapsed,
+                    "debris_finish" => debris_detail[15] = elapsed,
+                    "heat_begin" => {}
+                    "heat_world" => heat_detail[0] = elapsed,
+                    "heat_melt" => heat_detail[1] = elapsed,
+                    "heat_units" => {
+                        heat_detail[2] = elapsed + heat_detail[4..].iter().sum::<u128>()
+                    }
+                    "heat_edits" => heat_detail[3] = elapsed,
+                    "unit_heat_conduction" => heat_detail[4] = elapsed,
+                    "unit_heat_commit" => heat_detail[5] = elapsed,
+                    "unit_heat_melt" => heat_detail[6] = elapsed,
+                    "unit_heat_damage" => heat_detail[7] = elapsed,
+                    _ => unreachable!(),
+                }
+            }
+        };
+        let unit_detail = |id: usize, stage: &'static str| {
+            if tick_csv.is_some() {
+                if stage == "ground_accepted" || stage == "ground_rejected" {
+                    ground_counts[usize::from(stage == "ground_rejected")] += 1;
+                    return;
+                }
+                if stage == "local_hunt_accepted" || stage == "local_hunt_rejected" {
+                    local_hunts[usize::from(stage == "local_hunt_rejected")] += 1;
+                    return;
                 }
                 let now = Instant::now();
-                let elapsed = now.duration_since(last).as_micros();
-                last = now;
-                phases.entry(phase).or_default().push(elapsed);
-                if order_trace_tick == Some(tick_index + 1) && phase.starts_with("orders_") {
-                    println!(
-                        "order_trace tick={} phase={phase} us={elapsed}",
-                        tick_index + 1
-                    );
-                }
-                if tick_csv.is_some() {
-                    profile.record_phase(phase, elapsed);
-                }
-            },
-            |name| {
-                if tick_csv.is_some() {
-                    let now = Instant::now();
-                    if name == "rubble_print_begin" {
-                        rubble_print_last = Some(now);
-                        return;
-                    }
-                    if name == "rubble_print_end" {
-                        rubble_print_us = now
-                            .duration_since(rubble_print_last.expect("publication begin"))
-                            .as_micros();
-                        return;
-                    }
-                    let settled_phase = match name {
-                        "settled_clear" => Some(0),
-                        "settled_boxes" => Some(1),
-                        "settled_ranges" => Some(2),
-                        "settled_queries" => Some(3),
-                        "settled_candidates" => Some(4),
-                        "settled_cells" => Some(5),
+                if stage == "begin" {
+                    unit_start[id] = now;
+                    unit_last[id] = now;
+                } else {
+                    let elapsed = now.duration_since(unit_last[id]).as_nanos();
+                    unit_last[id] = now;
+                    let phase = match stage {
+                        "hunt" => 0,
+                        "plan" | "plan_coarse" | "plan_fine" | "plan_target" | "plan_prepare"
+                        | "plan_direct" => 1,
+                        "terrain_pose" | "terrain_collision" | "terrain_crush" | "terrain" => 2,
+                        "ride" => 3,
+                        "feet" => 4,
+                        "unit_done" => 5,
+                        _ => unreachable!(),
+                    };
+                    unit_phases[id][phase] += elapsed;
+                    let terrain = match stage {
+                        "terrain_pose" => Some(0),
+                        "terrain_collision" => Some(1),
+                        "terrain_crush" => Some(2),
+                        "terrain" => Some(3),
                         _ => None,
                     };
-                    if let Some(phase) = settled_phase {
-                        settled_detail[phase] = now
-                            .duration_since(settled_last.unwrap_or(detail_last))
-                            .as_micros();
-                        settled_last = Some(now);
-                        return;
+                    if let Some(part) = terrain {
+                        terrain_phases[id][part] += elapsed;
                     }
-                    let elapsed = now.duration_since(detail_last).as_micros();
-                    detail_last = now;
-                    match name {
-                        "motion_begin" => {}
-                        // The coarse continuation (ADR-680) counts as route work.
-                        "motion_coarse" => {
-                            motion_detail[0] = elapsed;
-                            coarse_us = elapsed;
-                        }
-                        "motion_routes" => motion_detail[0] += elapsed,
-                        "motion_ground" => ground_us = elapsed,
-                        "motion_commit" => motion_detail[1] = elapsed,
-                        "motion_feet" => feet_us = elapsed,
-                        "motion_contacts" => motion_detail[2] = elapsed,
-                        "motion_felling" => motion_detail[3] = elapsed,
-                        "debris_begin" => {}
-                        "debris_bodies" => debris_detail[0] = elapsed,
-                        "debris_sections" => debris_detail[1] = elapsed,
-                        "debris_hulls" => debris_detail[2] = elapsed,
-                        "debris_confirm" => debris_detail[3] = elapsed,
-                        "debris_settled" => debris_detail[4] = elapsed,
-                        "debris_wake" => debris_detail[5] = elapsed,
-                        "debris_translate" => debris_detail[6] = elapsed,
-                        "debris_merge_keys" => debris_detail[7] = elapsed,
-                        "debris_merge_groups" => debris_detail[8] = elapsed,
-                        "debris_advance" => debris_detail[9] = elapsed,
-                        "debris_compact" => debris_detail[10] = elapsed,
-                        "debris_wreck_prune" => debris_detail[11] = elapsed,
-                        "debris_wreck_append" => debris_detail[12] = elapsed,
-                        "debris_retire" => debris_detail[13] = elapsed,
-                        "debris_corpses" => debris_detail[14] = elapsed,
-                        "debris_finish" => debris_detail[15] = elapsed,
-                        "heat_begin" => {}
-                        "heat_world" => heat_detail[0] = elapsed,
-                        "heat_melt" => heat_detail[1] = elapsed,
-                        "heat_units" => {
-                            heat_detail[2] = elapsed + heat_detail[4..].iter().sum::<u128>()
-                        }
-                        "heat_edits" => heat_detail[3] = elapsed,
-                        "unit_heat_conduction" => heat_detail[4] = elapsed,
-                        "unit_heat_commit" => heat_detail[5] = elapsed,
-                        "unit_heat_melt" => heat_detail[6] = elapsed,
-                        "unit_heat_damage" => heat_detail[7] = elapsed,
-                        _ => unreachable!(),
+                    if stage == "unit_done" {
+                        unit_window[id] += now.duration_since(unit_start[id]).as_micros();
                     }
                 }
-            },
-            |id, stage| {
-                if tick_csv.is_some() {
-                    if stage == "ground_accepted" || stage == "ground_rejected" {
-                        ground_counts[usize::from(stage == "ground_rejected")] += 1;
-                        return;
-                    }
-                    if stage == "local_hunt_accepted" || stage == "local_hunt_rejected" {
-                        local_hunts[usize::from(stage == "local_hunt_rejected")] += 1;
-                        return;
-                    }
-                    let now = Instant::now();
-                    if stage == "begin" {
-                        unit_start[id] = now;
-                        unit_last[id] = now;
-                    } else {
-                        let elapsed = now.duration_since(unit_last[id]).as_nanos();
-                        unit_last[id] = now;
-                        let phase = match stage {
-                            "hunt" => 0,
-                            "plan" | "plan_coarse" | "plan_fine" | "plan_target"
-                            | "plan_prepare" | "plan_direct" => 1,
-                            "terrain_pose" | "terrain_collision" | "terrain_crush" | "terrain" => 2,
-                            "ride" => 3,
-                            "feet" => 4,
-                            "unit_done" => 5,
-                            _ => unreachable!(),
-                        };
-                        unit_phases[id][phase] += elapsed;
-                        let terrain = match stage {
-                            "terrain_pose" => Some(0),
-                            "terrain_collision" => Some(1),
-                            "terrain_crush" => Some(2),
-                            "terrain" => Some(3),
-                            _ => None,
-                        };
-                        if let Some(part) = terrain {
-                            terrain_phases[id][part] += elapsed;
-                        }
-                        if stage == "unit_done" {
-                            unit_window[id] += now.duration_since(unit_start[id]).as_micros();
-                        }
-                    }
-                }
-            },
-            |id, event| {
-                if let Some(profile) = &worker_profile {
-                    profile.observe(id, event);
-                }
-            },
-        );
+            }
+        };
+        let navigation_detail = |id: usize, event: &'static str| {
+            if let Some(profile) = &worker_profile {
+                profile.observe(id, event);
+            }
+        };
+        if let Some(profile) = &rubble_profile {
+            sim.step_observed_all_tasks(
+                completed,
+                detail,
+                unit_detail,
+                navigation_detail,
+                |stage, event| profile.observe(stage, event),
+            );
+        } else {
+            // Preserve the original no-op physics observer in ordinary
+            // timings: no Option test or clock at every physics task event.
+            sim.step_observed_tasks(completed, detail, unit_detail, navigation_detail);
+        }
         // Measure the authoritative tick, excluding optional replay and log I/O.
         let elapsed = start.elapsed().as_micros();
+        if let Some(profile) = &rubble_profile {
+            let end = tick_index + 1;
+            if end.is_multiple_of(300) || end == ticks {
+                profile.finish_window(end, (end - 1) % 300 + 1);
+            }
+        }
         if terrain_trace {
             for &(edit, before) in sim.world.completed() {
                 if edit.mat == 0 && before != 0 {

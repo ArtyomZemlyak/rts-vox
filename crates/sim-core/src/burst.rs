@@ -625,6 +625,56 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn rubble_row_batches_match_tree_across_dispatch_edges_and_workers() {
+        for workers in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            for count in [16_383usize, 16_384, 16_385, 65_536] {
+                for width in [511usize, 512, 513, 1025] {
+                    let mut rng = fx::rng::Rng::new(count as u64, width as u64);
+                    let mut columns: Vec<_> = (0..count)
+                        .map(|i| {
+                            let x = if i % 7 == 0 {
+                                0
+                            } else {
+                                rng.below(width as u32)
+                            };
+                            let z = rng.below(4096);
+                            let top = if (x + z) % 7 == 0 { 0 } else { i as u16 };
+                            ([x as i32, z as i32], top)
+                        })
+                        .collect();
+                    columns[0] = ([(width - 1) as i32, 4095], u16::MAX);
+                    let mut expected = BTreeMap::new();
+                    for &(at, top) in &columns {
+                        let kept = expected.entry(at).or_insert(0u16);
+                        *kept = (*kept).max(top);
+                    }
+                    let expected: Vec<_> = expected.into_iter().collect();
+                    let trace = crate::task_trace::Trace::default();
+                    pool.install(|| {
+                        merge_columns_observed(&mut columns, &|stage, event| {
+                            trace.record(stage, event)
+                        })
+                    });
+                    assert_eq!(
+                        columns, expected,
+                        "workers={workers} count={count} width={width}"
+                    );
+                    trace.balanced(&["physics_rubble_merge_rows"]);
+                    let jobs = if workers > 1 && count >= 16_384 && width >= 512 {
+                        width.div_ceil(64)
+                    } else {
+                        1
+                    };
+                    assert_eq!(trace.jobs("physics_rubble_merge_rows_begin"), jobs);
+                }
+            }
+        }
+    }
     impl Bursts {
         fn reference_rubble(
             &self,
@@ -836,7 +886,7 @@ mod tests {
                 .num_threads(workers)
                 .build()
                 .unwrap();
-            for count in [1023usize, 1024, 1025] {
+            for count in [63usize, 64, 65, 127, 128, 129, 1023, 1024, 1025] {
                 let mut b = Bursts::default();
                 b.fragments.push(Fragment {
                     id: 1,
@@ -900,6 +950,27 @@ mod tests {
                     "physics_rubble_merge",
                 ]);
                 assert_eq!(trace.jobs("physics_rubble_support_query_begin"), 1);
+                let mut scratch = RubbleScratch::default();
+                // Change membership within words and across word/batch edges
+                // without advancing a tick. Old bits must not survive reuse.
+                for pass in 0..3 {
+                    for (i, f) in b.fragments.iter_mut().enumerate().skip(1) {
+                        f.resting = i % 3 != pass;
+                    }
+                    let expected = b.reference_rubble(&w, &[], &[]);
+                    assert_eq!(
+                        pool.install(|| b.rubble_with_scratch(
+                            &w,
+                            &[],
+                            &[],
+                            &mut scratch,
+                            &|_, _| {}
+                        )),
+                        expected,
+                        "mask workers={workers} count={count} pass={pass}"
+                    );
+                    assert!(scratch.stacked_mask.is_empty());
+                }
             }
         }
     }
@@ -1051,6 +1122,7 @@ mod tests {
                         assert!(scratch.settled.cells.is_empty());
                         assert!(scratch.settled.boxes.is_empty());
                         assert!(scratch.queries.is_empty());
+                        assert!(scratch.stacked_mask.is_empty());
                     }
                 }
             }
@@ -1106,6 +1178,9 @@ mod tests {
         );
         let bounds_pointer = scratch.bounds.as_ptr();
         let bounds_capacity = scratch.bounds.capacity();
+        let mask_pointer = scratch.stacked_mask.as_ptr();
+        let mask_capacity = scratch.stacked_mask.capacity();
+        assert!(mask_capacity > 0);
         let pooled_lists: usize = scratch
             .settled
             .cells
@@ -1121,6 +1196,9 @@ mod tests {
             );
             assert_eq!(scratch.bounds.as_ptr(), bounds_pointer);
             assert_eq!(scratch.bounds.capacity(), bounds_capacity);
+            assert!(scratch.stacked_mask.is_empty());
+            assert_eq!(scratch.stacked_mask.as_ptr(), mask_pointer);
+            assert_eq!(scratch.stacked_mask.capacity(), mask_capacity);
             assert_eq!(
                 scratch
                     .settled
@@ -1161,6 +1239,8 @@ mod tests {
             .rubble_with_scratch(&w, &[], &[], &mut scratch, &|_, _| {})
             .is_empty());
         assert_eq!(scratch.bounds.capacity(), bounds_capacity);
+        assert!(scratch.stacked_mask.is_empty());
+        assert_eq!(scratch.stacked_mask.capacity(), mask_capacity);
         b.fragments = saved;
         assert_eq!(
             b.rubble_with_scratch(&w, &[], &[], &mut scratch, &|_, _| {}),
@@ -6308,6 +6388,7 @@ impl Bursts {
             bounds,
             settled,
             queries,
+            stacked_mask,
         } = scratch;
         {
             let _task = PhysicsTask::new(
@@ -6317,12 +6398,13 @@ impl Bursts {
             );
             bounds.clear();
             bounds.resize(self.fragments.len(), None);
+            stacked_mask.clear();
         }
         let mut floor = Vec::new();
         let mut stacked = Vec::new();
         // Each batch owns its boxes and candidate lists. World/hulls/fragments
         // stay immutable; indexed collection preserves the original ascending
-        // fragment order required by the stacked membership binary search.
+        // fragment order required by the ordered column gather.
         let classify = |start: usize, boxes: &mut [Option<([Fx; 3], [Fx; 3])>]| {
             let _task = PhysicsTask::new(
                 task,
@@ -6381,10 +6463,17 @@ impl Bursts {
                     "physics_rubble_support_build_begin",
                     "physics_rubble_support_build_end",
                 );
+                // Dense source indices need only one bit each. This is the
+                // same immutable candidate set, rebuilt on every call; no
+                // binary search per fragment or cross-tick membership cache.
+                stacked_mask.resize(self.fragments.len().div_ceil(64), 0);
+                for &i in &stacked {
+                    stacked_mask[i / 64] |= 1u64 << (i % 64);
+                }
                 Settled::around_bounds_into(
                     &self.fragments,
                     hulls,
-                    |i, _| stacked.binary_search(&i).is_ok(),
+                    |i, _| stacked_mask[i / 64] & (1u64 << (i % 64)) != 0,
                     |i, f| bounds[i].unwrap_or_else(|| f.bounds()),
                     SettledReach::Support,
                     settled,
@@ -6423,6 +6512,7 @@ impl Bursts {
             settled.boxes.clear();
             settled.requests = 0;
             queries.clear();
+            stacked_mask.clear();
         }
         // A hull covers no column outside the box around its footprint:
         // a piece far from every hull asks none of them (ADR-465).
@@ -6495,7 +6585,7 @@ impl Bursts {
                 "physics_rubble_merge_begin",
                 "physics_rubble_merge_end",
             );
-            merge_columns(&mut columns);
+            merge_columns_observed(&mut columns, task);
         }
         bounds.clear();
         nav::vehicle::Rubble::from_sorted(columns)
@@ -7072,7 +7162,14 @@ fn supported(
 /// reduces Z into a bounded row; presence bits also retain zero-height
 /// columns. Rows are independent and no ordering of equal inputs matters
 /// to the exact maximum. Scratch is proportional to input, not world area.
+#[cfg(test)]
 fn merge_columns(columns: &mut Vec<([i32; 2], u16)>) {
+    merge_columns_observed(columns, &|_, _| {});
+}
+fn merge_columns_observed(
+    columns: &mut Vec<([i32; 2], u16)>,
+    task: &(impl Fn(usize, &'static str) + Sync),
+) {
     debug_assert!(columns
         .iter()
         .all(|(c, _)| c.iter().all(|v| (0..1 << 16).contains(v))));
@@ -7100,45 +7197,81 @@ fn merge_columns(columns: &mut Vec<([i32; 2], u16)>) {
                 rows[starts[x]] = ((z as u32) << 16) | u32::from(top);
                 starts[x] += 1;
             }
-            // Store top + 1: zero is absent, including when top is zero.
-            // Reset touched entries on emission; no branch per duplicate.
-            let mut tops = vec![0u32; maximum[1] + 1];
-            let mut present = vec![0u64; words];
-            let mut blocks = vec![0u64; words.div_ceil(64)];
-            columns.clear();
-            let mut begin = 0;
-            // Scatter cursors are now the ends of their rows, including
-            // empty ones. Emit only set bits, in ascending Z within each X.
-            for (x, &end) in starts[..starts.len() - 1].iter().enumerate() {
-                let mut active = 0u64;
-                for &entry in &rows[begin..end] {
-                    let z = (entry >> 16) as usize;
-                    tops[z] = tops[z].max((entry & 0xffff) + 1);
-                    let word = z / 64;
-                    present[word] |= 1u64 << (z % 64);
-                    blocks[word / 64] |= 1u64 << (word % 64);
-                    active |= 1u64 << (word / 64);
+            let parallel =
+                rows.len() >= 16_384 && starts.len() > 512 && rayon::current_num_threads() > 1;
+            // Each batch owns complete X rows, so maxima are scalar and
+            // independent. Indexed collection and concatenation retain X/Z
+            // order. Small maps and single-worker pools keep the serial path.
+            let emit = |start: usize, ends: &[usize], out: &mut Vec<([i32; 2], u16)>| {
+                let _task = PhysicsTask::new(
+                    task,
+                    "physics_rubble_merge_rows_begin",
+                    "physics_rubble_merge_rows_end",
+                );
+                let mut begin = if start == 0 { 0 } else { starts[start - 1] };
+                if ends.last().is_none_or(|&end| end == begin) {
+                    return;
                 }
-                // Two summary levels skip every empty word, even when two
-                // columns are at opposite edges of the 16-bit domain. Each
-                // visited word holds an output: traversal is linear in N.
-                while active != 0 {
-                    let block = active.trailing_zeros() as usize;
-                    let mut occupied = std::mem::take(&mut blocks[block]);
-                    while occupied != 0 {
-                        let word = block * 64 + occupied.trailing_zeros() as usize;
-                        let mut bits = std::mem::take(&mut present[word]);
-                        while bits != 0 {
-                            let z = word * 64 + bits.trailing_zeros() as usize;
-                            columns.push(([x as i32, z as i32], (tops[z] - 1) as u16));
-                            tops[z] = 0;
-                            bits &= bits - 1;
-                        }
-                        occupied &= occupied - 1;
+                // Store top + 1: zero is absent, including when top is zero.
+                // Reset touched entries on emission; no branch per duplicate.
+                let mut tops = vec![0u32; maximum[1] + 1];
+                let mut present = vec![0u64; words];
+                let mut blocks = vec![0u64; words.div_ceil(64)];
+                // Scatter cursors are now the ends of their rows, including
+                // empty ones. Emit only set bits, in ascending Z within each X.
+                for (offset, &end) in ends.iter().enumerate() {
+                    let x = start + offset;
+                    let mut active = 0u64;
+                    for &entry in &rows[begin..end] {
+                        let z = (entry >> 16) as usize;
+                        tops[z] = tops[z].max((entry & 0xffff) + 1);
+                        let word = z / 64;
+                        present[word] |= 1u64 << (z % 64);
+                        blocks[word / 64] |= 1u64 << (word % 64);
+                        active |= 1u64 << (word / 64);
                     }
-                    active &= active - 1;
+                    // Two summary levels skip every empty word, even when two
+                    // columns are at opposite edges of the 16-bit domain. Each
+                    // visited word holds an output: traversal is linear in N.
+                    while active != 0 {
+                        let block = active.trailing_zeros() as usize;
+                        let mut occupied = std::mem::take(&mut blocks[block]);
+                        while occupied != 0 {
+                            let word = block * 64 + occupied.trailing_zeros() as usize;
+                            let mut bits = std::mem::take(&mut present[word]);
+                            while bits != 0 {
+                                let z = word * 64 + bits.trailing_zeros() as usize;
+                                out.push(([x as i32, z as i32], (tops[z] - 1) as u16));
+                                tops[z] = 0;
+                                bits &= bits - 1;
+                            }
+                            occupied &= occupied - 1;
+                        }
+                        active &= active - 1;
+                    }
+                    begin = end;
                 }
-                begin = end;
+            };
+            columns.clear();
+            let ends = &starts[..starts.len() - 1];
+            if parallel {
+                let groups: Vec<Vec<_>> = ends
+                    .par_chunks(64)
+                    .enumerate()
+                    .map(|(batch, ends)| {
+                        let start = batch * 64;
+                        let begin = if start == 0 { 0 } else { starts[start - 1] };
+                        let capacity = ends.last().copied().unwrap_or(begin) - begin;
+                        let mut out = Vec::with_capacity(capacity);
+                        emit(start, ends, &mut out);
+                        out
+                    })
+                    .collect();
+                for group in groups {
+                    columns.extend(group);
+                }
+            } else {
+                emit(0, ends, columns);
             }
             return;
         }
@@ -7263,6 +7396,7 @@ pub(crate) struct RubbleScratch {
     bounds: Vec<Option<([Fx; 3], [Fx; 3])>>,
     settled: Settled,
     queries: SettledQueries,
+    stacked_mask: Vec<u64>,
 }
 type SettledCellRequest = (u32, [i32; 3], [i32; 3]);
 /// X modulo eight owns each contact list. Each worker appends indices in
