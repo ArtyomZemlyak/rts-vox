@@ -1531,6 +1531,150 @@ mod tests {
         assert!(!SettledQueries::default().contains([0; 3]));
     }
     #[test]
+    fn dense_queries_match_sparse_words_columns_and_contact_order() {
+        for count in [127, 128, 129] {
+            let ranges: Vec<_> = (0..count)
+                .map(|i| {
+                    let x = i % 25 - 12;
+                    let z = i % 21 - 10;
+                    let y = [-65, -1, 0, 63, 64, 127][i as usize % 6];
+                    ([x, y, z], [x + 2, y + 3, z + 1])
+                })
+                .collect();
+            let mut reference = SettledQueries::default();
+            reference.build(&ranges, false, &|_, _| {});
+            let selected: Vec<_> = ranges.iter().copied().map(Some).collect();
+            let mut expected_cells = SettledCells::default();
+            expected_cells.build(&selected, &reference, false, &|_, _| {});
+            for workers in [1, 4, 8] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(workers)
+                    .build()
+                    .unwrap();
+                let mut actual = SettledQueries::default();
+                pool.install(|| actual.build(&ranges, true, &|_, _| {}));
+                assert_eq!(actual.word_counts(), reference.word_counts());
+                for (a, b) in actual.0.iter().zip(&reference.0) {
+                    assert_eq!(a.ordered(), b.ordered());
+                    assert_eq!(
+                        a.dense.as_ref().is_some_and(|d| d.plane.is_some()),
+                        count >= 128
+                    );
+                }
+                for x in -15..=17 {
+                    for z in -12..=13 {
+                        assert_eq!(
+                            actual.column(x, z, -130, 140).collect::<Vec<_>>(),
+                            reference.column(x, z, -130, 140).collect::<Vec<_>>()
+                        );
+                    }
+                }
+                let mut cells = SettledCells::default();
+                pool.install(|| cells.build(&selected, &actual, true, &|_, _| {}));
+                assert_eq!(cells.ordered(), expected_cells.ordered());
+            }
+        }
+    }
+    #[test]
+    fn dense_queries_preserve_additive_build_and_clear_across_layout_changes() {
+        let compact = vec![([-12, -1, -3], [19, 65, 4]); 128];
+        let sparse = vec![([10000, 0, -10000], [10000, 0, -10000]); 128];
+        let small = vec![([1, 0, 1], [2, 128, 2]); 128];
+        let mut actual = SettledQueries::default();
+        let mut reference = SettledQueries::default();
+        for ranges in [&compact, &sparse, &small] {
+            actual.build(ranges, true, &|_, _| {});
+            reference.build(ranges, false, &|_, _| {});
+            assert_eq!(actual.word_counts(), reference.word_counts());
+            for (a, b) in actual.0.iter().zip(&reference.0) {
+                assert_eq!(a.ordered(), b.ordered());
+            }
+        }
+        for ranges in [&small, &sparse, &compact, &Vec::new(), &small] {
+            actual.clear();
+            reference.clear();
+            assert!(actual.is_empty());
+            assert!(!actual.contains([10000, 0, -10000]));
+            actual.build(ranges, true, &|_, _| {});
+            reference.build(ranges, false, &|_, _| {});
+            assert_eq!(actual.word_counts(), reference.word_counts());
+            for (a, b) in actual.0.iter().zip(&reference.0) {
+                assert_eq!(a.ordered(), b.ordered());
+            }
+        }
+    }
+    #[test]
+    fn paged_query_limit_spills_a_partial_row_without_losing_or_duplicating_words() {
+        let mut stripe = SettledQueryStripe::default();
+        stripe.prepare(0, Some(([0, 0], [56, 16384])));
+        SettledQueries::include(&mut stripe, 0, [0, 0, 0], [56, 0, 16367]);
+        stripe.include_base_row(0, 24, 16368, 1);
+        assert!(stripe.dense.as_ref().unwrap().plane.is_some());
+        assert_eq!(
+            stripe.dense.as_ref().unwrap().words.len(),
+            DenseQueryWords::MAX_WORDS - 64
+        );
+        stripe.include_base_row(0, 56, 16384, 1);
+        assert!(stripe.dense.as_ref().unwrap().plane.is_none());
+        assert_eq!(stripe.base_len(), 16368 * 8 + 4 + 8);
+        for z in [0, 15, 16, 16367, 16368, 16369, 16383, 16384] {
+            for x in (0..=56).step_by(8) {
+                assert_eq!(
+                    stripe.base_word(x, z),
+                    u64::from(z <= 16367 || z == 16384 || z == 16368 && x <= 24)
+                );
+            }
+        }
+        stripe.include_base_row(32, 56, 16384, 2);
+        assert_eq!(stripe.base_len(), 16368 * 8 + 4 + 8);
+        assert_eq!(stripe.base_word(32, 16384), 3);
+        stripe.clear();
+        stripe.prepare(0, Some(([0, 0], [0, 0])));
+        stripe.include_base_row(0, 0, 0, 4);
+        assert_eq!(stripe.base_len(), 1);
+        assert_eq!(stripe.base_word(0, 0), 4);
+    }
+    #[test]
+    fn dense_query_layout_bounds_memory_and_balances_mode_observers() {
+        assert!(SettledQueries::dense_bounds(&[([0, 64, 0], [0, 64, 0]); 128]).is_none());
+        assert!(SettledQueries::dense_bounds(&[([0, 1, 0], [0, 0, 0]); 128]).is_none());
+        let far = [
+            ([i32::MIN + 8, 0, i32::MIN], [i32::MIN + 8, 0, i32::MIN]),
+            ([i32::MAX - 8, 0, i32::MAX], [i32::MAX - 8, 0, i32::MAX]),
+        ];
+        assert!(SettledQueries::dense_bounds(&far).is_none());
+        assert!(SettledQueries::dense_bounds(&[([0, 0, 0], [65536, 0, 65536])]).is_none());
+        assert!(SettledQueries::dense_bounds(&[
+            ([0, 0, 0], [0, 0, 0]),
+            ([1000, 0, 1000], [1000, 0, 1000])
+        ])
+        .is_some());
+        for (ranges, mode) in [
+            (vec![([-12, -1, -3], [19, 65, 4]); 128], "dense"),
+            (far.into_iter().cycle().take(128).collect(), "sparse"),
+        ] {
+            let events = std::sync::Mutex::new(BTreeMap::new());
+            let task = |_: usize, name: &'static str| {
+                *events.lock().unwrap().entry(name).or_insert(0usize) += 1;
+            };
+            let mut queries = SettledQueries::default();
+            queries.build(&ranges, true, &task);
+            let events = events.into_inner().unwrap();
+            for (family, count) in [("layout", 1), (mode, 8)] {
+                assert_eq!(
+                    events[format!("physics_queries_{family}_begin").as_str()],
+                    count
+                );
+                assert_eq!(
+                    events[format!("physics_queries_{family}_end").as_str()],
+                    count
+                );
+            }
+            assert_eq!(events["physics_queries_begin"], 8);
+            assert_eq!(events["physics_queries_end"], 8);
+        }
+    }
+    #[test]
     fn split_query_words_preserve_signed_coordinates_and_both_planes_on_reuse() {
         let xs = [i32::MIN + 8, -100, -1, 0, 123, i32::MAX - 8];
         let zs = [i32::MIN, -100, -1, 0, 123, i32::MAX];
@@ -7514,6 +7658,172 @@ struct SettledQueryStripe {
     base: FxLookup<(i32, i32), u64>,
     // Other heights, including negative margins, retain the exact 3D key.
     other: FxLookup<[i32; 3], u64>,
+    dense: Option<Box<DenseQueryWords>>,
+}
+#[derive(Clone, Copy)]
+struct DenseQueryPlane {
+    x: i32,
+    z: i32,
+    nx: usize,
+    nz: usize,
+}
+impl DenseQueryPlane {
+    // The caller selects this stripe by X modulo eight.
+    fn index(self, x: i32, z: i32) -> Option<(usize, usize)> {
+        let dx = i64::from(x) - i64::from(self.x);
+        let dz = i64::from(z) - i64::from(self.z);
+        if dx < 0 || dz < 0 {
+            return None;
+        }
+        let (x, z) = ((dx as usize) >> 3, dz as usize);
+        (x < self.nx && z < self.nz)
+            .then(|| ((z >> 4) * self.tile_nx() + (x >> 2), (z & 15) * 4 + (x & 3)))
+    }
+    fn tile_nx(self) -> usize {
+        self.nx.div_ceil(4)
+    }
+    fn point(self, tile: usize, offset: usize) -> (i32, i32) {
+        (
+            (i64::from(self.x) + ((tile % self.tile_nx()) * 4 + offset % 4) as i64 * 8) as i32,
+            (i64::from(self.z) + ((tile / self.tile_nx()) * 16 + offset / 4) as i64) as i32,
+        )
+    }
+}
+#[derive(Default)]
+struct DenseQueryWords {
+    plane: Option<DenseQueryPlane>,
+    // Zero is an empty page; other values are its first word index plus one.
+    // A stripe page covers four owned X columns by sixteen Z rows.
+    tiles: Vec<u32>,
+    words: Vec<u64>,
+    entries: usize,
+}
+impl DenseQueryWords {
+    const PAGE_WORDS: usize = 64;
+    const MAX_WORDS: usize = 1 << 17;
+
+    fn for_each_word(&self, mut visit: impl FnMut((i32, i32), u64)) {
+        if let Some(plane) = self.plane {
+            for (tile, &start) in self.tiles.iter().enumerate() {
+                if start != 0 {
+                    for (offset, &word) in self.words[start as usize - 1..][..Self::PAGE_WORDS]
+                        .iter()
+                        .enumerate()
+                    {
+                        if word != 0 {
+                            visit(plane.point(tile, offset), word);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+impl SettledQueryStripe {
+    fn clear(&mut self) {
+        self.base.clear();
+        self.other.clear();
+        if let Some(dense) = &mut self.dense {
+            dense.plane = None;
+            dense.tiles.clear();
+            dense.words.clear();
+            dense.entries = 0;
+        }
+    }
+    fn base_len(&self) -> usize {
+        self.base.len() + self.dense.as_ref().map_or(0, |d| d.entries)
+    }
+    fn base_word(&self, x: i32, z: i32) -> u64 {
+        if let Some(dense) = &self.dense {
+            if let Some(plane) = dense.plane {
+                return plane.index(x, z).map_or(0, |(tile, offset)| {
+                    let start = dense.tiles[tile];
+                    if start == 0 {
+                        0
+                    } else {
+                        dense.words[start as usize - 1 + offset]
+                    }
+                });
+            }
+        }
+        self.base.get(&(x, z)).copied().unwrap_or(0)
+    }
+    fn include_base_row(&mut self, x: i32, hi_x: i32, z: i32, mask: u64) {
+        if let Some(dense) = &mut self.dense {
+            if let Some(plane) = dense.plane {
+                let (mut tile, mut offset) =
+                    plane.index(x, z).expect("query inside prepared plane");
+                let mut remaining = ((i64::from(hi_x) - i64::from(x)) / 8 + 1) as usize;
+                debug_assert_ne!(mask, 0);
+                while remaining != 0 {
+                    let mut start = dense.tiles[tile];
+                    if start == 0 {
+                        if dense.words.len() == DenseQueryWords::MAX_WORDS {
+                            break;
+                        }
+                        start = dense.words.len() as u32 + 1;
+                        dense
+                            .words
+                            .resize(dense.words.len() + DenseQueryWords::PAGE_WORDS, 0);
+                        dense.tiles[tile] = start;
+                    }
+                    let len = remaining.min(4 - (offset & 3));
+                    let first = start as usize - 1 + offset;
+                    for word in &mut dense.words[first..first + len] {
+                        dense.entries += usize::from(*word == 0);
+                        *word |= mask;
+                    }
+                    remaining -= len;
+                    tile += 1;
+                    offset &= !3;
+                }
+                if remaining == 0 {
+                    return;
+                }
+                // Replay the whole row after spilling; OR preserves the
+                // prefix already written before reaching the page limit.
+                self.spill_dense();
+            }
+        }
+        for x in (x..=hi_x).step_by(8) {
+            *self.base.entry((x, z)).or_default() |= mask;
+        }
+    }
+    fn spill_dense(&mut self) {
+        if let Some(dense) = &mut self.dense {
+            let base = &mut self.base;
+            dense.for_each_word(|point, word| *base.entry(point).or_default() |= word);
+            dense.plane = None;
+            dense.tiles.clear();
+            dense.words.clear();
+            dense.entries = 0;
+        }
+    }
+    fn prepare(&mut self, stripe: i32, bounds: Option<([i32; 2], [i32; 2])>) {
+        // Preserve the old additive build contract too. Production clears
+        // each generation; an appended build converts existing dense words
+        // in deterministic row order before continuing in the sparse table.
+        self.spill_dense();
+        if !self.base.is_empty() {
+            return;
+        }
+        let Some((lo, hi)) = bounds else { return };
+        let x = i64::from(lo[0]) + (i64::from(stripe) - i64::from(lo[0])).rem_euclid(8);
+        if x > i64::from(hi[0]) {
+            return;
+        }
+        let plane = DenseQueryPlane {
+            x: x as i32,
+            z: lo[1],
+            nx: ((i64::from(hi[0]) - x) / 8 + 1) as usize,
+            nz: (i64::from(hi[1]) - i64::from(lo[1]) + 1) as usize,
+        };
+        let dense = self.dense.get_or_insert_with(Default::default);
+        dense
+            .tiles
+            .resize(plane.tile_nx() * plane.nz.div_ceil(16), 0);
+        dense.plane = Some(plane);
+    }
 }
 #[cfg(test)]
 impl SettledQueryStripe {
@@ -7527,25 +7837,27 @@ impl SettledQueryStripe {
         for (&key, &mask) in self.other.sorted_entries() {
             assert!(words.insert(key, mask).is_none());
         }
+        if let Some(dense) = &self.dense {
+            dense.for_each_word(|(x, z), mask| assert!(words.insert([x, 0, z], mask).is_none()));
+        }
         words.into_iter().collect()
     }
 }
 impl SettledQueries {
     fn clear(&mut self) {
         for stripe in &mut self.0 {
-            stripe.base.clear();
-            stripe.other.clear();
+            stripe.clear();
         }
     }
     fn is_empty(&self) -> bool {
         self.0
             .iter()
-            .all(|stripe| stripe.base.is_empty() && stripe.other.is_empty())
+            .all(|stripe| stripe.base_len() == 0 && stripe.other.is_empty())
     }
     fn word_counts(&self) -> [usize; 2] {
         let mut counts = [0; 2];
         for stripe in &self.0 {
-            counts[0] += stripe.base.len();
+            counts[0] += stripe.base_len();
             counts[1] += stripe.other.len();
         }
         counts
@@ -7556,10 +7868,37 @@ impl SettledQueries {
         parallel: bool,
         task: &(impl Fn(usize, &'static str) + Sync),
     ) {
+        let dense_bounds = {
+            let _task = PhysicsTask::new(
+                task,
+                "physics_queries_layout_begin",
+                "physics_queries_layout_end",
+            );
+            if parallel && ranges.len() >= 128 {
+                Self::dense_bounds(ranges)
+            } else {
+                None
+            }
+        };
         // X modulo eight owns the word, so workers never share a table and
         // need no unordered merge. Ranges are captured in fragment order.
         let fill = |(stripe, table): (usize, &mut SettledQueryStripe)| {
             let _task = PhysicsTask::new(task, "physics_queries_begin", "physics_queries_end");
+            table.prepare(stripe as i32, dense_bounds);
+            let active = table.dense.as_ref().is_some_and(|d| d.plane.is_some());
+            let _mode = PhysicsTask::new(
+                task,
+                if active {
+                    "physics_queries_dense_begin"
+                } else {
+                    "physics_queries_sparse_begin"
+                },
+                if active {
+                    "physics_queries_dense_end"
+                } else {
+                    "physics_queries_sparse_end"
+                },
+            );
             for &(lo, hi) in ranges {
                 Self::include(table, stripe as i32, lo, hi);
             }
@@ -7569,6 +7908,36 @@ impl SettledQueries {
         } else {
             self.0.iter_mut().enumerate().for_each(fill);
         }
+    }
+    /// Bounded page directory; word storage is allocated only on first touch.
+    fn dense_bounds(ranges: &[([i32; 3], [i32; 3])]) -> Option<([i32; 2], [i32; 2])> {
+        let (mut lo, mut hi) = ([i32::MAX; 2], [i32::MIN; 2]);
+        let mut present = false;
+        for &(a, b) in ranges {
+            if (0..3).any(|k| a[k] > b[k]) {
+                return None;
+            }
+            if a[1] > 63 || b[1] < 0 {
+                continue;
+            }
+            present = true;
+            for (k, axis) in [0, 2].into_iter().enumerate() {
+                lo[k] = lo[k].min(a[axis]);
+                hi[k] = hi[k].max(b[axis]);
+            }
+        }
+        if !present {
+            return None;
+        }
+        let nx = (i64::from(hi[0]) - i64::from(lo[0]) + 1) as u64;
+        let nz = (i64::from(hi[1]) - i64::from(lo[1]) + 1) as u64;
+        // At most 1 MiB of page-directory entries across all eight stripes,
+        // plus at most 1 MiB of words per stripe. Huge coordinate domains
+        // retain the exact signed-key hash representation immediately.
+        let pages = 8u64
+            .checked_mul(nx.div_ceil(32))?
+            .checked_mul(nz.div_ceil(16))?;
+        (pages <= 1 << 18).then_some((lo, hi))
     }
     fn include(table: &mut SettledQueryStripe, stripe: i32, lo: [i32; 3], hi: [i32; 3]) {
         let x0 = lo[0] + (stripe - lo[0]).rem_euclid(8);
@@ -7591,9 +7960,7 @@ impl SettledQueries {
                 };
                 let mask = (u64::MAX << low) & (u64::MAX >> (63 - high));
                 if word == 0 {
-                    for x in (x0..=hi[0]).step_by(8) {
-                        *table.base.entry((x, z)).or_default() |= mask;
-                    }
+                    table.include_base_row(x0, hi[0], z, mask);
                 } else {
                     for x in (x0..=hi[0]).step_by(8) {
                         *table.other.entry([x, word, z]).or_default() |= mask;
@@ -7604,12 +7971,11 @@ impl SettledQueries {
     }
     fn word(&self, x: i32, z: i32, word: i32) -> u64 {
         let stripe = &self.0[x.rem_euclid(8) as usize];
-        let mask = if word == 0 {
-            stripe.base.get(&(x, z))
+        if word == 0 {
+            stripe.base_word(x, z)
         } else {
-            stripe.other.get(&[x, word, z])
-        };
-        mask.copied().unwrap_or(0)
+            stripe.other.get(&[x, word, z]).copied().unwrap_or(0)
+        }
     }
     #[cfg(test)]
     fn contains(&self, [x, y, z]: [i32; 3]) -> bool {
