@@ -81,7 +81,7 @@ fn hull_queries_preserve_parallel_wake_reservations_moving_hulls_and_restore() {
         assert!(pieces.claim_voxel(&mut world, [88, 10, 88], 1, [88, 10, 88], 0, 1, &t));
         (pieces, world, economy)
     };
-    for workers in [1, 4] {
+    for workers in [1, 4, 8] {
         let (mut a, mut wa, mut ea) = fixture();
         let (mut b, mut wb, mut eb) = fixture();
         let pool = rayon::ThreadPoolBuilder::new()
@@ -178,4 +178,80 @@ fn hull_queries_preserve_parallel_wake_reservations_moving_hulls_and_restore() {
         assert_eq!(snapshot(&a, &wa, &ea), snapshot(&b, &wb, &eb));
         assert!(ea.balanced() && eb.balanced());
     }
+}
+
+#[test]
+fn zero_room_eviction_preserves_settled_contacts_outside_the_original_sweep() {
+    let tuning = crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap();
+    let mut t = tuning.blast;
+    t.max_flying = 1;
+    t.rest_check_ticks = 1;
+    t.push_pct = 0;
+    t.spin_deg_s = 0;
+    let world = voxel::World::new(96, 64, 96, 4096, Box::new(Ground));
+    let hulls = [Hull {
+        pos: [Fx::from_int(48), Fx::from_int(16), Fx::from_int(48)],
+        head: 0,
+        half: [Fx::from_int(12); 2],
+        height: Fx::from_int(12),
+        vel: [Fx::ZERO; 3],
+        step: Fx::ONE,
+        solid: None,
+    }];
+    let run = |workers| {
+        let mats =
+            modding::data::materials_from_ron(include_str!("../../../data/materials.ron")).unwrap();
+        let mut e = Economy::new(modding::Kinds::new(), mats, 2, &tuning);
+        let mut b = Bursts::default();
+        for (id, x, y, resting) in [(1, 48, 18, false), (2, 61, 17, true)] {
+            b.fragments.push(Fragment {
+                id,
+                position: V3::new(Fx::from_int(x), Fx::from_int(y), Fx::from_int(48)),
+                velocity: V3::ZERO,
+                material: 1,
+                paint: None,
+                mm: 100,
+                basis: IDENTITY,
+                mass_g: 1200,
+                count: 1,
+                shape: 1,
+                side: 1,
+                chunk: None,
+                held: e.ledger.create(matter::Kind::Debris, 1200, u64::MAX),
+                resting,
+            });
+        }
+        b.next_id = 3;
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .unwrap()
+            .install(|| {
+                b.step_fragments_reserved(
+                    &world,
+                    &mut e,
+                    &t,
+                    crate::gravity_per_tick(&tuning),
+                    0,
+                    Surroundings {
+                        hulls: &hulls,
+                        yielding: &[],
+                    },
+                    0,
+                    false,
+                    |_| {},
+                    &|_, _| {},
+                );
+            });
+        assert!(e.balanced());
+        assert_eq!(
+            b.fragments.len(),
+            1,
+            "the evicted cube must land on its support and merge"
+        );
+        snapshot(&b, &world, &e)
+    };
+    let expected = run(1);
+    assert_eq!(run(4), expected, "eviction must retain its settled support");
+    assert_eq!(run(8), expected, "eviction must retain its settled support");
 }

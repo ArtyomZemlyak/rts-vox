@@ -102,6 +102,123 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn fast_rest_schedule_matches_division_and_previous_deadline_at_wraparound() {
+        let mut t = tuning().blast;
+        for period in [0, 1, 2, 3, 7, 8, 16, 127, 128, u32::MAX] {
+            t.rest_check_ticks = period;
+            for id in [0, 1, 2, 7, 8, 15, 127, u64::MAX - 1, u64::MAX] {
+                for tick in [0, 1, 2, 6, 7, 8, 127, u64::MAX - 1, u64::MAX] {
+                    let now = id
+                        .wrapping_add(tick)
+                        .is_multiple_of(u64::from(period.max(1)));
+                    assert_eq!(due(id, tick, &t), now);
+                    for waiting in [false, true] {
+                        let previous = waiting
+                            && tick > 0
+                            && id
+                                .wrapping_add(tick - 1)
+                                .is_multiple_of(u64::from(period.max(1)));
+                        assert_eq!(
+                            support_due(id, tick, &t, waiting),
+                            now || previous,
+                            "period={period} id={id} tick={tick} waiting={waiting}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn damage_waiting_keeps_the_missed_deadline_support_in_the_index() {
+        for workers in [1, 4, 8] {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let (mut b, mut e, mut w) = (Bursts::default(), economy(), world());
+                    let mut t = tuning();
+                    t.blast.max_flying = 4;
+                    t.blast.push_pct = 0;
+                    w.queue_edit(Edit::put(48, 15, 48, 2));
+                    w.flush();
+                    // The upper shard rests on a thin plate's lip, with no world below it.
+                    // Its previous deadline is now retried; neither piece is due today.
+                    for (id, x, y, mm, material, shape, side) in [
+                        (3, 487, 1610, 20, 2, 0x000f000f000f000fu64, 4),
+                        (2, 4905, 1625, 10, 3, 1, 1),
+                    ] {
+                        b.fragments.push(Fragment {
+                            id,
+                            position: V3::new(
+                                Fx::from_ratio(x, if id == 3 { 10 } else { 100 }),
+                                Fx::from_ratio(y, 100),
+                                Fx::from_ratio(485, 10),
+                            ),
+                            velocity: V3::ZERO,
+                            material,
+                            paint: None,
+                            mm,
+                            basis: IDENTITY,
+                            mass_g: 1,
+                            count: shape.count_ones(),
+                            shape,
+                            side,
+                            chunk: None,
+                            held: e.ledger.create(matter::Kind::Debris, 0, u64::MAX),
+                            resting: true,
+                        });
+                    }
+                    b.next_id = 4;
+                    let tick = 7;
+                    assert!(due(2, tick - 1, &t.blast));
+                    assert!(b.fragments.iter().all(|f| !due(f.id, tick, &t.blast)));
+                    let old_index = Settled::of(&b.fragments, &[], tick, &t.blast);
+                    assert!(!supported(&b.fragments[1], &w, &[], &old_index, 1));
+                    let before = b.hash();
+                    b.step_fragments_reserved(
+                        &w,
+                        &mut e,
+                        &t.blast,
+                        crate::gravity_per_tick(&t),
+                        tick,
+                        Surroundings::NONE,
+                        0,
+                        true,
+                        |_| {},
+                        &|_, _| {},
+                    );
+                    assert_eq!(
+                        b.wakeups, 0,
+                        "the supported shard woke on the retry deadline"
+                    );
+                    assert_eq!(b.hash(), before);
+                    assert_eq!(b.settled_queries, 1);
+                    // The fix must not hide a real loss of support at the next deadline.
+                    b.fragments.remove(0);
+                    let y = b.fragments[0].position.y;
+                    b.step_fragments_reserved(
+                        &w,
+                        &mut e,
+                        &t.blast,
+                        crate::gravity_per_tick(&t),
+                        14,
+                        Surroundings::NONE,
+                        0,
+                        true,
+                        |_| {},
+                        &|_, _| {},
+                    );
+                    assert_eq!(b.wakeups, 1);
+                    assert!(b.fragments[0].position.y < y);
+                    assert!(e.balanced());
+                    assert!(!support_due(1, 0, &t.blast, true));
+                });
+        }
+    }
+
+    #[test]
     fn sleeping_history_keeps_its_matter_and_does_not_block_new_claims() {
         let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
         let mut t = tuning().blast;
@@ -231,12 +348,14 @@ mod tests {
         let mut bytes = Blob::new();
         b.save(&mut bytes);
         b.wakeups += 100;
+        b.settled_queries = usize::MAX;
         assert_eq!(b.hash(), expected);
         let mut again = Blob::new();
         b.save(&mut again);
         assert_eq!(bytes.v, again.v);
         let restored = Bursts::load(&mut Scan::new(&bytes.v), Some(&w), &t).unwrap();
         assert_eq!(restored.wakeups, 0);
+        assert_eq!(restored.settled_queries, 0);
         assert_eq!(restored.hash(), expected);
         assert_eq!(b.fragment_pools(&t).working, 1);
         assert_eq!(e.wrecks.len(), 2);
@@ -1183,6 +1302,7 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn settled_query_words_match_cells_across_negative_and_word_boundaries() {
         for bottom in [-129, -65, -64, -1, 0, 1, 63, 64, 127] {
@@ -4463,6 +4583,8 @@ pub struct Bursts {
     /// Reused only within a tick; neither cache affects save or ordering.
     settled_scratch: Settled,
     query_scratch: SettledQueries,
+    /// Query ranges prepared by the last fragment phase; diagnostic only.
+    pub settled_queries: usize,
     pub fragments: Vec<Fragment>,
     pub corpses: BTreeMap<u32, Fragment>,
     pub(crate) next_id: u64,
@@ -5636,24 +5758,24 @@ impl Bursts {
         for f in self.fragments.iter_mut().chain(self.corpses.values_mut()) {
             f.keep_on_map([world.nx, world.nz]);
         }
-        // What has already landed is ground for what is still falling
-        // (ADR-308), gathered once for the whole tick.
+        type RestingPile = ([i32; 3], Mat, Option<[u8; 3]>, u16);
+        let mut merged = BTreeSet::new();
+        let mut stale_wrecks = BTreeSet::new();
         let mut settled = std::mem::take(&mut self.settled_scratch);
         let mut queries = std::mem::take(&mut self.query_scratch);
-        Settled::of_into(
+        Settled::for_phase_into(
             &self.fragments,
             hulls,
             tick,
             t,
+            damage_waiting,
             &mut settled,
             &mut queries,
             &mut completed,
             task,
         );
+        self.settled_queries = settled.requests;
         completed("debris_settled");
-        type RestingPile = ([i32; 3], Mat, Option<[u8; 3]>, u16);
-        let mut merged = BTreeSet::new();
-        let mut stale_wrecks = BTreeSet::new();
         // Waking pieces count against the flying budget like new ones; a
         // piece without room waits for its next turn. A claim holds its
         // flying slot until its dig lands and it becomes a piece: a
@@ -5715,7 +5837,7 @@ impl Bursts {
             let unsupported = can_wake
                 && push.is_none()
                 && f.resting
-                && (due(f.id, tick, t) || (damage_waiting && tick > 0 && due(f.id, tick - 1, t)))
+                && support_due(f.id, tick, t, damage_waiting)
                 && !supported(f, world, hulls, &settled, i as u32);
             (push, unsupported)
         };
@@ -6587,8 +6709,25 @@ fn restack(f: &mut Fragment) {
 /// (ADR-291), the pieces spread over the period by id so that no tick
 /// checks them all.
 fn due(id: u64, tick: u64, t: &Blast) -> bool {
-    id.wrapping_add(tick)
-        .is_multiple_of(u64::from(t.rest_check_ticks.max(1)))
+    rest_phase(id, tick, t) == 0
+}
+/// A power-of-two period needs no integer division. Other authored periods
+/// retain the exact remainder. This is scheduling, never a change of cadence.
+fn rest_phase(id: u64, tick: u64, t: &Blast) -> u64 {
+    let period = u64::from(t.rest_check_ticks.max(1));
+    let turn = id.wrapping_add(tick);
+    if period.is_power_of_two() {
+        turn & (period - 1)
+    } else {
+        turn % period
+    }
+}
+/// Preparation and the support consumer share the same deadline. A missed
+/// previous turn is phase one now; when the wrapped sum is zero, the current
+/// turn is already due. Thus even overflow needs only one remainder (ADR-707).
+fn support_due(id: u64, tick: u64, t: &Blast, damage_waiting: bool) -> bool {
+    let phase = rest_phase(id, tick, t);
+    phase == 0 || (damage_waiting && tick > 0 && phase == 1)
 }
 /// All predicates read the frozen phase input. Empty answers have no commit
 /// effects, including no reservation changes; keep only actions and their
@@ -6813,6 +6952,8 @@ pub(crate) struct Settled {
     /// pieces. The cell lists use those indices throughout the tick, even
     /// when pieces wake or merge. Reuses the construction scratch buffer.
     boxes: Vec<([Fx; 3], [Fx; 3])>,
+    /// Number of prepared query ranges, not a second physics state.
+    requests: usize,
 }
 /// A bounded bit mask replaces repeated tree lookups for dense container IDs.
 /// Compaction and destruction keep their original slot order.
@@ -7091,6 +7232,7 @@ impl Settled {
     fn of(fragments: &[Fragment], hulls: &[Hull], tick: u64, t: &Blast) -> Settled {
         Self::around(fragments, hulls, |_, f| !f.resting || due(f.id, tick, t))
     }
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)] // Independent phase and worker observers.
     fn of_into(
         fragments: &[Fragment],
@@ -7102,10 +7244,24 @@ impl Settled {
         completed: &mut impl FnMut(&'static str),
         task: &(impl Fn(usize, &'static str) + Sync),
     ) {
+        Self::for_phase_into(fragments, hulls, tick, t, false, out, want, completed, task);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn for_phase_into(
+        fragments: &[Fragment],
+        hulls: &[Hull],
+        tick: u64,
+        t: &Blast,
+        damage_waiting: bool,
+        out: &mut Settled,
+        want: &mut SettledQueries,
+        completed: &mut impl FnMut(&'static str),
+        task: &(impl Fn(usize, &'static str) + Sync),
+    ) {
         Self::around_bounds_into(
             fragments,
             hulls,
-            |_, f| !f.resting || due(f.id, tick, t),
+            |_, f| !f.resting || support_due(f.id, tick, t, damage_waiting),
             |_, f| f.bounds(),
             SettledReach::Motion,
             out,
@@ -7168,6 +7324,7 @@ impl Settled {
         task: &(impl Fn(usize, &'static str) + Sync),
     ) {
         out.cells.clear();
+        out.requests = 0;
         want.clear();
         completed("settled_clear");
         if !fragments.iter().any(|f| f.resting) {
@@ -7225,6 +7382,7 @@ impl Settled {
                 .map(|(i, f)| reach.cells(f, out.boxes[i]))
                 .collect()
         };
+        out.requests = ranges.len();
         completed("settled_ranges");
         want.build(
             &ranges,
