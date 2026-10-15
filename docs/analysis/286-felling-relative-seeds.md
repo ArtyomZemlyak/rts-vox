@@ -108,9 +108,30 @@ BuildEvidence подтверждает свежую сборку изменён�
 
 ## Полигон
 
-На момент первого push этой итерации квалифицирован headless-движок.
-Пересборка и длинный maximized native-прогон выполняются отдельно;
-новых native FPS/30 Гц здесь пока не заявлено.
+После первого push `b7a0410` пересобран и установлен
+`target/release/blast.exe`. Он совпадает с frozen
+`out/felling-branches-20261015/blast.exe`, SHA256
+**`4D1F6E9F2113F114222E639E5A06817F77F430413EC7704C46D4A3AEB5407D81`**.
+BuildEvidence фиксирует refreshed source и toolchain.
+
+**Native240 завершён**: world-battle, фактический клиент **3840×1949**,
+focused, scale1, AutoNoVsync, maximized requested (`Windowed` в Bevy),
+Vulkan/RTX 5090, physics4/navigation8/Rayon4/Compute4, target165.
+Контекст и камера не менялись; Core/GPU/Timeline observers не включались.
+12 294 строки / 12 293 межкадровых интервала, среднее **19,526 мс**
+(около **51,2 FPS**), p99 **42,245 мс**, max **94,827 мс**.
+
+7165 SIM-шагов, core **16,646 мс/шаг**, темп **0,994877844×**.
+`valid_for_comparison=true`, но **`meets_simulation_rate=false` и
+`acceptance_eligible=false`**: порог 0,995× не достигнут. Стабильные
+30 Гц и пики кадра не закрыты. Это один длинный native-прогон,
+**не native FPS A/B**; сравнивать 51,2 FPS с короткими ранними запусками
+или прежним отдельным native240 как доказательство выигрыша нельзя.
+
+Hash7165 **`cba7ffe47bcf9105`** независимо воспроизведён headless на тех же
+7165 шагах, physics4/navigation8/Rayon4 (`native-endpoint.log`). Raw/context — `native240/`, анализ —
+`world-battle.analysis.json/md`. Прежний ранний выход 284 здесь не
+повторился, но его причина не установлена и исправление не заявляется.
 
 ## Память на загрузке позднего состояния
 
