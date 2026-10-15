@@ -1181,14 +1181,17 @@ mod tests {
         let mask_pointer = scratch.stacked_mask.as_ptr();
         let mask_capacity = scratch.stacked_mask.capacity();
         assert!(mask_capacity > 0);
-        let pooled_lists: usize = scratch
+        let arena_capacity: usize = scratch
             .settled
             .cells
             .stripes
             .iter()
-            .map(|s| s.free_lists.len())
+            .map(|s| s.nodes.capacity())
             .sum();
-        assert!(pooled_lists > 0, "fixture must build stacked support lists");
+        assert!(
+            arena_capacity > 0,
+            "fixture must build stacked support lists"
+        );
         for _ in 0..4 {
             assert_eq!(
                 b.rubble_with_scratch(&w, &[], &[], &mut scratch, &|_, _| {}),
@@ -1205,16 +1208,16 @@ mod tests {
                     .cells
                     .stripes
                     .iter()
-                    .map(|s| s.free_lists.len())
+                    .map(|s| s.nodes.capacity())
                     .sum::<usize>(),
-                pooled_lists
+                arena_capacity
             );
             assert!(scratch
                 .settled
                 .cells
                 .stripes
                 .iter()
-                .all(|s| s.free_lists.iter().all(Vec::is_empty)));
+                .all(|s| s.nodes.is_empty()));
             assert!(scratch.settled.cells.requests.iter().all(Vec::is_empty));
         }
         for x in 47..=49 {
@@ -1915,7 +1918,10 @@ mod tests {
             assert!(!expected.is_empty());
             assert_eq!(index.cells.len(), expected.len());
             for (cell, pieces) in &expected {
-                assert_eq!(index.cells.get(cell), Some(pieces));
+                assert_eq!(
+                    index.cells.get(cell).map(Iterator::collect::<Vec<_>>),
+                    Some(pieces.clone())
+                );
             }
             for (i, &(lo, hi)) in world_boxes.iter().enumerate() {
                 for skip in [i as u32, u32::MAX] {
@@ -4092,7 +4098,10 @@ mod tests {
                 assert_eq!(index.is_empty(), expected.is_empty());
                 assert_eq!(index.ordered(), expected, "workers={workers}");
                 for (cell, list) in &expected {
-                    assert_eq!(index.get(cell), Some(list));
+                    assert_eq!(
+                        index.get(cell).map(Iterator::collect::<Vec<_>>),
+                        Some(list.clone())
+                    );
                 }
             }
             index.clear();
@@ -7568,16 +7577,33 @@ struct SettledCells {
 }
 #[derive(Default)]
 struct SettledCellStripe {
-    cells: FxLookup<[i32; 3], Vec<u32>>,
-    free_lists: Vec<Vec<u32>>,
+    cells: FxLookup<[i32; 3], [usize; 2]>,
+    nodes: Vec<SettledCellNode>,
+}
+struct SettledCellNode {
+    source: u32,
+    next: usize,
+}
+struct SettledCellList<'a> {
+    nodes: &'a [SettledCellNode],
+    next: usize,
+}
+impl Iterator for SettledCellList<'_> {
+    type Item = u32;
+    fn next(&mut self) -> Option<u32> {
+        if self.next == usize::MAX {
+            return None;
+        }
+        let node = &self.nodes[self.next];
+        self.next = node.next;
+        Some(node.source)
+    }
 }
 impl SettledCells {
     fn clear(&mut self) {
         for stripe in &mut self.stripes {
-            for mut list in stripe.cells.drain_values_unordered() {
-                list.clear();
-                stripe.free_lists.push(list);
-            }
+            stripe.cells.clear();
+            stripe.nodes.clear();
         }
         self.len = 0;
     }
@@ -7588,8 +7614,12 @@ impl SettledCells {
     fn len(&self) -> usize {
         self.len
     }
-    fn get(&self, cell: &[i32; 3]) -> Option<&Vec<u32>> {
-        self.stripes[cell[0].rem_euclid(8) as usize].cells.get(cell)
+    fn get(&self, cell: &[i32; 3]) -> Option<SettledCellList<'_>> {
+        let stripe = &self.stripes[cell[0].rem_euclid(8) as usize];
+        stripe.cells.get(cell).map(|head| SettledCellList {
+            nodes: &stripe.nodes,
+            next: head[0],
+        })
     }
     #[cfg(test)]
     fn ordered(&self) -> BTreeMap<[i32; 3], Vec<u32>> {
@@ -7600,7 +7630,16 @@ impl SettledCells {
                     .cells
                     .sorted_entries()
                     .into_iter()
-                    .map(|(&cell, list)| (cell, list.clone()))
+                    .map(|(&cell, head)| {
+                        (
+                            cell,
+                            SettledCellList {
+                                nodes: &stripe.nodes,
+                                next: head[0],
+                            }
+                            .collect(),
+                        )
+                    })
             })
             .collect()
     }
@@ -7638,11 +7677,21 @@ impl SettledCells {
                 for z in lo[2]..=hi[2] {
                     for x in (lo[0]..=hi[0]).step_by(8) {
                         for y in want.column(x, z, lo[1], hi[1]) {
-                            stripe
-                                .cells
-                                .entry([x, y, z])
-                                .or_insert_with(|| stripe.free_lists.pop().unwrap_or_default())
-                                .push(i);
+                            // Each stripe owns its arena. Append in the same
+                            // source order as the former per-cell vectors;
+                            // no hash-order traversal or cross-stripe links.
+                            let index = stripe.nodes.len();
+                            let ends = stripe.cells.entry([x, y, z]).or_insert([usize::MAX; 2]);
+                            if ends[1] == usize::MAX {
+                                ends[0] = index;
+                            } else {
+                                stripe.nodes[ends[1]].next = index;
+                            }
+                            ends[1] = index;
+                            stripe.nodes.push(SettledCellNode {
+                                source: i,
+                                next: usize::MAX,
+                            });
                         }
                     }
                 }
@@ -8337,10 +8386,10 @@ impl Settled {
                         continue;
                     };
                     for i in list {
-                        if *i == skip {
+                        if i == skip {
                             continue;
                         }
-                        let (qlo, qhi) = self.boxes[*i as usize];
+                        let (qlo, qhi) = self.boxes[i as usize];
                         // Support is a top face reached from above, not
                         // an existing overlap. Otherwise two intersecting
                         // pieces can hold each other in mid-air forever.
