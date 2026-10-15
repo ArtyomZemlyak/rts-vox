@@ -201,7 +201,26 @@ SDK, registry или clean checkout.
 Нативный полигон пересобран; установленный `target/release/blast.exe`
 равен frozen `accepted/blast.exe`, SHA256
 `45deb3cb16d55b9be577d61c9492dcbf6c3ee4be5a4df84d062bc1d4ab1d5df4`.
-Результаты запуска в развёрнутом окне будут добавлены после проверки.
+Два native30 завершились при фактическом **3840×1949**, focused,
+scale 1, AutoNoVsync, Bevy Windowed с запросом maximize; камера и контекст
+стабильны. Physics4/navigation8/Rayon4/compute4. Это клиентская область
+развёрнутого окна, без exclusive fullscreen.
+
+CorePhases30: 900 traced steps, валидная полная трасса; family
+`physics_rubble_merge_rows` содержит **22 931 задачи на четырёх физических
+workers**. Диагностика не является FPS-приёмкой. Обычный native30:
+2276 кадров / 2275 интервалов, средний интервал **13,186 мс** (~75,8 FPS),
+p99 **35,551 мс**, максимум **59,109 мс**. 900 SIM-шагов, core
+**9,985 мс/шаг**, ratio **0,999266×**; valid/acceptance-eligible/rate=true.
+Eligible означает пригодность измерения, бюджет 165 FPS не пройден.
+
+Оба native запуска дали `6b248d02309736ad` на тике 900; этот endpoint
+независимо воспроизведён headless physics4/navigation8/Rayon4. Native
+FPS A/B не выполнен. Новый 240-секундный native после ADR-713 не запускался;
+прохождение ранних 900 шагов не закрывает поздний темп. Последний длинный
+результат [288](288-rubble-support-scratch.md) — 7182 при минимуме 7201,
+непройденный. Строгий критерий остаётся
+`steps >= floor(seconds * tick_rate) - 1`, а не порог коэффициента 0,995.
 
 ## Следующие работы
 
