@@ -231,9 +231,9 @@ impl Inspection {
             .count();
         self.bodies = world.bodies.list.len();
         self.stream_range = match world.config.delivery {
-            Delivery::Flame => Some(world.streams.tuning.flame.range),
-            Delivery::MachineGun => Some(world.streams.tuning.machine_gun.range),
-            Delivery::Laser => Some(world.streams.tuning.laser.range),
+            Delivery::Flame | Delivery::MachineGun | Delivery::Laser => {
+                Some(world.gun_attack_range())
+            }
             Delivery::Blast | Delivery::Kinetic => None,
         };
         self.stream_muzzles =

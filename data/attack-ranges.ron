@@ -1,0 +1,17 @@
+// Authoritative stock attack distances. World units = 0.1 m.
+// Other packs reference these names instead of copying balance numbers.
+(
+    flame: 300,
+    tank_blast: 800,
+    kinetic: 900,
+    // Energy and annihilation are direct field projectiles with one reach.
+    energy: 1200,
+    machine_gun: 1000,
+    laser: 1400,
+    spider_laser: 1800,
+    artillery: 1800,
+    canister: 2200,
+    siege: 2800,
+    // Acquisition is a sensor, not permission to fire beyond weapon reach.
+    acquisition: 3000,
+)

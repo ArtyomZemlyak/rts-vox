@@ -20,7 +20,7 @@
             (unit: 3, points: [(495,505),(495,540),(325,540),(325,505)]),
         ],
     )),
-    auto_attack_range: 1200, // 120 m, all placed units are range targets.
+    auto_attack_range: "acquisition", // Sensor reach; weapon reach gates firing.
     target: (392, 24, 336),
     airburst_on_target: true,
     clear_min: (315, 274),

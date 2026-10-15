@@ -48,6 +48,7 @@ pub struct WeaponDef {
     pub blast_energy_j: u32,
     /// Weapon reach in world units. Zero uses the benchmark's global range.
     #[serde(default)]
+    #[serde(deserialize_with = "crate::attack_ranges::deserialize")]
     pub range: i32,
 }
 

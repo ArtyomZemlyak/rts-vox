@@ -1425,25 +1425,15 @@ pub fn overlay(
                 }
             }
         }
-    } else if scene.sim.gun.status.alive && panel.ranges {
-        // Stream rounds have a hard flight limit. Show that same limit in
-        // the solo range; ballistic shells have no single ground radius.
-        let reach = match scene.sim.config.delivery {
-            Delivery::Flame => Some(scene.sim.streams.tuning.flame.range),
-            Delivery::MachineGun => Some(scene.sim.streams.tuning.machine_gun.range),
-            Delivery::Laser => Some(scene.sim.streams.tuning.laser.range),
-            Delivery::Kinetic => None,
-            Delivery::Blast => None,
-        };
-        if let Some(reach) = reach {
-            ground_range(
-                &mut giz,
-                &scene.sim,
-                [scene.sim.gun.at[0], scene.sim.gun.at[2]],
-                reach,
-                Color::srgba(0.48, 0.9, 1.0, 0.38),
-            );
-        }
+    } else if scene.sim.gun.status.alive && scene.sim.gun.status.weapon && panel.ranges {
+        // Unit-target admission uses this same SIM-owned tactical radius.
+        ground_range(
+            &mut giz,
+            &scene.sim,
+            [scene.sim.gun.at[0], scene.sim.gun.at[2]],
+            scene.sim.gun_attack_range(),
+            Color::srgba(0.48, 0.9, 1.0, 0.38),
+        );
     }
     // The charge keeps the idle field subdued; contacts travel along the
     // actual dome surface instead of appearing as a free-floating flash.

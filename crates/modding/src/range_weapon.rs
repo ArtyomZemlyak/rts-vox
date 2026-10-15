@@ -4,6 +4,7 @@ use serde::Deserialize;
 pub struct Stream {
     pub burst_ticks: u32,
     pub interval_ticks: u32,
+    #[serde(deserialize_with = "crate::attack_ranges::deserialize")]
     pub range: i32,
     pub standoff_milli: i32,
     pub spread_milli: i32,

@@ -1037,7 +1037,7 @@ pub(crate) mod tests {
             inspection: Some(Inspection::new(&sim, 4)),
             ..default()
         };
-        let range = sim.streams.tuning.machine_gun.range / 10;
+        let range = sim.gun_attack_range() / 10;
         let barrels = sim.stream_muzzles().len();
         drop(sim);
         let mut panel = Panel::new(true, false);

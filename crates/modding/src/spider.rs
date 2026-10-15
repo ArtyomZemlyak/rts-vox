@@ -99,7 +99,7 @@ mod tests {
         assert!(gait.stride_cm > 0 && gait.duty_pct > 0 && gait.duty_pct < 100);
         assert!(gait.offset_pct.iter().all(|p| (0..100).contains(p)));
         for (from, to) in [
-            ("range: 2800", "range: 99999"),
+            ("range: \"spider_laser\"", "range: 99999"),
             ("interval_ticks: 1", "interval_ticks: 0"),
             ("heat_radius: 4", "heat_radius: 8"),
         ] {

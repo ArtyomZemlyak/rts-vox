@@ -5262,7 +5262,7 @@ impl BlastRange {
     /// All placed range units are targets. Team rules belong to the battle
     /// scenario; this mode never retargets a manual order (ADR-338).
     fn set_auto_attack_inner(&mut self, enabled: bool) {
-        if self.auto_attack && !enabled && !self.manual_route && self.stream_tuning().is_some() {
+        if self.auto_attack && !enabled && !self.manual_route {
             self.gun.motion.stop();
         }
         if self.auto_attack || enabled {
@@ -5295,6 +5295,32 @@ impl BlastRange {
             modding::explosion::Delivery::Blast | modding::explosion::Delivery::Kinetic => None,
         }
     }
+    /// Tactical horizontal reach of the current trial gun. The same resolved
+    /// packs feed battle admission, controllers and presentation.
+    pub fn gun_attack_range(&self) -> i32 {
+        if let Some(stream) = self.stream_tuning() {
+            return stream.range;
+        }
+        let weapon = if self.config.delivery == modding::explosion::Delivery::Kinetic {
+            battle::Weapon::Kinetic
+        } else if self.config.motion == ProjectileMotion::Direct {
+            // Direct field projectiles share tactical reach; heat/fracture
+            // tuning must not act as an implicit weapon-type switch.
+            battle::Weapon::Energy
+        } else if self.gun.kind == RangeUnitKind::ArtilleryTurretT3 {
+            battle::Weapon::Siege
+        } else if self.gun.kind.canister() {
+            battle::Weapon::Canister
+        } else {
+            battle::Weapon::Blast
+        };
+        battle::attack_range(
+            &self.battle.tuning,
+            self.gun.kind,
+            weapon,
+            self.streams.tuning.machine_gun.range,
+        )
+    }
     fn acquire_auto_target(&mut self) {
         if !self.auto_attack {
             return;
@@ -5308,6 +5334,11 @@ impl BlastRange {
             .as_ref()
             .map_or(0, |r| i64::from(r.auto_attack_range));
         let from = self.gun.motion.pos.map(Fx::to_int_trunc);
+        let stationary_reach = self
+            .gun
+            .kind
+            .emplacement()
+            .then(|| i64::from(self.gun_attack_range()));
         // Layout validation caps this scan at eight slots. Integer world
         // coordinates keep squared distance safe on future 10 km layouts.
         let distance = |id: usize| -> Option<i64> {
@@ -5316,7 +5347,10 @@ impl BlastRange {
             let dx = i64::from(p[0]) - i64::from(from[0]);
             let dz = i64::from(p[2]) - i64::from(from[2]);
             let d = dx * dx + dz * dz;
-            (u.status.alive && d <= radius * radius).then_some(d)
+            (u.status.alive
+                && d <= radius * radius
+                && stationary_reach.is_none_or(|reach| d <= reach * reach))
+            .then_some(d)
         };
         if self.attack.is_some_and(|id| distance(id).is_some()) {
             return;
@@ -5329,10 +5363,7 @@ impl BlastRange {
             self.cancel_target_stream();
         }
         self.attack = None;
-        if self.stream_tuning().is_some()
-            && !self.manual_route
-            && self.gun.motion.destination.is_some()
-        {
+        if !self.manual_route && self.gun.motion.destination.is_some() {
             self.gun.motion.stop();
         }
         if self.shell.is_none() && self.fire_tick >= self.tick {
@@ -5346,15 +5377,15 @@ impl BlastRange {
             self.attack = chosen;
         }
     }
-    /// A manually ordered stream weapon closes to a checked firing point.
+    /// A unit-target order closes to the same tactical reach shown by the UI.
     /// Keep the saved route while its destination is still useful; restarting
     /// the bounded planner each tick would strand the vehicle indefinitely.
-    fn keep_stream_target_in_range(&mut self, id: usize) -> bool {
-        let Some(stream) = self.stream_tuning() else {
-            return true;
-        };
-        let reach = stream.range;
-        let standoff = reach * stream.standoff_milli / 1000;
+    fn keep_attack_target_in_range(&mut self, id: usize) -> bool {
+        let reach = self.gun_attack_range();
+        let standoff_milli = self
+            .stream_tuning()
+            .map_or(self.battle.tuning.standoff_milli, |s| s.standoff_milli);
+        let standoff = reach * standoff_milli / 1000;
         let from = self.gun.motion.pos;
         let to = self.units[id].motion.pos;
         let dx = to[0].sub(from[0]);
@@ -5365,6 +5396,9 @@ impl BlastRange {
                 self.gun.motion.stop();
             }
             return true;
+        }
+        if self.gun.kind.emplacement() {
+            return false;
         }
         // An explicit move keeps its destination while the turret tracks the
         // target. Once that route finishes, a stream weapon can pursue again.
@@ -6139,11 +6173,11 @@ impl BlastRange {
                 if !self.units[id].status.alive {
                     self.cancel_target_stream();
                     self.attack = None;
-                    if !self.manual_route && self.stream_tuning().is_some() {
+                    if !self.manual_route {
                         self.gun.motion.stop();
                     }
                 } else {
-                    let in_range = self.keep_stream_target_in_range(id);
+                    let in_range = self.keep_attack_target_in_range(id);
                     if !in_range && self.shell.is_none() && self.fire_tick >= self.tick {
                         self.fire_tick = u32::MAX;
                     }

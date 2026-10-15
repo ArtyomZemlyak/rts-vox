@@ -12,6 +12,7 @@ pub struct Canister {
     pub spread_milli: i32,
     #[serde(default = "default_canister_radius")]
     pub footprint_radius: i32,
+    #[serde(deserialize_with = "crate::attack_ranges::deserialize")]
     pub range: i32,
     pub reload_ticks: u32,
 }
@@ -28,7 +29,7 @@ impl Default for Canister {
             flight_time_milli: 2000,
             spread_milli: 45,
             footprint_radius: 60,
-            range: 1600,
+            range: crate::attack_ranges::stock().canister,
             reload_ticks: 150,
         }
     }
@@ -36,6 +37,7 @@ impl Default for Canister {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Siege {
+    #[serde(deserialize_with = "crate::attack_ranges::deserialize")]
     pub range: i32,
     pub reload_ticks: u32,
     pub flight_time_milli: i32,
@@ -64,15 +66,20 @@ pub struct Tuning {
     #[serde(default)]
     pub turret_t2_reload_ticks: Option<u32>,
     pub tank_reload_ticks: u32,
+    #[serde(deserialize_with = "crate::attack_ranges::deserialize")]
     pub tank_range: i32,
     #[serde(default = "default_artillery_range")]
+    #[serde(deserialize_with = "crate::attack_ranges::deserialize")]
     pub artillery_range: i32,
     #[serde(default)]
     pub canister: Canister,
     #[serde(default)]
     pub siege: Siege,
+    #[serde(deserialize_with = "crate::attack_ranges::deserialize")]
     pub kinetic_range: i32,
+    #[serde(deserialize_with = "crate::attack_ranges::deserialize")]
     pub energy_range: i32,
+    #[serde(deserialize_with = "crate::attack_ranges::deserialize")]
     pub anni_range: i32,
     pub pursuit_ticks: u32,
     pub standoff_milli: i32,
@@ -120,7 +127,7 @@ fn default_wave_work_ceiling() -> usize {
     4096
 }
 fn default_artillery_range() -> i32 {
-    1800
+    crate::attack_ranges::stock().artillery
 }
 impl Tuning {
     pub fn from_ron(s: &str) -> Result<Self, String> {
@@ -179,7 +186,7 @@ mod tests {
     fn siege_defaults_and_authored_limits_are_validated() {
         let text = include_str!("../../../data/range-battle.ron");
         let t = Tuning::from_ron(text).unwrap();
-        assert_eq!(t.siege.range, 2400);
+        assert_eq!(t.siege.range, crate::attack_ranges::stock().siege);
         assert_eq!(t.siege.reload_ticks, 210);
         assert_eq!(t.siege.flight_time_milli, 1800);
         for fields in [
@@ -222,9 +229,9 @@ mod tests {
     #[test]
     fn artillery_range_has_a_legacy_default_and_rejects_invalid_values() {
         let shipped = include_str!("../../../data/range-battle.ron");
-        let old = shipped.replace("artillery_range: 1800,", "");
+        let old = shipped.replace("artillery_range: \"artillery\",", "");
         assert_eq!(Tuning::from_ron(&old).unwrap().artillery_range, 1800);
-        let invalid = shipped.replace("artillery_range: 1800,", "artillery_range: 0,");
+        let invalid = shipped.replace("artillery_range: \"artillery\",", "artillery_range: 0,");
         assert!(Tuning::from_ron(&invalid).is_err());
     }
     #[test]

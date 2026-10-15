@@ -231,6 +231,7 @@ pub struct RangeLayout {
     pub target: [i32; 3],
     /// Automatic acquisition radius in world units; manual fire is unchanged.
     #[serde(default = "default_auto_attack_range")]
+    #[serde(deserialize_with = "crate::attack_ranges::deserialize")]
     pub auto_attack_range: i32,
     /// Target-plane fuse makes the with/without-cover comparison reproducible.
     pub airburst_on_target: bool,
@@ -292,7 +293,7 @@ pub struct RangeCourse {
     pub replan_ticks: u32,
 }
 fn default_auto_attack_range() -> i32 {
-    1200
+    crate::attack_ranges::stock().acquisition
 }
 fn default_turn_alignment() -> i32 {
     97

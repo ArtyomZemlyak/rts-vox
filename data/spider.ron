@@ -20,7 +20,7 @@
         elevation: (speed_deg_s: 90, accel_deg_s2: 360, aim_millidegrees: 1500),
         fire_millidegrees: 60000, elevation_limit_degrees: 75,
     )),
-    laser: (burst_ticks: 240, interval_ticks: 1, range: 2800,
+    laser: (burst_ticks: 240, interval_ticks: 1, range: "spider_laser",
         standoff_milli: 800, spread_milli: 0, work: 600,
         // Siege beam: thick armour must melt even while the contact moves.
         // Heat is energy per hit; cell volume and conduction still apply.

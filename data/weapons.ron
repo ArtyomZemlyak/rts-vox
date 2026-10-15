@@ -25,14 +25,14 @@
         ( id: 2, kind: Laser, speed:  0, damage: 12, reload: 15, blast_radius: 0, blast_damage:  0,
           mass_g: 0, impact_energy_j: 240000 ),
 
-        // Live material combat: a 6 kg projectile at 600 m/s, 80 m reach.
+        // Live material combat: a 6 kg projectile at 600 m/s, reach from attack-ranges.ron.
         // IDs 1/2 retain the reference workload; typed units use 3/4.
         ( id: 3, kind: Bolt, speed: 6000, damage: 30, reload: 60,
           blast_radius: 40, blast_damage: 10, mass_g: 6000,
           blast_energy_j: 6000000,
-          impact_energy_j: 0, range: 800 ),
+          impact_energy_j: 0, range: "kinetic" ),
         ( id: 4, kind: Laser, speed: 0, damage: 12, reload: 30,
           blast_radius: 0, blast_damage: 0, mass_g: 0,
-          impact_energy_j: 240000, range: 650 ),
+          impact_energy_j: 240000, range: "machine_gun" ),
     ],
 )

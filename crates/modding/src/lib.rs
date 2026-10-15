@@ -12,6 +12,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod attack_ranges;
 pub mod battle_ai;
 pub mod data;
 pub mod explosion;

@@ -12,7 +12,10 @@ fn siege_single_shell_digs_soil_and_replays_flight_and_live_wave() {
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
     assert_eq!(r.battle_weapon(0), Some(Weapon::Siege));
-    assert_eq!(r.battle_attack_range(0), Some(2400));
+    assert_eq!(
+        r.battle_attack_range(0),
+        Some(modding::attack_ranges::stock().siege)
+    );
     assert!(!r.battle_order(0, Order::Move, Some([220, 336])));
     assert!(!r.set_battle_weapon(0, Some(Weapon::Blast)));
     assert!(!r.set_battle_weapon(1, Some(Weapon::Siege)));
@@ -82,17 +85,22 @@ fn siege_full_range_survives_high_altitude_snapshot() {
     let mut l = arena_of([RangeUnitKind::ArtilleryTurretT3, RangeUnitKind::Tank])
         .layout
         .unwrap();
-    l.size[0] = 2800;
-    l.clear_max[0] = 2700;
-    l.units[1].at[0] = 2500;
+    let target_x = l.units[0].at[0] + modding::attack_ranges::stock().siege;
+    l.size[0] = ((target_x + 300 + 15) / 16 * 16) as u32;
+    l.clear_max[0] = target_x + 200;
+    l.units[1].at[0] = target_x;
     let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     let mut r = BlastRange::with_layout(c, l).unwrap();
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
-    assert!(r.battle_order(0, Order::Ground([2500, 15, 336]), None));
+    assert!(r.battle_order(0, Order::Ground([target_x, 15, 336]), None));
     let mut replay = None;
     let mut hit = false;
-    for _ in 0..500 {
+    let flight_ticks = modding::attack_ranges::stock().siege
+        * r.battle.tuning.siege.flight_time_milli
+        * crate::TICKS_PER_SECOND
+        / (r.battle.siege_config.shell_speed * 1000);
+    for _ in 0..flight_ticks + 180 {
         step_without_ai(&mut r);
         if r.battle.actors[0].fired > 0 {
             r.battle.actors[0].order = Order::Hold;
@@ -107,7 +115,7 @@ fn siege_full_range_survives_high_altitude_snapshot() {
             .battle
             .impacts
             .iter()
-            .any(|p| p.weapon == Weapon::Siege && (p.at[0] - 2500).abs() < 50);
+            .any(|p| p.weapon == Weapon::Siege && (p.at[0] - target_x).abs() < 50);
         if hit {
             break;
         }
@@ -126,7 +134,10 @@ fn siege_stationary_ai_uses_its_actual_weapon_reach() {
     r.start_battle().unwrap();
     let obs = r.enemy_ai_observation().unwrap();
     assert!(!obs.units[0].mobile && !obs.units[0].can_reposition);
-    assert!(obs.units[0].attack_ranges.iter().all(|&v| v == 2400));
+    assert!(obs.units[0]
+        .attack_ranges
+        .iter()
+        .all(|&v| v == modding::attack_ranges::stock().siege));
     for _ in 0..240 {
         r.step();
         if r.battle.actors[0].fired > 0 {

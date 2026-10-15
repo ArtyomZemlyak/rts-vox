@@ -1,2 +1,2 @@
 // T3 single-shell siege gun. 30 Hz, world units = 0.1 m.
-(range: 2400, reload_ticks: 210, flight_time_milli: 1800)
+(range: "siege", reload_ticks: 210, flight_time_milli: 1800)

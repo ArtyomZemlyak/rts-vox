@@ -243,7 +243,12 @@ pub struct Battle {
     /// (ADR-681). A diagnostic, absent in hashes and snapshots.
     pub wave_held: [usize; 2],
 }
-fn attack_range(tuning: &Tuning, kind: RangeUnitKind, weapon: Weapon, machine_gun: i32) -> i32 {
+pub(super) fn attack_range(
+    tuning: &Tuning,
+    kind: RangeUnitKind,
+    weapon: Weapon,
+    machine_gun: i32,
+) -> i32 {
     if kind == RangeUnitKind::Artillery && weapon == Weapon::Blast {
         return tuning.artillery_range;
     }
@@ -2111,6 +2116,7 @@ impl BlastRange {
                     .filter(|&i| hostile(i))
                     .min_by_key(|&i| (distance(i), i))
             };
+            let target_distance = target.map(distance);
             let target_changed = a.target != target;
             if target_changed {
                 if kind != RangeUnitKind::Spider || a.burst == 0 {
@@ -2212,8 +2218,14 @@ impl BlastRange {
             completed("orders_misc");
             self.units[id].update_pose(a.turret.angle);
             completed("orders_pose");
-            let in_range =
-                dx.mul(dx).add(dz.mul(dz)) <= Fx::from_int(range).mul(Fx::from_int(range));
+            // Acquisition/AI/UI use horizontal actor-centre distance, not
+            // a selected body cell or the projectile's predicted intercept.
+            let tactical_distance = if matches!(a.order, Order::Ground(_)) {
+                dx.mul(dx).add(dz.mul(dz))
+            } else {
+                target_distance.unwrap_or_else(|| dx.mul(dx).add(dz.mul(dz)))
+            };
+            let in_range = tactical_distance <= Fx::from_int(range).mul(Fx::from_int(range));
             // Direct rounds need a clear line. Siege lasers can melt hard
             // cover, but should change position instead of indefinitely
             // burning foliage or firing into terrain that cannot melt.
@@ -3166,3 +3178,7 @@ mod coarse_continuation_tests;
 #[cfg(test)]
 #[path = "range_instant_blast_tests.rs"]
 mod instant_blast_tests;
+
+#[cfg(test)]
+#[path = "range_attack_tests.rs"]
+mod attack_tests;

@@ -1278,6 +1278,8 @@ fn observed_weapon_reach_uses_euclidean_boundaries_and_safe_coordinate_extremes(
     let mut observation = r.enemy_ai_observation().unwrap();
     let mut actor = observation.units[0];
     actor.id = 41;
+    // This 3-4-5 boundary checks the metric independently of stock balance.
+    actor.attack_ranges.fill(1600);
     actor.position = [4400, 4900];
     observation.units[1].position = [5480, 5210];
     assert!(actor.in_weapon_reach(&observation.units[1]));
@@ -1867,6 +1869,10 @@ fn cover_blocks_enemy_machine_gun_and_winner_is_reported() {
         r.world.flush();
     }
     r.start_battle().unwrap();
+    // Isolate cover interception; faster walkers can otherwise flank this wall.
+    for unit in &mut r.units {
+        unit.motion.speed = 0;
+    }
     for _ in 0..150 {
         r.step();
     }
@@ -2835,9 +2841,10 @@ fn energy_weapons_keep_identity_in_flight_and_replay_their_own_wave() {
 }
 
 #[test]
-fn energy_loadouts_have_distinct_ranges_and_preserve_old_snapshot_choices() {
+fn energy_loadouts_share_direct_reach_and_preserve_old_snapshot_choices() {
     let mut r = arena(RangeUnitKind::Tank);
-    for (weapon, range) in [(Weapon::Energy, 1200), (Weapon::Annihilation, 1000)] {
+    for weapon in [Weapon::Energy, Weapon::Annihilation] {
+        let range = modding::attack_ranges::stock().energy;
         assert!(r.set_battle_weapon(0, Some(weapon)));
         assert_eq!(r.battle_attack_range(0), Some(range));
         let restored = BlastRange::restore(r.config, &r.snapshot()).unwrap();
@@ -4427,9 +4434,10 @@ fn canister_reaches_full_attack_range_on_a_high_arc_and_saves_above_world_ceilin
     let mut l = arena_of([RangeUnitKind::ArtilleryTurretT2, RangeUnitKind::Tank])
         .layout
         .unwrap();
-    l.size[0] = 2208;
-    l.units[1].at[0] = 1750;
-    l.clear_max[0] = 2100;
+    let target_x = l.units[0].at[0] + modding::attack_ranges::stock().canister;
+    l.size[0] = ((target_x + 300 + 15) / 16 * 16) as u32;
+    l.units[1].at[0] = target_x;
+    l.clear_max[0] = target_x + 200;
     let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     let mut r = BlastRange::with_layout(c, l).unwrap();
     r.start_battle().unwrap();
@@ -4439,7 +4447,11 @@ fn canister_reaches_full_attack_range_on_a_high_arc_and_saves_above_world_ceilin
     assert!(r.battle_order(0, Order::Attack(1), None));
     let mut contacted = false;
     let mut replay = None;
-    for _ in 0..440 {
+    let flight_ticks = modding::attack_ranges::stock().canister
+        * r.battle.tuning.canister.flight_time_milli
+        * crate::TICKS_PER_SECOND
+        / (r.battle.canister_config.shell_speed * 1000);
+    for _ in 0..flight_ticks + 180 {
         r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
         if r.battle.actors[0].fired > 0 {
@@ -4456,7 +4468,7 @@ fn canister_reaches_full_attack_range_on_a_high_arc_and_saves_above_world_ceilin
         if r.battle
             .impacts
             .iter()
-            .any(|i| i.weapon == Weapon::Canister && i.at[0] > 1600)
+            .any(|i| i.weapon == Weapon::Canister && (i.at[0] - target_x).abs() < 100)
         {
             contacted = true;
             break;
