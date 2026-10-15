@@ -187,4 +187,32 @@ try {
 $parserErrors = $null; $parserTokens = $null
 $null = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'build-range-variant.ps1'), [ref]$parserTokens, [ref]$parserErrors)
 Assert-Profile ($parserErrors.Count -eq 0) "Invalid variant builder syntax: $parserErrors"
-'PASS: validity/timing/context/camera/budget/task/log-filter/compute/build-evidence cases and parser checks.'
+$tuningTestRepo = Join-Path ([IO.Path]::GetTempPath()) ('rts-tuning-evidence-' + [guid]::NewGuid().ToString('N'))
+$tuningTestData = Join-Path $tuningTestRepo 'data'
+$tuningTestOut = Join-Path $tuningTestRepo 'out'
+$tuningTestFile = Join-Path $tuningTestOut 'range-tuning.txt'
+try {
+    New-Item -ItemType Directory -Path $tuningTestData, $tuningTestOut | Out-Null
+    $missing = @(Get-RangeInputHashes -Repo $tuningTestRepo -SavedTuning)
+    Assert-Profile ($missing.Count -eq 1 -and -not $missing[0].Exists -and $null -eq $missing[0].Sha256) 'Missing saved tuning invented a hash'
+    'melt.3 60' | Set-Content -LiteralPath $tuningTestFile
+    $present = @(Get-RangeInputHashes -Repo $tuningTestRepo -SavedTuning)
+    Assert-Profile ($present.Count -eq 1 -and $present[0].Exists -and $present[0].Path -eq 'out/range-tuning.txt') 'Saved tuning evidence missing'
+    Assert-Profile ($present[0].Sha256 -eq (Get-FileHash -LiteralPath $tuningTestFile).Hash) 'Wrong saved tuning fingerprint'
+    Assert-Profile (@(Get-RangeInputHashes -Repo $tuningTestRepo).Count -eq 0) 'Stock mode reads saved-player tuning'
+    'melt.3 61' | Set-Content -LiteralPath $tuningTestFile
+    $changed = @(Get-RangeInputHashes -Repo $tuningTestRepo -SavedTuning)
+    Assert-Profile ($changed[0].Sha256 -ne $present[0].Sha256) 'Saved tuning changes are invisible'
+    Remove-Item -LiteralPath $tuningTestFile
+    $deleted = @(Get-RangeInputHashes -Repo $tuningTestRepo -SavedTuning)
+    Assert-Profile (-not $deleted[0].Exists -and $null -eq $deleted[0].Sha256) 'Saved tuning deletion is invisible'
+} finally {
+    if (Test-Path -LiteralPath $tuningTestFile) { Remove-Item -LiteralPath $tuningTestFile }
+    # Only the three empty directories created above; no recursive removal.
+    foreach ($tuningEmpty in $tuningTestData, $tuningTestOut, $tuningTestRepo) {
+        if (Test-Path -LiteralPath $tuningEmpty) { Remove-Item -LiteralPath $tuningEmpty }
+    }
+}
+$null = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'profile-range.ps1'), [ref]$parserTokens, [ref]$parserErrors)
+Assert-Profile ($parserErrors.Count -eq 0) "Invalid profile runner syntax: $parserErrors"
+'PASS: validity/timing/context/camera/budget/task/log-filter/compute/build-evidence/saved-tuning cases and parser checks.'

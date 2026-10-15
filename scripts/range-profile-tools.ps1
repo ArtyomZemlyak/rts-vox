@@ -47,7 +47,7 @@ function Get-RangeCompetingProcesses {
 }
 
 function Get-RangeInputHashes {
-    param([string]$Repo)
+    param([string]$Repo, [switch]$SavedTuning)
     @(Get-ChildItem -LiteralPath (Join-Path $Repo 'data') -Recurse -File -Filter '*.ron' |
         Sort-Object FullName | ForEach-Object {
             [pscustomobject]@{
@@ -55,6 +55,15 @@ function Get-RangeInputHashes {
                 Sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
             }
         })
+    if ($SavedTuning) {
+        $path = Join-Path $Repo 'out/range-tuning.txt'
+        $exists = Test-Path -LiteralPath $path -PathType Leaf
+        [pscustomobject]@{
+            Path = 'out/range-tuning.txt'
+            Exists = $exists
+            Sha256 = if ($exists) { (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash } else { $null }
+        }
+    }
 }
 
 function Save-RangeManifest {

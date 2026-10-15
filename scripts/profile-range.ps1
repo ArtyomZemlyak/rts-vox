@@ -4,6 +4,8 @@ param(
     [string[]]$Scenarios = @('battle', 'battle-eight', 'energy', 'shell', 'clouds', 'drive', 'flame'),
     [string]$Output = '',
     [switch]$SkipBuild,
+    # Reproduce the ordinary player's persisted knobs; stock remains default.
+    [switch]$SavedTuning,
     [switch]$Gpu,
     [switch]$CheckBudget,
     [ValidateRange(30, 1000)][int]$TargetFps = 120,
@@ -83,7 +85,8 @@ try {
                 GitHead = (& git rev-parse HEAD); SourceAtLaunch = @(& git status --short)
                 SourceProvenance = 'SourceAtLaunch is not proof of the source used to build this binary; BinarySha256 identifies the measured executable.'
                 BinaryPath = $binary; BinarySha256 = $binaryHash; BuildEvidence = $buildEvidence
-                InputHashes = @(Get-RangeInputHashes -Repo $repo)
+                TuningMode = if ($SavedTuning) { 'saved' } else { 'stock' }
+                InputHashes = @(Get-RangeInputHashes -Repo $repo -SavedTuning:$SavedTuning)
                 RayonEnvironment = $env:RAYON_NUM_THREADS; NavigationWorkers = $NavigationWorkers
                 PhysicsWorkers = $PhysicsWorkers
                 ComputeWorkers = $ComputeWorkers
@@ -121,7 +124,19 @@ try {
             if ($scenario -eq 'actions' -and $Seconds -lt 15) { throw 'The actions scenario needs at least 15 seconds.' }
             $log = Join-Path $directory "$scenario.log"
             $err = Join-Path $directory "$scenario.err"
-            $arguments = @('--range', 'data/range-km.ron', '--stock-tuning', '--window', "$WindowWidth,$WindowHeight", '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
+            $arguments = @('--range', 'data/range-km.ron', '--window', "$WindowWidth,$WindowHeight", '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
+            if (-not $SavedTuning) {
+                $arguments += '--stock-tuning'
+            } else {
+                $tuning = $manifest.InputHashes | Where-Object { $_.Path -eq 'out/range-tuning.txt' }
+                if ($tuning.Exists) {
+                    $copy = Join-Path $directory "$scenario.saved-tuning.txt"
+                    if (Test-Path -LiteralPath $copy) { throw "Existing saved tuning evidence retained: $copy" }
+                    Copy-Item -LiteralPath (Join-Path $repo $tuning.Path) -Destination $copy
+                    if ((Get-FileHash -LiteralPath $copy).Hash -ne $tuning.Sha256) { throw 'Saved tuning changed before launch.' }
+                    $manifest.SavedTuningCopy = $copy
+                }
+            }
             if ($Gpu) { $arguments += '--profile-gpu' }
             if ($Maximized) { $arguments += '--maximized' }
             if ($CameraTour) { $arguments += '--profile-camera-tour' }
@@ -161,7 +176,7 @@ try {
                 if (@(Import-Csv -LiteralPath $environmentPath).Count -gt 0) { $reasons.Add('competing_process_during_run') }
             } else { $reasons.Add('environment_observations_missing') }
             if ((Get-FileHash -LiteralPath $binary).Hash -ne $manifest.BinarySha256) { $reasons.Add('binary_changed_during_run') }
-            if ((@(Get-RangeInputHashes -Repo $repo) | ConvertTo-Json -Compress) -ne ($manifest.InputHashes | ConvertTo-Json -Compress)) { $reasons.Add('inputs_changed_during_run') }
+            if ((@(Get-RangeInputHashes -Repo $repo -SavedTuning:$SavedTuning) | ConvertTo-Json -Compress) -ne ($manifest.InputHashes | ConvertTo-Json -Compress)) { $reasons.Add('inputs_changed_during_run') }
             $rows = if (Test-Path -LiteralPath $csv) { @(Import-Csv -LiteralPath $csv) } else { @() }
             $content = if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Raw } else { '' }
             if ($CameraTour -and -not (Test-Path -LiteralPath (Join-Path $directory "$scenario.camera.csv"))) {

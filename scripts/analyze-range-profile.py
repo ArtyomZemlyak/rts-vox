@@ -1591,6 +1591,10 @@ def compare(a, b):
             "CpuThreads", "CorePhases", "EnvironmentSampleIntervalMs", "InputHashes", "RequestedWindow", "RustLog"]
     if bool((a["manifest"] or {}).get("RequestedMaximized")) != bool((b["manifest"] or {}).get("RequestedMaximized")):
         problems.append("different:RequestedMaximized")
+    # Older runners always forced stock tuning. Saved-player runs must never
+    # qualify as the other half of a stock pair, even if the file was absent.
+    if (a["manifest"] or {}).get("TuningMode", "stock") != (b["manifest"] or {}).get("TuningMode", "stock"):
+        problems.append("different:TuningMode")
     if (a.get("gpu") or {}).get("schema") != (b.get("gpu") or {}).get("schema"):
         problems.append("different:gpu_schema")
     if bool((a["manifest"] or {}).get("CameraTour")) != bool((b["manifest"] or {}).get("CameraTour")):
@@ -1636,6 +1640,7 @@ def markdown(report):
              f"FPS acceptance eligible: {report['acceptance_eligible']}; simulation at real time: {report['meets_simulation_rate']}; ratio: {report['realtime_ratio']}.", "",
              f"Frames: {report['frames']}; real steps: {report['measured_steps']}; traced steps: {report['trace_steps']}.",
              f"Frame alignment: {report['frame_alignment']}; duration metric: {report['frame_timing_metric']}. Core ms per actual step: {report['core_ms_per_step']}.", "",
+             f"Tuning mode: {(report['manifest'] or {}).get('TuningMode', 'stock')} (legacy manifests use stock).", "",
              f"Requested compute workers: {int((report['manifest'] or {}).get('ComputeWorkers') or 0)} (0 = default); actual compute workers: {report.get('actual_compute_workers')}. Actual physics/navigation workers: {report['actual_workers']}.", "",
              f"Observed render context: {report['actual_render_context']['initial'] or 'unavailable'}.",
              f"Simulation pacing: {report.get('simulation_pacing', {'status': 'unavailable_legacy'})}.",

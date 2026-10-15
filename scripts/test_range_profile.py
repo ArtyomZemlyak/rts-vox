@@ -498,6 +498,21 @@ class ReportTests(unittest.TestCase):
             out.write('PROFILE compute_workers=8\nPROFILE compute_override=Some(8)\n')
         self.assertIn('different:ComputeWorkers', profile.compare(before, profile.analyze(self.path))['reasons'])
 
+    def test_saved_tuning_never_pairs_with_stock_and_legacy_means_stock(self):
+        self.write()
+        before = profile.analyze(self.path)
+        path = self.path / 'world-battle.manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest['TuningMode'] = 'stock'
+        path.write_text(json.dumps(manifest))
+        self.assertNotIn('different:TuningMode', profile.compare(before, profile.analyze(self.path))['reasons'])
+        manifest['TuningMode'] = 'saved'
+        path.write_text(json.dumps(manifest))
+        saved = profile.analyze(self.path)
+        self.assertIn('Tuning mode: saved', profile.markdown(saved))
+        self.assertIn('different:TuningMode', profile.compare(before, saved)['reasons'])
+        self.assertNotIn('different:TuningMode', profile.compare(saved, profile.analyze(self.path))['reasons'])
+
     def ordinary_stall_frames(self):
         frames = []
         for start, end, gap, tick, steps, core, input_ms in [
