@@ -5547,21 +5547,13 @@ impl BlastRange {
             .iter()
             .map(|u| motion::Obstacle::of(&u.motion, &u.body))
             .collect();
-        // At most this many new terrain cells can be claimed before the
-        // claim ceiling is reached: a cell joining a reserved piece needs
-        // no pool slot (ADR-659), so the pool does not bound the count.
-        // Pre-existing claims are skipped. Therefore every hull needs at
-        // most `left + claims + 1` claimable candidates from its ordered
-        // crush list to reproduce its immediate claims. ADR-688 retains only
-        // this prepared prefix on refusal; bounded capture of the remaining
-        // footprint (including left == 0) is still open in EP-06.
-        let claims = self.matter.debris.claims();
-        let left = (self.matter.tuning.max_claims as usize).saturating_sub(claims);
-        let cut_limit = if left == 0 {
-            0
-        } else {
-            left.saturating_add(claims).saturating_add(1)
-        };
+        // Contact capture and physical admission are separate: even a full
+        // claim queue must retain plants touched before the hull departs.
+        // Keep a bounded prefix, large enough for immediate claims and at
+        // least the configured felling work slice when claim slots are zero.
+        let cut_limit = (self.matter.tuning.max_claims as usize)
+            .saturating_add(1)
+            .max(self.navigation.fell.cells_per_tick as usize);
         // Bound concurrent starts as well as each search's work (ADR-312,
         // ADR-326). Hulls over this ceiling retain their orders and ask
         // again next tick, in the same stable spatial order as motion below.

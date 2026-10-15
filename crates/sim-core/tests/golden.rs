@@ -33,7 +33,9 @@ use sim_core::blast::BlastRange;
 // по себе состояния не меняет. Свежий Windows CLI, analysis/262.
 // ADR-697: квоты быстрых взрывов намеренно меняют межтиковый темп
 // разрушения. Windows 1/4/8 — analysis/268, формат снимка прежний.
-const GOLDEN_600: u64 = 0x5131_bc7b_e4f8_74fa;
+// ADR-718: contact capture survives a full claim queue; blocked felling
+// records no longer prevent bounded cleanup of later stale entries.
+const GOLDEN_600: u64 = 0xf805_b33f_ae20_6b54;
 
 /// Сценарий собирается **из тех же данных, что у игры**: `include_str!`
 /// разворачивается на сборке, ввода-вывода в тесте нет, а литералы

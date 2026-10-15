@@ -485,10 +485,21 @@ impl Matter {
         room: &mut Option<u32>,
     ) {
         let mut left = f.cells_per_tick;
+        let mut after = None;
         while left > 0 {
-            let Some((p, seed)) = self.felling.pop_first() else {
+            let entry = if let Some(previous) = after {
+                self.felling.after(previous).inspect(|pair| {
+                    self.felling.remove(pair);
+                })
+            } else {
+                self.felling.pop_first()
+            };
+            let Some((p, seed)) = entry else {
                 break;
             };
+            if after.is_some() {
+                after = entry;
+            }
             let (p, seed) = (fell_cell(p), fell_cell(seed));
             left -= 1;
             self.admission.felling[1] += 1;
@@ -523,7 +534,11 @@ impl Matter {
                 self.felling.insert((fell_key(p), fell_key(seed)));
                 self.admission.felling[2] -= 1;
                 self.admission.felling[4] += 1;
-                break;
+                // Keep this work, but do not let one full-pool cell prevent
+                // bounded cleanup of stale entries farther along the frontier.
+                // The cursor lives only inside this atomic call, not a tick.
+                after = entry;
+                continue;
             }
             // A self-seed is a hull contact rejected before a successful cut.
             // Charge its fracture once, on admission. The hull has already
@@ -1575,6 +1590,59 @@ mod felling_key_tests {
     use super::{fell_cell, fell_key, Matter};
     use fx::blob::Blob;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn blocked_felling_head_keeps_its_cell_but_does_not_lock_stale_cleanup() {
+        struct Grove;
+        impl voxel::Generator for Grove {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < 4 {
+                    1
+                } else if [x, y, z] == [4, 4, 4] {
+                    5
+                } else {
+                    0
+                }
+            }
+        }
+        let mut world = voxel::World::new(32, 16, 32, 4096, Box::new(Grove));
+        let mut matter = Matter::new(&[]);
+        matter.tuning.max_flying = 0;
+        let mut f = modding::navigation::Navigation::from_ron(include_str!(
+            "../../../data/range-navigation.ron"
+        ))
+        .unwrap()
+        .fell;
+        f.cells_per_tick = 4;
+        for x in 4..=8 {
+            let p = fell_key([x, 4, 4]);
+            matter.felling.insert((p, p));
+        }
+        matter.step_felling(&mut world, &f);
+        assert_eq!(
+            matter.admission.felling[1], 4,
+            "the configured work budget must advance past the refused head"
+        );
+        assert_eq!(
+            matter.admission.felling[2], 3,
+            "stale cells behind the head must retire"
+        );
+        assert_eq!(matter.felling.len(), 2);
+        let head = fell_key([4, 4, 4]);
+        assert!(
+            matter.felling.contains(&(head, head)),
+            "refused work was lost"
+        );
+        assert_eq!(world.material(4, 4, 4), 5);
+        assert_eq!(matter.spent_mj, 0);
+        matter.tuning.max_flying = 128;
+        matter.step_felling(&mut world, &f);
+        assert!(
+            matter.debris.claimed([4, 4, 4]),
+            "the retained head never resumed"
+        );
+        assert!(matter.spent_mj > 0);
+    }
 
     #[test]
     fn shared_felling_phase_matches_separate_claim_batches_at_pool_boundaries() {

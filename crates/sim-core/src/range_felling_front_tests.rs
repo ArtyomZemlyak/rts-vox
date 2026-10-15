@@ -4,6 +4,19 @@ use std::collections::BTreeSet;
 fn equal(front: &Front, reference: &BTreeSet<Pair>) {
     assert_eq!(front.len(), reference.len());
     assert_eq!(front.first(), reference.first().copied());
+    for pivot in reference
+        .iter()
+        .copied()
+        .chain([(0, 0), (u64::MAX, u64::MAX)])
+    {
+        assert_eq!(
+            front.after(pivot),
+            reference
+                .range((std::ops::Bound::Excluded(pivot), std::ops::Bound::Unbounded))
+                .next()
+                .copied()
+        );
+    }
     assert_eq!(
         front.iter().collect::<Vec<_>>(),
         reference.iter().copied().collect::<Vec<_>>()

@@ -221,19 +221,11 @@ fn contended_ai_artillery_crater(kind: RangeUnitKind) {
     });
     r.start_battle().unwrap();
     assert!(r.battle_order(1, Order::Hold, None));
-    assert_eq!(
-        r.matter.fell(
-            &mut r.world,
-            &[[260, 16, 260]],
-            [260, 16, 260],
-            &r.navigation.fell
-        ),
-        1
-    );
     let mut soil = 0;
     let mut wood = 0;
     let mut surface = std::collections::BTreeSet::new();
     let mut replay = None;
+    let mut seeded_felling = false;
     for _ in 0..600 {
         r.step();
         if let Some(copy) = replay.as_mut() {
@@ -255,6 +247,20 @@ fn contended_ai_artillery_crater(kind: RangeUnitKind) {
         }
         assert!(r.matter.debris.fragment_pools(&r.matter.tuning).flying <= 128);
         assert!(r.matter.economy.ledger.balanced());
+        // Start a real competing tree cut while the crater is active. The
+        // former tick-zero cut can now finish before the first shell arrives;
+        // stale frontier entries must not be what makes this fixture contend.
+        if !seeded_felling && soil > 0 && r.battle.has_material_work() {
+            assert_eq!(r.world.material(260, 16, 260), 5);
+            let cut = r.matter.fell(
+                &mut r.world,
+                &[[260, 16, 260]],
+                [260, 16, 260],
+                &r.navigation.fell,
+            );
+            assert!(cut == 1 || r.matter.felling_pending() > 0);
+            seeded_felling = true;
+        }
         if replay.is_none()
             && soil > 0
             && r.matter.felling_pending() > 0
@@ -283,6 +289,7 @@ fn contended_ai_artillery_crater(kind: RangeUnitKind) {
         "no surface crater"
     );
     assert!(replay.is_some());
+    assert!(seeded_felling);
 }
 
 #[test]

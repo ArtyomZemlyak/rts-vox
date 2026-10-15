@@ -219,6 +219,42 @@ impl Front {
         self.contacts -= 1;
         Some(pair)
     }
+    /// Ordered successor without walking the prefix of a million-entry
+    /// frontier. Used only after a capacity refusal within an atomic phase.
+    pub fn after(&self, pair: Pair) -> Option<Pair> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        #[cfg(test)]
+        if let Some(reference) = &self.reference {
+            return reference.range((Excluded(pair), Unbounded)).next().copied();
+        }
+        let contact = self
+            .words
+            .range((pair.0 >> 6)..)
+            .find_map(|(&word, &bits)| {
+                let mut bits = bits;
+                while bits != 0 {
+                    let p = (word << 6) | u64::from(bits.trailing_zeros());
+                    bits &= bits - 1;
+                    if (p, p) > pair {
+                        return Some((p, p));
+                    }
+                }
+                None
+            });
+        let nearby = self.nearby.range(pair.0..).find_map(|(&p, &word)| {
+            (0..8)
+                .map(|i| Self::lane(word, i))
+                .take_while(|&lane| lane != 0)
+                .map(|lane| Self::absolute(p, lane))
+                .find(|&next| next > pair)
+        });
+        let branch = self
+            .branches
+            .range((Excluded(pair), Unbounded))
+            .next()
+            .copied();
+        [contact, nearby, branch].into_iter().flatten().min()
+    }
     pub fn iter(&self) -> impl Iterator<Item = Pair> + '_ {
         let mut words = self.words.iter();
         let (mut key, mut mask) = (0, 0u64);

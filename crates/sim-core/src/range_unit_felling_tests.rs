@@ -131,10 +131,16 @@ fn tick_without_fire(r: &mut BlastRange, moving: bool) {
 
 fn contact_and_crown(kind: RangeUnitKind) {
     for allied in [true, false] {
-        for full_pool in [false, true] {
+        for refusal in ["none", "flying", "claims"] {
+            let full_pool = refusal != "none";
             let mut a = grove(kind, allied);
-            if full_pool {
+            if refusal == "flying" {
                 a.matter.tuning.max_flying = 0;
+            }
+            if refusal == "claims" {
+                // No claim slots: unlike a full flying pool this used to
+                // disable contact capture before Matter could retain it.
+                a.matter.tuning.max_claims = 0;
             }
             if allied {
                 assert!(a.battle_order(0, Order::Move, Some([350, 192])));
@@ -151,7 +157,7 @@ fn contact_and_crown(kind: RangeUnitKind) {
             }
             assert!(
                 !touched.is_empty(),
-                "{kind:?} allied={allied} never contacted a tree, at {:?}",
+                "{kind:?} allied={allied} refusal={refusal} never contacted a tree, at {:?}",
                 a.units[0].at
             );
             assert!(
@@ -181,6 +187,7 @@ fn contact_and_crown(kind: RangeUnitKind) {
             assert!(b.set_physics_workers(1));
             for r in [&mut a, &mut b] {
                 r.matter.tuning.max_flying = 4096;
+                r.matter.tuning.max_claims = 4096;
             }
             for _ in 0..32 {
                 tick_without_fire(&mut a, false);
