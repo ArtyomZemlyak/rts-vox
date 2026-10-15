@@ -3400,6 +3400,8 @@ pub struct BlastRange {
     /// Columns of resting debris and their tops, rebuilt each tick from
     /// the pieces (ADR-292); derived, not saved.
     pub rubble: nav::vehicle::Rubble,
+    /// Allocation-only scratch, rebuilt from current inputs; not saved/hashed.
+    rubble_scratch: crate::burst::RubbleScratch,
     /// Prints of `rubble` by page as the last step built it (ADR-426,
     /// ADR-427). In the snapshot: the pages the rubble changed on read the
     /// same in a restored run as in the continuing one.
@@ -3926,6 +3928,7 @@ impl BlastRange {
             ))
             .expect("heat tuning"),
             rubble: nav::vehicle::Rubble::new(),
+            rubble_scratch: Default::default(),
             rubble_print: nav::vehicle::RubblePrint::default(),
             rubble_fresh: false,
             full_rubble_print: false,
@@ -5389,7 +5392,9 @@ impl BlastRange {
         task: &(impl Fn(usize, &'static str) + Sync),
         detail: &mut impl FnMut(&'static str),
     ) -> nav::vehicle::Changed {
-        let rubble = self.current_rubble_observed(task);
+        let mut scratch = std::mem::take(&mut self.rubble_scratch);
+        let rubble = self.current_rubble_with_scratch(&mut scratch, task);
+        self.rubble_scratch = scratch;
         detail("rubble_print_begin");
         let mut changed = self.world_changed.clone();
         self.rubble_print_work = Default::default();
@@ -5426,6 +5431,13 @@ impl BlastRange {
         &self,
         task: &(impl Fn(usize, &'static str) + Sync),
     ) -> nav::vehicle::Rubble {
+        self.current_rubble_with_scratch(&mut crate::burst::RubbleScratch::default(), task)
+    }
+    fn current_rubble_with_scratch(
+        &self,
+        scratch: &mut crate::burst::RubbleScratch,
+        task: &(impl Fn(usize, &'static str) + Sync),
+    ) -> nav::vehicle::Rubble {
         let live: Vec<UnitVoxels> = self
             .units
             .iter()
@@ -5434,10 +5446,11 @@ impl BlastRange {
             .map(UnitVoxels::of)
             .collect();
         let hulls: Vec<crate::burst::Hull> = live.iter().map(|v| v.hull(None)).collect();
-        self.matter.debris.rubble_observed(
+        self.matter.debris.rubble_with_scratch(
             &self.world,
             &self.navigation.fell.materials,
             &hulls,
+            scratch,
             task,
         )
     }
@@ -9174,6 +9187,31 @@ mod tests {
         assert!(!restored.full_rubble_print);
         assert_eq!(restored.rubble_print_work, Default::default());
         assert_eq!(restored.state_hash(), hash);
+    }
+
+    #[test]
+    fn rubble_scratch_does_not_change_save_hash_or_restore() {
+        let mut range = quiet_cover();
+        drop_heap(&mut range, [GUN[0] + 30, FLOOR, GUN[2]], 100, 32);
+        let saved = range.snapshot();
+        let hash = range.state_hash();
+        let mut scratch = crate::burst::RubbleScratch::default();
+        for _ in 0..3 {
+            assert_eq!(
+                range.current_rubble_with_scratch(&mut scratch, &|_, _| {}),
+                range.current_rubble()
+            );
+        }
+        range.rubble_scratch = scratch;
+        assert_eq!(range.snapshot(), saved);
+        assert_eq!(range.state_hash(), hash);
+        let mut restored = BlastRange::restore(range.config, &saved).unwrap();
+        for _ in 0..3 {
+            range.step();
+            restored.step();
+            assert_eq!(range.snapshot(), restored.snapshot());
+            assert_eq!(range.rubble, restored.rubble);
+        }
     }
 
     #[test]

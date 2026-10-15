@@ -963,6 +963,7 @@ mod tests {
     #[test]
     fn rubble_reused_boxes_match_reference_after_support_and_hull_changes() {
         let (mut b, mut w) = (Bursts::default(), world());
+        let mut scratch = RubbleScratch::default();
         for i in 0..1537u32 {
             let side = (i % 4 + 1) as u8;
             let full = u64::MAX >> (64 - u32::from(side).pow(3));
@@ -1034,6 +1035,22 @@ mod tests {
                             "pass={pass} workers={}",
                             pool.current_num_threads()
                         );
+                        assert_eq!(
+                            pool.install(|| b.rubble_with_scratch(
+                                &w,
+                                yielding,
+                                hulls,
+                                &mut scratch,
+                                &|_, _| {}
+                            )),
+                            expected,
+                            "warm pass={pass} workers={}",
+                            pool.current_num_threads()
+                        );
+                        assert!(scratch.bounds.is_empty());
+                        assert!(scratch.settled.cells.is_empty());
+                        assert!(scratch.settled.boxes.is_empty());
+                        assert!(scratch.queries.is_empty());
                     }
                 }
             }
@@ -1054,6 +1071,101 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn rubble_scratch_keeps_capacity_without_retaining_old_contacts() {
+        let (mut b, mut w) = (Bursts::default(), world());
+        let mut scratch = RubbleScratch::default();
+        for i in 0..2 {
+            b.fragments.push(Fragment {
+                id: i + 1,
+                position: V3::new(
+                    Fx::from_ratio(97, 2),
+                    Fx::from_ratio(25 + i as i32 * 2, 2),
+                    Fx::from_ratio(97, 2),
+                ),
+                velocity: V3::ZERO,
+                material: 1,
+                paint: None,
+                mm: 100,
+                basis: IDENTITY,
+                mass_g: 1,
+                count: 1,
+                shape: 1,
+                side: 1,
+                chunk: None,
+                held: i as u32,
+                resting: true,
+            });
+        }
+        let expected = b.reference_rubble(&w, &[], &[]);
+        assert!(!expected.is_empty());
+        assert_eq!(
+            b.rubble_with_scratch(&w, &[], &[], &mut scratch, &|_, _| {}),
+            expected
+        );
+        let bounds_pointer = scratch.bounds.as_ptr();
+        let bounds_capacity = scratch.bounds.capacity();
+        let pooled_lists: usize = scratch
+            .settled
+            .cells
+            .stripes
+            .iter()
+            .map(|s| s.free_lists.len())
+            .sum();
+        assert!(pooled_lists > 0, "fixture must build stacked support lists");
+        for _ in 0..4 {
+            assert_eq!(
+                b.rubble_with_scratch(&w, &[], &[], &mut scratch, &|_, _| {}),
+                expected
+            );
+            assert_eq!(scratch.bounds.as_ptr(), bounds_pointer);
+            assert_eq!(scratch.bounds.capacity(), bounds_capacity);
+            assert_eq!(
+                scratch
+                    .settled
+                    .cells
+                    .stripes
+                    .iter()
+                    .map(|s| s.free_lists.len())
+                    .sum::<usize>(),
+                pooled_lists
+            );
+            assert!(scratch
+                .settled
+                .cells
+                .stripes
+                .iter()
+                .all(|s| s.free_lists.iter().all(Vec::is_empty)));
+            assert!(scratch.settled.cells.requests.iter().all(Vec::is_empty));
+        }
+        for x in 47..=49 {
+            for z in 47..=49 {
+                w.queue_edit(Edit::dig(x, 11, z));
+            }
+        }
+        w.flush();
+        for f in &mut b.fragments {
+            f.position.y = f.position.y.add(Fx::ONE);
+        }
+        b.fragments.reverse();
+        assert_eq!(
+            b.rubble_with_scratch(&w, &[], &[], &mut scratch, &|_, _| {}),
+            b.reference_rubble(&w, &[], &[])
+        );
+        assert!(b
+            .rubble_with_scratch(&w, &[1], &[], &mut scratch, &|_, _| {})
+            .is_empty());
+        let saved = std::mem::take(&mut b.fragments);
+        assert!(b
+            .rubble_with_scratch(&w, &[], &[], &mut scratch, &|_, _| {})
+            .is_empty());
+        assert_eq!(scratch.bounds.capacity(), bounds_capacity);
+        b.fragments = saved;
+        assert_eq!(
+            b.rubble_with_scratch(&w, &[], &[], &mut scratch, &|_, _| {}),
+            b.reference_rubble(&w, &[], &[])
+        );
     }
     #[test]
     fn hull_support_rejects_below_first_roof_without_voxel_queries() {
@@ -6172,6 +6284,18 @@ impl Bursts {
         hulls: &[Hull],
         task: &(impl Fn(usize, &'static str) + Sync),
     ) -> nav::vehicle::Rubble {
+        self.rubble_with_scratch(world, yielding, hulls, &mut RubbleScratch::default(), task)
+    }
+    /// Buffers are reused, never the support result. Every call reads the
+    /// current immutable world, hulls and fragment slice in full.
+    pub(crate) fn rubble_with_scratch(
+        &self,
+        world: &voxel::World,
+        yielding: &[Mat],
+        hulls: &[Hull],
+        scratch: &mut RubbleScratch,
+        task: &(impl Fn(usize, &'static str) + Sync),
+    ) -> nav::vehicle::Rubble {
         // Floor is what something holds: the world, or a resting piece
         // under it — a pile on a rock piece is floor at the pile's top.
         // Only the world was asked, and a stacked piece was missing from
@@ -6180,14 +6304,20 @@ impl Bursts {
         // hull carries is not asked about the pieces (ADR-469).
         // Reuse local boxes only within this immutable query: support edits,
         // hull movement and fragment changes are visible on the next call.
-        let mut bounds = {
+        let RubbleScratch {
+            bounds,
+            settled,
+            queries,
+        } = scratch;
+        {
             let _task = PhysicsTask::new(
                 task,
                 "physics_rubble_prepare_begin",
                 "physics_rubble_prepare_end",
             );
-            vec![None; self.fragments.len()]
-        };
+            bounds.clear();
+            bounds.resize(self.fragments.len(), None);
+        }
         let mut floor = Vec::new();
         let mut stacked = Vec::new();
         // Each batch owns its boxes and candidate lists. World/hulls/fragments
@@ -6241,25 +6371,28 @@ impl Bursts {
                     stacked.extend(on_pieces);
                 }
             } else {
-                (floor, stacked) = classify(0, &mut bounds);
+                (floor, stacked) = classify(0, bounds);
             }
         }
         if !stacked.is_empty() {
-            let settled = {
+            {
                 let _task = PhysicsTask::new(
                     task,
                     "physics_rubble_support_build_begin",
                     "physics_rubble_support_build_end",
                 );
-                Settled::around_bounds(
+                Settled::around_bounds_into(
                     &self.fragments,
                     hulls,
                     |i, _| stacked.binary_search(&i).is_ok(),
                     |i, f| bounds[i].unwrap_or_else(|| f.bounds()),
                     SettledReach::Support,
+                    settled,
+                    queries,
+                    &mut |_| {},
                     task,
-                )
-            };
+                );
+            }
             // These pieces already failed the world support test above.
             // No world or hull changes occur while this query is running.
             {
@@ -6281,7 +6414,15 @@ impl Bursts {
                 "physics_rubble_support_drop_begin",
                 "physics_rubble_support_drop_end",
             );
-            drop(settled);
+            // Release logical entries, keeping their empty buffers for the
+            // next full rebuild. No support information survives this call.
+            settled.cells.clear();
+            for requests in &mut settled.cells.requests {
+                requests.clear();
+            }
+            settled.boxes.clear();
+            settled.requests = 0;
+            queries.clear();
         }
         // A hull covers no column outside the box around its footprint:
         // a piece far from every hull asks none of them (ADR-465).
@@ -6356,6 +6497,7 @@ impl Bursts {
             );
             merge_columns(&mut columns);
         }
+        bounds.clear();
         nav::vehicle::Rubble::from_sorted(columns)
     }
     /// Remove the resting pieces whose matter a digger took whole
@@ -7116,6 +7258,12 @@ fn retain_live<T>(
 }
 /// Side of a cell of the settled index, world units.
 const SETTLED_CELL: i32 = 4;
+#[derive(Default)]
+pub(crate) struct RubbleScratch {
+    bounds: Vec<Option<([Fx; 3], [Fx; 3])>>,
+    settled: Settled,
+    queries: SettledQueries,
+}
 type SettledCellRequest = (u32, [i32; 3], [i32; 3]);
 /// X modulo eight owns each contact list. Each worker appends indices in
 /// fragment order to its own tables; no merge or shared insertion is needed.
@@ -7493,6 +7641,7 @@ impl Settled {
     }
     /// A caller that already measured pieces can supply the same local
     /// boxes. They must describe this exact immutable fragment slice.
+    #[cfg(test)]
     fn around_bounds(
         fragments: &[Fragment],
         hulls: &[Hull],

@@ -403,6 +403,7 @@ fn main() {
     println!("settled_query_layout=xz_zero_word_with_3d_fallback");
     println!("felling_front_layout=relative_inline_8_with_full_pair_overflow");
     println!("settled_membership=vertical_word_iteration");
+    println!("rubble_support_storage=reused_empty_buffers");
     if verify_frontier {
         println!("verify_collapse_frontier=true diagnostic_only=true");
     }
