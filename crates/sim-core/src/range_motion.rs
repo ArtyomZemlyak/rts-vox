@@ -5435,11 +5435,23 @@ mod tests {
                     );
                     let mut low = Fx::from_int(16);
                     let mut old = m.pos[1];
+                    let mut max_rise = Fx::ZERO;
+                    // The original 0.1 m/tick envelope was measured at
+                    // Strider speed 28. Preserve it for tanks and scale it
+                    // with the intentional walking-speed change (ADR-725).
+                    // This still rejects snapping to the 1.2 m crater rim.
+                    let height_step_limit = if kind == RangeUnitKind::Strider {
+                        Fx::ONE.max(Fx::from_ratio(m.speed, 28))
+                    } else {
+                        Fx::ONE
+                    };
                     for tick in 0..750 {
                         step(&mut m, &w, &body, &[], tick);
+                        let rise = m.pos[1].sub(old).abs();
+                        max_rise = max_rise.max(rise);
                         assert!(
-                            m.pos[1].sub(old).abs() < Fx::ONE,
-                            "height jump {depth} {kind:?}"
+                            rise < height_step_limit,
+                            "height jump depth={depth} {kind:?} reverse={reverse} tick={tick} rise={rise:?} limit={height_step_limit:?}"
                         );
                         old = m.pos[1];
                         low = low.min(old);
@@ -5447,6 +5459,7 @@ mod tests {
                             break;
                         }
                     }
+                    println!("crater depth={depth} {kind:?} reverse={reverse} max_height_step={max_rise:?} limit={height_step_limit:?}");
                     assert!(
                         m.destination.is_none(),
                         "stuck {kind:?} depth {depth} at {:?}",

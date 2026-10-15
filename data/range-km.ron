@@ -31,7 +31,7 @@
     ],
     course: Some((
         min: (200, 400), max: (590, 625),
-        tank_speed: 40, walker_speed: 28, step_height: 5, walker_step_height: 8,
+        tank_speed: 40, walker_speed: 56, step_height: 5, walker_step_height: 8,
         walker_terrain_tilt_pct: 70,
         tank_terrain_tilt_pct: 88,
         tank_terrain_approach_pct: 70,

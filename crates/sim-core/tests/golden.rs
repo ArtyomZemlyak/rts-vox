@@ -44,7 +44,8 @@ use sim_core::blast::BlastRange;
 // the authored map; Windows headless 1/4/8 agree (analysis/298).
 // ADR-724: snapshot-based following changes accepted motion; Windows
 // headless 1/4/8 agree (analysis/299). Wire format is unchanged.
-const GOLDEN_600: u64 = 0x71db_75e1_adce_cd7d;
+// ADR-725: doubled Strider speed; Windows physics 1/4/8 agree (analysis/300).
+const GOLDEN_600: u64 = 0x5034_c6fc_5b40_4e51;
 
 /// Сценарий собирается **из тех же данных, что у игры**: `include_str!`
 /// разворачивается на сборке, ввода-вывода в тесте нет, а литералы

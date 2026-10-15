@@ -116,17 +116,19 @@ fn walker_patrol_climbs_the_authored_steep_lane() {
     let mut sim = BlastRange::with_layout(config, r).unwrap();
     sim.patrols_running = true;
     let mut high = sim.units[1].motion.pos[1];
+    let mut farthest = sim.units[1].motion.pos[0];
     for _ in 0..650 {
         sim.step();
         high = high.max(sim.units[1].motion.pos[1]);
+        farthest = farthest.max(sim.units[1].motion.pos[0]);
     }
     assert!(
         high > fx::Fx::from_int(60),
         "walker never climbed: {high:?}"
     );
     assert!(
-        sim.units[1].motion.pos[0] > fx::Fx::from_int(500),
-        "walker did not cross the ramp: {:?}",
+        farthest > fx::Fx::from_int(500),
+        "walker did not cross the ramp: farthest={farthest:?}, final={:?}",
         sim.units[1].motion.pos
     );
     assert!(
