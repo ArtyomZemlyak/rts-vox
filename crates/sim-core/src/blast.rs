@@ -1899,6 +1899,20 @@ pub struct Explosion {
     /// contact first needs them (ADR-681): a function of the frozen poses
     /// and the body sizes, kept while the sizes hold. Never saved.
     body_maps: Vec<Option<wave_cells::BodyMap>>,
+    #[cfg(test)]
+    read_work: ContactReadWork,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct ContactReadWork {
+    batches: usize,
+    prepared_cells: usize,
+    prepared_solids: usize,
+    retained_cells: usize,
+    retained_solids: usize,
+    peak_batch: usize,
+    air_cells: usize,
 }
 
 impl Explosion {
@@ -1993,6 +2007,8 @@ impl Explosion {
             solid_next: 0,
             solid_mats: Vec::new(),
             body_maps: Vec::new(),
+            #[cfg(test)]
+            read_work: ContactReadWork::default(),
         }
     }
 
@@ -2118,7 +2134,23 @@ impl Explosion {
         spent: Option<(&matter::Matter, &ExplosionConfig, u64)>,
         observe: &impl Fn(&'static str),
     ) {
+        self.read_contacts_inner::<1>(w, budget, units, spent, observe);
+    }
+    // Policy 0 is the previous implementation, instantiated only by tests.
+    // Policy 1 bounds physical read-ahead; policy 2 measures an adaptive variant.
+    fn read_contacts_inner<const POLICY: u8>(
+        &mut self,
+        w: &World,
+        budget: usize,
+        units: &[RangeUnit],
+        spent: Option<(&matter::Matter, &ExplosionConfig, u64)>,
+        observe: &impl Fn(&'static str),
+    ) {
         self.drop_contacts();
+        #[cfg(test)]
+        {
+            self.read_work = ContactReadWork::default();
+        }
         // A wave with no share of the tick's contacts visits nothing.
         if budget == 0 || self.pending.is_empty() {
             return;
@@ -2156,21 +2188,104 @@ impl Explosion {
         let mut left_mj = spent.map(|(_, _, energy)| self.ground_share(energy));
         let mut prices = Prices::default();
         let (origin, edge) = (self.origin, self.cell);
+        let scale = (edge as usize).pow(3).max(8);
+        // Inline masks (up to 4^3 voxels) retain the previous packing. Large
+        // cells price material preparation by physical volume, not grid cells.
+        let coarse = scale > u64::BITS as usize;
+        let chunk = if POLICY == 0 || (POLICY == 1 && !coarse) {
+            READ_CHUNK
+        } else {
+            (READ_CHUNK * 8).div_ceil(scale).clamp(1, READ_CHUNK)
+        };
+        let batch_limit = if POLICY == 1 && coarse {
+            (READ_BATCH * 8 / scale).clamp(1, READ_BATCH)
+        } else {
+            READ_BATCH
+        };
+        let mut estimated = if POLICY == 0 || (POLICY == 1 && !coarse) {
+            8
+        } else {
+            scale
+        };
+        // If every registered solid material is unaffordable at the read's
+        // conservative energy estimate, sufficiently strong contacts cost only
+        // their visit. Larger batches then contain no discarded material work.
+        let spent_bounds = if POLICY == 1 && coarse {
+            spent
+                .filter(|(_, c, _)| c.material_energy_j > 0)
+                .map(|(m, c, _)| {
+                    let mut price = u64::MAX;
+                    let mut work = 0;
+                    for mat in m.economy.mats.definitions().filter(|mat| mat.id != 0) {
+                        price = price.min(m.ground_price(mat.id));
+                        work = work.max(material_work(mat.id, c));
+                    }
+                    (price, work)
+                })
+        } else {
+            None
+        };
         // The same pace as the visits: a cell and each voxel of matter in
         // it, unless the cell is spent.
         let mut left = budget;
         let mut next = 0;
         'read: while left > 0 && next < visits {
+            if POLICY == 1 && coarse {
+                // Proven air costs only its ordered visit. Consume such runs
+                // without dispatching many tiny material jobs on coarse grids.
+                while left > 0 && next < visits {
+                    let hit = order[next];
+                    let p = std::array::from_fn(|a| origin[a] + hit.cell[a] * edge);
+                    if !cell_is_air(w, p, edge) {
+                        break;
+                    }
+                    self.solid.push((
+                        hit.cell,
+                        contact_mask::Mask::default(),
+                        self.solid_mats.len() as u32,
+                    ));
+                    next += 1;
+                    left -= 1;
+                    #[cfg(test)]
+                    {
+                        self.read_work.prepared_cells += 1;
+                        self.read_work.air_cells += 1;
+                    }
+                }
+                if left == 0 || next == visits {
+                    break;
+                }
+            }
             // Every cell costs at least its visit: no batch reaches past
             // what is left to bill, and a batch read past the last billed
             // cell is not kept (review 252: only the billable prefix).
-            let batch = (visits - next)
+            let packed = (visits - next)
                 .min(left)
                 .min((left / 8).clamp(READ_CHUNK, READ_BATCH));
+            let spent_run = if let (Some((price, work)), Some(energy)) = (spent_bounds, left_mj) {
+                if energy < price {
+                    order[next..next + packed]
+                        .iter()
+                        .take_while(|hit| hit.pressure >= work)
+                        .count()
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            let batch = if spent_run > 0 {
+                spent_run
+            } else {
+                (visits - next)
+                    .min(left)
+                    .min((left / estimated).clamp(chunk, batch_limit))
+            };
+            let task_chunk = if spent_run > 0 { READ_CHUNK } else { chunk };
             let hits = &order[next..next + batch];
             next += batch;
             let parts: Vec<(Vec<contact_mask::Mask>, Vec<u16>)> = hits
-                .par_chunks(READ_CHUNK)
+                .par_chunks(task_chunk)
                 .map(|chunk| {
                     let mut masks = Vec::with_capacity(chunk.len());
                     let mut mats = Vec::new();
@@ -2182,6 +2297,14 @@ impl Explosion {
                     (masks, mats)
                 })
                 .collect();
+            #[cfg(test)]
+            {
+                self.read_work.batches += 1;
+                self.read_work.prepared_cells += hits.len();
+                self.read_work.prepared_solids += parts.iter().map(|(_, m)| m.len()).sum::<usize>();
+                self.read_work.peak_batch = self.read_work.peak_batch.max(hits.len());
+            }
+            let before = left;
             let mut k = 0;
             for (masks, mats) in parts {
                 let mut start = self.solid_mats.len();
@@ -2218,6 +2341,14 @@ impl Explosion {
                     left -= left.min(1 + worked);
                 }
             }
+            if POLICY == 2 {
+                estimated = (before - left).div_ceil(k).max(8);
+            }
+        }
+        #[cfg(test)]
+        {
+            self.read_work.retained_cells = self.solid.len();
+            self.read_work.retained_solids = self.solid_mats.len();
         }
         observe("physics_wave_read_ground_end");
         if !self.point_contacts {
@@ -7115,6 +7246,8 @@ impl Explosion {
             solid_next: 0,
             solid_mats: Vec::new(),
             body_maps: Vec::new(),
+            #[cfg(test)]
+            read_work: ContactReadWork::default(),
         })
     }
 }

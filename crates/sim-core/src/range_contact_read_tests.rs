@@ -145,14 +145,210 @@ fn read_ahead_matches_scalar_live_material_and_preserves_wrapped_contacts() {
                     left = left.saturating_sub(1 + mask.count_ones() as usize);
                     expected.push((hit.cell, mask, start));
                 }
-                e.read_contacts(&w, budget);
-                assert_eq!(
-                    e.solid, expected,
-                    "edge={edge} budget={budget} changed={changed}"
-                );
-                assert_eq!(e.solid_mats, mats);
-                assert_eq!(e.solid_next, 0);
-                assert_eq!(saved(&e), original, "read-ahead changed saved work");
+                for policy in 0..=2 {
+                    match policy {
+                        0 => e.read_contacts_inner::<0>(&w, budget, &[], None, &|_| {}),
+                        1 => e.read_contacts(&w, budget),
+                        _ => e.read_contacts_inner::<2>(&w, budget, &[], None, &|_| {}),
+                    }
+                    assert_eq!(
+                        e.solid, expected,
+                        "edge={edge} budget={budget} changed={changed} policy={policy}"
+                    );
+                    assert_eq!(e.solid_mats, mats);
+                    assert_eq!(e.solid_next, 0);
+                    assert_eq!(saved(&e), original, "read-ahead changed saved work");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn coarse_read_batches_preserve_energy_limited_prefixes() {
+    let matter = matter::Matter::new(&[]);
+    let mut c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    for edge in [2, 9] {
+        let (w, mut e) = fixture(edge, 128);
+        for enabled in [false, true] {
+            c.material_energy_j = u32::from(enabled);
+            for energy in [0, 1000, 1_000_000_000_000] {
+                // Weak contacts must not use a price-only proof: they can
+                // still owe deformation work when their fracture is unpaid.
+                for pressure in [1, 100_000] {
+                    for hit in &mut e.pending {
+                        hit.pressure = pressure;
+                    }
+                    for budget in [0, 1, 65, 129, 65536] {
+                        let spent = Some((&matter, &c, energy));
+                        e.read_contacts_inner::<0>(&w, budget, &[], spent, &|_| {});
+                        let solid = e.solid.clone();
+                        let mats = e.solid_mats.clone();
+                        let state = saved(&e);
+                        for policy in [1, 2] {
+                            if policy == 1 {
+                                e.read_contacts_with(&w, budget, &[], spent);
+                            } else {
+                                e.read_contacts_inner::<2>(&w, budget, &[], spent, &|_| {});
+                            }
+                            assert_eq!(e.solid, solid, "edge={edge} enabled={enabled} energy={energy} budget={budget} policy={policy}");
+                            assert_eq!(e.solid_mats, mats);
+                            assert_eq!(saved(&e), state);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn proven_air_read_keeps_the_same_body_contacts_and_ordered_visits() {
+    struct Air;
+    impl Generator for Air {
+        fn material(&self, _: u32, _: u32, _: u32) -> u16 {
+            0
+        }
+    }
+    let world = World::new(128, 128, 128, 100, Box::new(Air));
+    let mut c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    c.energy = 1;
+    c.cell_units = 9;
+    c.half_cells = 8;
+    let units = [RangeUnit::of_kind(RangeUnitKind::Tank, [42, 16, 42])];
+    let mut e = Explosion::begin([64; 3], &c, &units);
+    let n = e.wave.size();
+    e.pending.extend((0..n.pow(3)).map(|i| phys::blast::Hit {
+        cell: [(i % n) as i32, (i / n % n) as i32, (i / (n * n)) as i32],
+        pressure: 100_000,
+        broken: true,
+    }));
+    for budget in [0, 1, 64, 129, 65536] {
+        e.body_maps.clear();
+        e.read_contacts_inner::<0>(&world, budget, &units, None, &|_| {});
+        let solid = e.solid.clone();
+        let saved_work = saved(&e);
+        let contacts = |e: &Explosion| {
+            e.solid
+                .iter()
+                .flat_map(|(cell, _, _)| {
+                    let index =
+                        ((cell[2] as usize * n + cell[1] as usize) * n + cell[0] as usize) as u32;
+                    e.body_maps.iter().flatten().flat_map(move |map| {
+                        let (start, count) = map.range(index);
+                        (start..start + count).map(move |k| (index, map.contact(k)))
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = contacts(&e);
+        if budget == 65536 {
+            assert!(!before.is_empty(), "the body mapping must do work");
+        }
+        e.body_maps.clear();
+        e.read_contacts_with(&world, budget, &units, None);
+        assert_eq!(e.solid, solid);
+        assert!(e.solid_mats.is_empty());
+        assert_eq!(contacts(&e), before);
+        assert_eq!(saved(&e), saved_work);
+        assert_eq!(e.read_work.air_cells, e.solid.len());
+    }
+}
+
+/// Compare physical preparation and discarded material in one release binary.
+#[test]
+#[ignore = "manual coarse contact read-ahead experiment; run alone"]
+fn measure_coarse_contact_read_work() {
+    use std::{hint::black_box, time::Instant};
+    struct Ground {
+        edge: u32,
+        kind: u8,
+    }
+    impl Generator for Ground {
+        fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+            match self.kind {
+                0 => 1,
+                1 => 0,
+                2 => u16::from((x + y + z).is_multiple_of(4)),
+                _ => u16::from(z >= self.edge * 8),
+            }
+        }
+    }
+    let mut c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    c.energy = 1;
+    c.half_cells = 32;
+    let matter = matter::Matter::new(&[]);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    println!("READ_PROBE kind,edge,budget,spent,policy,median_us,max_us,prepared_cells,retained_cells,prepared_solids,retained_solids,batches,peak_batch,air_cells");
+    for edge in [2, 4, 9, 16] {
+        c.cell_units = edge;
+        for kind in 0..4 {
+            let w = World::new(
+                (65 * edge + 16) as u32,
+                (4 * edge + 8) as u32,
+                (33 * edge + 16) as u32,
+                100,
+                Box::new(Ground {
+                    edge: edge as u32,
+                    kind,
+                }),
+            );
+            let mut e = Explosion::begin([32 * edge; 3], &c, &[]);
+            e.origin = [8; 3];
+            e.pending.extend((0..2048).map(|i| phys::blast::Hit {
+                cell: [(i % 64) as i32, 0, (i / 64) as i32],
+                pressure: 100_000,
+                broken: true,
+            }));
+            for budget in [4096, 65536] {
+                for spent in [false, true] {
+                    c.material_energy_j = u32::from(spent);
+                    // Reverse variant order on alternate cases to reduce drift.
+                    let policies = if (kind + u8::from(spent)) % 2 == 0 {
+                        [0, 1, 2]
+                    } else {
+                        [2, 1, 0]
+                    };
+                    for policy in policies {
+                        let mut run = || match policy {
+                            0 => e.read_contacts_inner::<0>(
+                                &w,
+                                budget,
+                                &[],
+                                Some((&matter, &c, 0)),
+                                &|_| {},
+                            ),
+                            1 => e.read_contacts_inner::<1>(
+                                &w,
+                                budget,
+                                &[],
+                                Some((&matter, &c, 0)),
+                                &|_| {},
+                            ),
+                            _ => e.read_contacts_inner::<2>(
+                                &w,
+                                budget,
+                                &[],
+                                Some((&matter, &c, 0)),
+                                &|_| {},
+                            ),
+                        };
+                        pool.install(&mut run);
+                        let mut ns = Vec::new();
+                        for _ in 0..7 {
+                            let start = Instant::now();
+                            pool.install(&mut run);
+                            ns.push(start.elapsed().as_nanos());
+                        }
+                        ns.sort_unstable();
+                        black_box((&e.solid, &e.solid_mats));
+                        let a = e.read_work;
+                        println!("READ_PROBE {kind},{edge},{budget},{spent},{policy},{:.3},{:.3},{},{},{},{},{},{},{}", ns[3] as f64 / 1000.0, ns[6] as f64 / 1000.0, a.prepared_cells, a.retained_cells, a.prepared_solids, a.retained_solids, a.batches, a.peak_batch, a.air_cells);
+                    }
+                }
             }
         }
     }
