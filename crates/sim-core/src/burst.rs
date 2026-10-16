@@ -626,6 +626,51 @@ mod tests {
         }
     }
     #[test]
+    fn rubble_column_scratch_matches_tree_after_growth_shrink_and_worker_changes() {
+        let mut scratch = ColumnMergeScratch::default();
+        for workers in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            for (pass, (count, nx, nz)) in [
+                (40_000, 2048, 1024),
+                (6000, 64, 128),
+                (0, 1, 1),
+                (4095, 8192, 65536),
+                (80_000, 4096, 4096),
+                (4096, 4, 32),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut columns: Vec<_> = (0..count)
+                    .map(|i| {
+                        (
+                            [(i * 37 + pass * 17) % nx, (i * 19 + pass * 31) % nz]
+                                .map(|v| v as i32),
+                            if i % 7 == 0 { 0 } else { (i % 65536) as u16 },
+                        )
+                    })
+                    .collect();
+                let mut tree = BTreeMap::new();
+                for &(at, top) in &columns {
+                    let value = tree.entry(at).or_insert(0u16);
+                    *value = (*value).max(top);
+                }
+                let expected: Vec<_> = tree.into_iter().collect();
+                pool.install(|| merge_columns_observed(&mut columns, &|_, _| {}, &mut scratch));
+                assert_eq!(columns, expected, "workers={workers} pass={pass}");
+                for stripe in &scratch.groups {
+                    assert!(stripe.out.is_empty());
+                    assert!(stripe.tops.iter().all(|&v| v == 0));
+                    assert!(stripe.present.iter().all(|&v| v == 0));
+                    assert!(stripe.blocks.iter().all(|&v| v == 0));
+                }
+            }
+        }
+    }
+    #[test]
     fn rubble_row_batches_match_tree_across_dispatch_edges_and_workers() {
         for workers in [1, 2, 4, 8] {
             let pool = rayon::ThreadPoolBuilder::new()
@@ -656,9 +701,11 @@ mod tests {
                     let expected: Vec<_> = expected.into_iter().collect();
                     let trace = crate::task_trace::Trace::default();
                     pool.install(|| {
-                        merge_columns_observed(&mut columns, &|stage, event| {
-                            trace.record(stage, event)
-                        })
+                        merge_columns_observed(
+                            &mut columns,
+                            &|stage, event| trace.record(stage, event),
+                            &mut ColumnMergeScratch::default(),
+                        )
                     });
                     assert_eq!(
                         columns, expected,
@@ -6719,6 +6766,7 @@ impl Bursts {
             settled,
             queries,
             stacked_mask,
+            column_merge,
         } = scratch;
         {
             let _task = PhysicsTask::new(
@@ -6915,7 +6963,7 @@ impl Bursts {
                 "physics_rubble_merge_begin",
                 "physics_rubble_merge_end",
             );
-            merge_columns_observed(&mut columns, task);
+            merge_columns_observed(&mut columns, task, column_merge);
         }
         bounds.clear();
         nav::vehicle::Rubble::from_sorted(columns)
@@ -7494,11 +7542,12 @@ fn supported(
 /// to the exact maximum. Scratch is proportional to input, not world area.
 #[cfg(test)]
 fn merge_columns(columns: &mut Vec<([i32; 2], u16)>) {
-    merge_columns_observed(columns, &|_, _| {});
+    merge_columns_observed(columns, &|_, _| {}, &mut ColumnMergeScratch::default());
 }
 fn merge_columns_observed(
     columns: &mut Vec<([i32; 2], u16)>,
     task: &(impl Fn(usize, &'static str) + Sync),
+    scratch: &mut ColumnMergeScratch,
 ) {
     debug_assert!(columns
         .iter()
@@ -7512,7 +7561,13 @@ fn merge_columns_observed(
         }
         let words = maximum[1] / 64 + 1;
         if maximum[0] + maximum[1] + 2 <= columns.len() {
-            let mut starts = vec![0usize; maximum[0] + 2];
+            let ColumnMergeScratch {
+                starts,
+                rows,
+                groups,
+            } = scratch;
+            starts.clear();
+            starts.resize(maximum[0] + 2, 0);
             for &(at, _) in columns.iter() {
                 starts[at[0] as usize + 1] += 1;
             }
@@ -7521,7 +7576,8 @@ fn merge_columns_observed(
             }
             // X is implicit in the row. Pack its Z/top into four bytes,
             // instead of copying the twelve-byte full column twice.
-            let mut rows = vec![0u32; columns.len()];
+            // Every current input overwrites one scatter slot before any read.
+            rows.resize(columns.len(), 0);
             for &([x, z], top) in columns.iter() {
                 let x = x as usize;
                 rows[starts[x]] = ((z as u32) << 16) | u32::from(top);
@@ -7530,9 +7586,16 @@ fn merge_columns_observed(
             let parallel =
                 rows.len() >= 16_384 && starts.len() > 512 && rayon::current_num_threads() > 1;
             // Each batch owns complete X rows, so maxima are scalar and
-            // independent. Indexed collection and concatenation retain X/Z
+            // independent. Indexed writes and concatenation retain X/Z
             // order. Small maps and single-worker pools keep the serial path.
-            let emit = |start: usize, ends: &[usize], out: &mut Vec<([i32; 2], u16)>| {
+            let emit = |start: usize, ends: &[usize], stripe: &mut ColumnRows| {
+                let ColumnRows {
+                    tops,
+                    present,
+                    blocks,
+                    out,
+                } = stripe;
+                out.clear();
                 let _task = PhysicsTask::new(
                     task,
                     "physics_rubble_merge_rows_begin",
@@ -7542,11 +7605,12 @@ fn merge_columns_observed(
                 if ends.last().is_none_or(|&end| end == begin) {
                     return;
                 }
+                out.reserve(ends.last().copied().unwrap() - begin);
                 // Store top + 1: zero is absent, including when top is zero.
                 // Reset touched entries on emission; no branch per duplicate.
-                let mut tops = vec![0u32; maximum[1] + 1];
-                let mut present = vec![0u64; words];
-                let mut blocks = vec![0u64; words.div_ceil(64)];
+                tops.resize(maximum[1] + 1, 0);
+                present.resize(words, 0);
+                blocks.resize(words.div_ceil(64), 0);
                 // Scatter cursors are now the ends of their rows, including
                 // empty ones. Emit only set bits, in ascending Z within each X.
                 for (offset, &end) in ends.iter().enumerate() {
@@ -7584,24 +7648,27 @@ fn merge_columns_observed(
             };
             columns.clear();
             let ends = &starts[..starts.len() - 1];
+            groups.resize_with(
+                if parallel { ends.len().div_ceil(64) } else { 1 },
+                ColumnRows::default,
+            );
             if parallel {
-                let groups: Vec<Vec<_>> = ends
-                    .par_chunks(64)
+                groups
+                    .par_iter_mut()
                     .enumerate()
-                    .map(|(batch, ends)| {
+                    .for_each(|(batch, stripe)| {
                         let start = batch * 64;
-                        let begin = if start == 0 { 0 } else { starts[start - 1] };
-                        let capacity = ends.last().copied().unwrap_or(begin) - begin;
-                        let mut out = Vec::with_capacity(capacity);
-                        emit(start, ends, &mut out);
-                        out
-                    })
-                    .collect();
-                for group in groups {
-                    columns.extend(group);
-                }
+                        emit(start, &ends[start..(start + 64).min(ends.len())], stripe);
+                    });
             } else {
-                emit(0, ends, columns);
+                // Keep the serial path on the input allocation, as before.
+                std::mem::swap(columns, &mut groups[0].out);
+                emit(0, ends, &mut groups[0]);
+                std::mem::swap(columns, &mut groups[0].out);
+            }
+            // Logical outputs are drained in ascending X; only capacity survives.
+            for stripe in groups {
+                columns.append(&mut stripe.out);
             }
             return;
         }
@@ -7727,6 +7794,21 @@ pub(crate) struct RubbleScratch {
     settled: Settled,
     queries: SettledQueries,
     stacked_mask: Vec<u64>,
+    column_merge: ColumnMergeScratch,
+}
+/// Scratch only: every call rebuilds the same maxima from the complete input.
+#[derive(Default)]
+struct ColumnMergeScratch {
+    starts: Vec<usize>,
+    rows: Vec<u32>,
+    groups: Vec<ColumnRows>,
+}
+#[derive(Default)]
+struct ColumnRows {
+    tops: Vec<u32>,
+    present: Vec<u64>,
+    blocks: Vec<u64>,
+    out: Vec<([i32; 2], u16)>,
 }
 type SettledCellRequest = (u32, [i32; 3], [i32; 3]);
 /// X modulo eight owns each contact list. Each worker appends indices in

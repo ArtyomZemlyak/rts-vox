@@ -165,6 +165,19 @@ impl TickProfile {
     }
 }
 
+fn scenario_id(name: &str) -> Option<usize> {
+    let id = match name {
+        "breakthrough" => 0,
+        "spider" => 1,
+        "pincer" => 2,
+        "turrets" => 3,
+        "canister" => 4,
+        "siege" => 5,
+        _ => name.parse().ok()?,
+    };
+    (id < modding::range_skirmish::STOCK.len()).then_some(id)
+}
+
 fn main() {
     let args: Vec<_> = std::env::args().collect();
     let drain_ticks = args
@@ -285,6 +298,7 @@ fn main() {
     let mut layout =
         modding::range::RangeLayout::from_ron(include_str!("../../../../data/range-km.ron"))
             .unwrap();
+    let mut mission_deployment = None;
     let t =
         modding::range_battle::Tuning::from_ron(include_str!("../../../../data/range-battle.ron"))
             .unwrap();
@@ -346,29 +360,17 @@ fn main() {
             !args.iter().any(|a| a == "--units" || a == "--eight"),
             "--scenario uses its authored roster"
         );
-        let ron = match name {
-            "spider" => include_str!("../../../../data/skirmish-spider.ron"),
-            "turrets" => include_str!("../../../../data/skirmish-turrets.ron"),
-            "pincer" => include_str!("../../../../data/skirmish-pincer.ron"),
-            "breakthrough" => include_str!("../../../../data/skirmish-breakthrough.ron"),
-            "canister" => include_str!("../../../../data/skirmish-canister.ron"),
-            "siege" => include_str!("../../../../data/skirmish-siege.ron"),
-            _ => panic!("--scenario: spider, turrets, pincer, breakthrough, canister or siege"),
-        };
-        let preset = modding::range_skirmish::Skirmish::from_ron(ron).unwrap();
-        layout.gun = preset.zone.spawn;
-        layout.target = preset.zone.target;
-        // Match Workshop::skirmish: replace the authored battle sector.
-        // Appending a second zone preserves this battle's counters but
-        // changes the saved layout and invalidates native/headless hashes.
-        let zone = layout
-            .zones
-            .iter()
-            .position(|z| z.name == t.zone.name)
-            .expect("authored battle sector");
-        layout.zones[zone] = preset.zone;
-        layout.units = preset.units;
-        layout.blocks.extend(preset.blocks);
+        let id = scenario_id(name).expect("--scenario: stock encounter ID or legacy name");
+        let preset = modding::range_skirmish::stock(id).unwrap();
+        if let Some(modding::range_skirmish::MissionStep {
+            goal: modding::range_skirmish::MissionGoal::Reach { actors, point, .. },
+            ..
+        }) = preset.mission.as_ref().and_then(|m| m.steps.first())
+        {
+            mission_deployment = Some((actors.clone(), *point));
+        }
+        println!("authored_scenario_id={id} automation=deployment_then_ordinary_battle_not_mission_objectives");
+        layout = preset.apply_to(layout).expect("authored scenario layout");
     } else {
         assert_eq!(balance, "even", "--balance requires --world");
         layout.gun = t.zone.spawn;
@@ -423,6 +425,13 @@ fn main() {
         assert!(sim.set_ai_vs_ai(true));
     }
     sim.start_battle().unwrap();
+    if let Some((actors, point)) = mission_deployment {
+        let slots = sim.battle_formation_destinations(&actors, point);
+        assert!(
+            sim.battle_group_move(&slots, point) > 0,
+            "mission deployment rejected"
+        );
+    }
     sim.battle.trace_fire(fire_trace);
     if fire_trace {
         println!(
@@ -2165,6 +2174,28 @@ fn collapse_held_stress() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scenario_names_and_ids_use_the_same_stock_catalog() {
+        for (id, name) in [
+            "breakthrough",
+            "spider",
+            "pincer",
+            "turrets",
+            "canister",
+            "siege",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(scenario_id(name), Some(id));
+        }
+        for id in 0..modding::range_skirmish::STOCK.len() {
+            assert_eq!(scenario_id(&id.to_string()), Some(id));
+        }
+        for invalid in ["-1", "unknown", "9999"] {
+            assert_eq!(scenario_id(invalid), None);
+        }
+    }
     #[test]
     fn repeated_wave_callbacks_accumulate_without_double_counting_orders() {
         let mut profile = TickProfile::default();
