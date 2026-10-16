@@ -263,6 +263,48 @@ impl MissionRun {
             _ => None,
         }
     }
+    fn active_goal(
+        &self,
+        view: &sim_core::blast::read_model::View,
+    ) -> Option<&modding::range_skirmish::MissionGoal> {
+        (self.generation == Some(view.generation) && self.failure.is_none() && !self.complete)
+            .then(|| self.definition.steps.get(self.step).map(|step| &step.goal))
+            .flatten()
+    }
+    fn focus_point(&self, view: &sim_core::blast::read_model::View) -> Option<[i32; 2]> {
+        use modding::range_skirmish::MissionGoal;
+        match self.active_goal(view)? {
+            MissionGoal::Reach { point, .. } => Some(*point),
+            MissionGoal::Destroy { actors } => actors.iter().find_map(|&id| {
+                let unit = view.units.get(id)?;
+                unit.status.alive.then(|| {
+                    [
+                        unit.position[0].to_int_trunc(),
+                        unit.position[2].to_int_trunc(),
+                    ]
+                })
+            }),
+        }
+    }
+    fn participants(&self, view: &sim_core::blast::read_model::View) -> Vec<usize> {
+        use modding::range_skirmish::MissionGoal;
+        let Some(goal) = self.active_goal(view) else {
+            return Vec::new();
+        };
+        view.units
+            .iter()
+            .enumerate()
+            .filter_map(|(id, unit)| {
+                (unit.allied
+                    && unit.status.alive
+                    && match goal {
+                        MissionGoal::Reach { actors, .. } => actors.contains(&id),
+                        MissionGoal::Destroy { .. } => unit.kind == self.definition.focus,
+                    })
+                .then_some(id)
+            })
+            .collect()
+    }
     pub(super) fn readout(&self) -> String {
         if let Some(reason) = self.failure {
             return reason.into();
@@ -397,6 +439,8 @@ pub enum Action {
     Pitch(f32),
     Own,
     Target,
+    MissionTarget,
+    MissionParticipants,
     Zoom(f32),
     Pan(f32, f32),
     /// The live tuning menu (ADR-298), handled in `knobs`.
@@ -801,6 +845,7 @@ pub fn actions(
     mut panel: ResMut<Panel>,
     mut scene: ResMut<Scene>,
     mut edit: ResMut<Workshop>,
+    snapshot: Res<super::ui_snapshot::UiSnapshot>,
     interactions: Query<(&Action, &Interaction), Changed<Interaction>>,
     windows: Query<&Window>,
     roots: Query<&bevy::ui::RelativeCursorPosition, With<PanelRoot>>,
@@ -864,6 +909,8 @@ pub fn actions(
                 | Action::WholeMap
                 | Action::Own
                 | Action::Target
+                | Action::MissionTarget
+                | Action::MissionParticipants
         ) {
             panel.scenario_run = None;
         }
@@ -1054,19 +1101,46 @@ pub fn actions(
                     panel.demo = false;
                     panel.ground_fire = false;
                     scene.repeat = false;
-                    edit.controlled = scene
-                        .sim
-                        .units
-                        .iter()
-                        .enumerate()
-                        .find(|(i, u)| {
-                            scene.sim.allied(*i)
-                                && u.status.alive
-                                && u.status.engine
-                                && u.status.weapon
-                        })
-                        .map(|(i, _)| i);
-                    edit.selected_units = edit.controlled.into_iter().collect();
+                    let selected = edit.battle_selected_ids(&scene.sim);
+                    edit.controlled = if panel.mission.is_some() {
+                        edit.controlled
+                            .filter(|id| selected.contains(id))
+                            .or_else(|| selected.first().copied())
+                            .or_else(|| {
+                                scene
+                                    .sim
+                                    .units
+                                    .iter()
+                                    .enumerate()
+                                    .find(|(i, u)| {
+                                        scene.sim.allied(*i)
+                                            && u.status.alive
+                                            && panel
+                                                .mission
+                                                .as_ref()
+                                                .is_some_and(|m| m.definition.focus == u.kind)
+                                    })
+                                    .map(|(i, _)| i)
+                            })
+                    } else {
+                        scene
+                            .sim
+                            .units
+                            .iter()
+                            .enumerate()
+                            .find(|(i, u)| {
+                                scene.sim.allied(*i)
+                                    && u.status.alive
+                                    && u.status.engine
+                                    && u.status.weapon
+                            })
+                            .map(|(i, _)| i)
+                    };
+                    edit.selected_units = if panel.mission.is_some() && !selected.is_empty() {
+                        selected
+                    } else {
+                        edit.controlled.into_iter().collect()
+                    };
                     edit.selected = edit.controlled.map(Selection::Unit);
                 }
                 Err(e) => scene.notice = e.into(),
@@ -1438,6 +1512,59 @@ pub fn actions(
                 scene.view = 5;
                 edit.pan = Vec2::ZERO;
                 edit.zoom = 1.0;
+            }
+            Action::MissionTarget | Action::MissionParticipants => {
+                let Some(view) = snapshot
+                    .view
+                    .as_ref()
+                    .filter(|v| v.generation == scene.generation)
+                else {
+                    continue;
+                };
+                let Some(mission) = &panel.mission else {
+                    continue;
+                };
+                let point = if action == Action::MissionTarget {
+                    mission.focus_point(view)
+                } else {
+                    let ids = mission.participants(view);
+                    if ids.is_empty() {
+                        continue;
+                    }
+                    edit.select_battle_group(&scene.sim, &ids, false);
+                    let page_size = windows
+                        .single()
+                        .map_or(hud::ROSTER_PAGE_SIZE, |w| hud::roster_page_size(w.width()));
+                    panel.roster_page = view
+                        .units
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, u)| u.allied && u.status.alive)
+                        .position(|(id, _)| Some(id) == edit.controlled)
+                        .unwrap_or(0)
+                        / page_size;
+                    edit.controlled
+                        .and_then(|id| view.units.get(id))
+                        .map(|u| [u.position[0].to_int_trunc(), u.position[2].to_int_trunc()])
+                };
+                if let Some(point) = point {
+                    let centre = edit.sector().map_or(
+                        Vec2::new(
+                            view.gun.position[0].to_int_trunc() as f32,
+                            view.gun.position[2].to_int_trunc() as f32,
+                        ),
+                        |z| {
+                            Vec2::new(
+                                (z.min[0] + z.max[0]) as f32 * 0.5,
+                                (z.min[1] + z.max[1]) as f32 * 0.5,
+                            )
+                        },
+                    );
+                    edit.pan = Vec2::new(point[0] as f32, point[1] as f32) - centre;
+                    edit.zoom = 1.0;
+                    scene.view = 1;
+                    panel.ground_fire = false;
+                }
             }
             Action::Zoom(z) => edit.zoom = (edit.zoom * z).clamp(0.3, 32.0),
             Action::Pan(x, z) => {

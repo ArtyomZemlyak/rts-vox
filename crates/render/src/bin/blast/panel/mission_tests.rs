@@ -166,6 +166,57 @@ fn mission_critical_gun_failure_is_explicit_and_resets_on_replay() {
 }
 
 #[test]
+fn mission_navigation_tracks_live_targets_participants_and_world_generation() {
+    let (sim, mut run) = setup(13);
+    let mut view = View::new(&sim, 1);
+    run.update(&view);
+    assert_eq!(run.focus_point(&view), Some([3880, 2650]));
+    assert_eq!(run.participants(&view), vec![4, 5]);
+    // Losing one reserve still allows the remaining tank to complete the goal.
+    view.units[4].status.alive = false;
+    run.update(&view);
+    assert!(run.failure.is_none());
+    assert_eq!(run.participants(&view), vec![5]);
+    view.units[5].position[0] = fx::Fx::from_int(3880);
+    view.units[5].position[2] = fx::Fx::from_int(2650);
+    run.update(&view);
+    assert_eq!(run.step, 1);
+    assert_eq!(run.participants(&view), vec![0, 1, 2]);
+    let position = |view: &View, id: usize| {
+        [
+            view.units[id].position[0].to_int_trunc(),
+            view.units[id].position[2].to_int_trunc(),
+        ]
+    };
+    assert_eq!(run.focus_point(&view), Some(position(&view, 6)));
+    view.units[6].status.alive = false;
+    run.update(&view);
+    assert_eq!(run.focus_point(&view), Some(position(&view, 7)));
+    view.generation = 2;
+    assert!(run.focus_point(&view).is_none());
+    assert!(run.participants(&view).is_empty());
+    view.generation = 1;
+    view.units[3].status.alive = false;
+    run.update(&view);
+    assert!(run.focus_point(&view).is_none());
+    assert!(run.participants(&view).is_empty());
+}
+
+#[test]
+fn mission_loss_of_required_arrivals_fails_without_sending_orders() {
+    let (sim, mut run) = setup(7);
+    let mut view = View::new(&sim, 1);
+    let hash = sim.state_hash();
+    for id in 0..3 {
+        view.units[id].status.alive = false;
+    }
+    run.update(&view);
+    assert!(run.readout().contains("недостаточно уцелевших"));
+    assert!(run.focus_point(&view).is_none());
+    assert_eq!(sim.state_hash(), hash);
+}
+
+#[test]
 #[ignore = "physical T3 failure path; run explicitly in release"]
 fn mission_t3_auto_reports_critical_gun_loss_without_ending_sim() {
     let (mut sim, mut run) = setup(16);

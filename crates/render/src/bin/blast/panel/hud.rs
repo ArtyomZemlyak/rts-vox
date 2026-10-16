@@ -350,6 +350,8 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 button(p, font, "Другой бой", Action::BattleChoose);
                 let summary = button(p, font, "Сводка", Action::Drawer(5));
                 p.commands().entity(summary).insert(BattleButton);
+                button(p, font, "К цели задачи", Action::MissionTarget);
+                button(p, font, "Выбрать исполнителей", Action::MissionParticipants);
             });
         });
     commands.spawn((
@@ -368,6 +370,8 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
     commands
         .spawn((
             BriefingCard,
+            PanelRoot,
+            bevy::ui::RelativeCursorPosition::default(),
             Node {
                 position_type: PositionType::Absolute,
                 left: px(16),
@@ -375,6 +379,8 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 width: percent(47),
                 padding: UiRect::all(px(10)),
                 border: UiRect::left(px(2)),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(6),
                 ..default()
             },
             BackgroundColor(theme::PANEL),
@@ -564,6 +570,17 @@ pub fn refresh(
                 battle
                     && (action != Some(&Action::BattleStart)
                         || view.phase == sim_core::blast::battle::Phase::Setup),
+            )
+        } else if matches!(
+            action,
+            Some(Action::MissionTarget | Action::MissionParticipants)
+        ) {
+            Some(
+                battle
+                    && panel
+                        .mission
+                        .as_ref()
+                        .is_some_and(|m| m.active_goal(view).is_some()),
             )
         } else if briefing.is_some() {
             Some(
@@ -803,15 +820,11 @@ pub fn refresh(
                     ""
                 };
                 let briefing = if let Some(mission) = &panel.mission {
-                    format!(
-                        "{}\n{}",
-                        mission.readout(),
-                        if compact {
-                            "ПКМ — движение / атака. Золотой круг — текущий рубеж."
-                        } else {
-                            &panel.briefing
-                        }
-                    )
+                    if compact {
+                        mission.readout()
+                    } else {
+                        format!("{}\n{}", mission.readout(), panel.briefing)
+                    }
                 } else if compact && battle {
                     let mut chars = panel.briefing.chars();
                     let short: String = chars.by_ref().take(64).collect();
@@ -823,8 +836,17 @@ pub fn refresh(
                 } else {
                     panel.briefing.clone()
                 };
+                let heading = if phase.is_empty()
+                    || (compact
+                        && panel.mission.is_some()
+                        && view.phase == sim_core::blast::battle::Phase::Fighting)
+                {
+                    String::new()
+                } else {
+                    format!("{phase}\n")
+                };
                 format!(
-                    "{phase}\n{}{}",
+                    "{heading}{}{}",
                     briefing,
                     if scene.notice.is_empty() {
                         String::new()
@@ -1650,6 +1672,97 @@ pub(crate) mod tests {
         assert!(!app.world().resource::<Panel>().briefing.is_empty());
         click(&mut app, Action::Skirmish(0));
         assert!(app.world().resource::<Panel>().mission.is_none());
+    }
+    #[test]
+    fn mission_navigation_buttons_change_camera_and_selection_without_combat_orders() {
+        let mut app = app();
+        app.add_systems(Startup, |mut commands: Commands| {
+            let camera = commands.spawn_empty().id();
+            build(&mut commands, camera, &TextFont::default());
+        });
+        app.add_systems(PostUpdate, refresh);
+        click(&mut app, Action::Skirmish(13));
+        rebuild_pending(&mut app);
+        app.world_mut().spawn(Window {
+            resolution: (960, 540).into(),
+            ..default()
+        });
+        app.update();
+        let mut texts = app.world_mut().query::<(&HudText, &Text)>();
+        let briefing = texts.iter(app.world()).find(|(id, _)| id.0 == 3).unwrap().1;
+        assert!(briefing.starts_with("ЗАДАЧА 1/"));
+        assert!(
+            !briefing.contains("ПКМ"),
+            "compact HUD already explains controls in the command deck"
+        );
+        let mut cards = app.world_mut().query_filtered::<
+            &mut bevy::ui::RelativeCursorPosition,
+            (With<BriefingCard>, With<PanelRoot>),
+        >();
+        cards.single_mut(app.world_mut()).unwrap().cursor_over = true;
+        let hash = app.world().resource::<Scene>().sim.state_hash();
+        click(&mut app, Action::MissionTarget);
+        assert!(app.world().resource::<Panel>().blocked);
+        let visible = |app: &mut App| {
+            let mut buttons = app.world_mut().query::<(&Action, &Node)>();
+            buttons
+                .iter(app.world())
+                .filter(|(a, n)| {
+                    matches!(a, Action::MissionTarget | Action::MissionParticipants)
+                        && n.display != Display::None
+                })
+                .count()
+        };
+        assert_eq!(visible(&mut app), 2);
+        let workshop = app.world().resource::<Workshop>();
+        assert_eq!(workshop.pan, Vec2::new(-920.0, -100.0));
+        assert_eq!(workshop.zoom, 1.0);
+        assert_eq!(app.world().resource::<Scene>().view, 1);
+        click(&mut app, Action::MissionParticipants);
+        let workshop = app.world().resource::<Workshop>();
+        assert_eq!(workshop.selected_units, vec![4, 5]);
+        assert_eq!(workshop.controlled, Some(4));
+        assert_eq!(workshop.pan, Vec2::new(-1490.0, -540.0));
+        assert_eq!(app.world().resource::<Scene>().sim.state_hash(), hash);
+        // A failed operation must not jump to stale targets, even if invoked directly.
+        app.world_mut()
+            .resource_mut::<Panel>()
+            .mission
+            .as_mut()
+            .unwrap()
+            .failure = Some("failed");
+        click(&mut app, Action::MissionTarget);
+        click(&mut app, Action::MissionParticipants);
+        assert_eq!(
+            app.world().resource::<Workshop>().selected_units,
+            vec![4, 5]
+        );
+        assert_eq!(
+            app.world().resource::<Workshop>().pan,
+            Vec2::new(-1490.0, -540.0)
+        );
+        assert_eq!(app.world().resource::<Scene>().sim.state_hash(), hash);
+        assert_eq!(visible(&mut app), 0);
+    }
+    #[test]
+    fn mission_manual_start_preserves_profile_selection_including_stationary_t3() {
+        let mut app = app();
+        for id in [12, 16] {
+            click(&mut app, Action::Skirmish(id));
+            app.world_mut().resource_mut::<Panel>().battle_launch = false;
+            rebuild_pending(&mut app);
+            let focused = app.world().resource::<Workshop>().controlled;
+            click(&mut app, Action::BattleStart);
+            assert_eq!(app.world().resource::<Workshop>().controlled, focused);
+            assert_eq!(
+                app.world().resource::<Workshop>().selected_units,
+                focused.into_iter().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                app.world().resource::<Scene>().sim.battle.phase,
+                sim_core::blast::battle::Phase::Fighting
+            );
+        }
     }
     #[test]
     fn authored_battles_load_through_hud_and_enemy_ai_acquires_targets() {
