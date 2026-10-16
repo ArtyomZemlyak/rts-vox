@@ -917,6 +917,11 @@ fn main() {
             }
         };
         let detail = |name: &'static str| {
+            // These nested admission boundaries belong to the native trigger
+            // trace. Do not disturb the existing motion/debris detail clock.
+            if name.starts_with("collapse_admit_") {
+                return;
+            }
             if tick_csv.is_some() {
                 let now = Instant::now();
                 if name == "rubble_print_begin" {

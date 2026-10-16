@@ -3404,6 +3404,7 @@ pub mod battle;
 /// Per-tick diagnostics only; never serialized or included in the state hash.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CollapseWork {
+    pub fresh_edits: usize,
     pub queued: usize,
     pub submitted: usize,
     /// Why edits waited this tick (analysis 240, C1). Bit 0: some edits lie
@@ -6461,7 +6462,10 @@ impl BlastRange {
         // particle slots must not decide whether a building can fall.
         // This drain's edits join the backlog below: in one pass when the
         // layer takes the whole backlog this tick, one by one when it waits.
+        detail("collapse_admit_begin");
         let fresh: Vec<voxel::world::Edit> = self.world.edits().to_vec();
+        let fresh_edits = fresh.len();
+        detail("collapse_admit_fresh");
         let mut crumbs: Vec<([u32; 3], u16)> = Vec::new();
         // Regional readiness (analysis 240, C1). The layer used to wait for
         // every wave and claim on the map, and under steady fire it never ran
@@ -6483,6 +6487,7 @@ impl BlastRange {
             .map(|(lo, hi)| (lo.map(|v| v - chunk), hi.map(|v| v + chunk)))
             .collect();
         wave_boxes.sort_unstable();
+        detail("collapse_admit_waves");
         let claim_chunks: std::collections::BTreeSet<[i32; 3]> = {
             let own: std::collections::BTreeSet<[i32; 3]> = self
                 .matter
@@ -6496,6 +6501,7 @@ impl BlastRange {
                 })
                 .collect()
         };
+        detail("collapse_admit_claims");
         let has_collapse =
             !self.collapse_backlog.is_empty() || !fresh.is_empty() || self.collapse.pending();
         // A body whose source digs have not drained yet still stands in the
@@ -6507,6 +6513,7 @@ impl BlastRange {
                 .list
                 .iter()
                 .any(|b| b.awaiting_removal(&self.world));
+        detail("collapse_admit_awaiting");
         // Every edit reaches the layer at once: it learns about the world
         // only from edits it is shown, and a pass over a copy missing some
         // would tear off cells already dug, or hold ones already gone
@@ -6530,20 +6537,17 @@ impl BlastRange {
             // The latest edit of each cell, in cell order: what inserting
             // the drain into the backlog and admitting all of it gives
             // (ADR-681), without a map entry per edit.
-            let mut all = self.collapse_backlog.admit(|_| true);
-            all.extend_from_slice(&fresh);
-            ready = last_per_cell(&all, |e| [e.x, e.y, e.z])
-                .into_iter()
-                .map(|i| all[i])
-                .collect();
+            ready = self.collapse_backlog.prepare(&fresh, &mut detail);
         } else {
             for e in fresh {
                 self.collapse_backlog.insert(e);
             }
         }
+        detail("collapse_admit_ready");
         let runs = has_collapse && !awaiting && (!ready.is_empty() || self.collapse.pending());
         let queued = ready.len() + self.collapse_backlog.len();
         self.collapse_work = CollapseWork {
+            fresh_edits,
             queued,
             blocked_by: u8::from(awaiting) << 2,
             blocked_ticks: if has_collapse && !runs {
@@ -7106,57 +7110,93 @@ fn start_offers(wanting: Vec<usize>, starts: usize, tick: u32) -> Vec<usize> {
     chosen
 }
 
-/// Collapse edits waiting for their region (analysis 240, C1), grouped by
-/// chunk: admission looks at each chunk once and never touches the edits of
-/// a chunk that keeps waiting. The latest edit per cell.
+/// Pending latest edit per cell in canonical cell order. The consumer admits
+/// the complete batch; regional ownership is decided by CollapseLayer, not by
+/// selecting chunks here. A single tree avoids reconstructing global order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct CollapseBacklog {
-    chunks: BTreeMap<[u32; 3], BTreeMap<[u32; 3], voxel::world::Edit>>,
-    len: usize,
+    edits: BTreeMap<[u32; 3], voxel::world::Edit>,
 }
 
 impl CollapseBacklog {
-    fn chunk_of(p: [u32; 3]) -> [u32; 3] {
-        p.map(|v| v / voxel::store::CS as u32)
-    }
     fn insert(&mut self, e: voxel::world::Edit) {
-        let p = [e.x, e.y, e.z];
-        let cells = self.chunks.entry(Self::chunk_of(p)).or_default();
-        self.len += usize::from(cells.insert(p, e).is_none());
+        self.edits.insert([e.x, e.y, e.z], e);
     }
-    fn from_cells(cells: BTreeMap<[u32; 3], voxel::world::Edit>) -> Self {
-        let mut out = Self::default();
-        for e in cells.into_values() {
-            out.insert(e);
-        }
-        out
+    fn from_cells(edits: BTreeMap<[u32; 3], voxel::world::Edit>) -> Self {
+        Self { edits }
     }
     fn len(&self) -> usize {
-        self.len
+        self.edits.len()
     }
     fn is_empty(&self) -> bool {
-        self.len == 0
+        self.edits.is_empty()
     }
-    /// Every edit in ascending cell order, as the snapshot stores them.
+    /// Same canonical snapshot order as the former chunk-grouped map.
     fn cells(&self) -> Vec<(&[u32; 3], &voxel::world::Edit)> {
-        let mut out: Vec<_> = self.chunks.values().flatten().collect();
-        out.sort_unstable_by_key(|(p, _)| **p);
-        out
+        self.edits.iter().collect()
     }
-    /// Take out the edits of every chunk `admits` accepts, in ascending
-    /// cell order. Chunks are asked in ascending order, each once.
-    fn admit(&mut self, mut admits: impl FnMut([u32; 3]) -> bool) -> Vec<voxel::world::Edit> {
-        let taken: Vec<[u32; 3]> = self.chunks.keys().copied().filter(|&c| admits(c)).collect();
-        let mut out = Vec::new();
-        for c in taken {
-            if let Some(cells) = self.chunks.remove(&c) {
-                out.extend(cells.into_values());
-            }
+    fn admit(&mut self) -> Vec<voxel::world::Edit> {
+        std::mem::take(&mut self.edits).into_values().collect()
+    }
+
+    /// The backlog is already unique and ordered by cell. Only
+    /// fresh edits need last-writer normalization; they win over old edits.
+    /// Never sort the whole old + fresh batch a second time (ADR-727).
+    fn prepare(
+        &mut self,
+        fresh: &[voxel::world::Edit],
+        detail: &mut impl FnMut(&'static str),
+    ) -> Vec<voxel::world::Edit> {
+        let old = self.admit();
+        detail("collapse_admit_drained");
+        let latest = last_per_cell(fresh, |e| [e.x, e.y, e.z]);
+        detail("collapse_admit_dedup");
+        if latest.is_empty() {
+            detail("collapse_admit_merged");
+            return old;
         }
-        self.len -= out.len();
-        out.sort_unstable_by_key(|e| [e.x, e.y, e.z]);
-        out
+        if old.is_empty() {
+            let ready = latest.into_iter().map(|i| fresh[i]).collect();
+            detail("collapse_admit_merged");
+            return ready;
+        }
+        let mut ready = Vec::with_capacity(old.len() + latest.len());
+        let mut head = 0;
+        for index in latest {
+            let e = fresh[index];
+            let key = [e.x, e.y, e.z];
+            let end = head + collapse_prefix_before(&old[head..], key);
+            // Copy runs in bulk. When few fresh cells interrupt millions of
+            // old cells, neither sorting nor a comparison per old cell is due.
+            ready.extend_from_slice(&old[head..end]);
+            head = end;
+            if old.get(head).is_some_and(|e| [e.x, e.y, e.z] == key) {
+                head += 1;
+            }
+            ready.push(e);
+        }
+        ready.extend_from_slice(&old[head..]);
+        detail("collapse_admit_merged");
+        ready
     }
+}
+
+/// Length of the sorted prefix below key. Exponential bracketing keeps dense
+/// interleaved batches cheap too; binary search only examines the next run.
+fn collapse_prefix_before(edits: &[voxel::world::Edit], key: [u32; 3]) -> usize {
+    if edits.first().is_none_or(|e| [e.x, e.y, e.z] >= key) {
+        return 0;
+    }
+    let mut low = 1;
+    let mut high = 2.min(edits.len());
+    while high < edits.len() && {
+        let e = edits[high - 1];
+        [e.x, e.y, e.z] < key
+    } {
+        low = high;
+        high = high.saturating_mul(2).min(edits.len());
+    }
+    low + edits[low..high].partition_point(|e| [e.x, e.y, e.z] < key)
 }
 
 /// One pending edit per world cell. Bound by the actual encoded records and
@@ -7190,6 +7230,10 @@ fn load_collapse_backlog(
     }
     s.ok().then_some(edits)
 }
+
+#[cfg(test)]
+#[path = "range_collapse_admission_tests.rs"]
+mod collapse_admission_tests;
 
 #[cfg(test)]
 mod tests {
@@ -9315,6 +9359,7 @@ mod tests {
             full_builds: usize::MAX,
         };
         r.collapse_work = CollapseWork {
+            fresh_edits: usize::MAX,
             queued: usize::MAX,
             submitted: usize::MAX,
             blocked_by: 7,

@@ -85,6 +85,8 @@ struct Frame {
     gap_ns: u128,
     observed_frame_ms: Option<f64>,
     pacing: [f64; 4],
+    // State after this slice, not arrivals; no-tick frames can repeat it.
+    collapse: [usize; 3],
 }
 /// Capture requested camera controls, not animated/following camera poses.
 /// Keep changes in memory and print after measurement, not in a slow frame.
@@ -521,6 +523,11 @@ pub fn end(
             gap_ns,
             observed_frame_ms,
             pacing,
+            collapse: [
+                scene.sim.collapse_work.queued,
+                scene.sim.collapse_work.submitted,
+                scene.sim.collapse_work.fresh_edits,
+            ],
         });
         if let Some(mut source) = source {
             source.0 = Some(render::timeline::FrameTag {
@@ -583,7 +590,7 @@ pub fn end(
         let mut out = std::io::BufWriter::new(std::fs::File::create(p.output.as_ref().unwrap())?);
         writeln!(
             out,
-            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions,render_extract_ms,occupancy_ms,simulation_ticks,simulation_core_ms,generation,frame_start_ns,frame_end_ns,frame_gap_ns,observed_frame_ms,simulation_debt_ticks,simulation_dropped_ticks,simulation_batch_ms,simulation_budget_limited_steps"
+            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions,render_extract_ms,occupancy_ms,simulation_ticks,simulation_core_ms,generation,frame_start_ns,frame_end_ns,frame_gap_ns,observed_frame_ms,simulation_debt_ticks,simulation_dropped_ticks,simulation_batch_ms,simulation_budget_limited_steps,collapse_queued,collapse_submitted,collapse_incoming"
         )?;
         for row in &p.rows {
             let Frame {
@@ -596,10 +603,11 @@ pub fn end(
                 gap_ns,
                 observed_frame_ms,
                 pacing,
+                collapse,
             } = row;
             writeln!(
                 out,
-                "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.0},{:.6},{:.6},{:.0},{:.6},{generation},{start_ns},{end_ns},{gap_ns},{},{:.6},{:.6},{:.6},{:.0}",
+                "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.0},{:.6},{:.6},{:.0},{:.6},{generation},{start_ns},{end_ns},{gap_ns},{},{:.6},{:.6},{:.6},{:.0},{},{},{}",
                 ms[0],
                 ms[1],
                 ms[2],
@@ -616,7 +624,7 @@ pub fn end(
                 ms[13],
                 ms[14],
                 observed_frame_ms.map_or(String::new(), |value| format!("{value:.6}")),
-                pacing[0], pacing[1], pacing[2], pacing[3]
+                pacing[0], pacing[1], pacing[2], pacing[3], collapse[0], collapse[1], collapse[2]
             )?;
         }
         let saved = out
