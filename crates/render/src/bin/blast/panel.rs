@@ -474,6 +474,27 @@ fn scenario_weapon(weapon: RangeScenarioWeapon) -> (bool, bool, Delivery) {
     }
 }
 
+/// A fresh transparent layer: UI has shader edge AA, and must never load
+/// the previous MSAA resolve image before clearing its intermediate target.
+fn ui_camera() -> (Camera2d, Camera, Msaa) {
+    (
+        Camera2d,
+        Camera {
+            order: 2,
+            clear_color: ClearColorConfig::Custom(Color::NONE),
+            msaa_writeback: bevy::camera::MsaaWriteback::Off,
+            output_mode: bevy::camera::CameraOutputMode::Write {
+                blend_state: Some(
+                    bevy::render::render_resource::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+                ),
+                clear_color: ClearColorConfig::None,
+            },
+            ..default()
+        },
+        Msaa::Off,
+    )
+}
+
 pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Assets<Font>>) {
     if edit.layout.is_none() {
         return;
@@ -484,24 +505,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
         .iter()
         .map(|src| modding::range_skirmish::Skirmish::from_ron(src).expect("stock encounter"))
         .collect();
-    let camera = commands
-        .spawn((
-            Camera2d,
-            Camera {
-                order: 2,
-                // This camera has its own intermediate target. Loading it
-                // accumulates old UI borders even after Display::None.
-                clear_color: ClearColorConfig::Custom(Color::NONE),
-                output_mode: bevy::camera::CameraOutputMode::Write {
-                    blend_state: Some(
-                        bevy::render::render_resource::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-                    ),
-                    clear_color: ClearColorConfig::None,
-                },
-                ..default()
-            },
-        ))
-        .id();
+    let camera = commands.spawn(ui_camera()).id();
     // Load an installed UI font in memory; no system font is copied into assets.
     let font = std::fs::read("C:/Windows/Fonts/segoeui.ttf")
         .ok()

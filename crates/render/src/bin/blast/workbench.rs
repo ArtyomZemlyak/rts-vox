@@ -989,6 +989,12 @@ pub fn input(
         edit.drag_current = None;
         return;
     };
+    if !window.focused {
+        edit.drag_start = None;
+        edit.drag_current = None;
+        edit.previous_cursor = None;
+        return;
+    }
     let cursor = window.cursor_position();
     if cursor.is_none() {
         edit.drag_start = None;
@@ -2504,7 +2510,8 @@ mod tests {
         );
         // The same input system accepts RTS commands with no keyboard keys.
         app.insert_resource(panel::Panel::new(true, false))
-            .insert_resource(GasInput::default());
+            .insert_resource(GasInput::default())
+            .init_resource::<super::super::ui_snapshot::UiSnapshot>();
         app.add_systems(
             Update,
             (
@@ -2696,6 +2703,36 @@ mod tests {
             .release(MouseButton::Left);
         app.update();
         assert_eq!(app.world().resource::<Workshop>().selected_units, [0, 1]);
+        assert!(app.world().resource::<Workshop>().drag_start.is_none());
+        assert!(app.world().resource::<Workshop>().drag_current.is_none());
+        // Focus loss may leave the mouse resource pressed with its cursor
+        // still inside. Cancel the gesture rather than resuming on return.
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        {
+            let mut edit = app.world_mut().resource_mut::<Workshop>();
+            edit.drag_start = Some(start);
+            edit.drag_current = Some(end);
+        }
+        {
+            let world = app.world_mut();
+            let mut q = world.query::<&mut Window>();
+            q.single_mut(world).unwrap().focused = false;
+        }
+        app.update();
+        assert!(app.world().resource::<Workshop>().drag_start.is_none());
+        assert!(app.world().resource::<Workshop>().drag_current.is_none());
+        assert_eq!(app.world().resource::<Workshop>().selected_units, [0, 1]);
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear();
+        {
+            let world = app.world_mut();
+            let mut q = world.query::<&mut Window>();
+            q.single_mut(world).unwrap().focused = true;
+        }
+        app.update();
         assert!(app.world().resource::<Workshop>().drag_start.is_none());
         // Losing focus may suppress just_released; stale rectangle state must
         // still disappear on the next update without the button held.

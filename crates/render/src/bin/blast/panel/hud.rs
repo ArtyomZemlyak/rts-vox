@@ -880,7 +880,7 @@ pub fn refresh_selection_box(
 ) {
     let pointer_inside = windows
         .single()
-        .map_or(true, |w| w.cursor_position().is_some());
+        .is_ok_and(|w| w.focused && w.cursor_position().is_some());
     for mut node in &mut boxes {
         let drag = match (edit.drag_start, edit.drag_current) {
             (Some(start), Some(end))
@@ -914,6 +914,10 @@ pub fn refresh_selection_box(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "hud/selection_render_tests.rs"]
+mod selection_render_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -1147,6 +1151,9 @@ pub(crate) mod tests {
             .init_resource::<ButtonInput<MouseButton>>()
             .add_systems(Update, refresh_selection_box);
         let box_id = app.world_mut().spawn((SelectionBox, Node::default())).id();
+        let mut window = Window::default();
+        window.set_cursor_position(Some(Vec2::new(800.0, 600.0)));
+        let window_id = app.world_mut().spawn(window).id();
         {
             let mut edit = app.world_mut().resource_mut::<Workshop>();
             edit.drag_start = Some(Vec2::new(20.0, 30.0));
@@ -1172,6 +1179,21 @@ pub(crate) mod tests {
             app.world().entity(box_id).get::<Node>().unwrap().display,
             Display::Flex
         );
+        app.world_mut()
+            .entity_mut(window_id)
+            .get_mut::<Window>()
+            .unwrap()
+            .focused = false;
+        app.update();
+        assert_eq!(
+            app.world().get::<Node>(box_id).unwrap().display,
+            Display::None
+        );
+        app.world_mut()
+            .entity_mut(window_id)
+            .get_mut::<Window>()
+            .unwrap()
+            .focused = true;
         app.world_mut()
             .resource_mut::<ButtonInput<MouseButton>>()
             .release(MouseButton::Left);
