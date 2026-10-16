@@ -5572,8 +5572,10 @@ impl BlastRange {
                 self.rubble_print = print;
                 self.rubble_print_work = work;
             }
+            self.rubble = rubble;
         }
-        self.rubble = rubble;
+        // Equal columns have equal derived queries. Retain the previous
+        // map, including its lazy coarse tiles, across quiet ticks.
         self.rubble_fresh = true;
         detail("rubble_print_end");
         changed
@@ -9425,6 +9427,42 @@ mod tests {
             assert_eq!(range.snapshot(), restored.snapshot());
             assert_eq!(range.rubble, restored.rubble);
         }
+    }
+
+    #[test]
+    fn equal_rubble_retains_its_map_and_changes_still_refresh_after_restore() {
+        let mut range = quiet_cover();
+        drop_heap(&mut range, [100, FLOOR, 300], 500, 32);
+        let changed = range.refresh_rubble(&|_, _| {}, &mut |_| {});
+        assert!(!range.rubble.is_empty(), "the support query must do work");
+        assert!(!changed.is_empty());
+        let original = range.rubble.clone();
+        // The new map is built while the old allocation is still alive. Equal
+        // columns must retain that allocation rather than discard its caches.
+        let address = range.rubble.iter().next().unwrap().0 as *const [i32; 2];
+        let saved = range.snapshot();
+        for _ in 0..3 {
+            let changed = range.refresh_rubble(&|_, _| {}, &mut |_| {});
+            assert!(changed.is_empty());
+            assert_eq!(range.rubble, original);
+            assert_eq!(
+                range.rubble.iter().next().unwrap().0 as *const [i32; 2],
+                address
+            );
+            assert_eq!(range.snapshot(), saved);
+        }
+        let mut restored = BlastRange::restore(range.config, &saved).unwrap();
+        assert!(!restored.rubble_fresh);
+        assert!(restored.refresh_rubble(&|_, _| {}, &mut |_| {}).is_empty());
+        assert_eq!(restored.rubble, original);
+        assert_eq!(restored.snapshot(), saved);
+        for sim in [&mut range, &mut restored] {
+            drop_heap(sim, [300, FLOOR, 100], 500, 32);
+            assert!(!sim.refresh_rubble(&|_, _| {}, &mut |_| {}).is_empty());
+            assert_ne!(sim.rubble, original);
+            assert_eq!(sim.rubble, sim.current_rubble());
+        }
+        assert_eq!(range.snapshot(), restored.snapshot());
     }
 
     #[test]
