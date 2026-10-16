@@ -20,7 +20,8 @@ fn siege_single_shell_digs_soil_and_replays_flight_and_live_wave() {
     assert!(!r.set_battle_weapon(0, Some(Weapon::Blast)));
     assert!(!r.set_battle_weapon(1, Some(Weapon::Siege)));
     let start = r.units[0].motion.pos;
-    assert!(r.battle_order(0, Order::Ground([450, 15, 336]), None));
+    // Keep the shooter outside the now larger, physically damaging blast.
+    assert!(r.battle_order(0, Order::Ground([580, 15, 336]), None));
     for _ in 0..180 {
         step_without_ai(&mut r);
         if r.battle.actors[0].fired > 0 {

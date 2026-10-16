@@ -8,6 +8,58 @@ use crate::blast::{
     RangeUnitKind,
 };
 
+#[test]
+fn manual_handoff_on_ai_deadline_records_and_replays_without_allied_rules() {
+    for command in [
+        Command::Order {
+            actor: 0,
+            order: Order::Hold,
+            destination: None,
+        },
+        Command::FormationMove {
+            actor: 0,
+            destination: [260, 360],
+            fallback: [260, 360],
+        },
+        Command::FormationMove {
+            actor: 0,
+            destination: [-100, -100],
+            fallback: [-100, -100],
+        },
+        Command::Order {
+            actor: 1,
+            order: Order::Hold,
+            destination: None,
+        },
+    ] {
+        let mut r = owner(RangeUnitKind::Tank, true);
+        r.submit(Envelope {
+            epoch: 7,
+            producer: 0,
+            sequence: 0,
+            requested_tick: 0,
+            command,
+        })
+        .unwrap();
+        let mut replay = replica(&r);
+        let before = replay.checkpoint().to_bytes();
+        let frame = r.step_record_ai().unwrap().unwrap();
+        let enemy_actor = matches!(command, Command::Order { actor: 1, .. });
+        assert_eq!(frame.allied.is_some(), enemy_actor);
+        let mut bad = frame.clone();
+        bad.allied = if enemy_actor { None } else { Some(Vec::new()) };
+        assert!(replay.step_replay_ai(Some(bad)).is_err());
+        assert_eq!(before, replay.checkpoint().to_bytes());
+        replay.step_replay_ai(Some(frame)).unwrap();
+        assert_eq!(r.state_hash(), replay.state_hash());
+        for _ in 0..31 {
+            let frame = r.step_record_ai().unwrap();
+            replay.step_replay_ai(frame).unwrap();
+            assert_eq!(r.state_hash(), replay.state_hash());
+        }
+    }
+}
+
 #[cfg(test)]
 #[test]
 fn ai_configuration_record_replay_cancels_plan_and_rejects_missing_frame_before_mutation() {

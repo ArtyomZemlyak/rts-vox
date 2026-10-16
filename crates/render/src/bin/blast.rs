@@ -154,9 +154,7 @@ fn config(energy: bool, anni: bool) -> ExplosionConfig {
     .expect("weapon RON")
 }
 fn scaled_config(energy: bool, anni: bool, power: u32) -> ExplosionConfig {
-    let mut c = config(energy, anni);
-    c.energy = c.energy * power / 1000;
-    c.material_energy_j = (u64::from(c.material_energy_j) * u64::from(power) / 1000) as u32;
+    let mut c = config(energy, anni).at_power(power);
     c.gas_pressure_milli = (c.gas_pressure_milli * power as i32 / 1000).min(10000);
     c.gas_source_radius = c.gas_radius_at_power(power);
     c
@@ -173,13 +171,10 @@ fn weapon_config(energy: bool, anni: bool, power: u32, delivery: Delivery) -> Ex
         Delivery::Blast => unreachable!(),
     })
     .expect("weapon RON");
-    c.energy = if delivery == Delivery::Kinetic {
-        (u64::from(c.energy) * u64::from(power) / 1000) as u32
-    } else {
-        power
-    };
     if delivery == Delivery::Kinetic {
-        c.material_energy_j = (u64::from(c.material_energy_j) * u64::from(power) / 1000) as u32;
+        c = c.at_power(power);
+    } else {
+        c.energy = power;
     }
     c
 }

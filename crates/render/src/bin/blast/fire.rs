@@ -314,7 +314,7 @@ impl Effects {
             );
         }
     }
-    fn shell_burst(&mut self, at: Vec3, now: f32, energy: u32) {
+    fn shell_burst(&mut self, at: Vec3, now: f32, energy: u32, source_radius: i32) {
         // A full pool must not silently swallow a new impact. Particles are
         // stored in birth order, so recycle the oldest visual remnants first.
         let needed = self
@@ -325,7 +325,10 @@ impl Effects {
         if needed > 0 {
             self.particles.drain(..needed);
         }
-        let scale = (energy as f32 / 2300.0).sqrt().clamp(0.55, 1.8);
+        // Oversized charges must not all collapse to the same capped flash.
+        // Follow the authored gas source, keeping the exact particle count.
+        let scale = (energy as f32 / 2300.0).sqrt().clamp(0.55, 1.8)
+            * (source_radius.clamp(1, 128) as f32 / 32.0).max(1.0);
         self.add(at, Vec3::ZERO, now, 0.16, 9.0 * scale, false);
         // A ragged flash: a few broad tongues, many sharp sparks and unequal
         // radial speeds. The transported gas, rather than these cubes, owns
@@ -472,14 +475,8 @@ impl Effects {
                 i.weapon,
                 BattleWeapon::Blast | BattleWeapon::Canister | BattleWeapon::Siege
             ) {
-                let energy = if i.weapon == BattleWeapon::Canister {
-                    sim.battle.canister_config.energy
-                } else if i.weapon == BattleWeapon::Siege {
-                    sim.battle.siege_config.energy
-                } else {
-                    sim.battle.shell_config.energy
-                };
-                self.shell_burst(at, now, energy);
+                let c = sim.battle.config(i.weapon);
+                self.shell_burst(at, now, c.energy, c.gas_source_radius);
             } else if i.weapon == BattleWeapon::Kinetic {
                 self.kinetic_contact(at, self.kinetic_normal(at), now);
             }
@@ -490,7 +487,12 @@ impl Effects {
             && sim.tick == sim.impact_tick.saturating_add(1)
         {
             if let Some(at) = sim.impact {
-                self.shell_burst(Vec3::from(at.map(|v| v as f32)), now, sim.config.energy);
+                self.shell_burst(
+                    Vec3::from(at.map(|v| v as f32)),
+                    now,
+                    sim.config.energy,
+                    sim.config.gas_source_radius,
+                );
             }
         }
         if !sim.battle_mode()
@@ -1448,7 +1450,7 @@ mod tests {
         for _ in 0..CAP {
             effects.add(Vec3::ZERO, Vec3::ZERO, 0.0, 10.0, 1.0, true);
         }
-        effects.shell_burst(Vec3::new(20.0, 0.0, 0.0), 1.0, 2300);
+        effects.shell_burst(Vec3::new(20.0, 0.0, 0.0), 1.0, 2300, 32);
         assert_eq!(effects.particles.len(), CAP);
         assert_eq!(
             effects.particles.iter().filter(|p| p.born == 1.0).count(),
@@ -1458,6 +1460,18 @@ mod tests {
             effects.particles.iter().filter(|p| p.born == 0.0).count(),
             CAP - BURST_PARTICLES
         );
+    }
+    #[test]
+    fn oversized_shell_flashes_grow_without_increasing_particle_work() {
+        let mut before = Effects::default();
+        let mut after = Effects::default();
+        before.shell_burst(Vec3::ZERO, 0.0, 40_000, 32);
+        let c =
+            ExplosionConfig::from_ron(include_str!("../../../../../data/siege-shell.ron")).unwrap();
+        after.shell_burst(Vec3::ZERO, 0.0, c.energy, c.gas_source_radius);
+        assert_eq!(before.particles.len(), BURST_PARTICLES);
+        assert_eq!(after.particles.len(), BURST_PARTICLES);
+        assert!(after.particles[0].edge > before.particles[0].edge * 2.0);
     }
     #[test]
     fn machine_gun_scene_emits_both_flashes_at_its_own_launch_time() {

@@ -1063,6 +1063,30 @@ fn autonomous_battle_orders_both_sides_and_replays() {
 }
 
 #[test]
+fn manual_order_takes_over_allied_ai_without_disabling_the_enemy() {
+    let mut r = arena(RangeUnitKind::Tank);
+    assert!(r.set_ai_vs_ai(true));
+    r.start_battle().unwrap();
+    r.step();
+    assert!(r.battle.autonomous);
+    assert!(!r.battle_order(1, Order::Hold, None));
+    assert!(
+        r.battle.autonomous,
+        "a rejected enemy order must not take over"
+    );
+    assert!(r.battle_order(0, Order::Hold, None));
+    assert!(!r.battle.autonomous);
+    let mut restored = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+    for _ in 0..60 {
+        r.step();
+        restored.step();
+        assert_eq!(r.battle.actors[0].order, Order::Hold);
+        assert_eq!(r.battle.actors[1].order, Order::Attack(0));
+        assert_eq!(r.state_hash(), restored.state_hash());
+    }
+}
+
+#[test]
 fn rules_defend_local_fronts_instead_of_chasing_a_global_target() {
     let tuning =
         modding::battle_ai::Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();

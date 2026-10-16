@@ -45,7 +45,7 @@ pub(super) fn capture(
     let half = n / 2;
     let origin = e.origin;
     let radius2 = (half * half) as i32;
-    let far = [0, 1, 2].map(|a| origin[a] + n as i32 * c.cell_units - 1);
+    let far = [0, 1, 2].map(|a| origin[a] + n as i32 * e.cell - 1);
     // Bodies are captured where the wave will meet them: in the poses
     // frozen when the burst began, as `step` hits them. A capture cut
     // into slices would otherwise read a moving hull's armour where it
@@ -83,7 +83,7 @@ pub(super) fn capture(
         .range([origin[0], i32::MIN, i32::MIN]..=[far[0], i32::MAX, i32::MAX])
         .map(|(q, _)| q)
     {
-        let cell = [0, 1, 2].map(|a| (q[a] - origin[a]).div_euclid(c.cell_units));
+        let cell = [0, 1, 2].map(|a| (q[a] - origin[a]).div_euclid(e.cell));
         if (0..3).all(|a| cell[a] >= 0 && (cell[a] as usize) < n) {
             dented[(cell[2] as usize * n + cell[1] as usize) * n + cell[0] as usize] = true;
         }
@@ -116,10 +116,10 @@ pub(super) fn capture(
             let cached = &mut ceilings[(z - first_z) * n + x];
             if *cached == u32::MAX {
                 *cached = 0;
-                let wx = origin[0] + x as i32 * c.cell_units;
-                let wz = origin[2] + z as i32 * c.cell_units;
-                for dz in 0..c.cell_units {
-                    for dx in 0..c.cell_units {
+                let wx = origin[0] + x as i32 * e.cell;
+                let wz = origin[2] + z as i32 * e.cell;
+                for dz in 0..e.cell {
+                    for dx in 0..e.cell {
                         let (x, z) = (wx + dx, wz + dz);
                         if x >= 0 && z >= 0 && x < w.nx as i32 && z < w.nz as i32 {
                             *cached = (*cached).max(w.column_ceiling(x as u32, z as u32));
@@ -136,14 +136,14 @@ pub(super) fn capture(
             let index = start + offset;
             let (x, y, z) = (index % n, index / n % n, index / (n * n));
             let len = (n - x).min(output.len() - offset);
-            let wy = origin[1] + y as i32 * c.cell_units;
+            let wy = origin[1] + y as i32 * e.cell;
             let (cy, cz) = (y as i32 - half as i32, z as i32 - half as i32);
             let transverse = cy * cy + cz * cz;
             // Exact constant rows: bedrock/outside the sphere, or verified
             // air above terrain and every frozen hull in this Z strip. Only
             // the spherical boundary is refined per cell. Quotas and the
             // captured linear prefix remain unchanged.
-            if batch_rows && (wy + c.cell_units <= 0 || transverse > radius2) {
+            if batch_rows && (wy + e.cell <= 0 || transverse > radius2) {
                 output[offset..offset + len].fill(u32::MAX);
                 offset += len;
                 continue;
@@ -153,12 +153,9 @@ pub(super) fn capture(
                 if *row == u32::MAX {
                     *row = (0..n).map(|x| ceiling(x, z, &mut ceilings)).max().unwrap();
                 }
-                let wz = origin[2] + z as i32 * c.cell_units;
+                let wz = origin[2] + z as i32 * e.cell;
                 let body = queries.iter().any(|(_, lo, hi, ..)| {
-                    wy <= hi[1]
-                        && wy + c.cell_units > lo[1]
-                        && wz <= hi[2]
-                        && wz + c.cell_units > lo[2]
+                    wy <= hi[1] && wy + e.cell > lo[1] && wz <= hi[2] && wz + e.cell > lo[2]
                 });
                 if wy >= *row as i32 && !body {
                     for (x, resistance) in output[offset..offset + len].iter_mut().enumerate() {
@@ -178,9 +175,9 @@ pub(super) fn capture(
                 let index = start + offset;
                 let (x, y, z) = (index % n, (index / n) % n, index / (n * n));
                 let p = [
-                    origin[0] + x as i32 * c.cell_units,
-                    origin[1] + y as i32 * c.cell_units,
-                    origin[2] + z as i32 * c.cell_units,
+                    origin[0] + x as i32 * e.cell,
+                    origin[1] + y as i32 * e.cell,
+                    origin[2] + z as i32 * e.cell,
                 ];
                 // Beyond the inscribed sphere the wave does not go: a reach
                 // the grid cuts is cut the same in every direction.
@@ -193,7 +190,7 @@ pub(super) fn capture(
                     *resistance = u32::MAX;
                     continue;
                 }
-                let end = [0, 1, 2].map(|a| p[a] + c.cell_units - 1);
+                let end = [0, 1, 2].map(|a| p[a] + e.cell - 1);
                 // Under the world is bedrock: the wave does not run beneath the
                 // floor as through air and come up into the ground from below
                 // (ADR-681).
@@ -249,7 +246,7 @@ pub(super) fn capture(
                             pose,
                             segments,
                             p,
-                            c.cell_units,
+                            e.cell,
                             terms.as_ref(),
                             |(part, cell)| {
                                 let occupied = if part == 0 {
@@ -350,17 +347,21 @@ mod tests {
                     for y in [-3, -1, 0, 14, 15, 16, 38, 41, 63, 64] {
                         for z in [-1, 0, 31, 63, 95, 96, 190, 192] {
                             let p = [x, y, z];
-                            let mut want = (0u64, vec![99]);
+                            let mut want = (Vec::new(), vec![99]);
                             for (s, o) in offsets.iter().enumerate() {
                                 let mat = material(&w, std::array::from_fn(|a| p[a] + o[a]));
                                 if mat != 0 {
-                                    want.0 |= 1 << s;
+                                    want.0.push(s);
                                     want.1.push(mat);
                                 }
                             }
                             let mut mats = vec![99];
                             let mask = read_cell_into(&w, p, edge, [0; 3], &offsets, &mut mats);
-                            assert_eq!((mask, mats), want, "{edited} {edge} {p:?}");
+                            assert_eq!(
+                                (mask.indices_from(0).collect::<Vec<_>>(), mats),
+                                want,
+                                "{edited} {edge} {p:?}"
+                            );
                         }
                     }
                 }

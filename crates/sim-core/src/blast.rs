@@ -1845,6 +1845,9 @@ fn same_sizes(u: &RangeUnit, sizes: &[u16]) -> bool {
         })
 }
 
+#[path = "range_contact_mask.rs"]
+mod contact_mask;
+
 pub struct Explosion {
     pub at: [i32; 3],
     origin: [i32; 3],
@@ -1887,7 +1890,7 @@ pub struct Explosion {
     /// order, a bit per subcell holding matter and the start of its
     /// materials in `solid_mats`. The world's voxels do not change while
     /// the waves step; the cache is dropped when the step ends. Never saved.
-    solid: Vec<([i32; 3], u64, u32)>,
+    solid: Vec<([i32; 3], contact_mask::Mask, u32)>,
     /// `solid` by cell, for visits out of the order it was read in.
     solid_index: Vec<([i32; 3], u32)>,
     solid_next: usize,
@@ -1963,7 +1966,8 @@ impl Explosion {
             .max((c.energy / (100 + cheapest)) as usize + 2)
             .min(32);
         let n = half * 2 + 1;
-        let h = half as i32 * c.cell_units;
+        let cell = c.propagation_cell_units();
+        let h = half as i32 * cell;
         let origin = at.map(|v| v - h);
         Self {
             at,
@@ -1978,7 +1982,7 @@ impl Explosion {
             seg_poses: units.iter().map(|u| u.seg_frames.clone()).collect(),
             boxes: Default::default(),
             origin,
-            cell: c.cell_units,
+            cell,
             wave: Wave::new(n, c.energy, vec![0; n * n * n]).expect("validated explosion"),
             queued: 0,
             body_energy_mj: None,
@@ -2153,7 +2157,7 @@ impl Explosion {
                 .min((left / 8).clamp(READ_CHUNK, READ_BATCH));
             let hits = &order[next..next + batch];
             next += batch;
-            let parts: Vec<(Vec<u64>, Vec<u16>)> = hits
+            let parts: Vec<(Vec<contact_mask::Mask>, Vec<u16>)> = hits
                 .par_chunks(READ_CHUNK)
                 .map(|chunk| {
                     let mut masks = Vec::with_capacity(chunk.len());
@@ -2286,7 +2290,12 @@ impl Explosion {
     }
     /// Read a cell's matter: a bit per subcell holding some, and where its
     /// materials start in `solid_mats`.
-    fn read_cell(&mut self, w: &World, cell: [i32; 3], offsets: &[[i32; 3]]) -> (u64, usize) {
+    fn read_cell(
+        &mut self,
+        w: &World,
+        cell: [i32; 3],
+        offsets: &[[i32; 3]],
+    ) -> (contact_mask::Mask, usize) {
         let start = self.solid_mats.len();
         let mask = read_cell_into(
             w,
@@ -2306,7 +2315,7 @@ impl Explosion {
         matter: Option<&matter::Matter>,
         c: &ExplosionConfig,
         pressure: u32,
-        mask: u64,
+        mask: &contact_mask::Mask,
         start: usize,
     ) -> bool {
         let Some(m) = matter else {
@@ -2324,10 +2333,15 @@ impl Explosion {
     /// The matter of the cell being visited: as read ahead when it is the
     /// next one read (or a few further on, past a cell that yielded before
     /// its ground), else read now.
-    fn solid_cell(&mut self, w: &World, cell: [i32; 3], offsets: &[[i32; 3]]) -> (u64, usize) {
+    fn solid_cell(
+        &mut self,
+        w: &World,
+        cell: [i32; 3],
+        offsets: &[[i32; 3]],
+    ) -> (contact_mask::Mask, usize) {
         let end = (self.solid_next + 4).min(self.solid.len());
         for k in self.solid_next..end {
-            let (c, mask, start) = self.solid[k];
+            let (c, mask, start) = self.solid[k].clone();
             if c == cell {
                 self.solid_next = k + 1;
                 return (mask, start as usize);
@@ -2346,7 +2360,7 @@ impl Explosion {
         }
         if let Ok(i) = self.solid_index.binary_search_by_key(&cell, |e| e.0) {
             let k = self.solid_index[i].1 as usize;
-            let (_, mask, start) = self.solid[k];
+            let (_, mask, start) = self.solid[k].clone();
             self.solid_next = k + 1;
             return (mask, start as usize);
         }
@@ -2732,26 +2746,16 @@ impl Explosion {
                     // same order, without walking the bodies again; and an
                     // empty cell has none (ADR-681).
                     let (mask, start) = self.solid_cell(w, hit.cell, &offsets);
-                    let mut bits = if subcell >= 64 {
-                        0
-                    } else {
-                        mask & (!0u64 << subcell)
-                    };
-                    if self.ground_spent(matter.as_deref(), c, hit.pressure, mask, start) {
-                        // As refused as each claim would be; nothing changes.
-                        if let Some(m) = matter.as_deref_mut() {
-                            for s in BitIter(bits) {
+                    let spent = self.ground_spent(matter.as_deref(), c, hit.pressure, &mask, start);
+                    for s in mask.indices_from(subcell) {
+                        if spent {
+                            if let Some(m) = matter.as_deref_mut() {
                                 let o = offsets[s];
                                 m.count_unpaid(w, [p[0] + o[0], p[1] + o[1], p[2] + o[2]]);
                             }
+                            continue;
                         }
-                        bits = 0;
-                    }
-                    while bits != 0 {
-                        let s = bits.trailing_zeros() as usize;
-                        bits &= bits - 1;
-                        let m = self.solid_mats
-                            [start + (mask & ((1u64 << s) - 1)).count_ones() as usize];
+                        let m = self.solid_mats[start + mask.rank(s)];
                         self.contact_cursor = s * actors + units.len();
                         let o = offsets[s];
                         let q = [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
@@ -2852,26 +2856,16 @@ impl Explosion {
             // Only ground is left of this contact: its cells with matter,
             // read ahead, or read now.
             let (mask, start) = self.solid_cell(w, hit.cell, &offsets);
-            let mut bits = if from >= 64 {
-                0
-            } else {
-                mask & (!0u64 << from)
-            };
-            if self.ground_spent(matter.as_deref(), c, hit.pressure, mask, start) {
-                // As refused as each claim would be; nothing changes.
-                if let Some(m) = matter.as_deref_mut() {
-                    for s in BitIter(bits) {
-                        let o = offsets[s];
+            let spent = self.ground_spent(matter.as_deref(), c, hit.pressure, &mask, start);
+            for subcell in mask.indices_from(from) {
+                if spent {
+                    if let Some(m) = matter.as_deref_mut() {
+                        let o = offsets[subcell];
                         m.count_unpaid(w, [p[0] + o[0], p[1] + o[1], p[2] + o[2]]);
                     }
+                    continue;
                 }
-                bits = 0;
-            }
-            while bits != 0 {
-                let subcell = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                let m =
-                    self.solid_mats[start + (mask & ((1u64 << subcell) - 1)).count_ones() as usize];
+                let m = self.solid_mats[start + mask.rank(subcell)];
                 // No body can remain in this subcell. Preserve the canonical
                 // ground cursor before attempting a possibly deferred claim.
                 self.contact_cursor = subcell * actors + count;
@@ -3246,10 +3240,11 @@ fn read_cell_into(
     cell: [i32; 3],
     _offsets: &[[i32; 3]],
     mats: &mut Vec<u16>,
-) -> u64 {
+) -> contact_mask::Mask {
     let p: [i32; 3] = std::array::from_fn(|a| origin[a] + cell[a] * edge);
-    let mut mask = 0u64;
+    let mut mask = contact_mask::Mask::default();
     if !cell_is_air(w, p, edge) {
+        mask = contact_mask::Mask::for_voxels((edge as usize).pow(3));
         let x0 = p[0].max(0);
         let x1 = (p[0] + edge).min(w.nx as i32);
         let mut cursor = World::mat_cursor();
@@ -3261,7 +3256,7 @@ fn read_cell_into(
                         let x = x0 + bits.trailing_zeros() as i32;
                         bits &= bits - 1;
                         let s = x - p[0] + edge * (y - p[1] + edge * (z - p[2]));
-                        mask |= 1 << s;
+                        mask.insert(s as usize);
                         mats.push(material_cached(w, &mut cursor, [x, y, z]));
                     }
                 }
@@ -6969,7 +6964,7 @@ impl Explosion {
             }
             pending.push_back(hit);
         }
-        if !(1..=4).contains(&cell)
+        if !(1..=16).contains(&cell)
             || (pending.is_empty() && contact_cursor != 0)
             || (0..3).any(|a| {
                 at[a] < 0

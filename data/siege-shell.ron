@@ -4,16 +4,17 @@
     delivery: Blast,
     motion: Ballistic,
     charge_ticks: 24,
-    half_cells: 28,
-    cell_units: 4,
-    energy: 40000,
-    // 360 MJ of the charge reaches bodies; 540 MJ pays terrain fracture.
-    material_energy_j: 900000000,
+    // Keep 65^3 pressure cells; the engine grows their edge with charge yield.
+    half_cells: 32,
+    cell_units: 4, // Minimum edge; stock yield derives 9, with exact wide contacts.
+    // Ten times the former pressure envelope; finite fracture budget below.
+    energy: 400000,
+    // 1.6 GJ reaches bodies; 2.4 GJ pays terrain fracture, within the u32 wire field.
+    material_energy_j: 4000000000,
     air_cost: 100,
     soil_resistance: 165,
     concrete_resistance: 380,
-    // Intact armor still stops the stock shell; repeated hits and a 4x
-    // charge can tear the exposed face instead of leaving it immaculate.
+    // The heavy siege envelope can penetrate armour; material still pays work.
     steel_resistance: 6000,
     unit_role_resistance_milli: (1000, 1800, 650, 1100, 350),
     wave_work_per_tick: 65536,
@@ -30,13 +31,13 @@
     // The fireball lights fuel within thirty-two units: eighty heat at the
     // centre, falling to nothing at the edge, so the crowns of the trees
     // beside the one it destroys catch (ADR-277).
-    heat_units: 24,
+    heat_units: 32,
     heat_per_cell: 80,
     gravity: 98,
     gas_cell_units: 5,
     // Visible cubes are larger than the transport grid; the physics is unchanged.
     gas_display_mm: 640,
-    gas_source_radius: 32,
+    gas_source_radius: 69,
     gas_temperature_k: 2900,
     gas_fuel_milli: 1800,
     gas_pressure_milli: 2200,

@@ -1,6 +1,59 @@
 //! Read-ahead is disposable: it must preserve ordered contacts and live matter.
 use super::*;
 
+#[test]
+fn heavy_pressure_cells_destroy_ground_beyond_the_old_radius() {
+    struct Flat;
+    impl Generator for Flat {
+        fn material(&self, _: u32, y: u32, _: u32) -> u16 {
+            if y < 16 {
+                1
+            } else {
+                0
+            }
+        }
+    }
+    let c = ExplosionConfig::from_ron(include_str!("../../../data/siege-shell.ron")).unwrap();
+    let mut world = World::new(1024, 64, 1024, 4096, Box::new(Flat));
+    let mut burst = Explosion::with_damage(&world, [512, 15, 512], &c, &[], &SurfaceWork::new());
+    assert_eq!(burst.cell, 9);
+    assert_eq!(burst.wave.size(), 65);
+    let target = [722, 15, 512]; // 210 > the former 128-unit window.
+    let mut dents = SurfaceWork::new();
+    let mut changed = Vec::new();
+    while !burst.wave.finished() {
+        burst.wave.advance_contacts(65536);
+    }
+    let cell = std::array::from_fn(|a| (target[a] - burst.origin[a]) / burst.cell);
+    let pressure = burst.wave.pressure_at(cell.map(|v| v as usize));
+    assert!(
+        pressure >= c.soil_resistance,
+        "field never reached beyond the old radius"
+    );
+    // Isolate this real frontier contact; draining millions of other terrain
+    // edits would measure the whole crater rather than this regression.
+    burst.pending.push_back(phys::blast::Hit {
+        cell,
+        pressure,
+        broken: true,
+    });
+    burst.step(
+        &mut world,
+        65536,
+        &mut [],
+        &mut dents,
+        &mut changed,
+        &c,
+        None,
+    );
+    world.flush();
+    assert_eq!(
+        material(&world, target),
+        0,
+        "strong wave was clipped to the old radius"
+    );
+}
+
 struct Pattern;
 impl Generator for Pattern {
     fn material(&self, x: u32, y: u32, z: u32) -> u16 {
@@ -16,7 +69,8 @@ fn fixture(edge: i32, count: usize) -> (World, Explosion) {
     let mut c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
     c.cell_units = edge;
     c.half_cells = 32;
-    let w = World::new(320, 320, 320, 100, Box::new(Pattern));
+    let side = (65 * edge + 16).max(320) as u32;
+    let w = World::new(side, side, side, 100, Box::new(Pattern));
     let mut e = Explosion::begin([32 * edge; 3], &c, &[]);
     // Make the ring genuinely wrap, rather than testing only its first slice.
     e.pending.reserve(count);
@@ -47,7 +101,7 @@ fn saved(e: &Explosion) -> Vec<u8> {
 
 #[test]
 fn read_ahead_matches_scalar_live_material_and_preserves_wrapped_contacts() {
-    for edge in [1, 2, 4] {
+    for edge in [1, 2, 4, 8, 9, 12, 16] {
         let (mut w, mut e) = fixture(edge, 128);
         // Keep edited samples off the world's immutable outer frame.
         // The scaling probe below deliberately keeps its original fixture.
@@ -77,19 +131,19 @@ fn read_ahead_matches_scalar_live_material_and_preserves_wrapped_contacts() {
                     if left == 0 {
                         break;
                     }
-                    let mut mask = 0;
+                    let mut mask = contact_mask::Mask::default();
                     let start = mats.len() as u32;
                     for (index, offset) in subcell_offsets(edge).iter().enumerate() {
                         let p =
                             std::array::from_fn(|a| e.origin[a] + hit.cell[a] * edge + offset[a]);
                         let mat = material(&w, p);
                         if mat != 0 {
-                            mask |= 1u64 << index;
+                            mask.insert(index);
                             mats.push(mat);
                         }
                     }
-                    expected.push((hit.cell, mask, start));
                     left = left.saturating_sub(1 + mask.count_ones() as usize);
+                    expected.push((hit.cell, mask, start));
                 }
                 e.read_contacts(&w, budget);
                 assert_eq!(

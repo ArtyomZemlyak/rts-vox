@@ -348,6 +348,8 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 button(p, font, "Начать бой", Action::BattleStart);
                 button(p, font, "Повторить бой", Action::BattleReplay);
                 button(p, font, "Другой бой", Action::BattleChoose);
+                let manual = button(p, font, "Управлять юнитом", Action::Play);
+                p.commands().entity(manual).insert(RangeOnly);
                 let summary = button(p, font, "Сводка", Action::Drawer(5));
                 p.commands().entity(summary).insert(BattleButton);
                 button(p, font, "К цели задачи", Action::MissionTarget);
@@ -811,7 +813,12 @@ pub fn refresh(
                         sim_core::blast::battle::Phase::Setup => {
                             "РАССТАНОВКА · выберите бой или управление без боя"
                         }
-                        sim_core::blast::battle::Phase::Fighting => "БОЙ · уничтожьте противника",
+                        sim_core::blast::battle::Phase::Fighting if view.autonomous => {
+                            "ИИ × ИИ · ваш приказ передаёт вам управление"
+                        }
+                        sim_core::blast::battle::Phase::Fighting => {
+                            "БОЙ · ЛКМ/рамка — выбор, ПКМ — приказ"
+                        }
                         sim_core::blast::battle::Phase::Victory => "ПОБЕДА",
                         sim_core::blast::battle::Phase::Defeat => "ПОРАЖЕНИЕ",
                         sim_core::blast::battle::Phase::Draw => "НИЧЬЯ",

@@ -104,6 +104,32 @@ pub struct ExplosionConfig {
 }
 
 impl ExplosionConfig {
+    pub const MAX_MATERIAL_ENERGY_J: u32 = 4_000_000_000;
+
+    /// Keep the pressure grid bounded in cell count, not in world radius.
+    /// Above the former heavy-charge reference, equal-overpressure distances
+    /// grow with the cube root of yield. Exact contacts refine every voxel.
+    pub fn propagation_cell_units(&self) -> i32 {
+        if self.energy <= 40_000 {
+            return self.cell_units;
+        }
+        let target = u64::from(self.energy) * 4 * 4 * 4;
+        let mut edge = self.cell_units;
+        while (edge as u64).pow(3) * 40_000 < target {
+            edge += 1;
+        }
+        edge
+    }
+
+    /// Scale the finite charge without narrowing an overflowing u64 product.
+    /// Keep live tuning within the same bounds as data and restored configs.
+    pub fn at_power(mut self, power_milli: u32) -> Self {
+        self.energy =
+            (u64::from(self.energy) * u64::from(power_milli) / 1000).clamp(1, 1_000_000) as u32;
+        self.material_energy_j = (u64::from(self.material_energy_j) * u64::from(power_milli) / 1000)
+            .min(u64::from(Self::MAX_MATERIAL_ENERGY_J)) as u32;
+        self
+    }
     /// Visual source volume follows charge strength, so its radius scales
     /// with the cube root rather than filling the fixed gas window at 4x.
     pub fn gas_radius_at_power(&self, power_milli: u32) -> i32 {
@@ -141,9 +167,9 @@ impl ExplosionConfig {
         let c = self;
         if !(1..=32).contains(&c.half_cells)
             || c.charge_ticks > c.fire_tick
-            || !(1..=4).contains(&c.cell_units)
+            || !(1..=16).contains(&c.cell_units)
             || !(1..=1_000_000).contains(&c.energy)
-            || c.material_energy_j > 1_000_000_000
+            || c.material_energy_j > Self::MAX_MATERIAL_ENERGY_J
             || c.air_cost != 100
             || c.unit_ablation_resistance > 1_000_000
             || [c.soil_resistance, c.concrete_resistance, c.steel_resistance]
@@ -285,6 +311,25 @@ mod display_tests {
 #[cfg(test)]
 mod gravity_tests {
     use super::*;
+
+    #[test]
+    fn heavy_siege_charge_scales_without_overflow_and_keeps_supported_bounds() {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/siege-shell.ron")).unwrap();
+        assert_eq!(c.energy, 400_000);
+        assert_eq!(c.cell_units, 4);
+        assert_eq!(c.propagation_cell_units(), 9);
+        assert_eq!(c.material_energy_j, 4_000_000_000);
+        for power in [1000, 2000, 4000, u32::MAX] {
+            let scaled = c.at_power(power);
+            scaled.validate().unwrap();
+            assert_eq!(
+                scaled.material_energy_j,
+                ExplosionConfig::MAX_MATERIAL_ENERGY_J
+            );
+            assert!(scaled.energy >= c.energy);
+            assert!(scaled.propagation_cell_units() >= c.propagation_cell_units());
+        }
+    }
 
     /// Одно тяготение на юнита, кусок и снаряд (ADR-173, ADR-658):
     /// пресеты оружия и огонь полигона повторяют число `data/sim.ron`.

@@ -244,7 +244,7 @@ const WEAPON: [Knob; 13] = [
         "Энергия на обломки, Дж",
         1_000_000.0,
         0.0,
-        1_000_000_000.0,
+        ExplosionConfig::MAX_MATERIAL_ENERGY_J as f64,
     ),
     k(
         "weapon.hull_impulse_milli",
@@ -702,7 +702,9 @@ fn i(v: f64) -> i32 {
 fn set_weapon(c: &mut ExplosionConfig, f: &str, v: f64) {
     match f {
         "energy" => c.energy = u(v).clamp(1, 1_000_000),
-        "material_energy_j" => c.material_energy_j = u(v).min(1_000_000_000),
+        "material_energy_j" => {
+            c.material_energy_j = u(v).min(ExplosionConfig::MAX_MATERIAL_ENERGY_J)
+        }
         "hull_impulse_milli" => c.hull_impulse_milli = u(v).min(100_000),
         "soil_resistance" => c.soil_resistance = u(v).max(1),
         "concrete_resistance" => c.concrete_resistance = u(v).max(1),

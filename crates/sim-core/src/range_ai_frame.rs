@@ -1,6 +1,7 @@
 //! One-step policy boundary. The caller owns the journal and must reserve its
 //! sink before recording. No future tape is hidden in world/checkpoint state.
 use super::*;
+use crate::blast::battle::{orders, Order};
 use fx::blob::{Blob, Scan};
 
 #[cfg(test)]
@@ -56,6 +57,42 @@ impl CommandRuntime {
                 {
                     phase = Phase::Fighting;
                     next_tick = self.world.tick;
+                }
+                Command::Order {
+                    actor,
+                    order,
+                    destination,
+                } => {
+                    if !matches!(
+                        self.world.manual_order_admission(
+                            phase,
+                            orders::Request {
+                                actor,
+                                order,
+                                destination
+                            }
+                        ),
+                        orders::Admission::Rejected
+                    ) {
+                        autonomous = false;
+                    }
+                }
+                Command::FormationMove {
+                    actor, destination, ..
+                } => {
+                    if !matches!(
+                        self.world.manual_order_admission(
+                            phase,
+                            orders::Request {
+                                actor,
+                                order: Order::Move,
+                                destination: Some(destination)
+                            }
+                        ),
+                        orders::Admission::Rejected
+                    ) {
+                        autonomous = false;
+                    }
                 }
                 _ => {}
             }

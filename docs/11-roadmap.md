@@ -216,7 +216,7 @@ grep -rn 'QUESTION' docs/ | grep stage-0
 
 ```
 sim-cli --ticks 600 --dump-hash
-battle ticks=600 threads=1 hash=f2e2ec65c4c6f90e
+battle ticks=600 threads=1 hash=635200a9c3fc1530
 ```
 
 Контрольное число соответствует общим дальностям и допуску атаки (ADR-726),

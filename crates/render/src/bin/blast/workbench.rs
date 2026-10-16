@@ -837,15 +837,77 @@ fn remove(layout: &mut RangeLayout, selected: Selection) {
     }
 }
 
-/// Presentation ray only. Half-cell stepping is bounded by the 640-cell map.
+/// Clip the presentation ray to the actual world, then visit each crossed voxel
+/// once. Camera distance costs no work, and there is no small-map distance cap.
 /// The authoritative shot uses its separate swept integer collision.
-fn pick(sim: &BlastRange, ray: Ray3d) -> Option<([i32; 3], Option<Selection>)> {
-    for step in 0..2600 {
-        let v = ray.origin + *ray.direction * (step as f32 * 0.5);
-        let p = v.floor().as_ivec3().to_array();
-        if (0..3).any(|a| p[a] < 0 || p[a] >= sim.size()[a] as i32) {
-            continue;
+fn visit_pick_ray<T>(
+    size: [u32; 3],
+    ray: Ray3d,
+    mut visit: impl FnMut([i32; 3]) -> Option<T>,
+) -> Option<T> {
+    if size.contains(&0) {
+        return None;
+    }
+    let origin = ray.origin.to_array().map(f64::from);
+    let direction = ray.direction.to_array().map(f64::from);
+    let (mut enter, mut exit) = (0.0_f64, f64::INFINITY);
+    for a in 0..3 {
+        if direction[a] == 0.0 {
+            if origin[a] < 0.0 || origin[a] >= f64::from(size[a]) {
+                return None;
+            }
+        } else {
+            let lo = -origin[a] / direction[a];
+            let hi = (f64::from(size[a]) - origin[a]) / direction[a];
+            enter = enter.max(lo.min(hi));
+            exit = exit.min(lo.max(hi));
         }
+    }
+    if enter >= exit {
+        return None;
+    }
+    let mut p = [0_i32; 3];
+    let mut next = [f64::INFINITY; 3];
+    let mut delta = [f64::INFINITY; 3];
+    let mut step = [0_i32; 3];
+    for a in 0..3 {
+        let at = origin[a] + direction[a] * enter;
+        // A negative ray entering exactly on a face belongs to the lower cell.
+        p[a] = if direction[a] < 0.0 {
+            at.ceil() - 1.0
+        } else {
+            at.floor()
+        } as i32;
+        p[a] = p[a].clamp(0, size[a] as i32 - 1);
+        if direction[a] != 0.0 {
+            step[a] = if direction[a] > 0.0 { 1 } else { -1 };
+            let face = p[a] + i32::from(step[a] > 0);
+            next[a] = (f64::from(face) - origin[a]) / direction[a];
+            delta[a] = 1.0 / direction[a].abs();
+        }
+    }
+    loop {
+        if let Some(hit) = visit(p) {
+            return Some(hit);
+        }
+        let t = next.into_iter().fold(f64::INFINITY, f64::min);
+        if t >= exit {
+            return None;
+        }
+        for a in 0..3 {
+            if next[a] == t {
+                p[a] += step[a];
+                if p[a] < 0 || p[a] >= size[a] as i32 {
+                    return None;
+                }
+                next[a] += delta[a];
+            }
+        }
+    }
+}
+
+fn pick(sim: &BlastRange, ray: Ray3d) -> Option<([i32; 3], Option<Selection>)> {
+    visit_pick_ray(sim.size(), ray, |p| {
         if let Some(i) = sim.units.iter().position(|u| u.solid(p)) {
             return Some((p, Some(Selection::Unit(i))));
         }
@@ -876,8 +938,8 @@ fn pick(sim: &BlastRange, ray: Ray3d) -> Option<([i32; 3], Option<Selection>)> {
                 .map(Selection::Shield);
             return Some((p, b.or(dome)));
         }
-    }
-    None
+        None
+    })
 }
 
 pub fn issue_battle_group_order(
@@ -1141,6 +1203,7 @@ pub fn input(
                                     } else {
                                         ids.len()
                                     };
+                                    let autonomous = scene.sim.battle.autonomous;
                                     let accepted = issue_battle_group_order(
                                         &mut scene.sim,
                                         &ids,
@@ -1150,7 +1213,11 @@ pub fn input(
                                     if eligible == 0 && order == Order::Move {
                                         scene.notice = "В выделении нет подвижных юнитов".into();
                                     } else if accepted == eligible && accepted > 0 {
-                                        scene.notice.clear();
+                                        if autonomous && !scene.sim.battle.autonomous {
+                                            scene.notice = "Ручное управление: союзный ИИ передал вам управление. ЛКМ — выбор, ПКМ — приказ.".into();
+                                        } else {
+                                            scene.notice.clear();
+                                        }
                                     } else if accepted > 0 {
                                         scene.notice = format!(
                                             "Приказ получили {accepted} из {eligible} юнитов"
@@ -1345,14 +1412,35 @@ fn ground_dash(
         giz.line(point(k), point(k + 1), colour);
     }
 }
+#[path = "workbench/ranges.rs"]
+mod ranges;
 /// The range marker follows dug ground but does not climb tree crowns or
 /// walls. It is a distance guide; solid cover still blocks a shot.
 fn ground_range(giz: &mut Gizmos, sim: &BlastRange, at: [i32; 2], radius: i32, colour: Color) {
+    ground_range_arc(
+        giz,
+        sim,
+        ranges::Arc {
+            circle: ranges::Circle {
+                centre: Vec2::new(at[0] as f32, at[1] as f32),
+                radius: radius as f32,
+            },
+            start: 0.0,
+            end: std::f32::consts::TAU,
+        },
+        colour,
+    );
+}
+fn ground_range_arc(giz: &mut Gizmos, sim: &BlastRange, arc: ranges::Arc, colour: Color) {
     let mut previous = None;
-    for i in 0..=64 {
-        let angle = i as f32 * std::f32::consts::TAU / 64.0;
-        let x = (at[0] as f32 + angle.cos() * radius as f32).round() as i32;
-        let z = (at[1] as f32 + angle.sin() * radius as f32).round() as i32;
+    let segments = ((arc.end - arc.start) * 64.0 / std::f32::consts::TAU)
+        .ceil()
+        .max(1.0) as usize;
+    for i in 0..=segments {
+        let angle = arc.start + (arc.end - arc.start) * i as f32 / segments as f32;
+        let point = arc.circle.centre + Vec2::from_angle(angle) * arc.circle.radius;
+        let x = point.x.round() as i32;
+        let z = point.y.round() as i32;
         let next = if x >= 0 && z >= 0 && x < sim.size()[0] as i32 && z < sim.size()[2] as i32 {
             let natural = natural_ground(sim.layout.as_ref(), x, z);
             let floor = sim_core::blast::motion::floor(&sim.world, x, z).min(natural);
@@ -1407,6 +1495,7 @@ pub fn overlay(
     panel: Res<panel::Panel>,
     mut flashes: ResMut<ShieldFlashes>,
     camera: Query<&Transform, With<EditorCamera>>,
+    mut range_outline: Local<ranges::Outline>,
 ) {
     let flat = Quat::from_rotation_arc(Vec3::Z, Vec3::Y);
     if let Some((point, radius)) = panel.mission.as_ref().and_then(panel::MissionRun::waypoint) {
@@ -1419,6 +1508,7 @@ pub fn overlay(
         );
     }
     if scene.sim.battle_mode() {
+        let mut selected_ranges = Vec::new();
         for (i, u) in scene.sim.units.iter().enumerate() {
             if !u.status.alive {
                 continue;
@@ -1436,19 +1526,22 @@ pub fn overlay(
             giz.circle(Isometry3d::new(p + Vec3::Y * 0.8, flat), radius, color);
             let selected = edit.selected_units.contains(&i)
                 || (edit.selected_units.is_empty() && edit.controlled == Some(i));
-            if panel.ranges && selected {
+            if panel.ranges && selected && u.status.weapon {
                 let reach = scene.sim.battle_attack_range(i).unwrap_or(0);
-                ground_range(
-                    &mut giz,
-                    &scene.sim,
-                    [u.at[0], u.at[2]],
-                    reach,
-                    if scene.sim.allied(i) {
-                        Color::srgba(0.48, 0.9, 1.0, 0.38)
-                    } else {
-                        Color::srgba(1.0, 0.48, 0.25, 0.38)
-                    },
-                );
+                if scene.sim.allied(i) {
+                    selected_ranges.push(ranges::Circle {
+                        centre: Vec2::new(p.x, p.z),
+                        radius: reach as f32,
+                    });
+                } else {
+                    ground_range(
+                        &mut giz,
+                        &scene.sim,
+                        [u.at[0], u.at[2]],
+                        reach,
+                        Color::srgba(1.0, 0.48, 0.25, 0.38),
+                    );
+                }
             }
             if selected {
                 giz.circle(
@@ -1464,6 +1557,14 @@ pub fn overlay(
                     from = to;
                 }
             }
+        }
+        for &arc in range_outline.update(selected_ranges) {
+            ground_range_arc(
+                &mut giz,
+                &scene.sim,
+                arc,
+                Color::srgba(0.48, 0.9, 1.0, 0.38),
+            );
         }
     } else if scene.sim.gun.status.alive && scene.sim.gun.status.weapon && panel.ranges {
         // Unit-target admission uses this same SIM-owned tactical radius.
@@ -2377,6 +2478,41 @@ mod tests {
         assert!(next.blocks.is_empty());
     }
     #[test]
+    fn pick_ray_skips_distant_air_and_visits_crossed_cells_once() {
+        let mut cells = Vec::new();
+        let _: Option<()> = visit_pick_ray(
+            [4, 4, 4],
+            Ray3d::new(Vec3::new(1.5, 8000.0, 1.5), Dir3::NEG_Y),
+            |p| {
+                cells.push(p);
+                None
+            },
+        );
+        assert_eq!(cells, [[1, 3, 1], [1, 2, 1], [1, 1, 1], [1, 0, 1]]);
+        cells.clear();
+        let _: Option<()> = visit_pick_ray(
+            [4, 4, 4],
+            Ray3d::new(Vec3::splat(8000.0), Dir3::new(Vec3::splat(-1.0)).unwrap()),
+            |p| {
+                cells.push(p);
+                None
+            },
+        );
+        assert_eq!(cells, [[3, 3, 3], [2, 2, 2], [1, 1, 1], [0, 0, 0]]);
+        for ray in [
+            Ray3d::new(Vec3::new(1.5, 8000.0, 1.5), Dir3::Y),
+            Ray3d::new(Vec3::new(4.0, 8000.0, 1.5), Dir3::NEG_Y),
+            Ray3d::new(Vec3::new(-1.0, 1.5, 1.5), Dir3::NEG_X),
+        ] {
+            assert_eq!(visit_pick_ray([4, 4, 4], ray, |_| Some(())), None);
+        }
+        assert_eq!(
+            visit_pick_ray([0, 4, 4], Ray3d::new(Vec3::ZERO, Dir3::Y), |_| Some(())),
+            None
+        );
+    }
+
+    #[test]
     fn bounded_placements_and_click_pick_use_actual_occupancy() {
         let (mut w, c) = fixture();
         let mut next = w.layout.clone().unwrap();
@@ -2395,6 +2531,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hit.1, Some(Selection::Unit(1)));
+        assert_eq!(
+            pick(
+                &sim,
+                Ray3d::new(Vec3::new(439.0, 8000.0, 336.0), Dir3::NEG_Y)
+            ),
+            Some(hit),
+        );
+        let ground_ray = |height| Ray3d::new(Vec3::new(20.5, height, 20.5), Dir3::NEG_Y);
+        let ground = pick(&sim, ground_ray(180.0)).unwrap();
+        assert_eq!(pick(&sim, ground_ray(8000.0)), Some(ground));
+        assert_ne!(sim_core::blast::material(&sim.world, ground.0), 0);
         let mut too_many = w.layout.clone().unwrap();
         while too_many.units.len() <= 8 {
             too_many.units.push(too_many.units[0].clone());

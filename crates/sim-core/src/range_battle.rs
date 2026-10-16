@@ -385,28 +385,20 @@ impl Battle {
         );
         let mut shell_config =
             ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
-        shell_config.energy = shell_config.energy * tuning.tank_power_milli / 1000;
-        shell_config.material_energy_j = (u64::from(shell_config.material_energy_j)
-            * u64::from(tuning.tank_power_milli)
-            / 1000) as u32;
+        shell_config = shell_config.at_power(tuning.tank_power_milli);
         shell_config.unit_ablation_resistance = resistance;
         // The same tank's power drives either round.
         let mut kinetic_config =
             ExplosionConfig::from_ron(include_str!("../../../data/kinetic-shell.ron")).unwrap();
-        kinetic_config.energy = kinetic_config.energy * tuning.tank_power_milli / 1000;
-        kinetic_config.material_energy_j = (u64::from(kinetic_config.material_energy_j)
-            * u64::from(tuning.tank_power_milli)
-            / 1000) as u32;
+        kinetic_config = kinetic_config.at_power(tuning.tank_power_milli);
         kinetic_config.unit_ablation_resistance = resistance;
         let mut bullet_config =
             ExplosionConfig::from_ron(include_str!("../../../data/machine-gun.ron")).unwrap();
         bullet_config.unit_ablation_resistance = resistance;
         let energetic = |text| {
-            let mut c = ExplosionConfig::from_ron(text).expect("energy weapon tuning");
-            c.energy = c.energy * tuning.tank_power_milli / 1000;
-            c.material_energy_j =
-                (u64::from(c.material_energy_j) * u64::from(tuning.tank_power_milli) / 1000) as u32;
-            c
+            ExplosionConfig::from_ron(text)
+                .expect("energy weapon tuning")
+                .at_power(tuning.tank_power_milli)
         };
         let energy_config = energetic(include_str!("../../../data/energy-cannon.ron"));
         let anni_config = energetic(include_str!("../../../data/anni-cannon.ron"));
@@ -1479,6 +1471,23 @@ impl BlastRange {
     pub fn execute_battle_command(&mut self, command: commands::Command) -> commands::Outcome {
         self.execute_command(command)
     }
+    fn manual_order_admission(&self, phase: Phase, request: orders::Request) -> orders::Admission {
+        if !self.battle_mode()
+            || !(phase == Phase::Fighting
+                || phase == Phase::Setup
+                    && matches!(request.order, Order::Move | Order::Hold | Order::Dig(_)))
+        {
+            orders::Admission::Rejected
+        } else {
+            orders::validate(
+                self,
+                &self.battle.actors,
+                request,
+                true,
+                orders::Replacement::Explicit,
+            )
+        }
+    }
     /// Shared synchronous ingress. Setup tuning and battle orders retain their
     /// own admission rules; external owners schedule this same operation.
     pub fn execute_command(&mut self, command: commands::Command) -> commands::Outcome {
@@ -1563,56 +1572,52 @@ impl BlastRange {
                 fallback,
             } => (actor, Order::Move, Some(destination), Some(fallback)),
         };
-        let outcome = if !self.battle_mode()
-            || !(self.battle.phase == Phase::Fighting
-                || self.battle.phase == Phase::Setup
-                    && matches!(order, Order::Move | Order::Hold | Order::Dig(_)))
-        {
-            commands::Outcome::Rejected
-        } else {
-            let request = orders::Request {
-                actor: id,
-                order,
-                destination,
-            };
-            match orders::validate(
-                self,
-                &self.battle.actors,
-                request,
-                true,
-                orders::Replacement::Explicit,
-            ) {
-                orders::Admission::Rejected => commands::Outcome::Rejected,
-                orders::Admission::Unchanged => commands::Outcome::Unchanged,
-                orders::Admission::Apply => {
-                    // A digger out of reach drives to its face; the route
-                    // is derived, never part of the command (ADR-672).
-                    let request = match order {
-                        Order::Dig(face) => orders::Request {
-                            destination: self.dig_approach(id, face),
-                            ..request
-                        },
-                        _ => request,
-                    };
-                    // Between ticks, a manual Move uses the current physical rubble.
-                    let routed = order == Order::Move
-                        || matches!(order, Order::Dig(_)) && request.destination.is_some();
-                    let current = (routed && fallback.is_none()).then(|| self.current_rubble());
-                    let mut executor = orders::Executor {
-                        units: &mut self.units,
-                        actors: &mut self.battle.actors,
-                        world: &self.world,
-                        rubble: current.as_ref().unwrap_or(&self.rubble),
-                        tick: self.tick,
-                    };
-                    if let Some(fallback) = fallback {
-                        executor.queue(request, fallback)
-                    } else {
-                        executor.apply(request, orders::Replacement::Explicit)
-                    }
+        let request = orders::Request {
+            actor: id,
+            order,
+            destination,
+        };
+        let mut outcome = match self.manual_order_admission(self.battle.phase, request) {
+            orders::Admission::Rejected => commands::Outcome::Rejected,
+            orders::Admission::Unchanged => commands::Outcome::Unchanged,
+            orders::Admission::Apply => {
+                // A digger out of reach drives to its face; the route
+                // is derived, never part of the command (ADR-672).
+                let request = match order {
+                    Order::Dig(face) => orders::Request {
+                        destination: self.dig_approach(id, face),
+                        ..request
+                    },
+                    _ => request,
+                };
+                // Between ticks, a manual Move uses the current physical rubble.
+                let routed = order == Order::Move
+                    || matches!(order, Order::Dig(_)) && request.destination.is_some();
+                let current = (routed && fallback.is_none()).then(|| self.current_rubble());
+                let mut executor = orders::Executor {
+                    units: &mut self.units,
+                    actors: &mut self.battle.actors,
+                    world: &self.world,
+                    rubble: current.as_ref().unwrap_or(&self.rubble),
+                    tick: self.tick,
+                };
+                if let Some(fallback) = fallback {
+                    executor.queue(request, fallback)
+                } else {
+                    executor.apply(request, orders::Replacement::Explicit)
                 }
             }
         };
+        // An admitted human order takes control from the allied rules AI.
+        // Enemy decisions continue; rejected commands never change ownership.
+        // Persist the existing team flag so save/replay need no new state.
+        // An admitted but unreachable Move also expresses manual ownership.
+        if outcome.admitted() && self.battle.autonomous {
+            self.battle.autonomous = false;
+            if outcome == commands::Outcome::Unchanged {
+                outcome = commands::Outcome::Applied;
+            }
+        }
         // A new order ends a haul: it decides where to go (ADR-673).
         if matches!(
             outcome,

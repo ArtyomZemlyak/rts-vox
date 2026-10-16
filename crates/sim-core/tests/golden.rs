@@ -47,7 +47,8 @@ use sim_core::blast::BlastRange;
 // ADR-725: doubled Strider speed; Windows physics 1/4/8 agree (analysis/300).
 // ADR-726: shared attack-distance balance and centre-based admission;
 // Windows physics 1/4/8 agree (analysis/301).
-const GOLDEN_600: u64 = 0xf2e2_ec65_c4c6_f90e;
+// ADR-739/740: stronger T3 charge and growing physical radius; physics 1/4/8 agree (analysis/313).
+const GOLDEN_600: u64 = 0x6352_00a9_c3fc_1530;
 
 /// Сценарий собирается **из тех же данных, что у игры**: `include_str!`
 /// разворачивается на сборке, ввода-вывода в тесте нет, а литералы
