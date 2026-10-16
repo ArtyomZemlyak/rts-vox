@@ -1,5 +1,5 @@
 //! Authored encounters use the same placement data as the range editor.
-use crate::range::{RangeBlock, RangeUnitDef, RangeUnitKind, RangeZone};
+use crate::range::{RangeBlock, RangeLayout, RangeUnitDef, RangeUnitKind, RangeZone};
 use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize)]
 pub struct Skirmish {
@@ -8,6 +8,8 @@ pub struct Skirmish {
     pub zone: RangeZone,
     pub units: Vec<RangeUnitDef>,
     pub blocks: Vec<RangeBlock>,
+    #[serde(default)]
+    pub mission: Option<Mission>,
 }
 impl Skirmish {
     pub fn from_ron(src: &str) -> Result<Self, String> {
@@ -21,8 +23,138 @@ impl Skirmish {
         {
             return Err("skirmish needs a briefing and two bounded armies".into());
         }
+        if let Some(mission) = &s.mission {
+            mission.validate(&s)?;
+        }
         Ok(s)
     }
+    /// Prepare authored terrain and actors through the ordinary layout loader.
+    pub fn apply_to(&self, mut layout: RangeLayout) -> Result<RangeLayout, String> {
+        let stock =
+            crate::range_battle::Tuning::from_ron(include_str!("../../../data/range-battle.ron"))?;
+        let zone = layout
+            .zones
+            .iter()
+            .position(|z| z.name == stock.zone.name)
+            .ok_or("No battle sector")?;
+        if self.mission.is_some() {
+            layout.blocks.retain(|b| {
+                !(b.min[0] < self.zone.max[0]
+                    && b.max[0] > self.zone.min[0]
+                    && b.min[2] < self.zone.max[1]
+                    && b.max[2] > self.zone.min[1])
+            });
+        }
+        layout.battle = true;
+        layout.units = self.units.clone();
+        layout.gun = self.zone.spawn;
+        layout.target = self.zone.target;
+        layout.zones[zone] = self.zone.clone();
+        layout.blocks.extend(self.blocks.clone());
+        if let Some(course) = &mut layout.course {
+            course.patrols.clear();
+        }
+        layout.validate()?;
+        Ok(layout)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Mission {
+    pub focus: RangeUnitKind,
+    #[serde(default)]
+    pub protect: Vec<usize>,
+    pub steps: Vec<MissionStep>,
+}
+#[derive(Clone, Debug, Deserialize)]
+pub struct MissionStep {
+    pub text: String,
+    pub goal: MissionGoal,
+}
+#[derive(Clone, Debug, Deserialize)]
+pub enum MissionGoal {
+    Reach {
+        actors: Vec<usize>,
+        count: usize,
+        point: [i32; 2],
+        radius: i32,
+    },
+    Destroy {
+        actors: Vec<usize>,
+    },
+}
+impl Mission {
+    fn validate(&self, preset: &Skirmish) -> Result<(), String> {
+        let valid_ids = |ids: &[usize], allied| {
+            !ids.is_empty()
+                && ids.len() <= preset.units.len()
+                && ids.iter().enumerate().all(|(i, &id)| {
+                    preset.units.get(id).is_some_and(|u| u.allied == allied)
+                        && !ids[..i].contains(&id)
+                })
+        };
+        if self.steps.is_empty()
+            || self.steps.len() > 8
+            || !preset
+                .units
+                .iter()
+                .any(|u| u.allied && u.kind == self.focus)
+            || (!self.protect.is_empty() && !valid_ids(&self.protect, true))
+            || preset.blocks.len() > crate::range::MAX_RANGE_BLOCKS
+            || preset
+                .units
+                .iter()
+                .any(|u| !preset.zone.contains([u.at[0], u.at[2]], 0))
+            || self.steps.iter().any(|step| {
+                step.text.trim().is_empty()
+                    || step.text.chars().count() > 160
+                    || match &step.goal {
+                        MissionGoal::Reach {
+                            actors,
+                            count,
+                            point,
+                            radius,
+                        } => {
+                            !valid_ids(actors, true)
+                                || *count == 0
+                                || *count > actors.len()
+                                || !(1..=1000).contains(radius)
+                                || !preset.zone.contains(*point, *radius)
+                                || actors.iter().any(|&id| preset.units[id].kind.emplacement())
+                        }
+                        MissionGoal::Destroy { actors } => !valid_ids(actors, false),
+                    }
+            })
+        {
+            return Err("invalid tactical mission objectives".into());
+        }
+        Ok(())
+    }
+}
+
+/// Stable IDs keep the original six encounters available to tools and replays.
+pub const STOCK: &[&str] = &[
+    include_str!("../../../data/skirmish-breakthrough.ron"),
+    include_str!("../../../data/skirmish-pincer.ron"),
+    include_str!("../../../data/skirmish-spider.ron"),
+    include_str!("../../../data/skirmish-turrets.ron"),
+    include_str!("../../../data/skirmish-canister.ron"),
+    include_str!("../../../data/skirmish-siege.ron"),
+    include_str!("../../../data/mission-artillery.ron"),
+    include_str!("../../../data/mission-tanks-t1.ron"),
+    include_str!("../../../data/mission-tanks-t2.ron"),
+    include_str!("../../../data/mission-spider.ron"),
+    include_str!("../../../data/mission-strider.ron"),
+    include_str!("../../../data/mission-canister-mobile.ron"),
+    include_str!("../../../data/mission-bastion.ron"),
+    include_str!("../../../data/mission-turret-t1.ron"),
+    include_str!("../../../data/mission-turret-t2.ron"),
+    include_str!("../../../data/mission-canister-defense.ron"),
+    include_str!("../../../data/mission-siege-defense.ron"),
+    include_str!("../../../data/mission-base.ron"),
+];
+pub fn stock(id: usize) -> Result<Skirmish, String> {
+    Skirmish::from_ron(STOCK.get(id).ok_or("Unknown encounter")?)
 }
 
 /// A map-wide battle keeps the authored terrain and uses the bases as its
@@ -68,6 +200,65 @@ mod tests {
     use super::*;
     use crate::range::{RangeLayout, RangeLoadout};
 
+    #[test]
+    fn tactical_catalog_covers_every_kind_and_builds_real_bounded_layouts() {
+        let stock_layout =
+            RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        let mut focus = Vec::new();
+        let mut titles = std::collections::BTreeSet::new();
+        for (id, _) in STOCK.iter().enumerate() {
+            let preset = stock(id).unwrap();
+            assert!(titles.insert(preset.title.clone()));
+            let layout = preset.apply_to(stock_layout.clone()).unwrap();
+            assert_eq!(layout.units, preset.units);
+            assert_eq!(layout.zones.len(), stock_layout.zones.len());
+            if let Some(mission) = preset.mission {
+                focus.push(mission.focus);
+                for own in preset.units.iter().filter(|u| u.allied) {
+                    for enemy in preset.units.iter().filter(|u| !u.allied) {
+                        let dx = i64::from(own.at[0]) - i64::from(enemy.at[0]);
+                        let dz = i64::from(own.at[2]) - i64::from(enemy.at[2]);
+                        let ranges = crate::attack_ranges::stock();
+                        let reach = |u: &RangeUnitDef| match u.kind {
+                            RangeUnitKind::Base => 0,
+                            RangeUnitKind::Tank
+                            | RangeUnitKind::TurretT1
+                            | RangeUnitKind::TurretT2 => ranges.energy,
+                            RangeUnitKind::Strider => ranges.machine_gun,
+                            RangeUnitKind::Spider => ranges.spider_laser,
+                            RangeUnitKind::Artillery => ranges.artillery,
+                            RangeUnitKind::ArtilleryT2 | RangeUnitKind::ArtilleryTurretT2 => {
+                                ranges.canister
+                            }
+                            RangeUnitKind::ArtilleryTurretT3 => ranges.siege,
+                        };
+                        let max = reach(own).max(reach(enemy));
+                        assert!(
+                            dx * dx + dz * dz > i64::from(max) * i64::from(max),
+                            "unsafe deployment {id}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(focus.len(), 12);
+        assert!(RangeUnitKind::ALL.iter().all(|kind| focus.contains(kind)));
+        assert!(stock(STOCK.len()).is_err());
+    }
+    #[test]
+    fn mission_references_counts_and_protection_are_validated() {
+        let valid = include_str!("../../../data/mission-artillery.ron");
+        for broken in [
+            valid.replace("actors: [0, 1]", "actors: [0, 99]"),
+            valid.replace("count: 1", "count: 3"),
+            valid.replace("radius: 260", "radius: -1"),
+            valid.replace("actors: [6]", "actors: [0]"),
+            valid.replace("protect: []", "protect: [6]"),
+            valid.replace("actors: [0, 1]", "actors: [0, 0]"),
+        ] {
+            assert!(Skirmish::from_ron(&broken).is_err());
+        }
+    }
     #[test]
     fn world_armies_include_all_kinds_and_authored_ammunition() {
         let preset = WorldBattle::from_ron(include_str!("../../../data/battle-world.ron")).unwrap();

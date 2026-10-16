@@ -1,0 +1,24 @@
+(
+ title: "Артиллерия: занять рубеж",
+ briefing: "На старте свои держат огонь. ПКМ по земле — движение; по врагу — атака. Выведите две САУ в золотой круг. Используйте дальность и навесную траекторию, а танки оставьте прикрывать подход. Сначала подавите T2, затем добейте батарею. Потеря одной САУ допустима.",
+ zone: (name: "Артиллерия: занять рубеж", min: (2800,1800), max: (6800,3700), spawn: (3000,16,2600), target: (6300,16,2600)),
+ units: [
+  (kind: Artillery, allied: true, at: (3160,16,2480)),
+  (kind: Artillery, allied: true, at: (3160,16,2760)),
+  (kind: Tank, allied: true, at: (3370,16,2220)),
+  (kind: Tank, allied: true, at: (3370,16,3040)),
+  (kind: TurretT1, allied: false, at: (6200,16,2390)),
+  (kind: TurretT1, allied: false, at: (6200,16,2820)),
+  (kind: TurretT2, allied: false, at: (6460,16,2600)),
+ ],
+ blocks: [
+  (min: (5940,16,2300), max: (5962,50,2470), material: 2),
+  (min: (5940,16,2740), max: (5962,50,2910), material: 2),
+  (min: (4450,16,2200), max: (4630,40,2270), material: 2),
+ ],
+ mission: Some((focus: Artillery, protect: [], steps: [
+  (text: "Доставьте хотя бы одну САУ на огневой рубеж", goal: Reach(actors: [0, 1], count: 1, point: (4700,2630), radius: 260)),
+  (text: "Подавите энергетическую турель T2", goal: Destroy(actors: [6])),
+  (text: "Уничтожьте две турели T1", goal: Destroy(actors: [4, 5])),
+ ])),
+)

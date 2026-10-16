@@ -262,42 +262,46 @@ impl Workshop {
         Ok(())
     }
     pub fn skirmish(&mut self, id: u8, config: ExplosionConfig) -> Result<String, String> {
-        let preset = modding::range_skirmish::Skirmish::from_ron(match id {
-            0 => include_str!("../../../../../data/skirmish-breakthrough.ron"),
-            1 => include_str!("../../../../../data/skirmish-pincer.ron"),
-            2 => include_str!("../../../../../data/skirmish-spider.ron"),
-            3 => include_str!("../../../../../data/skirmish-turrets.ron"),
-            4 => include_str!("../../../../../data/skirmish-canister.ron"),
-            5 => include_str!("../../../../../data/skirmish-siege.ron"),
-            _ => return Err("Неизвестный сценарий боя".into()),
-        })?;
-        let mut layout = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"))?;
-        layout.battle = true;
-        layout.units = preset.units;
-        layout.gun = preset.zone.spawn;
-        layout.target = preset.zone.target;
-        layout.blocks.extend(preset.blocks);
-        // Replace the existing flat battle sector, keeping one coherent map.
-        let stock = modding::range_battle::Tuning::from_ron(include_str!(
+        let preset = modding::range_skirmish::stock(id as usize)?;
+        let stock = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"))?;
+        let stock_zone = modding::range_battle::Tuning::from_ron(include_str!(
             "../../../../../data/range-battle.ron"
-        ))?;
-        let zone = layout
+        ))?
+        .zone
+        .name;
+        let zone = stock
             .zones
             .iter()
-            .position(|z| z.name == stock.zone.name)
+            .position(|z| z.name == stock_zone)
             .ok_or("Нет боевого участка")?;
-        layout.zones[zone] = preset.zone;
-        if let Some(course) = &mut layout.course {
-            course.patrols.clear();
-        }
+        let layout = preset.apply_to(stock)?;
         self.commit(layout, config)?;
         self.zone = zone;
         self.editing = true;
         self.selected = Some(Selection::Unit(0));
         self.controlled = Some(0);
         self.selected_units = vec![0];
-        self.pan = Vec2::ZERO;
-        self.zoom = if id == 3 { 1.35 } else { 0.85 };
+        self.pan = if preset.mission.is_some() {
+            let army: Vec<_> = preset.units.iter().filter(|u| u.allied).collect();
+            let centre = [0, 2].map(|axis| {
+                (army.iter().map(|u| u.at[axis]).min().unwrap()
+                    + army.iter().map(|u| u.at[axis]).max().unwrap()) as f32
+                    * 0.5
+            });
+            Vec2::new(
+                centre[0] - (preset.zone.min[0] + preset.zone.max[0]) as f32 * 0.5,
+                centre[1] - (preset.zone.min[1] + preset.zone.max[1]) as f32 * 0.5,
+            )
+        } else {
+            Vec2::ZERO
+        };
+        self.zoom = if preset.mission.is_some() {
+            1.0
+        } else if id == 3 {
+            1.35
+        } else {
+            0.85
+        };
         self.orbit = 0.0;
         self.pitch = 0.0;
         Ok(preset.briefing)
@@ -1378,6 +1382,15 @@ pub fn overlay(
     camera: Query<&Transform, With<EditorCamera>>,
 ) {
     let flat = Quat::from_rotation_arc(Vec3::Z, Vec3::Y);
+    if let Some((point, radius)) = panel.mission.as_ref().and_then(panel::MissionRun::waypoint) {
+        ground_range(
+            &mut giz,
+            &scene.sim,
+            point,
+            radius,
+            Color::srgb(1.0, 0.83, 0.25),
+        );
+    }
     if scene.sim.battle_mode() {
         for (i, u) in scene.sim.units.iter().enumerate() {
             if !u.status.alive {
@@ -2093,6 +2106,30 @@ mod tests {
             "empty far sector must not jump to the old patrol"
         );
         assert_eq!(w.target_unit(Some(4), 1), Some(4), "explicit attack wins");
+    }
+    #[test]
+    fn tactical_mission_camera_starts_on_own_deployment() {
+        let (mut workshop, config) = fixture();
+        workshop.skirmish(7, config).unwrap();
+        let zone = workshop.sector().unwrap();
+        let focus = Vec2::new(
+            (zone.min[0] + zone.max[0]) as f32 * 0.5,
+            (zone.min[1] + zone.max[1]) as f32 * 0.5,
+        ) + workshop.pan;
+        let own: Vec<_> = workshop
+            .layout
+            .as_ref()
+            .unwrap()
+            .units
+            .iter()
+            .filter(|u| u.allied)
+            .collect();
+        assert!((focus.x - own[0].at[0] as f32).abs() < 200.0);
+        assert!((focus.y - own[1].at[2] as f32).abs() < 300.0);
+        assert!(
+            focus.x < 4000.0,
+            "empty centre of arena is not the deployment"
+        );
     }
     #[test]
     fn spider_skirmish_preserves_the_map_and_places_both_armies() {

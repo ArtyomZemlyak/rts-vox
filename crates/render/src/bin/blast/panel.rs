@@ -143,6 +143,120 @@ impl ScenarioRun {
     }
 }
 
+/// Presentation milestones read one owned publication. Combat stays in SIM.
+pub struct MissionRun {
+    pub definition: modding::range_skirmish::Mission,
+    step: usize,
+    failed: bool,
+    generation: Option<u64>,
+}
+impl MissionRun {
+    pub(super) fn new(definition: modding::range_skirmish::Mission) -> Self {
+        Self {
+            definition,
+            step: 0,
+            failed: false,
+            generation: None,
+        }
+    }
+    pub(super) fn begin(&mut self, sim: &mut BlastRange, generation: u64) {
+        self.step = 0;
+        self.failed = false;
+        self.generation = Some(generation);
+        for id in 0..sim.units.len() {
+            if sim.allied(id) && sim.units[id].status.alive {
+                sim.battle_order(id, sim_core::blast::battle::Order::Hold, None);
+            }
+        }
+    }
+    pub(super) fn update(&mut self, view: &sim_core::blast::read_model::View) {
+        use modding::range_skirmish::MissionGoal;
+        if self.generation != Some(view.generation)
+            || self.failed
+            || self.step == self.definition.steps.len()
+        {
+            return;
+        }
+        let alive = |id: usize| view.units.get(id).is_some_and(|u| u.status.alive);
+        if self.definition.protect.iter().any(|&id| !alive(id)) {
+            self.failed = true;
+            return;
+        }
+        while let Some(step) = self.definition.steps.get(self.step) {
+            let (done, impossible) = match &step.goal {
+                MissionGoal::Destroy { actors } => (actors.iter().all(|&id| !alive(id)), false),
+                MissionGoal::Reach {
+                    actors,
+                    count,
+                    point,
+                    radius,
+                } => {
+                    let reached = actors
+                        .iter()
+                        .filter(|&&id| {
+                            view.units.get(id).is_some_and(|u| {
+                                let dx = u.position[0].sub(fx::Fx::from_int(point[0]));
+                                let dz = u.position[2].sub(fx::Fx::from_int(point[1]));
+                                u.status.alive
+                                    && dx.mul(dx).add(dz.mul(dz))
+                                        <= fx::Fx::from_int(*radius).mul(fx::Fx::from_int(*radius))
+                            })
+                        })
+                        .count();
+                    (
+                        reached >= *count,
+                        actors.iter().filter(|&&id| alive(id)).count() < *count,
+                    )
+                }
+            };
+            if impossible {
+                self.failed = true;
+            }
+            if !done {
+                break;
+            }
+            self.step += 1;
+        }
+        if self.step < self.definition.steps.len()
+            && matches!(
+                view.phase,
+                sim_core::blast::battle::Phase::Defeat | sim_core::blast::battle::Phase::Draw
+            )
+        {
+            self.failed = true;
+        }
+    }
+    pub(super) fn waypoint(&self) -> Option<([i32; 2], i32)> {
+        if self.failed {
+            return None;
+        }
+        match &self.definition.steps.get(self.step)?.goal {
+            modding::range_skirmish::MissionGoal::Reach { point, radius, .. } => {
+                Some((*point, *radius))
+            }
+            _ => None,
+        }
+    }
+    pub(super) fn readout(&self) -> String {
+        if self.failed {
+            return "ЗАДАЧА ПРОВАЛЕНА · повторите операцию".into();
+        }
+        match self.definition.steps.get(self.step) {
+            None => "ЗАДАЧА ВЫПОЛНЕНА · все этапы завершены".into(),
+            Some(step) => format!(
+                "ЗАДАЧА {}/{} · {}{}",
+                self.step + 1,
+                self.definition.steps.len(),
+                step.text,
+                self.waypoint().map_or(String::new(), |(p, _)| format!(
+                    "\nЗолотой круг: {}, {}",
+                    p[0], p[1]
+                ))
+            ),
+        }
+    }
+}
+
 #[derive(Resource)]
 pub struct Panel {
     pub drive: bool,
@@ -161,6 +275,7 @@ pub struct Panel {
     pub roster_page: usize,
     pub briefing: String,
     pub scenario_run: Option<ScenarioRun>,
+    pub mission: Option<MissionRun>,
     history: BTreeMap<u8, Vec<ShotResult>>,
     keys: Vec<KeyCode>,
     pending: Option<(u8, u32)>,
@@ -184,6 +299,7 @@ impl Panel {
             roster_page: 0,
             briefing: String::new(),
             scenario_run: None,
+            mission: None,
             history: BTreeMap::new(),
             keys: Vec::new(),
             pending: None,
@@ -281,6 +397,10 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
     }
     let stock = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"))
         .expect("stock scenario layout");
+    let encounters: Vec<_> = modding::range_skirmish::STOCK
+        .iter()
+        .map(|src| modding::range_skirmish::Skirmish::from_ron(src).expect("stock encounter"))
+        .collect();
     let camera = commands
         .spawn((
             Camera2d,
@@ -554,6 +674,12 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 ],
             ),
         ];
+        let mission_rows = encounters
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.mission.is_some())
+            .map(|(id, s)| (false, vec![(s.title.as_str(), Action::Skirmish(id as u8))]));
+        rows.splice(0..0, mission_rows);
         let scenario_rows = stock.zones.iter().enumerate().filter_map(|(id, zone)| {
             zone.scenario
                 .as_ref()
@@ -713,6 +839,7 @@ pub fn actions(
                 | Action::Scenario(_)
         ) {
             panel.briefing.clear();
+            panel.mission = None;
             panel.battle_launch = false;
             panel.battle_auto = false;
         }
@@ -795,6 +922,10 @@ pub fn actions(
                 Ok(briefing) => {
                     panel.battle_name = edit.sector().map_or_else(String::new, |z| z.name.clone());
                     panel.briefing = briefing;
+                    panel.mission = modding::range_skirmish::stock(id as usize)
+                        .ok()
+                        .and_then(|s| s.mission)
+                        .map(MissionRun::new);
                     panel.battle_launch = true;
                     panel.drawer = 0;
                     panel.pending = None;
@@ -871,7 +1002,12 @@ pub fn actions(
                 .execute_battle_lifecycle(BattleLifecycle::StartBattle)
             {
                 Ok(_) => {
-                    panel.briefing.clear();
+                    if let Some(mission) = &mut panel.mission {
+                        let generation = scene.generation;
+                        mission.begin(&mut scene.sim, generation);
+                    } else {
+                        panel.briefing.clear();
+                    }
                     panel.drawer = 0;
                     edit.editing = false;
                     scene.paused = false;
@@ -1370,7 +1506,12 @@ pub fn scenario_progress(
             .execute_battle_lifecycle(BattleLifecycle::StartBattle)
         {
             Ok(_) => {
-                panel.briefing.clear();
+                if let Some(mission) = &mut panel.mission {
+                    let generation = scene.generation;
+                    mission.begin(&mut scene.sim, generation);
+                } else {
+                    panel.briefing.clear();
+                }
                 edit.editing = false;
                 scene.paused = false;
             }
@@ -1795,6 +1936,92 @@ pub fn scroll(
 
 #[cfg(test)]
 mod scenario_tests {
+
+    #[test]
+    fn mission_progress_uses_physical_positions_protection_and_generation() {
+        let cfg = super::super::scaled_config(true, false, 1000);
+        let preset = modding::range_skirmish::stock(6).unwrap();
+        let base = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
+        let mut sim = BlastRange::with_layout(cfg, preset.apply_to(base).unwrap()).unwrap();
+        sim.start_battle().unwrap();
+        let mut run = MissionRun::new(preset.mission.unwrap());
+        run.begin(&mut sim, 42);
+        let mut view = sim_core::blast::read_model::View::new(&sim, 42);
+        run.update(&view);
+        assert_eq!(run.step, 0);
+        assert!(view
+            .units
+            .iter()
+            .filter(|u| u.allied)
+            .all(|u| u.order == Some(sim_core::blast::battle::Order::Hold)));
+        let (p, _) = run.waypoint().unwrap();
+        view.units[0].position[0] = fx::Fx::from_int(p[0]);
+        view.units[0].position[2] = fx::Fx::from_int(p[1]);
+        view.generation = 43;
+        run.update(&view);
+        assert_eq!(run.step, 0, "stale roster cannot complete a goal");
+        view.generation = 42;
+        run.update(&view);
+        assert_eq!(run.step, 1);
+        view.units[6].status.alive = false;
+        run.update(&view);
+        assert_eq!(run.step, 2);
+        for id in [4, 5] {
+            view.units[id].status.alive = false;
+        }
+        run.update(&view);
+        assert_eq!(run.step, 3);
+        assert!(run.readout().contains("ВЫПОЛНЕНА"));
+        run.begin(&mut sim, 44);
+        assert_eq!(run.step, 0);
+        assert!(!run.failed);
+        run.definition.protect = vec![2];
+        view.generation = 44;
+        view.units[2].status.alive = false;
+        run.update(&view);
+        assert!(run.failed);
+        assert!(run.waypoint().is_none());
+    }
+    #[test]
+    fn mission_armies_start_quiet_and_accept_real_orders_on_every_layout() {
+        for id in 6..modding::range_skirmish::STOCK.len() {
+            let preset = modding::range_skirmish::stock(id).unwrap();
+            let base =
+                RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
+            let layout = preset.apply_to(base).unwrap();
+            let validator = sim_core::blast::placement::Validator::default();
+            validator.validate(&layout).unwrap();
+            let cfg = super::super::scaled_config(true, false, 1000);
+            let mut sim = BlastRange::with_layout(cfg, layout).unwrap();
+            sim.start_battle().unwrap();
+            let mut run = MissionRun::new(preset.mission.unwrap());
+            run.begin(&mut sim, 1);
+            for _ in 0..60 {
+                sim.step();
+            }
+            assert!(
+                sim.battle.actors.iter().all(|a| a.fired == 0),
+                "instant fire in mission {id}"
+            );
+            let modding::range_skirmish::MissionGoal::Reach { actors, point, .. } =
+                &run.definition.steps[0].goal
+            else {
+                panic!("deployment first")
+            };
+            for &actor in actors {
+                assert!(sim.battle_order(
+                    actor,
+                    sim_core::blast::battle::Order::Move,
+                    Some(*point)
+                ));
+            }
+            sim.step();
+            assert!(actors
+                .iter()
+                .any(|&id| sim.units[id].motion.destination.is_some()));
+            assert!(sim.matter.economy.ledger.balanced());
+        }
+    }
     use super::*;
 
     #[test]

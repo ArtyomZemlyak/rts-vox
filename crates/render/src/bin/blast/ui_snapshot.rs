@@ -18,7 +18,7 @@ pub(super) struct UiSnapshot {
 
 pub(super) fn publish(
     scene: Res<Scene>,
-    panel: Res<panel::Panel>,
+    mut panel: ResMut<panel::Panel>,
     readouts: Query<(), With<panel::Readout>>,
     knobs: Option<Res<knobs::Overrides>>,
     values: Query<(), With<knobs::SlotValue>>,
@@ -27,6 +27,9 @@ pub(super) fn publish(
     match &mut output.view {
         Some(view) => view.update(&scene.sim, scene.generation),
         None => output.view = Some(View::new(&scene.sim, scene.generation)),
+    }
+    if let (Some(mission), Some(view)) = (&mut panel.mission, &output.view) {
+        mission.update(view);
     }
     // Hidden diagnostics must not scan the entire debris history every frame.
     if panel.drawer == 5 && !readouts.is_empty() {

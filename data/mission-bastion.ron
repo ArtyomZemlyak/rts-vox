@@ -1,0 +1,32 @@
+(
+ title: "Бастион: подавление и прорыв",
+ briefing: "На старте свои держат огонь. ПКМ по земле — движение; по врагу — атака. У крепости три слоя: передовые T1, тяжёлая батарея и командный центр. Выведите ударный отряд к южному проходу, артиллерией вскройте укрытия. Сначала подавите тяжёлые орудия, потом добейте передний рубеж и базу.",
+ zone: (name: "Бастион: подавление и прорыв", min: (2800,1800), max: (6800,3700), spawn: (3000,16,2600), target: (6300,16,2600)),
+ units: [
+  (kind: Tank, allied: true, at: (3120,16,2120), weapon: Some(Kinetic)),
+  (kind: Tank, allied: true, at: (3300,16,2120), weapon: Some(Kinetic)),
+  (kind: Tank, allied: true, at: (3120,16,2380), weapon: Some(Kinetic)),
+  (kind: Tank, allied: true, at: (3300,16,2380), weapon: Some(Kinetic)),
+  (kind: Tank, allied: true, at: (3120,16,2640), weapon: Some(Kinetic)),
+  (kind: Tank, allied: true, at: (3300,16,2640), weapon: Some(Kinetic)),
+  (kind: Artillery, allied: true, at: (3350,16,3120)),
+  (kind: Spider, allied: true, at: (3150,16,3400)),
+  (kind: TurretT1, allied: false, at: (6040,16,2340)),
+  (kind: TurretT1, allied: false, at: (6040,16,2920)),
+  (kind: TurretT2, allied: false, at: (6340,16,2300)),
+  (kind: ArtilleryTurretT2, allied: false, at: (6470,16,2990)),
+  (kind: Base, allied: false, at: (6500,16,2600)),
+ ],
+ blocks: [
+  (min: (5740,16,2050), max: (5780,70,2430), material: 2),
+  (min: (5740,16,2680), max: (5780,70,2980), material: 2),
+  (min: (6000,16,2040), max: (6620,61,2070), material: 2),
+  (min: (6000,16,3270), max: (6620,61,3300), material: 2),
+ ],
+ mission: Some((focus: Tank, protect: [], steps: [
+  (text: "Соберите три танка у южного прохода", goal: Reach(actors: [0, 1, 2, 3, 4, 5], count: 3, point: (5290,3210), radius: 330)),
+  (text: "Подавите T2 и картечную установку", goal: Destroy(actors: [10, 11])),
+  (text: "Зачистите передовые T1", goal: Destroy(actors: [8, 9])),
+  (text: "Уничтожьте командный центр бастиона", goal: Destroy(actors: [12])),
+ ])),
+)

@@ -1,0 +1,25 @@
+(
+ title: "Танки: штурм турелей T2",
+ briefing: "На старте свои держат огонь. ПКМ по земле — движение; по врагу — атака. Восемь танков против двух T2: численный перевес рассчитан на штурм, а не дуэль. Разведите две четвёрки по краям стены, атакуйте одновременно. Не выстраивайте весь отряд в одну линию под энергетическим выстрелом.",
+ zone: (name: "Танки: штурм турелей T2", min: (2800,1800), max: (6800,3700), spawn: (3000,16,2600), target: (6300,16,2600)),
+ units: [
+  (kind: Tank, allied: true, at: (3100,16,2070), weapon: Some(Kinetic)),
+  (kind: Tank, allied: true, at: (3290,16,2070), weapon: Some(Kinetic)),
+  (kind: Tank, allied: true, at: (3100,16,2330), weapon: Some(Kinetic)),
+  (kind: Tank, allied: true, at: (3290,16,2330), weapon: Some(Kinetic)),
+  (kind: Tank, allied: true, at: (3100,16,2590), weapon: Some(Energy)),
+  (kind: Tank, allied: true, at: (3290,16,2590), weapon: Some(Energy)),
+  (kind: Tank, allied: true, at: (3100,16,2850), weapon: Some(Energy)),
+  (kind: Tank, allied: true, at: (3290,16,2850), weapon: Some(Energy)),
+  (kind: TurretT2, allied: false, at: (6320,16,2390)),
+  (kind: TurretT2, allied: false, at: (6320,16,2910)),
+ ],
+ blocks: [
+  (min: (5720,16,2320), max: (5754,62,2840), material: 2),
+  (min: (5900,16,2020), max: (6050,42,2100), material: 2),
+ ],
+ mission: Some((focus: Tank, protect: [], steps: [
+  (text: "Выведите минимум три танка к рубежу атаки", goal: Reach(actors: [0, 1, 2, 3, 4, 5, 6, 7], count: 3, point: (5150,2650), radius: 480)),
+  (text: "Выведите из строя две энергетические T2", goal: Destroy(actors: [8, 9])),
+ ])),
+)

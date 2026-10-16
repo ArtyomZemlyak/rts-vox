@@ -570,6 +570,7 @@ pub fn refresh(
                 !(compact && panel.drawer != 0)
                     && (!scene.notice.is_empty()
                         || (battle && view.phase == sim_core::blast::battle::Phase::Setup)
+                        || panel.mission.is_some()
                         || (!battle && !panel.briefing.is_empty())),
             )
         } else if strip.is_some() {
@@ -801,7 +802,17 @@ pub fn refresh(
                 } else {
                     ""
                 };
-                let briefing = if compact && battle {
+                let briefing = if let Some(mission) = &panel.mission {
+                    format!(
+                        "{}\n{}",
+                        mission.readout(),
+                        if compact {
+                            "ПКМ — движение / атака. Золотой круг — текущий рубеж."
+                        } else {
+                            &panel.briefing
+                        }
+                    )
+                } else if compact && battle {
                     let mut chars = panel.briefing.chars();
                     let short: String = chars.by_ref().take(64).collect();
                     if chars.next().is_some() {
@@ -1594,6 +1605,50 @@ pub(crate) mod tests {
             scene.sim.units[0].motion.destination,
             scene.sim.units[1].motion.destination
         );
+    }
+    #[test]
+    fn tactical_mission_hud_launch_replay_and_replacement_keep_orders_and_goals_coherent() {
+        let mut app = app();
+        click(&mut app, Action::Skirmish(7));
+        let (cfg, layout) = app
+            .world_mut()
+            .resource_mut::<Workshop>()
+            .pending
+            .take()
+            .unwrap();
+        app.world_mut().resource_mut::<Scene>().sim = BlastRange::with_layout(cfg, layout).unwrap();
+        app.update();
+        assert!(app.world().resource::<Panel>().mission.is_some());
+        assert!(!app.world().resource::<Panel>().briefing.is_empty());
+        let mut scene = app.world_mut().resource_mut::<Scene>();
+        assert_eq!(
+            scene.sim.battle.phase,
+            sim_core::blast::battle::Phase::Fighting
+        );
+        for _ in 0..30 {
+            scene.sim.step();
+        }
+        assert!(scene.sim.battle.actors.iter().all(|a| a.fired == 0));
+        drop(scene);
+        click(&mut app, Action::BattleReplay);
+        let (cfg, layout) = app
+            .world_mut()
+            .resource_mut::<Workshop>()
+            .pending
+            .take()
+            .unwrap();
+        app.world_mut().resource_mut::<Scene>().sim = BlastRange::with_layout(cfg, layout).unwrap();
+        app.update();
+        assert!(app
+            .world()
+            .resource::<Panel>()
+            .mission
+            .as_ref()
+            .unwrap()
+            .readout()
+            .contains("ЗАДАЧА 1/"));
+        click(&mut app, Action::Skirmish(0));
+        assert!(app.world().resource::<Panel>().mission.is_none());
     }
     #[test]
     fn authored_battles_load_through_hud_and_enemy_ai_acquires_targets() {

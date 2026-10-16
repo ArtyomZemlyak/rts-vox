@@ -1,0 +1,21 @@
+(
+ title: "Танки: штурм турелей T1",
+ briefing: "На старте свои держат огонь. ПКМ по земле — движение; по врагу — атака. Четыре танка против двух T1. Соберите ударную группу у входа, затем атакуйте одной волной с фокусом на одной турели. Между бетонными экранами есть широкий проход; можно зайти с фланга.",
+ zone: (name: "Танки: штурм турелей T1", min: (2800,1800), max: (6800,3700), spawn: (3000,16,2600), target: (6300,16,2600)),
+ units: [
+  (kind: Tank, allied: true, at: (3150,16,2250), weapon: Some(Kinetic)),
+  (kind: Tank, allied: true, at: (3150,16,2490), weapon: Some(Kinetic)),
+  (kind: Tank, allied: true, at: (3150,16,2730), weapon: Some(Kinetic)),
+  (kind: Tank, allied: true, at: (3340,16,2490), weapon: Some(Kinetic)),
+  (kind: TurretT1, allied: false, at: (6300,16,2400)),
+  (kind: TurretT1, allied: false, at: (6300,16,2840)),
+ ],
+ blocks: [
+  (min: (5930,16,2150), max: (5960,50,2400), material: 2),
+  (min: (5930,16,2780), max: (5960,50,3080), material: 2),
+ ],
+ mission: Some((focus: Tank, protect: [], steps: [
+  (text: "Соберите минимум два танка перед укреплением", goal: Reach(actors: [0, 1, 2, 3], count: 2, point: (5480,2600), radius: 360)),
+  (text: "Прорвите оборону: уничтожьте обе T1", goal: Destroy(actors: [4, 5])),
+ ])),
+)

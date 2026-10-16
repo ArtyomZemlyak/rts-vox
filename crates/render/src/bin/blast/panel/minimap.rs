@@ -81,7 +81,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                         ));
                     }
                 }
-                for i in 0..=modding::range::MAX_RANGE_UNITS {
+                for i in 0..=modding::range::MAX_RANGE_UNITS + 1 {
                     p.spawn((
                         Marker(i),
                         Node {
@@ -313,11 +313,29 @@ pub fn input(
 pub fn refresh_markers(
     snapshot: Res<super::super::ui_snapshot::UiSnapshot>,
     edit: Res<Workshop>,
+    panel: Res<Panel>,
     mut markers: Query<(&Marker, &mut Node, &mut BackgroundColor)>,
 ) {
     let Some(view) = &snapshot.view else { return };
     let size = view.size;
     for (Marker(i), mut node, mut color) in &mut markers {
+        if *i == modding::range::MAX_RANGE_UNITS + 1 {
+            let point = panel.mission.as_ref().and_then(MissionRun::waypoint);
+            node.display = if point.is_some() {
+                Display::Flex
+            } else {
+                Display::None
+            };
+            if let Some((p, _)) = point {
+                node.width = px(7);
+                node.height = px(7);
+                node.left = percent(100.0 * p[0] as f32 / size[0] as f32);
+                node.top = percent(100.0 * p[1] as f32 / size[2] as f32);
+                *color = BackgroundColor(theme::ACCENT);
+            }
+            continue;
+        }
+
         let unit = if *i == modding::range::MAX_RANGE_UNITS {
             (!view.battle).then_some(&view.gun)
         } else {
@@ -374,12 +392,44 @@ mod tests {
             ..default()
         })
         .insert_resource(Workshop::new(None, false))
+        .insert_resource(Panel::new(false, false))
         .add_systems(Update, refresh_markers);
         let marker = app
             .world_mut()
             .spawn((Marker(0), Node::default(), BackgroundColor::default()))
             .id();
+        let waypoint = app
+            .world_mut()
+            .spawn((
+                Marker(modding::range::MAX_RANGE_UNITS + 1),
+                Node::default(),
+                BackgroundColor::default(),
+            ))
+            .id();
         app.update();
+        assert_eq!(
+            app.world().get::<Node>(waypoint).unwrap().display,
+            Display::None
+        );
+        app.world_mut().resource_mut::<Panel>().mission = modding::range_skirmish::stock(6)
+            .unwrap()
+            .mission
+            .map(MissionRun::new);
+        app.update();
+        assert_eq!(
+            app.world().get::<Node>(waypoint).unwrap().display,
+            Display::Flex
+        );
+        assert_eq!(
+            app.world().get::<Node>(waypoint).unwrap().left,
+            percent(100.0 * 4700.0 / size[0] as f32)
+        );
+        app.world_mut().resource_mut::<Panel>().mission = None;
+        app.update();
+        assert_eq!(
+            app.world().get::<Node>(waypoint).unwrap().display,
+            Display::None
+        );
         let node = app.world().get::<Node>(marker).unwrap();
         assert_eq!(node.display, Display::Flex);
         assert_eq!(

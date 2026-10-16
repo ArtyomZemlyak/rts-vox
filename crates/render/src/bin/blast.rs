@@ -502,7 +502,7 @@ fn main() {
             }
             "--skirmish" => {
                 i += 1;
-                skirmish = Some(args[i].parse::<u8>().expect("skirmish 0..=5"));
+                skirmish = Some(args[i].parse::<u8>().expect("skirmish catalog ID"));
             }
             "--no-projectile-markers" => projectile_markers = false,
             "--zoom" => {
@@ -766,6 +766,10 @@ fn main() {
     }
     let mut hud = panel::Panel::new(drive, demo);
     hud.briefing = battle_briefing;
+    hud.mission = skirmish
+        .and_then(|id| modding::range_skirmish::stock(id as usize).ok())
+        .and_then(|s| s.mission)
+        .map(panel::MissionRun::new);
     hud.battle_name = if world_battle {
         if ai_vs_ai {
             "Война за базы · ИИ × ИИ".into()
@@ -787,7 +791,9 @@ fn main() {
     };
     hud.drawer = hud_drawer;
     hud.projectile_markers = projectile_markers;
-    workshop.zoom = camera_zoom;
+    if hud.mission.is_none() || args.iter().any(|arg| arg == "--zoom") {
+        workshop.zoom = camera_zoom;
+    }
     let mut sim = match loaded {
         Some(sim) => sim,
         None => range_sim(
@@ -820,6 +826,9 @@ fn main() {
     }
     if battle_preset && !edit {
         sim.start_battle().expect("two battle teams");
+        if let Some(mission) = &mut hud.mission {
+            mission.begin(&mut sim, 0);
+        }
     }
     if let Some(mm) = gas_cell_mm {
         sim.config.gas_display_mm = mm;

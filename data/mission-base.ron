@@ -1,0 +1,26 @@
+(
+ title: "Командный центр: активная оборона",
+ briefing: "На старте свои держат огонь. ПКМ по земле — движение; по врагу — атака. Сохраните базу. Вынесите мобильную группу вперёд, не прячьте все машины у командного центра. Прикройте турель танками, а быстрым шагоходом зайдите к артиллерии с южного фланга. Победа требует уничтожить весь атакующий отряд.",
+ zone: (name: "Командный центр: активная оборона", min: (2800,1800), max: (6800,3700), spawn: (3000,16,2600), target: (6300,16,2600)),
+ units: [
+  (kind: Base, allied: true, at: (3050,16,2630)),
+  (kind: Tank, allied: true, at: (3320,16,2180)),
+  (kind: Tank, allied: true, at: (3320,16,2500)),
+  (kind: Tank, allied: true, at: (3320,16,2900)),
+  (kind: Strider, allied: true, at: (3550,16,3200)),
+  (kind: TurretT2, allied: true, at: (3600,16,2630)),
+  (kind: Tank, allied: false, at: (6400,16,2190)),
+  (kind: Tank, allied: false, at: (6400,16,2600)),
+  (kind: Tank, allied: false, at: (6400,16,3020)),
+  (kind: Artillery, allied: false, at: (6580,16,3390)),
+ ],
+ blocks: [
+  (min: (4370,16,2070), max: (4402,50,2380), material: 2),
+  (min: (4370,16,2920), max: (4402,50,3320), material: 2),
+ ],
+ mission: Some((focus: Base, protect: [0], steps: [
+  (text: "Выдвиньте два танка на внешний рубеж", goal: Reach(actors: [1, 2, 3], count: 2, point: (4090,2620), radius: 330)),
+  (text: "Уничтожьте вражескую артиллерию", goal: Destroy(actors: [9])),
+  (text: "Остановите танковый удар", goal: Destroy(actors: [6, 7, 8])),
+ ])),
+)

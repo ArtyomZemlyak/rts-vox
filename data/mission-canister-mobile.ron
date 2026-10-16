@@ -1,0 +1,22 @@
+(
+ title: "Артиллерия T2: разнести батарею",
+ briefing: "На старте свои держат огонь. ПКМ по земле — движение; по врагу — атака. Выведите картечные САУ на дальний рубеж и накройте плотную батарею T1. Разведите свои машины, чтобы ответный огонь не накрыл обе. Затем смените направление огня на отдельную T2.",
+ zone: (name: "Артиллерия T2: разнести батарею", min: (2800,1800), max: (6800,3700), spawn: (3000,16,2600), target: (6300,16,2600)),
+ units: [
+  (kind: ArtilleryT2, allied: true, at: (3160,16,2450)),
+  (kind: ArtilleryT2, allied: true, at: (3160,16,2790)),
+  (kind: Tank, allied: true, at: (3430,16,2160)),
+  (kind: TurretT1, allied: false, at: (6190,16,2410)),
+  (kind: TurretT1, allied: false, at: (6190,16,2600)),
+  (kind: TurretT1, allied: false, at: (6190,16,2790)),
+  (kind: TurretT2, allied: false, at: (6480,16,3050)),
+ ],
+ blocks: [
+  (min: (5940,16,2330), max: (5960,46,2870), material: 2),
+ ],
+ mission: Some((focus: ArtilleryT2, protect: [], steps: [
+  (text: "Займите дальний рубеж хотя бы одной САУ T2", goal: Reach(actors: [0, 1], count: 1, point: (4490,2670), radius: 270)),
+  (text: "Накройте группу из трёх T1", goal: Destroy(actors: [3, 4, 5])),
+  (text: "Добейте вынесенную T2", goal: Destroy(actors: [6])),
+ ])),
+)

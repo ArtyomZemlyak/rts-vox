@@ -1,0 +1,25 @@
+(
+ title: "Турели T2: удержать проход",
+ briefing: "На старте свои держат огонь. ПКМ по земле — движение; по врагу — атака. Противник идёт издали под управлением обычного ИИ. Выведите резерв в золотой круг и отдайте огневым точкам приказ атаки по приближающейся машине. Используйте экраны и держите проход под перекрёстным огнём. Командный центр должен уцелеть.",
+ zone: (name: "Турели T2: удержать проход", min: (2800,1800), max: (6800,3700), spawn: (3000,16,2600), target: (6300,16,2600)),
+ units: [
+  (kind: TurretT2, allied: true, at: (3490,16,2370)),
+  (kind: TurretT2, allied: true, at: (3490,16,2980)),
+  (kind: Base, allied: true, at: (3040,16,3300)),
+  (kind: Tank, allied: true, at: (3310,16,2210)),
+  (kind: Tank, allied: true, at: (3310,16,2910)),
+  (kind: Tank, allied: false, at: (6370,16,2160)),
+  (kind: Tank, allied: false, at: (6550,16,2160)),
+  (kind: Tank, allied: false, at: (6370,16,2460)),
+  (kind: Tank, allied: false, at: (6550,16,2460)),
+  (kind: Tank, allied: false, at: (6370,16,2760)),
+ ],
+ blocks: [
+  (min: (4080,16,1970), max: (4110,56,2400), material: 2),
+  (min: (4080,16,2890), max: (4110,56,3510), material: 2),
+ ],
+ mission: Some((focus: TurretT2, protect: [2], steps: [
+  (text: "Переместите резерв к проходу", goal: Reach(actors: [3, 4], count: 1, point: (3880,2650), radius: 300)),
+  (text: "Отбейте наступление и сохраните командный центр", goal: Destroy(actors: [5, 6, 7, 8, 9])),
+ ])),
+)

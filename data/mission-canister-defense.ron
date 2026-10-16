@@ -1,0 +1,24 @@
+(
+ title: "Картечная установка: закрыть ущелье",
+ briefing: "На старте свои держат огонь. ПКМ по земле — движение; по врагу — атака. Противник идёт издали под управлением обычного ИИ. Выведите резерв в золотой круг и отдайте огневым точкам приказ атаки по приближающейся машине. Используйте экраны и держите проход под перекрёстным огнём. Командный центр должен уцелеть.",
+ zone: (name: "Картечная установка: закрыть ущелье", min: (2800,1800), max: (6800,3700), spawn: (3000,16,2600), target: (6300,16,2600)),
+ units: [
+  (kind: ArtilleryTurretT2, allied: true, at: (3250,16,2630)),
+  (kind: Base, allied: true, at: (3040,16,3300)),
+  (kind: Tank, allied: true, at: (3310,16,2210)),
+  (kind: Tank, allied: true, at: (3310,16,2910)),
+  (kind: Tank, allied: false, at: (6370,16,2180)),
+  (kind: Tank, allied: false, at: (6550,16,2180)),
+  (kind: Tank, allied: false, at: (6370,16,2450)),
+  (kind: Tank, allied: false, at: (6550,16,2450)),
+  (kind: Strider, allied: false, at: (6500,16,3110)),
+ ],
+ blocks: [
+  (min: (4080,16,1970), max: (4110,56,2400), material: 2),
+  (min: (4080,16,2890), max: (4110,56,3510), material: 2),
+ ],
+ mission: Some((focus: ArtilleryTurretT2, protect: [1], steps: [
+  (text: "Переместите резерв к проходу", goal: Reach(actors: [2, 3], count: 1, point: (3880,2650), radius: 300)),
+  (text: "Отбейте наступление и сохраните командный центр", goal: Destroy(actors: [4, 5, 6, 7, 8])),
+ ])),
+)
