@@ -122,6 +122,94 @@ fn move_group(sim: &mut BlastRange, actors: &[usize], point: [i32; 2]) {
 }
 
 #[test]
+fn mission_progress_counts_arrivals_and_destroyed_targets() {
+    let (sim, mut run) = setup(7);
+    let mut view = View::new(&sim, 1);
+    run.update(&view);
+    assert!(run.readout().contains("Юниты в зоне: 0/2"));
+    let (point, _) = run.waypoint().unwrap();
+    for id in 0..2 {
+        view.units[id].position[0] = fx::Fx::from_int(point[0]);
+        view.units[id].position[2] = fx::Fx::from_int(point[1]);
+        run.update(&view);
+        if id == 0 {
+            assert!(run.readout().contains("Юниты в зоне: 1/2"));
+        }
+    }
+    assert!(run.readout().contains("Цели уничтожены: 0/2"));
+    view.units[4].status.alive = false;
+    run.update(&view);
+    assert!(run.readout().contains("Цели уничтожены: 1/2"));
+    assert!(run.waypoint().is_none());
+}
+
+#[test]
+fn mission_critical_gun_failure_is_explicit_and_resets_on_replay() {
+    let (mut sim, mut run) = setup(16);
+    let mut view = View::new(&sim, 1);
+    view.units[0].status.weapon = false;
+    assert!(view.units[0].status.alive);
+    run.update(&view);
+    assert!(run.readout().contains("потеряно ключевое орудие"));
+    assert!(run.waypoint().is_none());
+    run.begin(&mut sim, 2);
+    run.update(&view);
+    assert!(
+        run.failure.is_none(),
+        "old publication cannot fail the replay"
+    );
+    view.generation = 2;
+    view.units[0].status.weapon = true;
+    run.update(&view);
+    assert!(run.failure.is_none());
+    assert!(run.waypoint().is_some());
+}
+
+#[test]
+#[ignore = "physical T3 failure path; run explicitly in release"]
+fn mission_t3_auto_reports_critical_gun_loss_without_ending_sim() {
+    let (mut sim, mut run) = setup(16);
+    for _ in 0..60 {
+        sim.step();
+    }
+    let MissionGoal::Reach { actors, point, .. } = run.definition.steps[0].goal.clone() else {
+        panic!()
+    };
+    move_group(&mut sim, &actors, point);
+    attack(&mut sim, &[0], 4);
+    let mut view = View::new(&sim, 1);
+    let mut automatic = false;
+    while sim.tick < 9000 && sim.battle.phase == Phase::Fighting && run.failure.is_none() {
+        view.update(&sim, 1);
+        run.update(&view);
+        if run.step > 0 && !automatic {
+            automatic = true;
+            for id in 0..sim.units.len() {
+                if sim.allied(id) {
+                    sim.battle_order(id, Order::Auto, None);
+                }
+            }
+        }
+        if run.failure.is_none() {
+            sim.step();
+        }
+    }
+    println!(
+        "CRITICAL_GUN tick={} phase={:?} own={:?} hash={:016x}",
+        sim.tick,
+        sim.battle.phase,
+        sim.battle_counts(),
+        sim.state_hash()
+    );
+    assert_eq!(sim.battle.phase, Phase::Fighting);
+    assert!(sim.units[0].status.alive && !sim.units[0].status.weapon);
+    assert!(sim.units[1].status.alive);
+    assert!(run.readout().contains("потеряно ключевое орудие"));
+    assert!(run.waypoint().is_none());
+    assert!(sim.matter.economy.ledger.balanced());
+}
+
+#[test]
 #[ignore = "full twelve-mission playthroughs; run explicitly in release"]
 fn mission_stock_playthroughs_use_real_orders_and_reach_victory() {
     for id in 6..range_skirmish::STOCK.len() {
@@ -218,6 +306,19 @@ fn mission_stock_playthroughs_use_real_orders_and_reach_victory() {
         assert!(run.failure.is_none(), "mission {id}: {}", run.readout());
         assert_eq!(run.step, run.definition.steps.len(), "mission {id}");
         assert!(run.complete, "mission {id}");
+        assert!(
+            run.definition
+                .protect_weapons
+                .iter()
+                .all(|&i| sim.units[i].status.weapon),
+            "mission {id}"
+        );
+        if id == 13 {
+            assert!(
+                (0..3).filter(|&i| sim.battle.actors[i].fired > 0).count() >= 2,
+                "T1 crossfire needs multiple turrets"
+            );
+        }
         assert!(
             run.definition
                 .protect

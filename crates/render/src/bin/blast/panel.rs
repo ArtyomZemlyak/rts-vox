@@ -149,6 +149,7 @@ pub struct MissionRun {
     step: usize,
     failure: Option<&'static str>,
     complete: bool,
+    progress: Option<(usize, usize)>,
     generation: Option<u64>,
 }
 impl MissionRun {
@@ -161,6 +162,7 @@ impl MissionRun {
             step: 0,
             failure: None,
             complete: false,
+            progress: None,
             generation: None,
         }
     }
@@ -168,6 +170,7 @@ impl MissionRun {
         self.step = 0;
         self.failure = None;
         self.complete = false;
+        self.progress = None;
         self.generation = Some(generation);
         for id in 0..sim.units.len() {
             if sim.allied(id) && sim.units[id].status.alive {
@@ -185,9 +188,23 @@ impl MissionRun {
             self.failure = Some("ЗАДАЧА ПРОВАЛЕНА · потерян защищаемый объект");
             return;
         }
+        if self.definition.protect_weapons.iter().any(|&id| {
+            !view
+                .units
+                .get(id)
+                .is_some_and(|u| u.status.alive && u.status.weapon)
+        }) {
+            self.failure = Some("ЗАДАЧА ПРОВАЛЕНА · потеряно ключевое орудие");
+            return;
+        }
+        self.progress = None;
         while let Some(step) = self.definition.steps.get(self.step) {
-            let (done, impossible) = match &step.goal {
-                MissionGoal::Destroy { actors } => (actors.iter().all(|&id| !alive(id)), false),
+            let (current, required, impossible) = match &step.goal {
+                MissionGoal::Destroy { actors } => (
+                    actors.iter().filter(|&&id| !alive(id)).count(),
+                    actors.len(),
+                    false,
+                ),
                 MissionGoal::Reach {
                     actors,
                     count,
@@ -207,7 +224,8 @@ impl MissionRun {
                         })
                         .count();
                     (
-                        reached >= *count,
+                        reached,
+                        *count,
                         actors.iter().filter(|&&id| alive(id)).count() < *count,
                     )
                 }
@@ -216,7 +234,8 @@ impl MissionRun {
                 self.failure = Some("ЗАДАЧА ПРОВАЛЕНА · недостаточно уцелевших участников");
                 return;
             }
-            if !done {
+            if current < required {
+                self.progress = Some((current, required));
                 break;
             }
             self.step += 1;
@@ -252,10 +271,18 @@ impl MissionRun {
             None if self.complete => "ЗАДАЧА ВЫПОЛНЕНА · все этапы завершены".into(),
             None => "ЭТАПЫ ВЫПОЛНЕНЫ · дождитесь завершения боя".into(),
             Some(step) => format!(
-                "ЗАДАЧА {}/{} · {}{}",
+                "ЗАДАЧА {}/{} · {}{}{}",
                 self.step + 1,
                 self.definition.steps.len(),
                 step.text,
+                self.progress
+                    .map_or(String::new(), |(current, required)| format!(
+                        "\n{}: {current}/{required}",
+                        match step.goal {
+                            modding::range_skirmish::MissionGoal::Reach { .. } => "Юниты в зоне",
+                            _ => "Цели уничтожены",
+                        }
+                    )),
                 self.waypoint().map_or(String::new(), |(p, _)| format!(
                     "\nЗолотой круг: {}, {}",
                     p[0], p[1]

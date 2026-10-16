@@ -282,15 +282,36 @@ impl Workshop {
         self.controlled = Some(0);
         self.selected_units = vec![0];
         self.pan = if preset.mission.is_some() {
-            let army: Vec<_> = preset.units.iter().filter(|u| u.allied).collect();
+            let army: Vec<_> = preset
+                .units
+                .iter()
+                .enumerate()
+                .filter(|(_, u)| {
+                    u.allied && preset.mission.as_ref().is_some_and(|m| m.focus == u.kind)
+                })
+                .collect();
             let centre = [0, 2].map(|axis| {
-                (army.iter().map(|u| u.at[axis]).min().unwrap()
-                    + army.iter().map(|u| u.at[axis]).max().unwrap()) as f32
+                (army.iter().map(|(_, u)| u.at[axis]).min().unwrap()
+                    + army.iter().map(|(_, u)| u.at[axis]).max().unwrap()) as f32
                     * 0.5
             });
+            let focused = army
+                .iter()
+                .min_by(|(a, u), (b, v)| {
+                    let distance = |u: &RangeUnitDef| {
+                        (u.at[0] as f32 - centre[0]).powi(2) + (u.at[2] as f32 - centre[1]).powi(2)
+                    };
+                    distance(u).total_cmp(&distance(v)).then(a.cmp(b))
+                })
+                .unwrap()
+                .0;
+            self.selected = Some(Selection::Unit(focused));
+            self.controlled = Some(focused);
+            self.selected_units = vec![focused];
+            let focus = &preset.units[focused];
             Vec2::new(
-                centre[0] - (preset.zone.min[0] + preset.zone.max[0]) as f32 * 0.5,
-                centre[1] - (preset.zone.min[1] + preset.zone.max[1]) as f32 * 0.5,
+                focus.at[0] as f32 - (preset.zone.min[0] + preset.zone.max[0]) as f32 * 0.5,
+                focus.at[2] as f32 - (preset.zone.min[1] + preset.zone.max[1]) as f32 * 0.5,
             )
         } else {
             Vec2::ZERO
@@ -2130,6 +2151,28 @@ mod tests {
             focus.x < 4000.0,
             "empty centre of arena is not the deployment"
         );
+    }
+    #[test]
+    fn tactical_mission_camera_selects_the_focus_role_near_its_centre() {
+        let (mut workshop, config) = fixture();
+        for id in 6..modding::range_skirmish::STOCK.len() {
+            workshop.skirmish(id as u8, config.clone()).unwrap();
+            let preset = modding::range_skirmish::stock(id).unwrap();
+            let selected = workshop.controlled.unwrap();
+            assert_eq!(preset.units[selected].kind, preset.mission.unwrap().focus);
+            assert!(preset.units[selected].allied);
+            let zone = workshop.sector().unwrap();
+            let centre = Vec2::new(
+                (zone.min[0] + zone.max[0]) as f32 * 0.5,
+                (zone.min[1] + zone.max[1]) as f32 * 0.5,
+            ) + workshop.pan;
+            let u = &preset.units[selected];
+            assert!(
+                (centre - Vec2::new(u.at[0] as f32, u.at[2] as f32)).length() < 200.0,
+                "selected focus outside starting centre {id}"
+            );
+            assert_eq!(workshop.selected_units, vec![selected]);
+        }
     }
     #[test]
     fn spider_skirmish_preserves_the_map_and_places_both_armies() {

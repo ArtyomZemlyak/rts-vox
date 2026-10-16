@@ -64,6 +64,10 @@ pub struct Mission {
     pub focus: RangeUnitKind,
     #[serde(default)]
     pub protect: Vec<usize>,
+    /// An authored mission can require a particular gun to remain usable.
+    /// This is distinct from preserving its core or ending the SIM battle.
+    #[serde(default)]
+    pub protect_weapons: Vec<usize>,
     pub steps: Vec<MissionStep>,
 }
 #[derive(Clone, Debug, Deserialize)]
@@ -100,6 +104,12 @@ impl Mission {
                 .iter()
                 .any(|u| u.allied && u.kind == self.focus)
             || (!self.protect.is_empty() && !valid_ids(&self.protect, true))
+            || (!self.protect_weapons.is_empty()
+                && (!valid_ids(&self.protect_weapons, true)
+                    || self
+                        .protect_weapons
+                        .iter()
+                        .any(|&id| preset.units[id].kind == RangeUnitKind::Base)))
             || preset.blocks.len() > crate::range::MAX_RANGE_BLOCKS
             || preset
                 .units
@@ -257,6 +267,30 @@ mod tests {
             valid.replace("actors: [0, 1]", "actors: [0, 0]"),
         ] {
             assert!(Skirmish::from_ron(&broken).is_err());
+        }
+    }
+    #[test]
+    fn mission_weapon_protection_is_optional_and_references_allied_guns() {
+        assert!(stock(6)
+            .unwrap()
+            .mission
+            .unwrap()
+            .protect_weapons
+            .is_empty());
+        let valid = include_str!("../../../data/mission-siege-defense.ron");
+        assert_eq!(
+            Skirmish::from_ron(valid)
+                .unwrap()
+                .mission
+                .unwrap()
+                .protect_weapons,
+            vec![0]
+        );
+        for ids in ["[99]", "[4]", "[1]", "[0, 0]"] {
+            assert!(Skirmish::from_ron(
+                &valid.replace("protect_weapons: [0]", &format!("protect_weapons: {ids}"))
+            )
+            .is_err());
         }
     }
     #[test]
