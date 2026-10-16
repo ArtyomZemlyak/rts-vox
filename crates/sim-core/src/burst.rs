@@ -1333,12 +1333,20 @@ mod tests {
                                 let bottom = Fx::from_int(base).add(Fx::from_ratio(offset, 4));
                                 let reach = bottom.add(Fx::from_ratio(1, 2));
                                 let reference =
-                                    hull.lowest(centre).is_some_and(|roof| roof <= reach);
+                                    hull.lowest(centre, None).is_some_and(|roof| roof <= reach);
                                 queries.store(0, Ordering::Relaxed);
                                 assert_eq!(hull.carries(bottom, centre), reference);
                                 if solid.is_some() && reach < Fx::from_int(base + 1) {
                                     assert_eq!(queries.load(Ordering::Relaxed), 0);
                                 }
+                                if solid.is_some() {
+                                    let limit = ((reach.raw() >> 32) - i64::from(base)).max(0);
+                                    assert!(queries.load(Ordering::Relaxed) as i64 <= limit);
+                                }
+                                assert_eq!(
+                                    hull.shelters(bottom, centre),
+                                    hull.lowest(centre, None).is_some_and(|roof| roof > reach)
+                                );
                             }
                         }
                     }
@@ -1352,6 +1360,32 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn low_support_probe_does_not_scan_a_tall_hollow_hull() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let queries = AtomicUsize::new(0);
+        let voxels = |p: [i32; 3]| {
+            queries.fetch_add(1, Ordering::Relaxed);
+            p[1] == 500
+        };
+        let hull = Hull {
+            pos: [Fx::ZERO; 3],
+            head: 0,
+            half: [Fx::from_int(4); 2],
+            height: Fx::from_int(512),
+            vel: [Fx::ZERO; 3],
+            step: Fx::ONE,
+            solid: Some(Solid(&voxels)),
+        };
+        let centre = V3::new(Fx::from_ratio(1, 2), Fx::ZERO, Fx::from_ratio(1, 2));
+        assert!(!hull.carries(Fx::from_ratio(5, 2), centre));
+        assert_eq!(queries.load(Ordering::Relaxed), 3);
+        queries.store(0, Ordering::Relaxed);
+        assert!(hull.shelters(Fx::from_ratio(5, 2), centre));
+        assert_eq!(queries.load(Ordering::Relaxed), 501);
+        assert!(hull.carries(Fx::from_ratio(1001, 2), centre));
+        assert!(!hull.carries(Fx::from_ratio(2001, 4), centre));
     }
     #[test]
     fn scattered_impulses_are_varied_replayable_and_never_add_energy() {
@@ -5165,8 +5199,9 @@ impl Hull<'_> {
     }
     /// The top of the hull's lowest voxel in the world column under
     /// `centre` (ADR-469); the box's top without the voxels. `None` where
-    /// the centre is not over the box or the column holds no voxel.
-    fn lowest(&self, centre: V3) -> Option<Fx> {
+    /// the centre is not over the box or the column holds no voxel below
+    /// the optional roof ceiling. A non-voxel hull retains its box roof.
+    fn lowest(&self, centre: V3, ceiling: Option<Fx>) -> Option<Fx> {
         if !self.covers_point([centre.x, centre.z]) {
             return None;
         }
@@ -5176,7 +5211,12 @@ impl Hull<'_> {
         };
         let [x, z] = [centre.x, centre.z].map(|v| (v.raw() >> 32) as i32);
         let base = (self.pos[1].raw() >> 32) as i32;
-        (base..-(top.neg().raw() >> 32) as i32)
+        let end = -(top.neg().raw() >> 32) as i32;
+        // Voxel y has roof y + 1. A support query cannot use any roof
+        // above its reach, so stop before floor(reach), even for negative
+        // or fractional heights. Shelter queries still scan the whole hull.
+        let end = ceiling.map_or(end, |reach| end.min((reach.raw() >> 32) as i32));
+        (base..end)
             .find(|&y| voxels.solid([x, y, z]))
             .map(|y| Fx::from_int(y + 1))
     }
@@ -5197,7 +5237,8 @@ impl Hull<'_> {
         {
             return false;
         }
-        self.lowest(centre).is_some_and(|roof| roof <= reach)
+        self.lowest(centre, Some(reach))
+            .is_some_and(|roof| roof <= reach)
     }
     /// Whether a piece whose box bottom is `bottom` and centre `centre`
     /// lies under the hull (ADR-302, ADR-469): its centre over the box
@@ -5205,7 +5246,7 @@ impl Hull<'_> {
     /// belly, or dug from under it.
     fn shelters(&self, bottom: Fx, centre: V3) -> bool {
         let reach = bottom.add(Fx::from_ratio(1, 2));
-        self.lowest(centre).is_some_and(|roof| roof > reach)
+        self.lowest(centre, None).is_some_and(|roof| roof > reach)
     }
     /// Whether the column's centre lies under the hull's box.
     pub fn covers(&self, x: i32, z: i32) -> bool {
