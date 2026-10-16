@@ -28,6 +28,17 @@ pub(super) fn publish(
         Some(view) => view.update(&scene.sim, scene.generation),
         None => output.view = Some(View::new(&scene.sim, scene.generation)),
     }
+    // A queued replay binds after its layout commits. An unrelated load/reset
+    // has no such launch and must not keep another world's goals or markers.
+    if !panel.battle_launch
+        && panel
+            .mission
+            .as_ref()
+            .is_some_and(|mission| !mission.belongs_to(scene.generation))
+    {
+        panel.mission = None;
+        panel.briefing.clear();
+    }
     if let (Some(mission), Some(view)) = (&mut panel.mission, &output.view) {
         mission.update(view);
     }

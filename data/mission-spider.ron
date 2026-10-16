@@ -13,7 +13,7 @@
   (min: (5480,16,2320), max: (5520,101,2880), material: 2),
  ],
  mission: Some((focus: Spider, protect: [], steps: [
-  (text: "Проведите паука к южному флангу", goal: Reach(actors: [0], count: 1, point: (5260,3230), radius: 220)),
+  (text: "Проведите паука к южному флангу", goal: Reach(actors: [0], count: 1, point: (4240,3210), radius: 220)),
   (text: "Прожгите T2 с открытого фланга", goal: Destroy(actors: [4])),
   (text: "Зачистите оставшуюся T1", goal: Destroy(actors: [3])),
  ])),

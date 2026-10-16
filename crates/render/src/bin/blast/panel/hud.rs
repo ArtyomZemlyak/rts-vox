@@ -1647,6 +1647,7 @@ pub(crate) mod tests {
             .unwrap()
             .readout()
             .contains("ЗАДАЧА 1/"));
+        assert!(!app.world().resource::<Panel>().briefing.is_empty());
         click(&mut app, Action::Skirmish(0));
         assert!(app.world().resource::<Panel>().mission.is_none());
     }

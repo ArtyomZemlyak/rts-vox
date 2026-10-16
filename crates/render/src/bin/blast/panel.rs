@@ -147,21 +147,27 @@ impl ScenarioRun {
 pub struct MissionRun {
     pub definition: modding::range_skirmish::Mission,
     step: usize,
-    failed: bool,
+    failure: Option<&'static str>,
+    complete: bool,
     generation: Option<u64>,
 }
 impl MissionRun {
+    pub(super) fn belongs_to(&self, generation: u64) -> bool {
+        self.generation.is_none_or(|bound| bound == generation)
+    }
     pub(super) fn new(definition: modding::range_skirmish::Mission) -> Self {
         Self {
             definition,
             step: 0,
-            failed: false,
+            failure: None,
+            complete: false,
             generation: None,
         }
     }
     pub(super) fn begin(&mut self, sim: &mut BlastRange, generation: u64) {
         self.step = 0;
-        self.failed = false;
+        self.failure = None;
+        self.complete = false;
         self.generation = Some(generation);
         for id in 0..sim.units.len() {
             if sim.allied(id) && sim.units[id].status.alive {
@@ -171,15 +177,12 @@ impl MissionRun {
     }
     pub(super) fn update(&mut self, view: &sim_core::blast::read_model::View) {
         use modding::range_skirmish::MissionGoal;
-        if self.generation != Some(view.generation)
-            || self.failed
-            || self.step == self.definition.steps.len()
-        {
+        if self.generation != Some(view.generation) || self.failure.is_some() || self.complete {
             return;
         }
         let alive = |id: usize| view.units.get(id).is_some_and(|u| u.status.alive);
         if self.definition.protect.iter().any(|&id| !alive(id)) {
-            self.failed = true;
+            self.failure = Some("ЗАДАЧА ПРОВАЛЕНА · потерян защищаемый объект");
             return;
         }
         while let Some(step) = self.definition.steps.get(self.step) {
@@ -210,24 +213,28 @@ impl MissionRun {
                 }
             };
             if impossible {
-                self.failed = true;
+                self.failure = Some("ЗАДАЧА ПРОВАЛЕНА · недостаточно уцелевших участников");
+                return;
             }
             if !done {
                 break;
             }
             self.step += 1;
         }
-        if self.step < self.definition.steps.len()
-            && matches!(
-                view.phase,
-                sim_core::blast::battle::Phase::Defeat | sim_core::blast::battle::Phase::Draw
-            )
-        {
-            self.failed = true;
-        }
+        self.failure = match view.phase {
+            sim_core::blast::battle::Phase::Defeat | sim_core::blast::battle::Phase::Draw => {
+                Some("ЗАДАЧА ПРОВАЛЕНА · повторите операцию")
+            }
+            sim_core::blast::battle::Phase::Victory if self.step < self.definition.steps.len() => {
+                Some("БОЙ ВЫИГРАН, НО РУБЕЖ НЕ ДОСТИГНУТ · повторите операцию")
+            }
+            _ => None,
+        };
+        self.complete = self.step == self.definition.steps.len()
+            && view.phase == sim_core::blast::battle::Phase::Victory;
     }
     pub(super) fn waypoint(&self) -> Option<([i32; 2], i32)> {
-        if self.failed {
+        if self.failure.is_some() {
             return None;
         }
         match &self.definition.steps.get(self.step)?.goal {
@@ -238,11 +245,12 @@ impl MissionRun {
         }
     }
     pub(super) fn readout(&self) -> String {
-        if self.failed {
-            return "ЗАДАЧА ПРОВАЛЕНА · повторите операцию".into();
+        if let Some(reason) = self.failure {
+            return reason.into();
         }
         match self.definition.steps.get(self.step) {
-            None => "ЗАДАЧА ВЫПОЛНЕНА · все этапы завершены".into(),
+            None if self.complete => "ЗАДАЧА ВЫПОЛНЕНА · все этапы завершены".into(),
+            None => "ЭТАПЫ ВЫПОЛНЕНЫ · дождитесь завершения боя".into(),
             Some(step) => format!(
                 "ЗАДАЧА {}/{} · {}{}",
                 self.step + 1,
@@ -256,6 +264,10 @@ impl MissionRun {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "panel/mission_tests.rs"]
+mod mission_tests;
 
 #[derive(Resource)]
 pub struct Panel {
@@ -1036,7 +1048,9 @@ pub fn actions(
                 Ok(()) => {
                     panel.battle_launch = true;
                     panel.battle_auto = scene.sim.battle.autonomous;
-                    panel.briefing.clear();
+                    if panel.mission.is_none() {
+                        panel.briefing.clear();
+                    }
                     panel.drawer = 0;
                     panel.roster_page = 0;
                     panel.ground_fire = false;
@@ -1971,15 +1985,19 @@ mod scenario_tests {
         }
         run.update(&view);
         assert_eq!(run.step, 3);
+        assert!(!run.complete);
+        assert!(run.readout().contains("дождитесь завершения боя"));
+        view.phase = sim_core::blast::battle::Phase::Victory;
+        run.update(&view);
         assert!(run.readout().contains("ВЫПОЛНЕНА"));
         run.begin(&mut sim, 44);
         assert_eq!(run.step, 0);
-        assert!(!run.failed);
+        assert!(run.failure.is_none());
         run.definition.protect = vec![2];
         view.generation = 44;
         view.units[2].status.alive = false;
         run.update(&view);
-        assert!(run.failed);
+        assert!(run.failure.is_some());
         assert!(run.waypoint().is_none());
     }
     #[test]
