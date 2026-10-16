@@ -3905,6 +3905,83 @@ mod tests {
         assert_eq!(run(1), run(4));
     }
     #[test]
+    fn compact_settled_links_preserve_full_lists_and_clear_wide_generations() {
+        for workers in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let selected: Vec<_> = (0..73)
+                    .map(|i| (i % 7 != 0).then_some(([-2, -1, -1], [10, 2, 2])))
+                    .collect();
+                let mut want = SettledQueries::default();
+                want.build(&[([-2, -1, -1], [10, 2, 2])], true, &|_, _| {});
+                let mut expected: BTreeMap<_, Vec<_>> = BTreeMap::new();
+                for (i, bounds) in selected.iter().enumerate() {
+                    if let Some((lo, hi)) = bounds {
+                        for x in lo[0]..=hi[0] {
+                            for y in lo[1]..=hi[1] {
+                                for z in lo[2]..=hi[2] {
+                                    expected.entry([x, y, z]).or_default().push(i as u32);
+                                }
+                            }
+                        }
+                    }
+                }
+                let mut normal = SettledCells::default();
+                normal.build(&selected, &want, true, &|_, _| {});
+                let mut wide = SettledCells::default();
+                // Real wide encoding/decoding, with a tiny derived threshold
+                // instead of allocating billions of nodes for the fixture.
+                wide.build_links::<3>(&selected, &want, true, &|_, _| {});
+                assert!(normal.stripes.iter().all(|s| s.wide.is_empty()));
+                assert!(wide.stripes.iter().any(|s| !s.wide.is_empty()));
+                assert_eq!(normal.ordered(), expected);
+                assert_eq!(wide.ordered(), expected);
+                wide.clear();
+                assert!(wide.stripes.iter().all(|s| s.wide.is_empty()));
+                wide.build_links::<3>(&[Some(([0; 3], [0; 3]))], &want, false, &|_, _| {});
+                assert_eq!(wide.ordered(), BTreeMap::from([([0; 3], vec![0])]));
+                assert!(wide.stripes.iter().all(|s| s.wide.is_empty()));
+            });
+        }
+    }
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn settled_link_iterator_retains_successors_above_u32_without_large_allocation() {
+        for target in [
+            u32::MAX as usize - 1,
+            u32::MAX as usize,
+            u32::MAX as usize + 17,
+        ] {
+            let nodes = [SettledCellNode {
+                source: 37,
+                next: u32::MAX,
+            }];
+            let wide = BTreeMap::from([(0, target)]);
+            let mut list = SettledCellList {
+                nodes: &nodes,
+                wide: &wide,
+                next: 1,
+            };
+            assert_eq!(list.next(), Some(37));
+            assert_eq!(list.next, target + 1);
+        }
+        let nodes = [SettledCellNode {
+            source: u32::MAX,
+            next: 0,
+        }];
+        let wide = BTreeMap::new();
+        let mut list = SettledCellList {
+            nodes: &nodes,
+            wide: &wide,
+            next: 1,
+        };
+        assert_eq!(list.next(), Some(u32::MAX));
+        assert_eq!(list.next(), None);
+    }
+    #[test]
     fn settled_rebuilds_preserve_sweeps_and_clear_empty_generations() {
         let t = tuning().blast;
         for workers in [1, 2, 4, 8] {
@@ -7579,23 +7656,31 @@ struct SettledCells {
 struct SettledCellStripe {
     cells: FxLookup<[i32; 3], [usize; 2]>,
     nodes: Vec<SettledCellNode>,
+    wide: BTreeMap<usize, usize>,
 }
 struct SettledCellNode {
     source: u32,
-    next: usize,
+    next: u32,
 }
 struct SettledCellList<'a> {
     nodes: &'a [SettledCellNode],
+    wide: &'a BTreeMap<usize, usize>,
+    // One-based arena slot; zero terminates without an overflow lookup.
     next: usize,
 }
 impl Iterator for SettledCellList<'_> {
     type Item = u32;
     fn next(&mut self) -> Option<u32> {
-        if self.next == usize::MAX {
+        if self.next == 0 {
             return None;
         }
-        let node = &self.nodes[self.next];
-        self.next = node.next;
+        let index = self.next - 1;
+        let node = &self.nodes[index];
+        self.next = if node.next == u32::MAX {
+            self.wide.get(&index).copied().expect("wide settled link") + 1
+        } else {
+            node.next as usize
+        };
         Some(node.source)
     }
 }
@@ -7604,6 +7689,7 @@ impl SettledCells {
         for stripe in &mut self.stripes {
             stripe.cells.clear();
             stripe.nodes.clear();
+            stripe.wide.clear();
         }
         self.len = 0;
     }
@@ -7618,7 +7704,8 @@ impl SettledCells {
         let stripe = &self.stripes[cell[0].rem_euclid(8) as usize];
         stripe.cells.get(cell).map(|head| SettledCellList {
             nodes: &stripe.nodes,
-            next: head[0],
+            wide: &stripe.wide,
+            next: head[0] + 1,
         })
     }
     #[cfg(test)]
@@ -7635,7 +7722,8 @@ impl SettledCells {
                             cell,
                             SettledCellList {
                                 nodes: &stripe.nodes,
-                                next: head[0],
+                                wide: &stripe.wide,
+                                next: head[0] + 1,
                             }
                             .collect(),
                         )
@@ -7644,6 +7732,17 @@ impl SettledCells {
             .collect()
     }
     fn build(
+        &mut self,
+        selected: &[Option<([i32; 3], [i32; 3])>],
+        want: &SettledQueries,
+        parallel: bool,
+        task: &(impl Fn(usize, &'static str) + Sync),
+    ) {
+        self.build_links::<{ u32::MAX }>(selected, want, parallel, task);
+    }
+    // A smaller test limit exercises real wide links without a multi-GiB
+    // arena. Production reserves u32::MAX for wide links; zero terminates.
+    fn build_links<const COMPACT_LIMIT: u32>(
         &mut self,
         selected: &[Option<([i32; 3], [i32; 3])>],
         want: &SettledQueries,
@@ -7685,13 +7784,17 @@ impl SettledCells {
                             if ends[1] == usize::MAX {
                                 ends[0] = index;
                             } else {
-                                stripe.nodes[ends[1]].next = index;
+                                if index + 1 < COMPACT_LIMIT as usize {
+                                    stripe.nodes[ends[1]].next = (index + 1) as u32;
+                                } else {
+                                    // No new index cap: rare large successors
+                                    // retain their full usize outside the node.
+                                    stripe.nodes[ends[1]].next = u32::MAX;
+                                    stripe.wide.insert(ends[1], index);
+                                }
                             }
                             ends[1] = index;
-                            stripe.nodes.push(SettledCellNode {
-                                source: i,
-                                next: usize::MAX,
-                            });
+                            stripe.nodes.push(SettledCellNode { source: i, next: 0 });
                         }
                     }
                 }
