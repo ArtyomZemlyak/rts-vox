@@ -1534,6 +1534,91 @@ mod tests {
         assert!(!SettledQueries::default().contains([0; 3]));
     }
     #[test]
+    fn settled_intersections_match_geometric_union_at_signed_word_limits() {
+        let ranges = [
+            ([-4, -130, -2], [-3, -129, 0]),
+            ([-1, -65, 2], [2, -63, 3]),
+            ([-2, -1, -2], [1, 1, 1]),
+            ([3, 62, 0], [5, 65, 2]),
+            ([0, 127, -1], [2, 129, 0]),
+            ([7, i32::MIN, 4], [7, i32::MIN + 1, 4]),
+            ([-7, i32::MAX - 1, -4], [-7, i32::MAX, -4]),
+        ];
+        // Duplicate requests reach the real paged path, without enlarging
+        // the independent geometric oracle or relying on the old iterator.
+        let dense: Vec<_> = ranges
+            .iter()
+            .copied()
+            .cycle()
+            .take(SettledQueries::PAGED_MIN_RANGES)
+            .collect();
+        for workers in [1, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            for paged in [false, true] {
+                let mut queries = SettledQueries::default();
+                pool.install(|| queries.build(&dense, paged, &|_, _| {}));
+                assert!(queries.0.iter().all(|stripe| {
+                    stripe.dense.as_ref().is_some_and(|d| d.plane.is_some()) == paged
+                }));
+                for x in [-9, -7, -4, -2, 0, 2, 3, 5, 7, 9] {
+                    for z in [-5, -4, -2, 0, 2, 4, 5] {
+                        for bottom in [
+                            i32::MIN,
+                            i32::MIN + 63,
+                            -130,
+                            -65,
+                            -64,
+                            -1,
+                            0,
+                            1,
+                            62,
+                            63,
+                            64,
+                            65,
+                            127,
+                            i32::MAX - 63,
+                            i32::MAX,
+                        ] {
+                            for height in [0, 1, 2, 63, 64, 65, 130] {
+                                let lo = [x, bottom, z];
+                                let hi = [x + 2, bottom.saturating_add(height), z + 1];
+                                let expected = ranges.iter().any(|&(a, b)| {
+                                    (0..3).all(|axis| lo[axis] <= b[axis] && hi[axis] >= a[axis])
+                                });
+                                assert_eq!(
+                                    queries.intersects(lo, hi),
+                                    expected,
+                                    "{lo:?}..{hi:?}, workers={workers}, paged={paged}"
+                                );
+                            }
+                        }
+                    }
+                }
+                for (lo, hi) in [
+                    ([0, 3, 0], [1, 2, 1]),
+                    ([0, 65, 0], [1, 63, 1]),
+                    ([1, 0, 0], [0, 1, 1]),
+                    ([0, 0, 1], [1, 1, 0]),
+                ] {
+                    assert!(!queries.intersects(lo, hi));
+                }
+                queries.clear();
+                assert!(!queries.intersects([-9, -130, -5], [9, 130, 5]));
+            }
+        }
+        // Full signed X/Z still use the sparse representation exactly.
+        let mut queries = SettledQueries::default();
+        for point in [[i32::MIN, -64, i32::MAX], [i32::MAX, 63, i32::MIN]] {
+            queries.build(&[(point, point)], false, &|_, _| {});
+            assert!(queries.intersects(point, point));
+            let absent = [point[0], point[1] + 1, point[2]];
+            assert!(!queries.intersects(absent, absent));
+        }
+    }
+    #[test]
     fn dense_queries_match_sparse_words_columns_and_contact_order() {
         for count in [
             SettledQueries::PAGED_MIN_RANGES - 1,
@@ -8111,10 +8196,13 @@ impl SettledQueries {
         (pages <= 1 << 18).then_some((lo, hi))
     }
     fn include(table: &mut SettledQueryStripe, stripe: i32, lo: [i32; 3], hi: [i32; 3]) {
-        let x0 = lo[0] + (stripe - lo[0]).rem_euclid(8);
-        if x0 > hi[0] {
+        // The first owned column may lie past i32::MAX. Compare before
+        // narrowing; both signed endpoints remain valid sparse keys.
+        let x0 = i64::from(lo[0]) + (i64::from(stripe) - i64::from(lo[0])).rem_euclid(8);
+        if x0 > i64::from(hi[0]) {
             return;
         }
+        let x0 = x0 as i32;
         let first = lo[1].div_euclid(64);
         let last = hi[1].div_euclid(64);
         for z in lo[2]..=hi[2] {
@@ -8176,6 +8264,16 @@ impl SettledQueries {
         })
     }
     fn intersects(&self, lo: [i32; 3], hi: [i32; 3]) -> bool {
+        let first = lo[1].div_euclid(64);
+        if first == hi[1].div_euclid(64) {
+            // Most fragment boxes occupy one vertical word. Membership
+            // needs only its masked bits, not a column iterator or a Y
+            // coordinate. Share the range mask across every X/Z column.
+            let mask =
+                (u64::MAX << lo[1].rem_euclid(64)) & (u64::MAX >> (63 - hi[1].rem_euclid(64)));
+            return (lo[2]..=hi[2])
+                .any(|z| (lo[0]..=hi[0]).any(|x| self.word(x, z, first) & mask != 0));
+        }
         (lo[2]..=hi[2])
             .any(|z| (lo[0]..=hi[0]).any(|x| self.column(x, z, lo[1], hi[1]).next().is_some()))
     }
