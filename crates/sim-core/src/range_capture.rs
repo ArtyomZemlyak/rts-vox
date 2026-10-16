@@ -318,6 +318,9 @@ mod tests {
 
     struct Ground;
     impl Generator for Ground {
+        fn batches_columns(&self) -> bool {
+            true // Exercise the column path at coarse edges as well.
+        }
         fn material(&self, x: u32, y: u32, z: u32) -> u16 {
             if y < 16 {
                 2
@@ -341,7 +344,7 @@ mod tests {
                 }
                 w.flush();
             }
-            for edge in 1..=4 {
+            for edge in [1, 2, 3, 4, 5, 8, 9, 12, 16] {
                 let offsets = subcell_offsets(edge);
                 for x in [-3, -1, 0, 15, 31, 62, 63, 103, 190, 192] {
                     for y in [-3, -1, 0, 14, 15, 16, 38, 41, 63, 64] {

@@ -1610,6 +1610,9 @@ impl RangeTerrain {
 }
 
 impl Generator for RangeTerrain {
+    fn batches_columns(&self) -> bool {
+        true
+    }
     /// A whole column at once (ADR-114, ADR-319): what depends only on
     /// `(x, z)` is worked out once instead of once a voxel. Building a
     /// world asks for every voxel of it, and that is where the time goes.
@@ -3405,6 +3408,44 @@ fn read_cell_into(
     let mut mask = contact_mask::Mask::default();
     if !cell_is_air(w, p, edge) {
         mask = contact_mask::Mask::for_voxels((edge as usize).pow(3));
+        if (5..=16).contains(&edge) && w.batches_material_columns() {
+            // Generator columns share expensive X/Z terrain preparation.
+            // Transpose one bounded plane back into canonical X/Y/Z order;
+            // masks and materials stay identical to the scalar row reader.
+            let mut plane = [0u16; 16 * 16];
+            let mut column = [0u16; 16];
+            let x0 = p[0].max(0);
+            let x1 = (p[0] + edge).min(w.nx as i32);
+            let y0 = p[1].max(0);
+            let y1 = (p[1] + edge).min(w.ny as i32);
+            if x0 < x1 && y0 < y1 {
+                for z in p[2].max(0)..(p[2] + edge).min(w.nz as i32) {
+                    for x in x0..x1 {
+                        w.column(
+                            x as u32,
+                            z as u32,
+                            y0 as u32,
+                            &mut column[..(y1 - y0) as usize],
+                        );
+                        for y in y0..y1 {
+                            plane[(x - p[0] + edge * (y - p[1])) as usize] =
+                                column[(y - y0) as usize];
+                        }
+                    }
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            let index = (x - p[0] + edge * (y - p[1])) as usize;
+                            let mat = plane[index];
+                            if mat != 0 {
+                                mask.insert(index + (edge * edge * (z - p[2])) as usize);
+                                mats.push(mat);
+                            }
+                        }
+                    }
+                }
+            }
+            return mask;
+        }
         let x0 = p[0].max(0);
         let x1 = (p[0] + edge).min(w.nx as i32);
         let mut cursor = World::mat_cursor();

@@ -56,6 +56,9 @@ fn heavy_pressure_cells_destroy_ground_beyond_the_old_radius() {
 
 struct Pattern;
 impl Generator for Pattern {
+    fn batches_columns(&self) -> bool {
+        true // Exercise both read algorithms against the scalar oracle.
+    }
     fn material(&self, x: u32, y: u32, z: u32) -> u16 {
         if (x + 3 * y + 5 * z).is_multiple_of(3) {
             1 + ((x + y + z) % 2) as u16

@@ -109,3 +109,65 @@ fn material_reads_match_columns_and_snapshots_through_edits_load_and_reset() {
     assert_eq!(loaded.material(65, 63, 44), AIR);
     assert_eq!(loaded.material(3, 34, 5), 7);
 }
+
+#[test]
+fn columns_evaluate_only_pristine_spans_and_merge_adjacent_chunks() {
+    struct Counted {
+        calls: Arc<AtomicUsize>,
+        voxels: Arc<AtomicUsize>,
+    }
+    impl Generator for Counted {
+        fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+            1 + ((x + 3 * y + z) % 7) as Mat
+        }
+        fn column(&self, x: u32, z: u32, y0: u32, out: &mut [Mat]) {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.voxels.fetch_add(out.len(), Ordering::Relaxed);
+            for (i, dst) in out.iter_mut().enumerate() {
+                *dst = self.material(x, y0 + i as u32, z);
+            }
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let voxels = Arc::new(AtomicUsize::new(0));
+    let mut w = World::new(
+        35,
+        99,
+        35,
+        100,
+        Box::new(Counted {
+            calls: Arc::clone(&calls),
+            voxels: Arc::clone(&voxels),
+        }),
+    );
+    let reset = || {
+        calls.store(0, Ordering::Relaxed);
+        voxels.store(0, Ordering::Relaxed);
+    };
+    let mut out = [AIR; 108];
+    reset();
+    w.column(2, 3, 0, &mut out);
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "adjacent pristine chunks share evaluation"
+    );
+    assert_eq!(voxels.load(Ordering::Relaxed), 99);
+    w.queue_edit(Edit::put(2, 40, 3, 9));
+    w.flush();
+    for (y, n, expected_calls, expected_voxels) in [
+        (32, 32, 0, 0),
+        (0, 108, 2, 67),
+        (31, 34, 2, 2),
+        (99, 9, 0, 0),
+        (0, 0, 0, 0),
+    ] {
+        reset();
+        w.column(2, 3, y, &mut out[..n]);
+        assert_eq!(calls.load(Ordering::Relaxed), expected_calls);
+        assert_eq!(voxels.load(Ordering::Relaxed), expected_voxels);
+        for (dy, &mat) in out[..n].iter().enumerate() {
+            assert_eq!(mat, w.material(2, y + dy as u32, 3), "y={y} dy={dy}");
+        }
+    }
+}

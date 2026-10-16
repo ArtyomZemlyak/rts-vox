@@ -108,6 +108,14 @@ impl Edit {
 pub trait Generator: Send + Sync {
     fn material(&self, x: u32, y: u32, z: u32) -> Mat;
 
+    /// Performance hint for readers that can use either exact points or
+    /// columns. Opt in when column() shares expensive X/Z preparation;
+    /// the default scalar implementation gains nothing by also reading air.
+    /// This affects query packing only, never the returned materials.
+    fn batches_columns(&self) -> bool {
+        false
+    }
+
     /// Отрезок колонки разом. По умолчанию — повоксельный обход, чтобы
     /// простой генератор оставался в одну строку; настоящий генератор
     /// обязан её переопределить и вынести всё, что зависит только от
@@ -856,7 +864,6 @@ impl World {
             return;
         }
         let n = out.len().min((self.ny - y0) as usize);
-        self.gen.column(x, z, y0, &mut out[..n]);
         let mut offset = 0;
         while offset < n {
             let y = y0 + offset as u32;
@@ -865,9 +872,29 @@ impl World {
                 for (dy, dst) in out[offset..offset + count].iter_mut().enumerate() {
                     *dst = chunk.get(x as usize % CS, y as usize % CS + dy, z as usize % CS);
                 }
+                offset += count;
+            } else {
+                // Evaluate only pristine spans, once across adjacent pristine
+                // chunks. An edited chunk owns its whole material column;
+                // evaluating the generator under it is discarded work.
+                let start = offset;
+                offset += count;
+                while offset < n {
+                    let next_y = y0 + offset as u32;
+                    if self.chunks[self.chunk_index(x, next_y, z)].is_some() {
+                        break;
+                    }
+                    offset += (CS - next_y as usize % CS).min(n - offset);
+                }
+                self.gen
+                    .column(x, z, y0 + start as u32, &mut out[start..offset]);
             }
-            offset += count;
         }
+    }
+
+    /// Whether the procedural source opts into column-based material queries.
+    pub fn batches_material_columns(&self) -> bool {
+        self.gen.batches_columns()
     }
 
     /// Restore the authored map without rebuilding untouched occupancy.
