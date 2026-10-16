@@ -12659,6 +12659,9 @@ mod tests {
     fn capture_clips_packed_rows_at_world_edges_for_every_cell_size() {
         struct Pattern;
         impl Generator for Pattern {
+            fn batches_columns(&self) -> bool {
+                true
+            }
             fn material(&self, x: u32, y: u32, z: u32) -> u16 {
                 if y < 8 + (x + z) % 5 {
                     ((x + 3 * y + z) % 9) as u16
@@ -12669,7 +12672,7 @@ mod tests {
         }
         let w = World::new(64, 32, 64, 100, Box::new(Pattern));
         let dents = BTreeMap::from([([1, 1, 1], 777), ([62, 9, 63], 500)]);
-        for edge in 1..=4 {
+        for edge in [1, 2, 3, 4, 5, 8, 9, 12, 16] {
             let mut c = config();
             c.half_cells = 4;
             c.cell_units = edge;

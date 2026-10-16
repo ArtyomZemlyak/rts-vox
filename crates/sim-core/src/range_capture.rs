@@ -30,6 +30,19 @@ pub(super) fn capture(
     budget: usize,
     parallel: bool,
 ) -> bool {
+    capture_inner::<true>(e, w, c, units, dents, budget, parallel)
+}
+
+// The previous ground reader is instantiated only by the test probe.
+fn capture_inner<const COLUMNS: bool>(
+    e: &mut Explosion,
+    w: &World,
+    c: &ExplosionConfig,
+    units: &[RangeUnit],
+    dents: &SurfaceWork,
+    budget: usize,
+    parallel: bool,
+) -> bool {
     let n = e.wave.size();
     let cells = n * n * n;
     if e.captured >= cells {
@@ -105,6 +118,8 @@ pub(super) fn capture(
     // workers also checks row proofs, not merely parallel dispatch of them.
     // Production capture always enables these exact row reductions.
     let batch_rows = !cfg!(test) || parallel;
+    let batch_ground =
+        COLUMNS && batch_rows && (5..=16).contains(&e.cell) && w.batches_material_columns();
     let fill = |start: usize, output: &mut [u32]| {
         // A parallel chunk visits at most two Z planes. Share column
         // ceilings across heights locally; no cache crosses a worker.
@@ -130,6 +145,7 @@ pub(super) fn capture(
             *cached
         };
         let mut cursor = World::mat_cursor();
+        let mut column = [0u16; 16];
         let mut parts = Vec::new();
         let mut offset = 0;
         while offset < output.len() {
@@ -204,25 +220,83 @@ pub(super) fn capture(
                     if p[1] < ceiling(x, z, &mut ceilings) as i32 {
                         let x0 = p[0].max(0);
                         let x1 = (end[0] + 1).min(w.nx as i32);
-                        'terrain: for wz in p[2].max(0)..(end[2] + 1).min(w.nz as i32) {
-                            for wy in p[1].max(0)..(end[1] + 1).min(w.ny as i32) {
-                                if x1 <= x0 {
-                                    continue;
+                        let y0 = p[1].max(0);
+                        let z0 = p[2].max(0);
+                        let z1 = (end[2] + 1).min(w.nz as i32);
+                        if batch_ground && x0 < x1 && z0 < z1 {
+                            // A saturated first sample already proves the
+                            // terrain maximum, without preparing a column.
+                            // Otherwise exact max is independent of traversal
+                            // order: share generator work along each column.
+                            let q = [x0, y0, z0];
+                            let dent = if look {
+                                dents.get(&q).copied().unwrap_or(0)
+                            } else {
+                                0
+                            };
+                            r = material_work(material_cached(w, &mut cursor, q), c)
+                                .saturating_sub(dent);
+                            if r < maximum {
+                                'columns: for wz in z0..z1 {
+                                    for wx in x0..x1 {
+                                        let y1 = (end[1] + 1)
+                                            .min(w.ny as i32)
+                                            .min(w.column_ceiling(wx as u32, wz as u32) as i32);
+                                        if y1 <= y0 {
+                                            continue;
+                                        }
+                                        w.column(
+                                            wx as u32,
+                                            wz as u32,
+                                            y0 as u32,
+                                            &mut column[..(y1 - y0) as usize],
+                                        );
+                                        for (dy, &mat) in
+                                            column[..(y1 - y0) as usize].iter().enumerate()
+                                        {
+                                            if mat == 0 {
+                                                continue;
+                                            }
+                                            let q = [wx, y0 + dy as i32, wz];
+                                            let dent = if look {
+                                                dents.get(&q).copied().unwrap_or(0)
+                                            } else {
+                                                0
+                                            };
+                                            r = r.max(material_work(mat, c).saturating_sub(dent));
+                                            if r == maximum {
+                                                break 'columns;
+                                            }
+                                        }
+                                    }
                                 }
-                                let mut bits =
-                                    w.solid_bits(x0 as u32, wy as u32, wz as u32, (x1 - x0) as u32);
-                                while bits != 0 {
-                                    let q = [x0 + bits.trailing_zeros() as i32, wy, wz];
-                                    bits &= bits - 1;
-                                    let work = material_work(material_cached(w, &mut cursor, q), c);
-                                    let dent = if look {
-                                        dents.get(&q).copied().unwrap_or(0)
-                                    } else {
-                                        0
-                                    };
-                                    r = r.max(work.saturating_sub(dent));
-                                    if r == maximum {
-                                        break 'terrain;
+                            }
+                        } else {
+                            'terrain: for wz in z0..z1 {
+                                for wy in p[1].max(0)..(end[1] + 1).min(w.ny as i32) {
+                                    if x1 <= x0 {
+                                        continue;
+                                    }
+                                    let mut bits = w.solid_bits(
+                                        x0 as u32,
+                                        wy as u32,
+                                        wz as u32,
+                                        (x1 - x0) as u32,
+                                    );
+                                    while bits != 0 {
+                                        let q = [x0 + bits.trailing_zeros() as i32, wy, wz];
+                                        bits &= bits - 1;
+                                        let work =
+                                            material_work(material_cached(w, &mut cursor, q), c);
+                                        let dent = if look {
+                                            dents.get(&q).copied().unwrap_or(0)
+                                        } else {
+                                            0
+                                        };
+                                        r = r.max(work.saturating_sub(dent));
+                                        if r == maximum {
+                                            break 'terrain;
+                                        }
                                     }
                                 }
                             }
@@ -387,6 +461,9 @@ mod tests {
                 ([100, 28, 96], 2),
                 ([100, 28, 96], 3),
                 ([191, 62, 191], 4),
+                ([0, 4, 0], 5),
+                ([100, 28, 96], 9),
+                ([191, 62, 191], 16),
             ] {
                 c.cell_units = edge;
                 let mut w = World::new(192, 64, 192, 100, Box::new(Ground));
@@ -449,6 +526,62 @@ mod tests {
                     }
                 }
                 assert!(!actual.capturing());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual exact coarse capture comparison; run alone in release"]
+    fn measure_coarse_column_capture() {
+        use std::{hint::black_box, time::Instant};
+        let w = World::new(
+            640,
+            192,
+            640,
+            100,
+            Box::new(super::super::RangeTerrain::new(true, None)),
+        );
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/siege-shell.ron")).unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let dents = SurfaceWork::from([([320, 16, 320], 1_000_000), ([321, 24, 320], 713)]);
+        println!("CAPTURE_PROBE budget,columns,median_us,max_us,captured");
+        for budget in [4096, 65536, usize::MAX] {
+            let mut expected = Vec::new();
+            for columns in [false, true] {
+                let mut times = Vec::new();
+                let mut count = 0;
+                for rep in 0..8 {
+                    let mut e = Explosion::begin([320, 24, 320], &c, &[]);
+                    let start = Instant::now();
+                    pool.install(|| {
+                        if columns {
+                            capture_inner::<true>(&mut e, &w, &c, &[], &dents, budget, true)
+                        } else {
+                            capture_inner::<false>(&mut e, &w, &c, &[], &dents, budget, true)
+                        }
+                    });
+                    let elapsed = start.elapsed().as_nanos();
+                    if rep > 0 {
+                        times.push(elapsed);
+                    }
+                    let mut saved = Blob::new();
+                    e.save(&mut saved);
+                    if expected.is_empty() {
+                        expected = saved.v.clone();
+                    }
+                    assert_eq!(saved.v, expected, "budget={budget} columns={columns}");
+                    count = e.captured;
+                    black_box(&e);
+                }
+                times.sort_unstable();
+                println!(
+                    "CAPTURE_PROBE {budget},{columns},{:.3},{:.3},{count}",
+                    times[3] as f64 / 1000.0,
+                    times[6] as f64 / 1000.0
+                );
             }
         }
     }
