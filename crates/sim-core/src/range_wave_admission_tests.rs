@@ -64,7 +64,7 @@ fn contested_waves() -> BlastRange {
 
 fn apply_waves(r: &mut BlastRange) {
     let mut b = std::mem::replace(&mut r.battle, Battle::new(&r.units, 1));
-    r.battle_waves(&mut b, &mut |_| {});
+    r.battle_waves(&mut b, &mut |_| {}, &|_, _| {});
     r.battle = b;
 }
 

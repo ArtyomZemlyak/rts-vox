@@ -2100,6 +2100,7 @@ impl Explosion {
     /// [`Explosion::read_contacts`] with the hulls, whose cells each read
     /// wave cell owns are mapped too, and with the wave's matter, preset
     /// and energy when its claims pay (`spent`).
+    #[cfg(test)]
     pub(crate) fn read_contacts_with(
         &mut self,
         w: &World,
@@ -2107,11 +2108,22 @@ impl Explosion {
         units: &[RangeUnit],
         spent: Option<(&matter::Matter, &ExplosionConfig, u64)>,
     ) {
+        self.read_contacts_observed(w, budget, units, spent, &|_| {});
+    }
+    pub(crate) fn read_contacts_observed(
+        &mut self,
+        w: &World,
+        budget: usize,
+        units: &[RangeUnit],
+        spent: Option<(&matter::Matter, &ExplosionConfig, u64)>,
+        observe: &impl Fn(&'static str),
+    ) {
         self.drop_contacts();
         // A wave with no share of the tick's contacts visits nothing.
         if budget == 0 || self.pending.is_empty() {
             return;
         }
+        observe("physics_wave_read_ground_begin");
         let offsets = subcell_offsets(self.cell);
         // A step visits at most this many cells, in about this order: the
         // billable prefix of the queue, except that a step with contacts
@@ -2207,8 +2219,11 @@ impl Explosion {
                 }
             }
         }
+        observe("physics_wave_read_ground_end");
         if !self.point_contacts {
+            observe("physics_wave_body_map_begin");
             self.read_bodies(units);
+            observe("physics_wave_body_map_end");
         }
     }
     /// The body cells each cell read ahead owns of every hull whose frozen
@@ -2374,14 +2389,27 @@ impl Explosion {
     /// A cell the frontier finds empty, with no matter in the world and
     /// no hull's frozen box reaching it, has nothing to contact: it is not
     /// queued for a visit (ADR-681).
+    #[cfg(test)]
     pub(crate) fn advance_frontier(&mut self, budget: usize, w: &World, units: &[RangeUnit]) {
+        self.advance_frontier_observed(budget, w, units, &|_| {});
+    }
+    pub(crate) fn advance_frontier_observed(
+        &mut self,
+        budget: usize,
+        w: &World,
+        units: &[RangeUnit],
+        observe: &impl Fn(&'static str),
+    ) {
         if budget == 0 {
             return;
         }
         // Only the roster the burst began with (ADR-675).
         let units = &units[..self.roster(units.len())];
         let room = budget.saturating_sub(self.pending.len());
+        observe("physics_wave_heap_begin");
         let hits = self.wave.advance_contacts(room);
+        observe("physics_wave_heap_end");
+        observe("physics_wave_filter_begin");
         let boxes = self.unit_boxes(units);
         let (domain_lo, domain_hi) = self.domain();
         let near: Vec<([i32; 3], [i32; 3])> = boxes
@@ -2397,6 +2425,7 @@ impl Explosion {
                     .any(|(lo, hi)| (0..3).all(|a| p[a] <= hi[a] && p[a] + edge > lo[a]))
         }));
         self.frontier_ready = true;
+        observe("physics_wave_filter_end");
     }
     #[allow(clippy::too_many_arguments)]
     fn step_inner<const FAIR: bool>(
@@ -5612,7 +5641,7 @@ impl BlastRange {
     }
     /// Also observe independent physics jobs on their executing threads.
     /// Physics IDs name caller stages (0: rubble, 1: debris, 2: laser,
-    /// 3: heat exchange, 4: terrain heat), not actor IDs;
+    /// 3: heat exchange, 4: terrain heat, 5: unit heat, 6: explosion waves), not actor IDs;
     /// observers pair them by OS thread and event family. Navigation-only
     /// observers keep the existing API and receive no physics events.
     pub fn step_observed_all_tasks(

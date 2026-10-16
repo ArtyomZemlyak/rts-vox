@@ -389,6 +389,34 @@ class FrameCadenceTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    def test_workload_columns_require_the_matching_capture_contract(self):
+        frames = [dict(row, **{key: '3' for key in profile.WORKLOAD_FIELDS}, workload_sample_ms='0.002') for row in self.frames]
+        self.write(frames=frames)
+        missing = profile.analyze(self.path)
+        self.assertIn('workload_capture_contract_missing_or_unsupported', missing['reasons'])
+        log = self.path / 'world-battle.log'
+        base = log.read_text()
+        contract = 'PROFILE workload_capture_schema=1 counter_scope=frame_snapshot fragment_count=records sample_clock=wall\n'
+        log.write_text(base + contract)
+        observed = profile.analyze(self.path)
+        self.assertTrue(observed['valid_for_comparison'])
+        self.assertEqual(observed['workload_snapshots']['schema'], 1)
+        self.assertIn('| fragment_records | 3 | 3 |', profile.markdown(observed))
+        log.write_text(base + contract.replace('schema=1', 'schema=2'))
+        unknown = profile.analyze(self.path)
+        self.assertFalse(unknown['valid_for_comparison'])
+        self.assertIn('different:workload_capture_schema', profile.compare(observed, unknown)['reasons'])
+        self.write()
+        with log.open('a') as output: output.write(contract)
+        self.assertIn('workload_capture_columns_missing', profile.analyze(self.path)['reasons'])
+
+    def test_workload_sampling_mode_is_a_comparison_key(self):
+        self.write()
+        before = profile.analyze(self.path)
+        after = json.loads(json.dumps(before))
+        after['workload_snapshots'] = dict(status='observed')
+        self.assertIn('different:workload_observation_mode', profile.compare(before, after)['reasons'])
+
     def test_build_context_is_explicit_and_compares_toolchain_flags_and_refresh(self):
         self.write()
         before = profile.analyze(self.path)
@@ -1850,6 +1878,26 @@ class PacingTests(unittest.TestCase):
         del rows[0]["simulation_batch_ms"]
         with self.assertRaises(KeyError):
             profile.pacing_summary(rows)
+
+
+class WorkloadTests(unittest.TestCase):
+    def test_legacy_is_missing_and_invalid_partial_counters_are_rejected(self):
+        self.assertEqual(profile.workload_summary([{"simulation_ticks": "1"}]),
+                         {"status": "unavailable_legacy"})
+        rows = [{key: str(i) for key in profile.WORKLOAD_FIELDS} for i in [2, 5]]
+        for row in rows:
+            row["workload_sample_ms"] = "0.002"
+        result = profile.workload_summary(rows)
+        self.assertEqual(result["counters"]["fragment_records"]["first"], 2)
+        self.assertEqual(result["counters"]["fragment_records"]["last"], 5)
+        self.assertEqual(result["sample_ms"]["mean"], .002)
+        for value in ["-1", "1.5", "nan"]:
+            bad = [dict(rows[0], live_waves=value)]
+            with self.assertRaises(ValueError): profile.workload_summary(bad)
+        with self.assertRaises(KeyError): profile.workload_summary([{"fragment_records": "1"}])
+        for value in ["nan", "inf", "-1"]:
+            with self.assertRaises(ValueError):
+                profile.workload_summary([dict(rows[0], workload_sample_ms=value)])
 
 
 if __name__ == "__main__":

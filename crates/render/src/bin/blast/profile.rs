@@ -87,6 +87,9 @@ struct Frame {
     pacing: [f64; 4],
     // State after this slice, not arrivals; no-tick frames can repeat it.
     collapse: [usize; 3],
+    // Cheap frame snapshots: no fragment scans or full-world chunk walks.
+    workload: [usize; 12],
+    workload_sample_ms: f64,
 }
 /// Capture requested camera controls, not animated/following camera poses.
 /// Keep changes in memory and print after measurement, not in a slow frame.
@@ -348,6 +351,7 @@ pub fn begin(
         println!(
             "PROFILE schema=3 frame_ms_scope=bevy_time_delta_render_pipeline_lag observed_frame_ms_scope=previous_profile_begin_to_current_profile_begin cpu_time_scope=thread_kernel_plus_user"
         );
+        println!("PROFILE workload_capture_schema=1 counter_scope=frame_snapshot fragment_count=records sample_clock=wall");
         println!(
             "PROFILE tick_rate={} epoch_unix_ns={}",
             sim_core::TICKS_PER_SECOND,
@@ -501,6 +505,35 @@ pub fn end(
     // Keep the first measured slice too: its Bevy elapsed time can be zero,
     // while its monotonic slice and any recorded core tick are already real.
     if elapsed >= 0.0 {
+        let sample_start = Instant::now();
+        let waves = scene.sim.battle.wave_progress().fold([0; 3], |mut n, w| {
+            n[0] += 1;
+            n[1] += usize::from(w.capturing);
+            n[2] += w.pending;
+            n
+        });
+        let motion = std::iter::once(&scene.sim.gun)
+            .chain(scene.sim.units.iter())
+            .fold([0; 2], |mut n, u| {
+                n[0] += usize::from(u.motion.searching());
+                n[1] += usize::from(u.motion.destination.is_some());
+                n
+            });
+        let workload = [
+            scene.sim.matter.debris.fragments.len(),
+            scene.sim.matter.debris.corpses.len(),
+            scene.sim.matter.debris.claims(),
+            scene.sim.matter.debris.pending(),
+            scene.sim.pending_kinetic_impacts(),
+            scene.sim.matter.felling_pending(),
+            waves[0],
+            waves[1],
+            waves[2],
+            scene.sim.world.queued(),
+            motion[0],
+            motion[1],
+        ];
+        let workload_sample_ms = sample_start.elapsed().as_secs_f64() * 1000.0;
         let end_ns = p.epoch.unwrap().elapsed().as_nanos();
         let start_ns = p.frame_start_ns;
         let observed_frame_ms = p.observed_frame_ms;
@@ -528,6 +561,8 @@ pub fn end(
                 scene.sim.collapse_work.submitted,
                 scene.sim.collapse_work.fresh_edits,
             ],
+            workload,
+            workload_sample_ms,
         });
         if let Some(mut source) = source {
             source.0 = Some(render::timeline::FrameTag {
@@ -590,7 +625,7 @@ pub fn end(
         let mut out = std::io::BufWriter::new(std::fs::File::create(p.output.as_ref().unwrap())?);
         writeln!(
             out,
-            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions,render_extract_ms,occupancy_ms,simulation_ticks,simulation_core_ms,generation,frame_start_ns,frame_end_ns,frame_gap_ns,observed_frame_ms,simulation_debt_ticks,simulation_dropped_ticks,simulation_batch_ms,simulation_budget_limited_steps,collapse_queued,collapse_submitted,collapse_incoming"
+            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions,render_extract_ms,occupancy_ms,simulation_ticks,simulation_core_ms,generation,frame_start_ns,frame_end_ns,frame_gap_ns,observed_frame_ms,simulation_debt_ticks,simulation_dropped_ticks,simulation_batch_ms,simulation_budget_limited_steps,collapse_queued,collapse_submitted,collapse_incoming,fragment_records,corpse_records,material_claims,material_jobs,pending_kinetic,felling_pending,live_waves,capturing_waves,pending_wave_contacts,pending_world_edits,searching_units,moving_units,workload_sample_ms"
         )?;
         for row in &p.rows {
             let Frame {
@@ -604,8 +639,10 @@ pub fn end(
                 observed_frame_ms,
                 pacing,
                 collapse,
+                workload,
+                workload_sample_ms,
             } = row;
-            writeln!(
+            write!(
                 out,
                 "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.0},{:.6},{:.6},{:.0},{:.6},{generation},{start_ns},{end_ns},{gap_ns},{},{:.6},{:.6},{:.6},{:.0},{},{},{}",
                 ms[0],
@@ -626,6 +663,10 @@ pub fn end(
                 observed_frame_ms.map_or(String::new(), |value| format!("{value:.6}")),
                 pacing[0], pacing[1], pacing[2], pacing[3], collapse[0], collapse[1], collapse[2]
             )?;
+            for value in workload {
+                write!(out, ",{value}")?;
+            }
+            writeln!(out, ",{workload_sample_ms:.9}")?;
         }
         let saved = out
             .flush()

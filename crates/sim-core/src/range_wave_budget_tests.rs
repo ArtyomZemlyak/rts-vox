@@ -44,7 +44,7 @@ fn ceilings(r: &mut BlastRange, capture: usize, work: usize) {
 
 fn apply(r: &mut BlastRange) {
     let mut b = std::mem::replace(&mut r.battle, Battle::new(&r.units, 1));
-    r.battle_waves(&mut b, &mut |_| {});
+    r.battle_waves(&mut b, &mut |_| {}, &|_, _| {});
     r.battle = b;
     r.tick += 1;
 }

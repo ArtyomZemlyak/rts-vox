@@ -64,6 +64,31 @@ def pacing_summary(frames):
                 budget_limited_steps=sum(values[keys[3]]), steps_per_frame=histogram)
 
 
+WORKLOAD_FIELDS = ("fragment_records", "corpse_records", "material_claims", "material_jobs",
+                   "pending_kinetic", "felling_pending", "live_waves", "capturing_waves",
+                   "pending_wave_contacts", "pending_world_edits", "searching_units", "moving_units")
+
+
+def workload_summary(frames):
+    if not any(key in row for row in frames for key in WORKLOAD_FIELDS):
+        return dict(status="unavailable_legacy")
+    values = {key: [] for key in WORKLOAD_FIELDS}
+    cost = []
+    for row in frames:
+        for key in WORKLOAD_FIELDS:
+            value = int(row[key])
+            if value < 0:
+                raise ValueError("Negative workload counter")
+            values[key].append(value)
+        ms = float(row["workload_sample_ms"])
+        if not math.isfinite(ms) or ms < 0:
+            raise ValueError("Invalid workload sample cost")
+        cost.append(ms)
+    return dict(status="observed", scope="frame_snapshot_records_not_live_objects",
+                counters={key: dict(first=v[0], last=v[-1], minimum=min(v), **stats(v))
+                          for key, v in values.items()}, sample_ms=stats(cost))
+
+
 def render_context(log):
     initial = re.search(r"^PROFILE render_context=(RenderContext \{[^\r\n]+\})$", log, re.M)
     steps = [dict(step=int(step), value=value) for step, value in
@@ -1481,6 +1506,14 @@ def analyze(directory, scenario="world-battle", top=12):
         reasons.append("compute_workers_override_mismatch")
     context = render_context(log)
     reasons.extend(context["reasons"])
+    workload = workload_summary(frames)
+    workload_contract = re.findall(r"^PROFILE workload_capture_schema=(\d+) counter_scope=frame_snapshot fragment_count=records sample_clock=wall$", log, re.M)
+    if workload['status'] == 'observed':
+        workload['schema'] = int(workload_contract[0]) if len(workload_contract) == 1 else None
+        if workload_contract != ['1']:
+            reasons.append('workload_capture_contract_missing_or_unsupported')
+    elif workload_contract or 'PROFILE workload_capture_schema=' in log:
+        reasons.append('workload_capture_columns_missing')
     stall_trace, stall_issues = analyze_stall_trace(directory, scenario, log, manifest, frames, starts, roles, top)
     reasons.extend(stall_issues)
     render_trace, render_issues = analyze_render_timeline(directory, scenario, log, manifest, frames, top, roles)
@@ -1526,6 +1559,7 @@ def analyze(directory, scenario="world-battle", top=12):
         actual_workers=[int(pools[1]), int(pools[2])] if pools else None,
         actual_compute_workers=compute,
         simulation_pacing=pacing_summary(frames),
+        workload_snapshots=workload,
         actual_render_context=context,
         camera_tour=camera_tour,
         gpu=gpu, main_wall_accounting=range_gpu_profile.frame_accounting(frames),
@@ -1544,7 +1578,7 @@ def analyze(directory, scenario="world-battle", top=12):
         stall_episodes=episodes, stall_trace=stall_trace, render_timeline=render_trace,
         render_tasks=render_tasks, render_tasks_build=task_build,
         limitations=["wall_minus_cpu includes preemption, waits and coarse OS accounting; it is not lock wait time",
-                    "physics slots identify caller stages (0 rubble, 1 debris, 2 laser, 3 heat exchange, 4 terrain heat, 5 unit heat), not actors; OS thread and family pair scopes",
+                    "physics slots identify caller stages (0 rubble, 1 debris, 2 laser, 3 heat exchange, 4 terrain heat, 5 unit heat, 6 explosion waves), not actors; early audit captures used slot 5 for wave families too; OS thread and family pair scopes",
                     "sampled traces retain the longest physics scope per OS thread, family and stage; complete job totals are validated separately",
                     "task family wall totals are inclusive across concurrent jobs, not elapsed phase time or CPU utilization",
                     "zero task CPU deltas can be coarse OS rounding; diagnostic callbacks add overhead",
@@ -1582,6 +1616,10 @@ def recorded_build_context(report):
 
 def compare(a, b):
     problems = []
+    if (a.get("workload_snapshots") or {}).get("status", "unavailable_legacy") != (b.get("workload_snapshots") or {}).get("status", "unavailable_legacy"):
+        problems.append("different:workload_observation_mode")
+    if (a.get("workload_snapshots") or {}).get("schema") != (b.get("workload_snapshots") or {}).get("schema"):
+        problems.append("different:workload_capture_schema")
     for label, run in [("before", a), ("after", b)]:
         if not run["valid_for_comparison"]:
             problems.append(f"{label}:not_valid")
@@ -1650,6 +1688,14 @@ def markdown(report):
     for p in report["phases"]:
         cpu = p["thread_cpu_occurrences"]
         lines.append(f"| {p['name']} | {p['mean_per_tick_ms']:.3f} | {p['wall_occurrences']['p99']:.3f} | {cpu['samples'] if cpu else 'unavailable'} |")
+    workload = report.get('workload_snapshots', {})
+    if workload.get('status') == 'observed':
+        lines += ['', 'Workload snapshots are record counts at frame publication, not counts of live visible objects.', '',
+                  '| Counter | First | Last | Minimum | Mean | Maximum |',
+                  '|---|---:|---:|---:|---:|---:|']
+        for name, values in workload['counters'].items():
+            lines.append(f"| {name} | {values['first']} | {values['last']} | {values['minimum']} | {values['mean']:.3f} | {values['max']} |")
+        lines += ['', f"Workload sampling wall cost, ms: {workload['sample_ms']}."]
     if report.get('details'):
         lines += ['', 'Nested caller details (already included in parent phases):', '',
                   '| Group / completed boundary | Mean per traced tick, ms | p99 occurrence, ms | Occurrences |',

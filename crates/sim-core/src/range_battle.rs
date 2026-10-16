@@ -1950,7 +1950,7 @@ impl BlastRange {
             u64::from(self.tick),
         );
         self.reserve_thermal_fragments();
-        self.battle_waves(&mut battle, &mut completed);
+        self.battle_waves(&mut battle, &mut completed, physics);
         completed("battle_waves");
         for (id, (u, old)) in self.units.iter_mut().zip(revisions).enumerate() {
             if u.revision != old {
@@ -2994,7 +2994,12 @@ impl BlastRange {
             }
         }
     }
-    fn battle_waves(&mut self, b: &mut Battle, completed: &mut impl FnMut(&'static str)) {
+    fn battle_waves(
+        &mut self,
+        b: &mut Battle,
+        completed: &mut impl FnMut(&'static str),
+        physics: &(impl Fn(usize, &'static str) + Sync),
+    ) {
         use rayon::prelude::*;
         let n = b.waves.len().max(1);
         // A growing old crater must not consume every newly freed fragment
@@ -3046,8 +3051,10 @@ impl BlastRange {
                 .zip(slices.par_iter())
                 .for_each(|(w, &slice)| {
                     if w.wave.capturing() {
+                        physics(6, "physics_wave_capture_begin");
                         w.wave
                             .capture(world, config_of(w.weapon), units, dents, slice);
+                        physics(6, "physics_wave_capture_end");
                     }
                 });
             completed("battle_capture");
@@ -3080,9 +3087,12 @@ impl BlastRange {
                 .par_iter_mut()
                 .zip(pops.par_iter().zip(budgets.par_iter()))
                 .for_each(|(w, (&pop, &budget))| {
-                    w.wave.advance_frontier(pop, world, units);
+                    let observe = |event| physics(6, event);
+                    w.wave
+                        .advance_frontier_observed(pop, world, units, &observe);
                     let spent = Some((matter, config_of(w.weapon), w.energy));
-                    w.wave.read_contacts_with(world, budget, units, spent)
+                    w.wave
+                        .read_contacts_observed(world, budget, units, spent, &observe)
                 });
         }
         completed("battle_frontier");
@@ -3111,6 +3121,7 @@ impl BlastRange {
                     .collect::<Vec<_>>()
             });
             let room = room.get_or_insert_with(|| self.matter.claim_room());
+            physics(6, "physics_wave_apply_begin");
             w.wave.step_with_room::<true>(
                 &mut self.world,
                 budgets[i],
@@ -3121,6 +3132,7 @@ impl BlastRange {
                 Some(&mut self.matter),
                 Some(room),
             );
+            physics(6, "physics_wave_apply_end");
             if let Some(before) = before {
                 for (id, (u, (root, seg))) in self.units.iter().zip(before).enumerate() {
                     self.matter

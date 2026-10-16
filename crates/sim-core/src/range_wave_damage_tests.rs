@@ -165,9 +165,13 @@ fn captured_resistance_matches_an_exhaustive_voxel_centre_reference() {
     unit.motion.drive.head = fx::angle::FULL / 7;
     unit.update_pose(-fx::angle::FULL / 11);
     unit.dents.insert([20, 10, 12], 1);
-    for edge in [1, 2, 4] {
+    for (energy, authored_edge) in [40_000, 100_000, 400_000]
+        .into_iter()
+        .flat_map(|energy| [1, 2, 4].map(|edge| (energy, edge)))
+    {
         let mut c = config();
-        c.cell_units = edge;
+        c.energy = energy;
+        c.cell_units = authored_edge;
         let world = World::new(128, 128, 128, 100, Box::new(Air));
         let e = Explosion::with_damage(
             &world,
@@ -176,6 +180,9 @@ fn captured_resistance_matches_an_exhaustive_voxel_centre_reference() {
             std::slice::from_ref(&unit),
             &SurfaceWork::new(),
         );
+        // Ownership and bedrock use the actual propagation grid. A powerful
+        // charge may enlarge its cells independently of the authored minimum.
+        let edge = e.cell;
         let turret = crate::damage::turned(&unit.pose, unit.turret_delta, 0);
         let mut expected = BTreeMap::<[i32; 3], u32>::new();
         let mut reference = |part: usize, b: &UnitBody, root: bool| {
@@ -227,7 +234,7 @@ fn captured_resistance_matches_an_exhaustive_voxel_centre_reference() {
                     assert_eq!(
                         e.wave.resistance_at([x, y, z]),
                         want,
-                        "edge={edge}, cell={cell:?}"
+                        "energy={energy}, authored_edge={authored_edge}, edge={edge}, cell={cell:?}"
                     );
                 }
             }

@@ -216,10 +216,19 @@ fn the_rules_ai_does_not_override_a_dig_order() {
     l.units.last_mut().unwrap().at = [600, 16, 600];
     let mut r = BlastRange::with_layout(config(), l).unwrap();
     assert!(r.set_ai_vs_ai(true));
-    r.start_battle().unwrap();
     r.start_command_capture(4096).unwrap();
     assert!(r.battle_order(0, Order::Dig(FACE), None));
     assert!(r.battle_order(1, Order::Hold, None));
+    assert!(
+        !r.battle.autonomous,
+        "manual orders hand control to the player"
+    );
+    // Arm the prepared orders before enabling the autonomous fight. Starting
+    // AI first and then issuing human orders disables allied AI (ADR-738),
+    // which would not exercise the rules' protection of an existing dig order.
+    assert!(r.set_ai_vs_ai(true));
+    r.start_battle().unwrap();
+    assert!(r.battle.autonomous);
     for _ in 0..60 {
         r.step();
     }

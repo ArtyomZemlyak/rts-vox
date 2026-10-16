@@ -7,6 +7,50 @@ fn step_without_ai(r: &mut BlastRange) {
 }
 
 #[test]
+fn wave_task_observers_are_balanced_and_do_not_change_combat() {
+    let mut plain = arena_of([RangeUnitKind::ArtilleryTurretT3, RangeUnitKind::Tank]);
+    plain.start_battle().unwrap();
+    plain.battle.actors[1].order = Order::Hold;
+    assert!(plain.battle_order(0, Order::Ground([580, 15, 336]), None));
+    let mut observed = BlastRange::restore(plain.config, &plain.snapshot()).unwrap();
+    let counts = std::sync::Mutex::new(std::collections::BTreeMap::<&str, usize>::new());
+    for _ in 0..240 {
+        plain.battle.ai.next_tick = u32::MAX;
+        observed.battle.ai.next_tick = u32::MAX;
+        plain.step();
+        observed.step_observed_all_tasks(
+            |_| {},
+            |_| {},
+            |_, _| {},
+            |_, _| {},
+            |stage, event| {
+                if event.starts_with("physics_wave_") {
+                    assert_eq!(stage, 6);
+                    *counts.lock().unwrap().entry(event).or_default() += 1;
+                }
+            },
+        );
+        assert_eq!(plain.state_hash(), observed.state_hash());
+    }
+    let counts = counts.into_inner().unwrap();
+    for family in [
+        "capture",
+        "heap",
+        "filter",
+        "read_ground",
+        "body_map",
+        "apply",
+    ] {
+        let begin = format!("physics_wave_{family}_begin");
+        let end = format!("physics_wave_{family}_end");
+        let n = counts.get(begin.as_str()).copied().unwrap_or(0);
+        assert!(n > 0, "unobserved family: {family}");
+        assert_eq!(Some(&n), counts.get(end.as_str()), "unbalanced {family}");
+    }
+    assert!(plain.matter.economy.ledger.balanced());
+}
+
+#[test]
 fn siege_single_shell_digs_soil_and_replays_flight_and_live_wave() {
     let mut r = arena_of([RangeUnitKind::ArtilleryTurretT3, RangeUnitKind::Tank]);
     r.start_battle().unwrap();
