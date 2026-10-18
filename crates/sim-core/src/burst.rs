@@ -928,12 +928,14 @@ mod tests {
     #[test]
     fn rubble_support_scopes_preserve_contacts_and_cover_cleanup() {
         let w = world();
-        for workers in [1, 4, 8] {
+        for workers in [1, 2, 4, 8] {
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(workers)
                 .build()
                 .unwrap();
-            for count in [63usize, 64, 65, 127, 128, 129, 1023, 1024, 1025] {
+            for count in [
+                63usize, 64, 65, 127, 128, 129, 1023, 1024, 1025, 2047, 2048, 2049,
+            ] {
                 let mut b = Bursts::default();
                 b.fragments.push(Fragment {
                     id: 1,
@@ -991,12 +993,22 @@ mod tests {
                     "physics_rubble_floor",
                     "physics_rubble_support_build",
                     "physics_rubble_support_query",
+                    "physics_rubble_support_read",
                     "physics_rubble_support_drop",
                     "physics_rubble_gather_dispatch",
                     "physics_rubble_gather",
                     "physics_rubble_merge",
                 ]);
                 assert_eq!(trace.jobs("physics_rubble_support_query_begin"), 1);
+                assert_eq!(
+                    trace.jobs("physics_rubble_support_read_begin"),
+                    if count >= 1024 && workers > 1 {
+                        count.div_ceil(256)
+                    } else {
+                        1
+                    },
+                    "support batches workers={workers} count={count}"
+                );
                 let mut scratch = RubbleScratch::default();
                 // Change membership within words and across word/batch edges
                 // without advancing a tick. Old bits must not survive reuse.
@@ -7043,11 +7055,37 @@ impl Bursts {
                     "physics_rubble_support_query_begin",
                     "physics_rubble_support_query_end",
                 );
-                floor.extend(stacked.into_iter().filter(|&i| {
+                let supported = |&i: &usize| {
                     let f = &self.fragments[i];
                     let (low, high) = bounds[i].unwrap();
                     settled.supports(arr(f.position), low, high, i as u32)
-                }));
+                };
+                if stacked.len() >= 1024 && rayon::current_num_threads() > 1 {
+                    // Every query reads the same frozen index. Keep each
+                    // cell's contact order and join indexed batches in source
+                    // order; no landing, wakeup or world edits occur here.
+                    let groups: Vec<Vec<_>> = stacked
+                        .par_chunks(256)
+                        .map(|indices| {
+                            let _task = PhysicsTask::new(
+                                task,
+                                "physics_rubble_support_read_begin",
+                                "physics_rubble_support_read_end",
+                            );
+                            indices.iter().copied().filter(supported).collect()
+                        })
+                        .collect();
+                    for group in groups {
+                        floor.extend(group);
+                    }
+                } else {
+                    let _task = PhysicsTask::new(
+                        task,
+                        "physics_rubble_support_read_begin",
+                        "physics_rubble_support_read_end",
+                    );
+                    floor.extend(stacked.into_iter().filter(supported));
+                }
             }
             // Temporary contact tables can own many small lists. Their release
             // must be visible separately from support queries and pool waits.
