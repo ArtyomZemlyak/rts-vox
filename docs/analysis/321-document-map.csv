@@ -1,0 +1,334 @@
+path,role_after_review,lines_before_review,sha256_before_review,title
+docs/01-concept.md,canon,214,941c036ffabf682df5b93558b6bc34393fef200046458ab2f6d03bd50009a80d,# 01 — Концепт
+docs/02-architecture.md,canon,574,5b219db1c8532b35a7453db4f516ae0965f7b161a3e0b0005b15c596f22d9eb6,# 02 — Архитектура
+docs/03-determinism.md,canon,451,55569c861d7ba55ee3fbf16f2883a114e6a3bfe17da700ecab51c5de84942351,# 03 — Детерминизм
+docs/04-world.md,canon,842,1af6d2adfbaeb6606d9f37fdd7bcd95e263a407c54e8c15b98454488aa07f654,# 04 — Воксельный мир и разрушаемость
+docs/05-units.md,canon,1086,891b3dbf039f05d301f9c7dc43c3d66cf4f4e322af93a1137c74651028947131,# 05 — Юниты и бой
+docs/06-navigation.md,canon,1047,b6554d1bae56420cdbce0d2a49c8199109332a033d71729bf8c176eddfb9d904,# 06 — Навигация и видимость
+docs/07-economy.md,canon,595,345cc86655d576d1cd030baf01df8370a53c64f58ab6d9715ad9bd8736041163,# 07 — Экономика
+docs/08-worldgen.md,canon,157,47c1d06b7e23089ef0fcae4a3e25512bb9f3d24e243522dd236eb9fae2fc1192,# 08 — Процедурная генерация
+docs/09-modding.md,canon,251,bfca33d8ac502b76b56dd006495e9d2b9cee29ee1300dd0009c2d2ae907ae5e7,# 09 — Мод-контракт
+docs/10-budgets.md,canon,397,e539e9280483853c8e32e329a23dd8e940c80111c3f319861abf9214e0e2b92d,# 10 — Бюджеты
+docs/11-roadmap.md,canon,453,98863aad2db6097685f7ce2d32f4b98edf6f0e31e7ae87d0b5d3dc14f1c3245e,# 11 — План
+docs/12-decisions.md,canon,961,3904ab1543e3df6135b95dcb8f576e6603cf3cf64f92cec28d624c299d91dff2,# 12 — Реестр решений
+docs/13-gpu.md,canon,143,444d235f5ac39b0f02f18213d069028bdde8ba8f1dcdc8b2f8cd12bd9c3d1ee9,# Слой видеокарты
+docs/14-demo-scenes.md,canon,858,4df1ad2fbc68727626fe9907dba2b8c8afd8433fc2ad8469ba4a7fb7b6cca4a5,# Сцены техно-демки
+docs/15-explosions-and-fields.md,canon,1484,25c8e9012579aa55bc4e11bf813e8df1c9b0befbbb19ebd3221518d7f53d2e5e,# Взрывы и локальные физические поля
+docs/analysis/01-verified-facts.md,historical_evidence_or_research,857,2e7fec40555c5ad336cf352b1fda6220c221c2dbf10f46dc3678e12f911e41b0,# Проверенные факты
+docs/analysis/02-research-notes.md,historical_evidence_or_research,279,6804fec3c0c6f69216f68dda4ea7fabb38d4bf8d9b59ebdb87aa41cda80d412c,# Ресёрч: смежный опыт и что он меняет
+docs/analysis/03-engine.md,historical_evidence_or_research,153,6c61fc17c8f4f7029dc2e06a2632c52a84f34a2066801b58a8706568a62e07dd,"# Движок: что даёт, чего не даёт, цикл итерации"
+docs/analysis/04-optimization.md,archived_performance_plan_or_review,868,4a790e6d595968035c719c55ce30903f0fe818d7525a6b4abff4b83c6a4cf948,# Плейбук оптимизаций
+docs/analysis/05-mining-and-terrain.md,historical_evidence_or_research,244,5a55268094cadcc9c13b0aa4c44fbfccc7e8f027da85af39cc775db3649a7178,# Копка как экономика: что это меняет
+docs/analysis/06-units-as-voxels.md,historical_evidence_or_research,226,54da7e0a077159a4e2215f22d6e94e68bc16318e404df94bfa6b9348d3989438,# Юниты как воксельные тома
+docs/analysis/07-voxel-scale-and-shape.md,historical_evidence_or_research,228,64d0ad571d53af6f979906903a27b360e2db951d294df67b9e2004de28c6f1c2,# Динамический размер воксела и сложные формы
+docs/analysis/08-economy-and-factions.md,historical_evidence_or_research,313,d75c6880610f4119dc7818180fce80d5c389a76b3dc5590257d6ec52645b0447,"# Экономика, энергия, фракции"
+docs/analysis/09-gpu-compute.md,historical_evidence_or_research,794,8f6ff230c1cedaa4ee5f331df9b6b308f3c501602fb373c09fe951f6828e2421,"# Вычисления на GPU: что можно, что нельзя и почему"
+docs/analysis/10-decisions-full.md,accepted_decision_rationale,30749,9e1c6cc89c731c2c3c2b32832431bd103214d9f4fe46658c9c09675c59c190c7,"# Решения целиком: контекст, основание, цена, поправки"
+docs/analysis/100-anchor-candidate-pass.md,historical_evidence_or_research,61,e5bf488a543b61d7de18cf7b4ede791cba5fb1072285e8453c8dbcdefacfacda,# Один проход по кандидатам опор
+docs/analysis/101-collapse-traversal-marks.md,historical_evidence_or_research,57,7e0c9dacb6e5da809679e596352d092078ed0da7bb1467bb5fe132d66314b867,# Метки обхода при поиске опор
+docs/analysis/102-packed-anchor-chunks.md,historical_evidence_or_research,55,ebc5f3020b9fff793677dc30ef58a817bc84207e556f6857b5d812e76be9639f,# Упакованный индекс чанков без прямой опоры
+docs/analysis/103-hump-contact-weights.md,historical_evidence_or_research,60,952b612e51e45b6a35382dc8392b59c023efdac1c31e3582677c1ecaffa7d26b,# Коэффициенты подъёма гусеницы
+docs/analysis/104-direct-anchor-shortcut.md,historical_evidence_or_research,54,4018ed7dbdcb8a5fe812d9348560bf194475facf216d9c94b9e3386da3a7d0eb,# Прямой контакт с подтверждённой опорой
+docs/analysis/104-terrain-routes-local-hulls.md,historical_evidence_or_research,29,e1b36cf0a3cdd5f45bdde5f9aed7f2721aa98e05215bd1fbe5664d017b297c4d,"# ADR-484: маршрут по рельефу, корпуса — при контакте"
+docs/analysis/105-flat-route-poses.md,historical_evidence_or_research,29,75b54ebe17f59c49d97b0024557fbc3a51d5f0b9c7e978b82a5d9a506051b9c0,# ADR-485: точная поза на доказанно ровной плитке
+docs/analysis/105-map-camera-flicker.md,historical_evidence_or_research,35,0e8ba7fb5d3b7bc325199d496d3d259311b1a32524181a389fb89ab965ecfbaf,# Камера километрового полигона и мерцание при перемещении
+docs/analysis/106-stock-weapon-balance.md,historical_evidence_or_research,35,f77d2827dd69b4c4fc556271bf8626a134eb4015dd5e1390babc24b89a6bb3b0,# Проверка мощности штатного оружия при масштабе 1×
+docs/analysis/107-continuous-map-rendering.md,historical_evidence_or_research,110,e5fd472e5f4e5cb38ef2ed09fa43086e3a6ef4596ab1d7dc01eb30f89e26a56a,# Непрерывный дальний вид километрового полигона
+docs/analysis/108-camera-shadow-cache.md,historical_evidence_or_research,82,db743c2067fa0a5aacc7d29b099baad27166c96cb493cc671683fc3d3ff95ea6,# Кэш теневых ячеек при перемещении камеры
+docs/analysis/109-mega-review.md,historical_evidence_or_research,610,c1b11dc4712c8cb9e81494d81e9d4858ff523d3a974bb033fc9911668034a806,"# Сквозное ревью архитектуры, исправления и оптимизация"
+docs/analysis/11-eikonal-bench.md,historical_evidence_or_research,320,94381d9f415a8d29355f5e8bafb34fe067a120add779ff2031c693c4dbd202dd,# Эйконал: первый замер вместо оценки
+docs/analysis/110-rts-range-hud.md,historical_evidence_or_research,80,448076650ddfc87ac83e62d7fa5c701e4c8f76e5449b50565d13d643195e165f,# Игровое управление полигоном
+docs/analysis/111-battle-160fps.md,historical_evidence_or_research,49,b56d30893914184d95ad4c2b45f5a9e5e6bcbcd89e2a2a29d8ef9d2eb1cd1a50,# Бой полигона: аудит цели 160 FPS
+docs/analysis/112-group-move-latency.md,historical_evidence_or_research,36,4a4ad7fdf5d3a30e96ff21767d3347c1bc0d8cb7166e080dc0815c981bd336b7,# Массовый приказ: задержка клика и стоимость маршрутов
+docs/analysis/113-large-battle-search-and-shadows.md,historical_evidence_or_research,19,64110dae05a2076e494dad84de5520aa6459f728a415a64acb75408ca23972c0,# Большой бой: поиск пауков и тени вне камеры
+docs/analysis/114-late-battle-debris.md,historical_evidence_or_research,16,b66849b7e65a1bb0524d62c0090809b97d4cba1d25126457505c65a3365b3638,# Поздний бой: стоимость обломков и поиска пути
+docs/analysis/115-route-search-tables.md,historical_evidence_or_research,12,88ed3754f18cc82d6fad0b16b54eb864c14f1c1a257a7623c6480197114bfd14,# Таблицы поиска маршрута в большом бою
+docs/analysis/116-occupancy-integer-sort.md,historical_evidence_or_research,15,42d5c4dbd23bc77f09a33de936d2f0a90592323e317d47ddf605a3879b3b0947,# Сортировка занятости вокселей в большом бою
+docs/analysis/117-world-battle-165-audit.md,historical_evidence_or_research,188,ec4b8dad300ebdd914d562cfadf387e4da5f1ef5a102eb98e0880cf0a4e45d74,# Бой 30 на 30: CPU-узкое место и бюджет 165 FPS
+docs/analysis/118-world-battle-performance-backlog.md,archived_performance_plan_or_review,5822,b7239bcd6b956d47f37aafa53049bf0aa4c9cf3f2771c053c7fa500afd244814,# Производительность боя на всей карте: аудит и отдельный бэклог
+docs/analysis/119-selection-and-laser-regressions.md,historical_evidence_or_research,98,10856c967e7d53649a54996f027b5540ce0d60b357b633a9cd391edbac0bdbb2,"# Рамки выделения, обломки, лазер и контакт ступней"
+docs/analysis/12-meshing-bench.md,historical_evidence_or_research,267,36583fd4f44ca57433a1e8feed93fd3886597ba7fdfb181089414d560033fe58,"# Мешинг: перемер на сценах, которые игра действительно порождает"
+docs/analysis/120-performance-observability-review.md,historical_evidence_or_research,237,16a0103ab749526434497bdae8a647ea4201be613e27215e093c751dfd3a090b,# Оптимизация боя: что подтверждено и почему диагностика буксовала
+docs/analysis/121-parallel-battle-feet.md,historical_evidence_or_research,128,f38050c28872b8504f10d6cbd4145f650802dd9dc6afea734ba0c76245da3c42,# Параллельная обработка ног в бою ИИ против ИИ
+docs/analysis/122-air-material-battle-performance.md,historical_evidence_or_research,118,bdc0019f791ecc49ed7373ff7b4c65763a3f99bd3ce6c592e81310ea339f5d04,# Пустые ячейки не вычисляют процедурный материал
+docs/analysis/123-debris-hull-candidates.md,historical_evidence_or_research,162,a1c23018f33c82c4cd4bb1df0d3f8bbd38db80a37d08bc9324933c6c0bb91c73,# Отклонённая оптимизация обломков и контроль фокуса окна
+docs/analysis/124-physics-worker-observability.md,historical_evidence_or_research,176,3a7a494eee1321a884e029dbe3602f7c8b83a688773bc314c95c641347167c83,# Физические задачи в нативном профиле боя — ADR-530
+docs/analysis/125-performance-priority-review.md,historical_evidence_or_research,142,34e77e5dd6d8dff78edc1fefb8aecefea653431835b1d02a6cbcccae222636ec,"# Повторный обзор производительности боя, 03.10.2026"
+docs/analysis/126-fragment-history-and-rejected-physics.md,historical_evidence_or_research,114,45503db71a638d383a28613d25e982d7a8f6bf99586562830369c5a562d04cb1,# История поз обломков и отклонённые эксперименты — ADR-532
+docs/analysis/127-laser-and-thermal-worker-observability.md,historical_evidence_or_research,150,6a17abe88440471153e2abf159679c76d7cebc031e6a68354b08faae85119d30,# Лазер и тепловые задачи в профиле боя — ADR-533
+docs/analysis/128-stall-slices-and-realtime-acceptance.md,historical_evidence_or_research,132,304e44e454d778f5c4b9a39229f936eae72e7bf96a7439d3099ac262e271c9e5,# Долгие тики обычного боя и приёмка без потери времени — ADR-534
+docs/analysis/129-phase-ring-stall-capture.md,historical_evidence_or_research,128,964b61b436eee8cd3045562cd53d1be94e6594f179be9d542c09016c944e65ae,# Ограниченный захват фаз вокруг медленного тика — ADR-535
+docs/analysis/13-vision-bench.md,historical_evidence_or_research,199,5713d1c0a45a0504d09afacb22bf4d1569d0b20809dc5fcc9903ba24027b0394,# Видимость: строка «не определён» закрыта замером
+docs/analysis/130-fast-fragment-lookups.md,historical_evidence_or_research,108,2a3fa4da0f89db0949b291ee7e203200b67863d983b2287f47cc33e0f3560cde,# Таблицы ID обломков в рендере — ADR-536
+docs/analysis/131-rotated-armour-wave-aliasing.md,historical_evidence_or_research,105,52ba6ee2531fd6f6b873ceaa0f6b012aec5ce189d1e7a2971688872d79176c43,# Регулярная решётка после сильного взрыва — ADR-537
+docs/analysis/132-fragment-render-bounds.md,historical_evidence_or_research,91,7ddca8092c9c05eb9d97818090b124917f525c23dde5414e677cd8a43f1431df,# Размер рисунка обломков и физические габариты — ADR-538
+docs/analysis/133-game-fragment-lifecycle.md,historical_evidence_or_research,85,35a2e8bb58477861717b81f4c0ddbafdad22920fa3105bf346d0ab4b5e48f803,# Форма и вращение обломков в игровом окне — ADR-539
+docs/analysis/134-performance-review-and-frame-triggers.md,historical_evidence_or_research,182,bc886536eb28edf4afdec115a144b26580d36c790e53993222082dbb7bfca4d0,# Повторный обзор оптимизации и пробелы диагностики — ADR-540
+docs/analysis/135-render-source-frame-timeline.md,historical_evidence_or_research,173,2f5c5f41d518297ed5770947ba8037f77dc715cc16d078c6c866bd53ee62edb6,# Повторный обзор: привязка CPU-рендера к исходному кадру — ADR-541
+docs/analysis/136-render-worker-calls-and-workload.md,historical_evidence_or_research,162,4b7eee5b70b92193b942ae72221d51e3fbd9c2b384dafd7b253cdb8f86ebb273,# Обзор наблюдаемости: реальные render-вызовы и объём работы — ADR-542
+docs/analysis/137-lagging-terrain-journal.md,historical_evidence_or_research,140,caf0c8dba7873e8363eac26b59486f5ba594f4d6d7f605c5978f4eda73f89bad,# Уплотнение журнала terrain при отстающем рендере — ADR-543
+docs/analysis/138-render-trace-duration-budget.md,historical_evidence_or_research,114,bfd52509d0f951e2808aa8e619d1b842ea88a6d980d21de2a549fd5300fea60d,# ADR-544 — позднее покрытие диагностической трассы рендера
+docs/analysis/139-render-prepare-system-calls.md,historical_evidence_or_research,157,591d84bc32c9ee5e6bebf496ace48b5e0d1d7a88dd4c30de7e185b3fe10d464f,# Actual Bevy system calls в подготовке рендера — ADR-545
+docs/analysis/14-connectivity-bench.md,historical_evidence_or_research,285,e730db5adad2be1eeca338dc31d778ce48b53e61de2ca0ffb4ebc9f15ad23944,# Связность: каскад ADR-055 в числах
+docs/analysis/140-parallel-unit-poses-and-compute-pool.md,historical_evidence_or_research,123,2eb8fe85f58f7612af757b8695dc7709590b95eddadc2ed0892ea47e93106020,# ADR-546 — параллельные позы юнитов и проверка compute pool
+docs/analysis/141-parallel-combustion-contacts.md,historical_evidence_or_research,142,ca592625e5755b523c903627be359fbc5c4e99054ba6fec05d3189a4ac637d38,# ADR-547 — общий снимок геометрии и параллельные контакты горения
+docs/analysis/142-debris-support-lower-bound.md,historical_evidence_or_research,137,e41c3958375aea7d1caab57e12c7122688d60c2d4d7b3d7974f3bb6a6690b9f0,# ADR-548 — точный ранний отсев запросов крыши
+docs/analysis/143-parallel-unit-conduction.md,historical_evidence_or_research,152,32065e78d6d781f7fe436bc4df847537f4ee806e8e2786a8de011c5bbac69912,# ADR-549 — параллельные чтения теплопроводности юнитов
+docs/analysis/144-dense-parallel-fragment-poses.md,historical_evidence_or_research,120,913017ca014912a24dbb8dd99fbba89d3c8c3ec036be40195fe0ce0012ce9ade,# Плотные слоты и параллельная подготовка поз обломков — ADR-550
+docs/analysis/145-packed-parallel-shadow-union.md,historical_evidence_or_research,130,37e5f30a2b4edf2460da856de948f12a3dace1db825947bb7fb0be0930d3f3cb,# Параллельная упаковка и точное слияние теней юнитов — ADR-551
+docs/analysis/146-parallel-shadow-union.md,historical_evidence_or_research,125,f8c5160f66f057982db3afa533008b9803ccbab7da1d1cde8cb9918f8076ea0a,# Параллельное слияние масок теней — ADR-552
+docs/analysis/147-parallel-fire-geometry.md,historical_evidence_or_research,171,8ccc9ebd5b6172bf7323fd4d3f35ea9ac915d06f3fc45145bfa1df939e15aea9,# Подготовка слоёв огня и дыма — ADR-553
+docs/analysis/148-local-rubble-proofs-and-build-provenance.md,historical_evidence_or_research,195,32d0e114d4e6330df83e75c9c50d8e5795e98e778ec9f5283ccd57a003324144,# ADR-554 — локальные доказательства под корпусом и проверяемые сборки
+docs/analysis/149-parallel-rubble-preparation.md,historical_evidence_or_research,151,43da491f1bd9d2daeb2b6afe4f7dd725963f3317fc24d1f61b8c33b6294b30e4,# ADR-555 — параллельная подготовка навигационных обломков
+docs/analysis/15-tick-bench.md,historical_evidence_or_research,207,277e6ff92a4f26ca83b7c124f08fe0727e1c2c8fd342ce69286d0a17a60ea859,# Тик под нагрузкой: 5000 сущностей с непустыми фазами
+docs/analysis/150-wake-query-experiments-and-frame-cadence.md,historical_evidence_or_research,155,86aaac12c81c8e9d53aaa5dc1362fb8b20c808d918f64ae32afa5b3f0d0da7eb,# ADR-556 — проверка параллельных кандидатов и распределение кадров
+docs/analysis/151-main-thread-tick-coordinator.md,historical_evidence_or_research,147,f074ca9935cf9172f7fcb53947677419b4de076a5b4fbb0a13bda29acb9574bb,# ADR-557 — координатор тика вне общего render compute executor
+docs/analysis/152-goal-clearance-and-pursuit-attribution.md,historical_evidence_or_research,141,ba49a8ae61e09fdb7d1b1e4b03d400c0d5927b31acec5ef2d89dafaeed6caf32,# ADR-558 — дешёвая проверка цели и наблюдаемое перестроение маршрута
+docs/analysis/153-sweep-prefix-work-and-rejected-geometry-indices.md,historical_evidence_or_research,112,97b9296d87416e6337a7fc130068618b1cdb70dcb6a03a990f06862d92e931b6,# Короткий sweep prefix и отклонённые geometry optimizations
+docs/analysis/154-dense-fragment-history-and-rejected-picture-pool.md,historical_evidence_or_research,110,710c792e16d826eefdb4f522052a026fea0c984a415f32ce45794b314e718976,# ADR-560 — плотная история поз в параллельной подготовке обломков
+docs/analysis/155-settled-contact-work-partition.md,historical_evidence_or_research,140,2afd34bc6d18c2f33c3c2bc947a7eb3bfe263cbf0c1d9ff03ec4d451a0fa5059,# ADR-561 — подготовка входов параллельного contact index
+docs/analysis/156-camera-streaming-without-battle-pauses.md,historical_evidence_or_research,192,07ae5819a0e98ee483d6b43c67866d53bd6dd4300d27e3f500050e4b198b49b6,# Камера без многосекундной остановки боя
+docs/analysis/157-parallel-physics-experiments-and-os-pressure.md,historical_evidence_or_research,184,cd0eb0254d3b9b97fb7817f932855ee2d6ad43619a0229a4dc902ac90237af19,# Параллельная физика: отвергнутые варианты и диагностика внешней нагрузки
+docs/analysis/158-reuse-phase-fragment-bounds.md,historical_evidence_or_research,158,456e4bff8ee96397ced3f191238f2007978d5335dedd97b452d12b95fd36f23f,# ADR-564 — повторное использование параллельно рассчитанных границ обломков
+docs/analysis/159-worker-distribution-and-caller-details.md,historical_evidence_or_research,134,48d13ac0b0aa072c9f60a5c3dbfb7fae18e704db42205111ec8beb41adc0e29e,# ADR-565 — видеть последовательную подготовку и распределение заданий
+docs/analysis/16-sustained-digging.md,historical_evidence_or_research,182,dc7fb2d1b7cb55338fb8e648fa36a473c3ba5ad4081b33fa7ec352b71996c276,# Устойчивая копка: три подсистемы в одном прогоне
+docs/analysis/160-local-route-inputs-and-build-context.md,historical_evidence_or_research,106,73dad655dc04486db5588b011276f0b05a325dc70032029824ff772c52b1fac0,# ADR-566: лишние входы локальных поисков и контекст сборок
+docs/analysis/161-battle-damage-pool-pressure.md,historical_evidence_or_research,112,3c39ebd906fddb99fe7626a309a6903d57aeaca8cd066043ace72338501be422,"# ADR-567: урон, защита тяжёлых юнитов и свободное управление"
+docs/analysis/162-fracture-admission.md,historical_evidence_or_research,104,39ad586d72a669b4caadee0259fb0ebbfb0f83ec9ff7c27d02852b7d5c4d45c1,# ADR-568: резервирование обломков и подтверждение остановки урона
+docs/analysis/163-connected-fracture-reservations.md,historical_evidence_or_research,107,cef457b7a622864a30c5da14bda38e4945c9d66e0f89f4ef8da9ab4ee8f33cd0,# ADR-569: связные резервы повреждения под давлением debris pool
+docs/analysis/164-settled-debris-storage.md,historical_evidence_or_research,178,6045b96fcef89b85781826c0fa21182074a946a02ef28dc0afd28b7dd8fe15b4,# ADR-570 — отдельная вместимость осевших обломков
+docs/analysis/165-collapse-gathering-and-backlog-attribution.md,historical_evidence_or_research,142,ca2185490f6a2e9c399be5f8941cc9dc37252e855b78b06864dcd2483f76188b,# ADR-571 — сбор больших обломков и атрибуция очереди обрушений
+docs/analysis/166-kinetic-contact-effects.md,historical_evidence_or_research,60,8203bcf4daaa43c0cfc68f3d9b71c69bc8b8539e4ebe62003fe9351f5ac1bf99,# ADR-572 — эффект бронебойного контакта
+docs/analysis/167-strategic-projectile-markers.md,historical_evidence_or_research,77,c1f3f47383ca5a4aa9ca4c3f883d25689a4c5dce1c397b017124300f6715123f,# ADR-573 — экранные метки летящих снарядов
+docs/analysis/168-t2-canister-artillery.md,historical_evidence_or_research,96,e2e7416ad60f6508ff7679121ab23ec46beeeaf8643563f4a2107152cc1d5843,# Артиллерия T2 с картечью
+docs/analysis/169-world-ai-complete-roster.md,historical_evidence_or_research,110,4ef9698370eb57e1e35345ea2658eb49639c06989e5823df6fc2d9c0936079c0,# Полный состав общего боя ИИ
+docs/analysis/17-raycast-bench.md,historical_evidence_or_research,148,f0ed50292204cc23d2b9494e49d2a3afcf405fb12a6970fe009a9d2f7d4e5135,# DDA: лучи разрешения попаданий
+docs/analysis/170-new-combat-verification.md,historical_evidence_or_research,172,0cf5d126b632d1f474620fa58169aa6e11cea4a2b91e814f7a6640f1519816bc,# Проверка нового вооружения и общего боя
+docs/analysis/171-section-admission-capacity.md,historical_evidence_or_research,164,98a1eaaa95c8b7175cdfb26a8bee432625615da29e3c9ee8453decd9b2baaadc,# Ёмкость обломков при отделении секций
+docs/analysis/172-fair-battle-wave-admission.md,historical_evidence_or_research,106,10541a2ba061a3a87cf8038241dbfb18fbb325e476d878353c15658ea30302ce,"# P-76: обслуживание конкурирующих волн, ADR-578"
+docs/analysis/173-free-range-and-wake-admission.md,historical_evidence_or_research,124,2c120cb7504d1f28cc38edb85870c2eda0079c33731d1a5b59a93a9006b93eb7,# Свободный полигон и проверка пробуждения обломков
+docs/analysis/174-resumable-kinetic-contacts.md,historical_evidence_or_research,145,87967c170026f716149bb3b9bd2b5bc61dc7c0164bfcfad5795a118409b19c8b,# Продолжение бронебойного попадания под давлением пула
+docs/analysis/175-resumable-machine-gun-contacts.md,historical_evidence_or_research,118,499e668539d721395bc6b87ed86467f0c0d2494a6e1494e69e3b3d64fe2a3c71,"# Продолжение пулемётного попадания, 05.10.2026"
+docs/analysis/176-t2-five-tank-defense.md,historical_evidence_or_research,104,31f182b2074ada8a4e8606b54e6a3a895d600ffc52bbdc0c8c9569dd430f19c8,"# T2 против пяти танков, 05.10.2026"
+docs/analysis/177-spider-reactor-qualification.md,historical_evidence_or_research,108,31af855c73f7062875c26e79ad69172f950840e518460b6a7566bc1633f4bd9f,"# Неподвижный паук: реактор и ответный огонь, 05.10.2026"
+docs/analysis/178-spider-laser-ground-sweep.md,historical_evidence_or_research,107,e7e21bdec41915ec21027d37c907f9f3f89807ba189da953ccb8c839ed6299ed,# P-83: проход осадного лазера от поверхности к цели (ADR-584)
+docs/analysis/179-laser-firing-positions.md,historical_evidence_or_research,113,907b9c39820a16e7937c9e740b486742b0e451fdbb98bb07ce0dbb612aa9ba73,# P-76: полезная позиция осадного лазера и классы контактов (ADR-585)
+docs/analysis/18-storage-bench.md,historical_evidence_or_research,112,efee83f24ca1758da222b3618e65448ce28441a2a2fefe2b740f6896b72efc08,# Хранение чанка: три раскладки
+docs/analysis/180-heavy-cluster-artillery.md,historical_evidence_or_research,149,f4e2924f1b25e79d324b663b7b21f98922e57c37f5375727b529364362d96299,# Тяжёлая артиллерия T2 и навесной сплэш — ADR-586
+docs/analysis/181-spider-continuous-siege-laser.md,historical_evidence_or_research,146,02a0b9bfad0802d2fb2e09796f34963aa7c267401ff5f15d346252fd2dfec581,# Непрерывное прожигание и медленный перенос лазера паука — ADR-588
+docs/analysis/182-stock-template-integrity.md,historical_evidence_or_research,124,d30f9805af610fa497ea8722c64a47d2808e8600e531ce66d9431df92056957b,# Целостность и заполнение штатных моделей — ADR-589
+docs/analysis/183-steep-contact-recovery.md,historical_evidence_or_research,107,e98187ad3a65c93d55066a708a3b568cab4d34de654e6b453dbbc36af3e446b8,# ADR-590 — выход повреждённого танка и сохранение обхода
+docs/analysis/184-crowded-wave-budgets.md,historical_evidence_or_research,85,8eb0e9264ca433db5b625166145b8ba2f26454568f7fc182970967e4f4f68c15,# ADR-591 — очередь волн не теряет малый бюджет
+docs/analysis/185-burst-admission-diagnostics.md,historical_evidence_or_research,134,53e72772283b1177ce4abca3a558b5174d449b5ecfdca586f6296f332cf45f31,# ADR-592 — причины ожидания огня и допуск полного залпа
+docs/analysis/186-wave-phase-admission.md,historical_evidence_or_research,138,c275884d74860cf4f1c184f5e450cd8135df8854a3a62cfbccf10d9aa5d74d83,# ADR-593 — один пересчёт вместимости на фазу волн
+docs/analysis/187-ground-resume-geometry.md,historical_evidence_or_research,148,85d092618fce318d1e861dcdd5bc7033442d099b4622cb26e23b1bc81cf6483d,# ADR-594 — повтор грунта без подготовки всех юнитов
+docs/analysis/188-ground-melt-admission.md,historical_evidence_or_research,138,de156d9e81481341662da59559953e6ea495c0e2126e645fb84fdeb71a6c29b6,# ADR-595 — вместимость плавления грунта
+docs/analysis/189-local-terrain-sweeps.md,historical_evidence_or_research,181,e04b24a577dfd0c871c10ac90ee0f33804d76314f34f5aaaf5032e55da4e55cc,# ADR-596 — параллельный рельеф локального поиска
+docs/analysis/19-remaining-bench.md,historical_evidence_or_research,208,3bd423a7dce1d9f1b8941e327af16e89543084d136232459f35200f24748cf8c,"# Оставшиеся строки бюджета: щиты, энергия, горячие чанки, пустоты"
+docs/analysis/190-rubble-support-scopes.md,historical_evidence_or_research,107,0fc52afc2f76376c6df52f96cec2b45ab044df36d5dbcb8a8917900468a163ab,# ADR-597 — скрытые этапы карты обломков
+docs/analysis/191-rubble-query-reach.md,historical_evidence_or_research,116,3a9fb57642fc4c5402b3ef7e39745b1fc17023e03cd1dd7b88b9e34d5d8aa441,# ADR-598 — индекс только для фактических запросов опоры
+docs/analysis/192-parallel-camera-strips.md,historical_evidence_or_research,101,4af16849c7d18594df008ff4816fa4df46a9e8cafd69e3c7b032e4a1ee5ff9a8,# ADR-599 — параллельные входящие полосы камеры
+docs/analysis/193-camera-publication-cache.md,historical_evidence_or_research,117,b13f73933f34b982bb324dd73bad8718dbefff9aa8587076a0be5aa4072a761a,# ADR-600 — диагностика камеры и сохранение actor cache
+docs/analysis/194-moving-model-interface.md,historical_evidence_or_research,90,5fced52a22849bd0e4b2c72166d5e457b4e4260868252ae0990f235b91af893b,# Прорези при повороте башни — ADR-601
+docs/analysis/195-battle-contact-continuations.md,historical_evidence_or_research,119,9f10ee4e84c4a18bee10389f3c4f4397f01fffe23235d0f85591ec0e6d7f5387,# ADR-602: продолжения урона внутри боевой волны
+docs/analysis/196-siege-laser-admission.md,historical_evidence_or_research,131,f3f190c69ca7804f8107e68d3fb5de9a4beb8994041a7e70fe9bd0ce42c521de,# ADR-603: расплавление лазера в перегруженном бою
+docs/analysis/197-artillery-elevation.md,historical_evidence_or_research,101,bfa159769fe2220b43d815cae59b06f6499414e4dcd46eed8fdaa9ade607b47d,# Артиллерия: наклон оружия и начальная скорость
+docs/analysis/198-artillery-interception.md,historical_evidence_or_research,84,fae685bfb050ddaa546bdc8b76fcf6661ea724b73e1498239301be1eda40d16d,# Артиллерийское упреждение движущейся цели
+docs/analysis/199-engine-performance-audit.md,archived_performance_plan_or_review,395,c3d33f69fbac4d69950ef845005390e6940273527ded00490b728f420358c07e,# Производительность игры и общая архитектура движка
+docs/analysis/20-measurement-machine.md,historical_evidence_or_research,137,8a25b3ed7c3a25c9d8ae7e0c5719d7169b2856a7513e068344dbade5d4dbb1d7,"# Машина, на которой сделаны все замеры"
+docs/analysis/200-engine-performance-plan.md,archived_performance_plan_or_review,1545,4c1b084ef9f8ba7d0bda93162efb287d44fbc8b44d744724483f79362e494aaa,"# План общего движка: производительность, устойчивость и сценарии как данные"
+docs/analysis/201-engine-performance-first-implementation.md,archived_performance_plan_or_review,75,3ae92b1e360bffb8d26dfb8fd0e0a2ef0e17a703468d4f5cf90492111d3db49a,# Первое внедрение плана производительности движка
+docs/analysis/202-engine-wave-lazy-geometry.md,historical_evidence_or_research,57,25860826ada1f27788689120406618cbdd79a7f4f552b3b18f0795609ac642cf,# Второй пакет производительности: подготовка геометрии волн по фактическим контактам
+docs/analysis/203-engine-ground-continuations.md,historical_evidence_or_research,58,2762eb8e9f987cd00ec65059a0d8e2ba8e923842e6dc7f9fe5c718235d57ac1f,# Грунтовые продолжения волн без повторной подготовки корпусов
+docs/analysis/204-engine-rubble-rectangle-index.md,historical_evidence_or_research,65,c774081b129203204aa602165958ab0f587954b8796c62e999cc9971062dafbb,# Точные запросы навигации по карте обломков
+docs/analysis/205-engine-debris-hull-index.md,historical_evidence_or_research,74,4b1de3dbb16a6095dd2340cb4345d5a169465c21cb0748b1599d043499592168,# Поиск корпуса для толчка и пробуждения обломков
+docs/analysis/206-engine-roof-support-queries.md,historical_evidence_or_research,82,d15fa25630a4d548263e5ccbf0a3b354f853553f67df002331e753c2bd133a61,# Поиск опоры на корпусах: отклонённый прототип
+docs/analysis/207-engine-compact-wake-actions.md,historical_evidence_or_research,64,f2fc541dccb44340fc15f6b2b6f0794eb1516e7ae91387295a444148415e59a2,# Компактный список действий пробуждения обломков
+docs/analysis/208-engine-translation-experiments.md,historical_evidence_or_research,71,2fed1e4320a53fa799bda38fd052a1324c595e09c2f8d74f9a0ec08fe5604d01,# Проверка хранения и сбора результатов движения обломков
+docs/analysis/209-engine-shared-order-handler.md,historical_evidence_or_research,66,da0f6380af262e2d339a757a4c49903a1f29eb775b4c5b576738061a72a830b4,# Общая валидация и применение боевых приказов
+docs/analysis/21-render-bench.md,historical_evidence_or_research,132,94b3008945dc0aa714dc7e87aee16a392884fbd675254e3b9cdc7adeae7d3262,# Рендер: марш по пирамиде занятости
+docs/analysis/210-engine-command-receipts.md,historical_evidence_or_research,78,6b70e6870ccb37bf1e60fe968b8dcb7002444d9f8e5dbbfb287b725baf0a9efa,# Общий вход приказов и ограниченная запись их исполнения
+docs/analysis/211-engine-command-runtime.md,historical_evidence_or_research,63,4e8c5df802cf817672eab076b3fedf2165c4b47ebfcde3afe84d83c7de47fd19,# Ограниченная доставка внешних боевых приказов
+docs/analysis/212-engine-ai-plan-delivery.md,archived_performance_plan_or_review,68,e6b059bcdbe406d4643f771da8496f6b60354107db3fa2cd9a485a4bf869c0da,# Доставка целого плана ИИ и подтверждение исполнения
+docs/analysis/213-engine-command-checkpoint.md,historical_evidence_or_research,73,c2b88eb09a82772f522ddc6f2cbd592a71da7817796e335a068e0e434a2d3a2c,# Переносимый checkpoint общего владельца команд
+docs/analysis/214-engine-ai-decision-replay.md,historical_evidence_or_research,176,cb7150d1eab3636780673b3a1caaea6ae8ed0467b092ece7addc757ab177a4c1,# 214 — фазовые решения ИИ и воспроизведение без policy
+docs/analysis/215-engine-performance-review.md,archived_performance_plan_or_review,484,aec79d8614eee11a190dfade13524c560fef5282e834d367d7e7623c16e2b604,# Повторный анализ производительности игры и общего движка
+docs/analysis/216-engine-hud-read-model.md,historical_evidence_or_research,153,e6cc7aba0c25b26ef7af2ec05218764bdc387a884922cdea261217203a9b394e,# 216 — общий снимок состояния для HUD и миникарты
+docs/analysis/217-engine-panel-read-model.md,historical_evidence_or_research,150,621615ac20e065716b1fed8e41ff96e96ff8b08f3d9e82e49c2a80f871d35bb9,# 217 — панель на модели чтения и диагностика по запросу
+docs/analysis/218-engine-rubble-flank-queries.md,historical_evidence_or_research,102,7bd2b962d7d3d631d03847d2e950782c87cc222f313c2a891a66afa27f61916e,# Пространственный отбор корпусов при построении завалов
+docs/analysis/219-engine-fragment-geometry-table.md,historical_evidence_or_research,79,67321b4617223f8d654f9b3a32687229e4405b0326317e5dd66d34cbbf89c442,# Предвычисленная геометрия малых фрагментов: отклонённый прототип
+docs/analysis/22-gpu-batching.md,historical_evidence_or_research,358,230283995c159bf5d3160e60d8a2f015607eceacb933a2c1c86ea8781ea1834e,"# Видеокарта: цена обращения, слияние операций, расчёт пачкой"
+docs/analysis/220-engine-fragment-identity-transforms.md,historical_evidence_or_research,137,8e914fd222e2666a14a1fed73173fdce27b11846ad30cd507f488ed98229d3a3,# Пропуск тождественных преобразований границ фрагмента
+docs/analysis/221-engine-settings-read-model.md,historical_evidence_or_research,177,dd7d60274c31109db9d8fe5353176411b0d2682fe070b811abb2ab7bab2634f0,# Настройки через модель чтения общего движка
+docs/analysis/222-engine-motion-commands.md,historical_evidence_or_research,164,d87acefe981a5d1f4b6cb7d87aca710ceb2f92a83de684825fcae79c019e9ddb,# Изменение ходовой через общий командный вход
+docs/analysis/223-engine-debris-commands.md,historical_evidence_or_research,173,c1e50107c5d50da07cf293d360600a7a9cef180fd803d7d5ee700542a736dd1f,# Параметры обломков через общий командный вход
+docs/analysis/224-engine-material-commands.md,historical_evidence_or_research,158,06234fd991cf948f62347637b15fb77b64e796e8ea9ca66134fe87b1c875fdc7,# Прочность и плавление материалов через общий движок
+docs/analysis/225-engine-density-commands.md,historical_evidence_or_research,149,2e4ab34911d29b1ba8f32244d6b9021c0a5868ac0dbe7d7dfa3a631a6514d6d6,# Плотность материалов и сохранение уже учтённой материи
+docs/analysis/226-engine-weapon-commands.md,historical_evidence_or_research,175,880f9eba8272e4e1341cb1db5d61a8c3a03351059a251e2fe5aa699ed7781609,# Настройки оружия через общий движок и восстановление боя
+docs/analysis/227-engine-battle-lifecycle-commands.md,historical_evidence_or_research,151,a8b161b4a9b1da841dedcca67e30831a25a7ed4e77131738209417365444d45a,# Подготовленный бой через общий командный вход
+docs/analysis/228-engine-ai-configuration-commands.md,historical_evidence_or_research,155,3dcce07248f5406a130c9747da5dacff66a8f3e532397550535f5461489fabe9,# Настройки ИИ и отмена планов через общий движок
+docs/analysis/229-engine-manual-gun-commands.md,historical_evidence_or_research,177,80bfc2b647e24b300e1816d2c1c307a42a466db2ccd640785b4460a4c9e8037d,# Ручное орудие через общий командный вход
+docs/analysis/23-cut-shape.md,historical_evidence_or_research,94,9f6d2683232f413865f02dfd105b1f8f92d1350d49374815ce6debe0d8384bc9,# Форма забоя: сколько стоит рваная стена
+docs/analysis/230-engine-world-reset-lifecycle.md,historical_evidence_or_research,199,9e10d50c8c62d309e0535fedeaf6fd5c8eaaa593f0d377350a2045ca0127d1be,"# Согласованный сброс мира, поколения и очереди команд"
+docs/analysis/231-engine-owned-unit-geometry.md,historical_evidence_or_research,262,df0c95ca73ac090af813b63017e1a94bda855c018fb8dda893360d6ed47c508d,# Собственные снимки геометрии юнитов для сборки повреждённых моделей
+docs/analysis/232-engine-owned-terrain-rows.md,historical_evidence_or_research,277,2228fa24fa9da76a769048fa5f5af1d80e22220a936dc242e0672937f7b653d6,# Собственные ограниченные строки рельефа для подгрузки окна
+docs/analysis/233-artillery-terrain-energy.md,historical_evidence_or_research,151,753990b44ecbfce8fdd4d5fe692d523f8043cccf0de3105e5127c19967e2e5c8,# Артиллерия разрушает грунт при попадании в машину
+docs/analysis/234-artillery-terrain-admission.md,historical_evidence_or_research,239,c0c3b419d4084d116e3f646a218c949da6161cb068681bccc074bb9ece46573d,# Воронки артиллерии при насыщении физических очередей
+docs/analysis/235-artillery-surface-blast.md,historical_evidence_or_research,132,52edb8f34ccc39defb936a6451fdd36e48565ca9e89002a101a3216a70c5c8c4,# Поверхностный взрыв артиллерии не должен исчезать в прочной стене
+docs/analysis/236-rubble-column-sorting.md,historical_evidence_or_research,138,f658d4472ddc191ae46e97bb5ea85882d8f1c99eb113440d920117b9a14e753e,# Оптимизация сортировки карты обломков — 09.10.2026
+docs/analysis/237-explosion-batch-latency.md,historical_evidence_or_research,218,11f8ae82717d979b63a96bbbacf7706b936e1f1220ed73d22464b1d5da60e082,# Почему разрушение после взрыва растягивается — 09.10.2026
+docs/analysis/238-plans-status-and-next-steps.md,archived_performance_plan_or_review,207,b55ef7ba77cadca2f7e6d77f9eba577f7198e3fb779c157f3b908acdb645f90d,"# Что осталось по всем планам — ревизия 238, 09.10.2026"
+docs/analysis/239-mega-review-october.md,archived_performance_plan_or_review,598,5835a369e3d3014fb242ae3215e576dc362402e459a3a7ef6da416bab4dee760,"# Мега-ревью игры, 09.10.2026 (анализ 239): два ядра, физика, баланс, играбельность"
+docs/analysis/240-improvement-plan.md,archived_performance_plan_or_review,905,bf2508e3284cd216a2d5e748fcf452a435342ad66d809870a404319f8bd78ff9,# Итоговый план улучшений после ревью 239 и сводки 238 — актуализация 15.10.2026
+docs/analysis/241-parallelism-and-gpu.md,archived_performance_plan_or_review,134,9925b3a0e2714fbdebaf7778001776817bb27e8e5f85e64f525bc9e7bae9bae3,# 241. Параллелизм и видеокарта для тика боя: разбор
+docs/analysis/242-plans-status-after-main-update.md,archived_performance_plan_or_review,157,e0296d57f153a0a6b22d03b52c2b7809098beb177729db7e4b8eb59b6250c884,"# Остатки всех планов после обновления main — 10.10.2026, ревизия 242"
+docs/analysis/243-canister-debris-stability.md,historical_evidence_or_research,204,60016654b37fc97f6577c19f50a6c575519fc21c82d1130cd0413265a7416254,# Картечь: зависающие обломки и цена изображения — 10.10.2026
+docs/analysis/244-main-performance-review.md,archived_performance_plan_or_review,643,ecc7e01d3142a30d8139fa2f5f47c2ca1dd862f7a16940bc7018e6e108f892d7,# Ревью изменений main: корректность и задержки — 10.10.2026
+docs/analysis/245-economy-port-plan.md,specialized_mechanics_plan_performance_tracked_in_316,278,b8d15aceb2cc6bee4b6f65261b6a3cf2415f5d2541192ad99614e58ae3de4fc1,# 245 — перенос экономики копки в `BlastRange` (этап H3)
+docs/analysis/246-main-update-review.md,historical_evidence_or_research,305,0ede7768ca3d10ff8597a01dffa50b7418a74a4bcce6c6cda306aac5dee93e67,# Повторное ревью main после обновления — 11.10.2026
+docs/analysis/247-main-economy-pressure-review.md,historical_evidence_or_research,248,e8cb91845e1095ef5c3fc7fdac956b92e5067ee705f3956a6f87b7119eaa2495,# Повторная проверка main и предельных случаев экономики — 11.10.2026
+docs/analysis/248-main-production-placement-review.md,historical_evidence_or_research,242,dcdb2191773cb64b00de9aebd2730f59d81e8bf0297925a7f58e4ab271a712e3,# Повторная проверка main: геометрия выпуска — 11.10.2026
+docs/analysis/249-main-mining-bitrows-review.md,historical_evidence_or_research,216,d42f8610b9a2193dc4ac650551b278373f5749f60e58b05dbce39a9a997898eb,# Повторная проверка main: пустой забой и общая копка — 11.10.2026
+docs/analysis/25-march-ms.md,historical_evidence_or_research,99,88031205b363e954538854aab8ffa39b3a89675252e6be0f996c461c7c70222a,# Марш луча в миллисекундах
+docs/analysis/250-coarse-continuation.md,historical_evidence_or_research,160,ed0114bf4d7b12627476274c799a17980274a03aed7391fdfbe73abeca921fc9,"# 250 — продолжение дальнего поиска по тикам (EP-08, ADR-680)"
+docs/analysis/251-instant-blasts.md,historical_evidence_or_research,214,6c0e8aecabaa68d1e5aa3798dc01e971a71ba0c55942c30cebb752b8abcde081,# Мгновенный взрыв: куда уходило время залпа — 11.10.2026
+docs/analysis/252-main-navigation-blasts-review.md,historical_evidence_or_research,617,26e71244730936fcdc0c591727cbf0793fdc72714017b0fc5c687fa486c3288e,"# Повторное ревью main: навигация, взрывы и копка — 11.10.2026"
+docs/analysis/253-main-contact-prefix-review.md,historical_evidence_or_research,257,b0481c69ac0dcab936a7ef153e2f47fd71dce35ebbebab5d390de4ff013f1668,# Повторная проверка main: подготовка контактов взрывов
+docs/analysis/254-main-felling-and-coarse-review.md,historical_evidence_or_research,257,3bf5fdd560d8f2694e53a8ada8f2235b6508760a65cf7b10ef10742e61e2ef94,# Повторная проверка main: потеря валки в бою и подготовка навигации
+docs/analysis/255-all-unit-tree-review.md,historical_evidence_or_research,138,dfb99be7ef73fb6745460ad8d933c0ae7de5bfa520017b7ccc5f303b8852e712,# 255 — повторная проверка разрушения деревьев всеми юнитами
+docs/analysis/256-felling-contact-frontier.md,historical_evidence_or_research,252,612f0e060032201ed8d98d9b877bd329c8e2db812627b32396dbb2a115d6d766,# 256 — компактная очередь контактной валки
+docs/analysis/26-voxel-look.md,historical_evidence_or_research,113,9b3bb85bd2ec2e400fc87bcffc9411d8b40a886e1f3ece2587051efc5fb3f993,# 26 — Воксельный реализм: референсы и что из них взято
+docs/analysis/260-salvo-peaks.md,historical_evidence_or_research,175,194bfc1c8cbb17b4c74a4c95adfbd23f53e0603ae5a8e3b462e673b01fa9b809,"# 260 — пиковые тики залпа: точные ускорения волны, обвала и дренажа"
+docs/analysis/261-fine-start-and-hand-over.md,historical_evidence_or_research,170,a0deada61b07522f0ef63661ada4c402db4593f70b875ed966272d4c0103be2d,"# 261 — начала детального поиска, передача от дальнего и Spider 22 (ADR-691)"
+docs/analysis/262-soil-destruction-and-fracture-cost.md,historical_evidence_or_research,309,df1000d9858aa317d8fa62b91e7485ed08c1321f29188c56bdf17197886b0378,# Земля под огнём: объём разрушения и цена обработки
+docs/analysis/263-whole-engine-performance-audit.md,archived_performance_plan_or_review,579,e1c8b0b981599cdf74792c603866e13421ee3b40082a13f710009b2e66a8c25a,"# Общий аудит производительности: стоимость тика, кадра и отдельных операций"
+docs/analysis/264-motion-navigation-column-batches.md,historical_evidence_or_research,191,6336f8d2bf625abce247443edf161833928f7973972a9616160f62a55e74eaa8,# Движение и навигация: пакетное чтение столбцов
+docs/analysis/265-walker-columns-and-support-proofs.md,historical_evidence_or_research,162,65cacee9b63fdffabbbc802d48a481b7956d85c486bed701fc64df341fc11587,# Движение: столбцы под стопами и доказательство ровной опоры
+docs/analysis/266-navigation-row-proofs.md,historical_evidence_or_research,159,6e67012c12235a89d9e4303e08e15500f7d84739f0dbe5b031da93ea5a2c2d22,# Навигация: точные проверки строк под корпусом
+docs/analysis/267-rubble-row-maxima.md,historical_evidence_or_research,178,3dd3449402a47bcb7fba798d39f9d0a93fd236de8ba170e6163c1165c95fe985,# Карта завалов: точные максимумы без сортировки всех повторов
+docs/analysis/268-blast-latency-and-row-batching.md,historical_evidence_or_research,209,484e9d1c3a68544b81feac004cddc5b08fa1c3e68a61c093c5c79261478bc6b5,# Скорость воронок и пакетная обработка волн
+docs/analysis/269-laser-frames-and-fire-gains.md,historical_evidence_or_research,193,7e80e4c1b930d0fcd5f81b0ea7adaf778cca473e980aa18f639cfde9520d75e5,# Нагрузка после быстрых воронок: лазерный ореол и огонь
+docs/analysis/27-blast-fields.md,historical_evidence_or_research,203,07a0e78fc7f87c34fccce273ab1f8e67f111c4fa43375653fed7d0d63801a8c6,# Полигон взрыва: проверка реализации
+docs/analysis/270-common-fragment-geometry.md,historical_evidence_or_research,213,887930bd06358c9353b1eb1ee2debd2bb5822850ae3a6d1420860c74165c7e7e,# Общая геометрия обломков: малые маски и слоистые кучи
+docs/analysis/271-blast-contact-geometry-and-frame-peaks.md,historical_evidence_or_research,141,771ac11d42b364293290897cf2c9715537606fbaff1263e44a51917cc63a6e12,# Геометрия контактов взрыва и критический путь длинных кадров
+docs/analysis/272-ground-claim-connectivity.md,historical_evidence_or_research,165,93a8f3f5a2e52250f5c14206e01926a3b49f36cbe5f424d6be21426d7dd84ba4,# Разрушение грунта: локальное изменение связности вместо полного пересчёта
+docs/analysis/273-maximized-window-performance.md,historical_evidence_or_research,109,b27a971f4a41b1bfd04fa4be34df198749a62a4d641d87a0cde5de396b51e23c,# Развёрнутое окно как основной режим приёмки — 13.10.2026
+docs/analysis/274-engine-profile-coverage.md,archived_performance_plan_or_review,328,045c82ef2be63c19b2a6af15bbb3487bbc876b2703eea22104fa59c394f48bcd,# Аудит времени движка и покрытия профилировщиком — 13.10.2026
+docs/analysis/275-terrain-lighting-addressing.md,historical_evidence_or_research,187,e60de9f1c17d825357e6975fcb1b608e42267a0923e73aeead71787d6e60a279,# Ускорение освещения и грунта точной адресацией вокселей — 13.10.2026
+docs/analysis/276-parallelism-audit.md,archived_performance_plan_or_review,365,4ae880bf5d772ba36aba50150b5810569132e2f65d90471162fc70ad75bba8c0,# Где движку не хватает параллелизма — 13.10.2026
+docs/analysis/277-controlled-approximations.md,archived_performance_plan_or_review,370,f21ce9306be11099afd3dc616ede1d5e4b9522c717fd432aeb0f73aceffed8c1,# Приближённые алгоритмы: где сократить работу движка — 13.10.2026
+docs/analysis/278-bounded-impact-light.md,historical_evidence_or_research,161,22ecc7a5c484da02ad8ee77761483a2a97c7c98cd65890b47e5276a3bbcdc9fc,# Слабый отсвет удара: ограниченное приближение — 13.10.2026
+docs/analysis/279-engine-hotspots-and-bugs-recheck.md,archived_performance_plan_or_review,327,3b633f5b2360ec1fec2d115a63ae8a801ba113d1d3b1bfb66582207c1f876728,# Повторная проверка тяжёлых подсистем и остаточных дефектов — 13.10.2026
+docs/analysis/28-goal-progress.md,historical_evidence_or_research,1163,7af7e199283fb50ee3f6e5ae812e58e5b183ed80043c1da8e3373440b600a88a,"# Доработка игрового среза, 2026-09-13"
+docs/analysis/280-optimization-by-weight.md,archived_performance_plan_or_review,1074,3b258820de74dd88e78a6b609fa20c44e27270dbcb43893cec6136225e814abb,# Что оптимизировать дальше: разбор по весу — 14.10.2026
+docs/analysis/281-optimization-proposals-review.md,archived_performance_plan_or_review,465,babef1fb20fa173c1b2edaf04460f33b181ea4b3bd13198df4812f5a5a01debd,# Ревью предложений оптимизации 280 — 14.10.2026
+docs/analysis/282-collapse-frontier-reuse.md,historical_evidence_or_research,194,a8ccb65b10b54b7e6a908676f0381fa58641a9b1c52ea30c366d664769933608,# Повторные обходы фронтира обрушения — 15.10.2026
+docs/analysis/283-settled-support-and-query-coalescing.md,historical_evidence_or_research,314,0453ed51ec52d946207370b72469449704b66caa0c1126af493941f4cdb7de25,"# Опоры обломков, расписание и проверка областей поиска — 15.10.2026"
+docs/analysis/284-rubble-print-delta.md,historical_evidence_or_research,188,ba5a29837bd32c8f83746abb71323de20936ad740e12d1f5d61f4977458210bb,# Дельта отпечатков завалов — 15.10.2026
+docs/analysis/285-settled-zero-word-keys.md,historical_evidence_or_research,178,93e32796993bd0e751b2fa4e1bf75fa81690c8ae82c7807bcd56b11baeb0ef81,# Компактные ключи маски запросов к обломкам — 15.10.2026
+docs/analysis/286-felling-relative-seeds.md,historical_evidence_or_research,191,37ca6dbe76f79fa66e16c627ceaa33bdecd715ea8efe9954e223161de88b8db6,# Уплотнение исходных точек очереди валки — 15.10.2026
+docs/analysis/287-settled-vertical-words.md,historical_evidence_or_research,140,999bc659e9e400cdaed2c59e54debb4422ebc9261eb8c6cd38533c66215ed3b0,# Поиск клеток опор целыми вертикальными словами — 15.10.2026
+docs/analysis/288-rubble-support-scratch.md,historical_evidence_or_research,155,f2f5de08c7c98f32ce87573989652347e98a82fe0fbea658d5183412086db4d5,# Переиспользование пустых буферов опор карты завалов — 15.10.2026
+docs/analysis/289-rubble-candidate-membership.md,historical_evidence_or_research,240,da68d4d8523974e03ed025bcd63aeb4c35e74131f062950cb9e0664ad89ae2cc,# Членство запросов опор и параллельные строки завалов — 15.10.2026
+docs/analysis/29-code-review.md,historical_evidence_or_research,58,c58bf43a8249c5dbf0b2951c0eeb626375230a84333c254877baa1fbb1d21b2b,# Проверка перед слиянием в main — 2026-09-14
+docs/analysis/290-paged-settled-queries.md,historical_evidence_or_research,365,25b87a2c059b0eb43e09e6432799f2d8890ef87e59401ab9b8ac72561f90354b,# Страничная маска запросов к обломкам — 15.10.2026
+docs/analysis/291-native-tick-recovery.md,historical_evidence_or_research,209,0549923f2d35b7bd55b411c69c9e183a87d96be93790bf7114813d4adee70ca8,# Догоняющие шаги живого окна — 15.10.2026
+docs/analysis/292-settled-contact-arena.md,historical_evidence_or_research,209,a1654101c5bc00ab5a2dbb40ff4bf680a46dcf62dd3dcfb4e775b04569e45891,# Расчёты SIM: списки контактов осевших обломков — 15.10.2026
+docs/analysis/293-unit-tree-felling-fix.md,historical_evidence_or_research,136,34eaa361f448f35ea587ef46570bef1623a3f1fe281749156bb3dcb16a8b9285,# Деревья после контакта с юнитами — 15.10.2026
+docs/analysis/294-spider-laser-stability.md,historical_evidence_or_research,133,05c87e51e54a85516f8ac2b25b705a167f49ec6681da5ed5674f8051143d0c82,# Стабильное конечное наведение лазера паука — 15.10.2026
+docs/analysis/295-late-ai-stalls.md,historical_evidence_or_research,145,1ef1c3952266012b25612ae912d9601af95e4d62b22623a34d3ce1e86dcf2c25,# Поздние паузы боя с ИИ — 15.10.2026
+docs/analysis/296-emplacement-foundations.md,historical_evidence_or_research,124,5da6b2492a65902835e54ed4ddc0e0e2ee217028753b10b28c4250b5466a7868,# Заглублённые основания стационарных построек — 15.10.2026
+docs/analysis/297-stationary-siege-artillery.md,historical_evidence_or_research,158,4d6a97a48412aa98982dbfe78c7431a1ab3bbdef5f8cc390eae0d567779dddbf,# Стационарная осадная артиллерия T3 — 15.10.2026
+docs/analysis/298-varied-proving-ground.md,historical_evidence_or_research,143,bc46c17b2f5ae9bb9a09e5642ab26aa6e1028586cc4c5e03b14a839d063464ec,# Разнообразный километровый полигон — 15.10.2026
+docs/analysis/299-group-movement.md,historical_evidence_or_research,217,a755afc7dcf61d5a330b7f7137afef0cff852abd778ffa3fa0009f0afacd40e7,# Групповое движение и соседние машины — 15–16.10.2026
+docs/analysis/30-physics-goal.md,historical_evidence_or_research,385,86fc91311a08bc3d0edb5092d70d4f77e0d6f1171f2542faf362bed7313913f9,# Следующий этап физики: согласованная цель
+docs/analysis/300-strider-speed.md,historical_evidence_or_research,66,cb85077715d6c01c26968cf09dc1c9e1b525b7a1723c8546c7dd914c867bbf03,# Скорость шагохода — 16.10.2026
+docs/analysis/301-attack-ranges.md,historical_evidence_or_research,141,009d0cbd57bcb74c679b5c1c28eadae1bdf1a3c1c052aedc48dda68600750d27,# Общая дальность атаки — 16.10.2026
+docs/analysis/302-performance-priorities.md,archived_performance_plan_or_review,328,13b19b6a4f961e2967a68256db12f20df8e16f221184f91b4ab478b5d317e95d,# Повторный аудит производительности и очередь работ — 16.10.2026
+docs/analysis/303-collapse-admission-merge.md,historical_evidence_or_research,287,1b46950ea0e9e5d208bb930cdf6f7c95be56dd55ec655405b1ebf08e4cb8ba0b,# Подготовка обрушения: исследование и точная оптимизация — 16.10.2026
+docs/analysis/304-settled-contact-links.md,historical_evidence_or_research,156,a532965f159cc8487b1fc5816a2844b98851474f1b479a2fcf90fde97f9ca878,# Компактные связи контактов осевших обломков — 16.10.2026
+docs/analysis/305-settled-word-intersections.md,historical_evidence_or_research,123,dc59ef1bd35b0ad95d3369ce3177fb007d4b61ef45587fc0dd39f6492b05849b,# Точное пересечение одного слова маски опор — 16.10.2026
+docs/analysis/306-tactical-unit-missions.md,historical_evidence_or_research,113,56a9880fff4d46b15b70ebca631a53cf9f78f3469f9232a401ee63be04f79142,# Тактические операции для юнитов — 16.10.2026
+docs/analysis/307-tactical-missions-playthrough-audit.md,historical_evidence_or_research,155,5e76ed9d3d23bbb9d4cafabb107e933dc7f21900daede0f33d351486fc568dab,# Проверка прохождения тактических операций — 16.10.2026
+docs/analysis/308-mission-clarity-and-critical-guns.md,historical_evidence_or_research,105,f9fcc332f552bb7158ff26ee72b702502f924fb382d7db065f1ae2ed295b9a43,# Повторная проверка и улучшение операций — 16.10.2026
+docs/analysis/309-mission-navigation-and-alternative-tactics.md,historical_evidence_or_research,127,a44a9dea920621cb9075f4cdf7e9f1552c666f479f4bcf8da1fecc392f3c527f,# Повторная проверка сценариев: управление задачей — 16.10.2026
+docs/analysis/31-problem-backlog.md,archived_performance_plan_or_review,2477,cc31b8688daa00b7e3cc4a72349fc678d770e3c8fb3a9108026f89340e90371c,# Бэклог проблем
+docs/analysis/310-all-scenarios-performance-and-rubble-scratch.md,archived_performance_plan_or_review,252,72bfd81f68e738f5052289e9698bcd9aec8298d9f80a6254184c25a0b8f43076,# Производительность всех сценариев и общая оптимизация завалов — 16.10.2026
+docs/analysis/311-bounded-hull-support-probes.md,historical_evidence_or_research,185,2994658949025abbd296cebfc90c7372a29b1eb88157f63598e16b8d5da35c19,# Ограничение высоты поиска опор корпуса — 16.10.2026
+docs/analysis/312-selection-outline-gpu-regression.md,historical_evidence_or_research,73,f6af13623731c4931226ab8c52ecc630bc2ccc2cfe6783d02ecebc7609f81af0,# Зависшая рамка выбора: GPU-регрессия — 16.10.2026
+docs/analysis/313-siege-range-union-and-manual-control.md,historical_evidence_or_research,220,5666588ef2c1877e3a0d37be97a54688292c5ffc888828eb629a9363a0e78e65,"# T3, общий контур дальностей и ручное управление — 16.10.2026"
+docs/analysis/314-global-performance-audit.md,archived_performance_plan_or_review,610,365779aee73cc459ca34114d4d2760c058b3278ad1bb1b990d4a0694a4570cbb,# Производительность текущего движка: полный повторный аудит — 16.10.2026
+docs/analysis/315-performance-architecture.md,archived_performance_plan_or_review,516,24d1cb3a806671a12ed22addf1f7b44126c75ed4c9f67fd6e932921a8b87a015,# Архитектура производительности: несколько углов анализа — 16.10.2026
+docs/analysis/316-optimization-delivery-plan.md,single_active_performance_plan,345,930a18565015dffc331abb52e9a97e1b906757c1c34ce38dc89ac08b040db68d,# План реализации оптимизации — 16.10.2026
+docs/analysis/317-rubble-cache-lifetime.md,historical_evidence_or_research,179,fd300a148eb5fba6f6c734554b3efb715e93a36c63dde4be1e4e6fbc1024dfd9,# Сохранение навигационного кэша равных завалов — 16.10.2026
+docs/analysis/318-bounded-ground-read-ahead.md,historical_evidence_or_research,179,85656ee93222d11cdc2151a609c2b839c39c71547c9f5763841a2187600128e1,# 318 — Ограничение лишнего чтения грунта при больших взрывах
+docs/analysis/319-coarse-ground-column-reads.md,historical_evidence_or_research,181,ab6c904b6f493a0e6b886258c809591e44d08c1d00dc0134376155fea9dfe309,# 319 — Точные колонки для чтения грунта крупных взрывов
+docs/analysis/32-range-performance.md,historical_evidence_or_research,140,09a20531bb05e3e035067fa4b9b2ecaf495ef317d16bf8df0822093455ed2dc6,"# Производительность километрового полигона, 20 сентября 2026"
+docs/analysis/320-coarse-resistance-capture.md,historical_evidence_or_research,183,09bb146eda265d4aa7c6033b5885b1b2c4fdfc914efb3f2e3f3d52bf3b936d94,# 320 — Точный пакетный захват сопротивления взрывов
+docs/analysis/33-range-spikes.md,historical_evidence_or_research,187,ad38422f7f93391f7f78cfe46b28cfe573e1d1544450c2e3d283498496196069,# Полигон: длинные приказы и пики взрывов
+docs/analysis/34-smoke-and-rays.md,historical_evidence_or_research,135,fb0a5ae145503d3faa3ba603b502d4d526ea36e7f3dda770afa0a95f22f1f031,# Крупный дым и стоимость света восьми облаков
+docs/analysis/35-streaming-patches.md,historical_evidence_or_research,82,a9499c9ae432f475b53c9a8c4db4531ef32b909dc2af3236483ee0febd173bbb,# Передача изменившихся полос карты
+docs/analysis/36-bounded-routes.md,historical_evidence_or_research,68,225d0ee731fa306f7fbeaa3171bf624cbaef9afaf4c7fd494482d27fe33b916e,# Ограниченный поиск и исполнение маршрута
+docs/analysis/37-placement-preview.md,historical_evidence_or_research,60,2d02532da78760a984b0b5cb07b2a600b52426c463907c78b3fcbcec75a26c8b,# Проверяемая расстановка без пересоздания карты
+docs/analysis/38-range-sectors.md,historical_evidence_or_research,89,6aa3771853251cf23a68745437d5250efd35b24c86733e5daf522a4994befba7,# Участки единого полигона
+docs/analysis/39-fire-and-stream-weapons.md,historical_evidence_or_research,56,50b27b2e7cf13039f4fe1f1fc8b20cfd9ecddff86ace41151dc146c3aa55312f,# Огонь и поточное оружие полигона
+docs/analysis/40-unit-heat.md,historical_evidence_or_research,43,6a52b08018607001387580fffdaa805f1568753d6c150d6b51346779d4f9f26e,# Нагрев техники на полигоне
+docs/analysis/41-heat-exchange.md,historical_evidence_or_research,74,3ec5100240e5c298ab959168fe1c53afda2232ccadab093d14f6518971b72850,# Тепловой контакт мира и техники
+docs/analysis/42-unit-combustion.md,historical_evidence_or_research,96,e5a9c61b3abc17ac5ceb492842faa50303bfc8a2245ac615aeca8ec2cf37e59d,# Конечное горючее и пожар моторного отсека
+docs/analysis/43-supports-and-detachment.md,historical_evidence_or_research,124,07649721155de7af4686876f2daa3e797c46289298945e48946ff78563eb218d,# Опоры и отделение частей полигона
+docs/analysis/44-range-battle.md,historical_evidence_or_research,115,c5c3eae2632735c4061feacb21a66a2a48eef4271b4cdf6a74be74c74daf0cc6,# Бой отрядов на полигоне
+docs/analysis/45-range-frame-budget.md,historical_evidence_or_research,145,5c19ae6c0e7dca76165faaf88b46d399a2be97d7bca7317ca97207fbd39e6314,"# Полигон: расчёт опор, попадания и бюджет кадра"
+docs/analysis/46-range-cache-and-clearance.md,historical_evidence_or_research,203,623980584586d58bfdb1e39c74d1701f3fa5928038cdc7de04ff03603416b02f,"# Полигон: кэши опор и дыма, проверка габарита"
+docs/analysis/47-range-flicker.md,historical_evidence_or_research,93,12e14c12ae9c17371a6fd0b772e7d479dd20ef33d9c65814081a325037888f32,# Мерцание танков и фона полигона
+docs/analysis/48-range-interactions.md,historical_evidence_or_research,123,fa4a36d3e7c12bb0b6a369c9ec534f5a3cf09933e7cf9719ff63d5e4107dea02,"# Паузы при расстановке, сбросе и смене участка"
+docs/analysis/49-local-terrain-reset.md,historical_evidence_or_research,70,cfc11b2a11fbf0373e439a2e5a1dfb21616c5cc0430a6e929e8ad8bb234fae4c,# Локальная правка геометрии и сброс повреждённого мира
+docs/analysis/50-content-effects-and-balance.md,historical_evidence_or_research,57,5f6500d0e9bcfe93a72b69d9c0d8d1482baff732141d70f61a3b2f64d10d153a,"# Фугас, сталь и читаемость струй"
+docs/analysis/51-flame-stream-and-attack-range.md,historical_evidence_or_research,55,16d8b486ce8ef889f1721f6d17b2775a68a7bb0ff04c88010c7c9a7a2e4be778,# Струя огнемёта и дальность приказа
+docs/analysis/52-tank-blast-landing.md,historical_evidence_or_research,44,0b5710b06b34cb8a34975a043afdb01b6b6776b97e0d2654f004b953ad9e3e24,# P-54: толчок и посадка танка от фугаса под корпусом
+docs/analysis/53-world-battle-placement.md,historical_evidence_or_research,37,03d263e3b637caec5852214df2656ab5953a6eef104bd204b70ef6fcdb3b1fa9,# P-55: бой на километровой карте
+docs/analysis/54-battle-pursuit-range.md,historical_evidence_or_research,32,def38dec997c56e8b2cf081295eb2ca3777c1d1b648ab181ec61a4daf868d548,# P-56: преследование на большой карте
+docs/analysis/55-crater-contact-and-floor.md,historical_evidence_or_research,40,541172b3437f751160c14d4d83c9c3c7d1a4d3fc709ce913070dba97e50c61df,# P-54/P-45: посадка у кратера и чтение высоты грунта
+docs/analysis/56-solo-weapon-range.md,historical_evidence_or_research,14,e1749fc7837a39ab93d8bac658f64e7b1e1f2c533e0df0b52c634ebe7266ddd4,# P-56: дальность в одиночном полигоне
+docs/analysis/57-hull-contact-shove.md,historical_evidence_or_research,30,2177707ba2515b249ba28cf82fbac0c0c03dd80a95d1ceab671b5cd4da832b84,# P-54: передача толчка между машинами
+docs/analysis/58-hull-motor-contact.md,historical_evidence_or_research,22,112b9661e89eccee774fe95a3ecc95e49c9f155e5a2f73857b88d79fe749471d,# P-54: передача толчка при упоре двигателя в танк
+docs/analysis/59-walker-forest-and-hill.md,historical_evidence_or_research,34,9595775a907eb0b7eab4a5dbda596515e0bd2cd357e87d1f5600bf894cbdba81,# P-60/P-61/P-41: лес и склон для шагохода
+docs/analysis/60-responsive-orders-and-hull-routes.md,historical_evidence_or_research,17,2768bdc558a8bb7105bde70399e813b2bd016526285094ef2e1e3b5d40b93a94,# P-63: пересчёт пути у машины и смена приказа
+docs/analysis/61-kinetic-shell.md,historical_evidence_or_research,20,23502a44bb344c1e1e901cd80d363f22ad66a9d5a73f39692e90d640da92857b,# P-64: бронебойный снаряд на полигоне
+docs/analysis/62-track-dust.md,historical_evidence_or_research,20,f1652be632440f7d3b1c40f009e4254a6847fb3050e9b9ed498896de6c48ff95,# P-65: пыль у гусениц
+docs/analysis/63-laser-beam.md,historical_evidence_or_research,19,364a2f331f6aeff95b413d6272212d5d1b189726766a61779361c73ddd0e7f38,# P-39: лазер полигона
+docs/analysis/64-shell-gas-tempo.md,historical_evidence_or_research,55,f4bc7cdaa032ba238f982b35b44991ece9ce0f7f7ba0a6dfc4162942d3ce9256,# P-51: темп огня и дыма малого фугаса
+docs/analysis/65-shell-smoke-silhouette.md,historical_evidence_or_research,37,3fcf52d765cd4f7629da54a153d3b160673d3ec0cb072abb3db6ae896b54c1a6,# P-51: просветы большого дыма
+docs/analysis/66-flame-tongues.md,historical_evidence_or_research,31,953ef3f2ce2642457ed5d293f61f58960526687ea8e75fb9c94b7e73f355291f,# Огнемёт: рваная струя вместо цепочки кубиков
+docs/analysis/67-machine-gun-tracers.md,historical_evidence_or_research,27,23a593d871ad60db381564173226dc406e175e6ae654d6f9a608534a2651a183,# Пулемёт: короткий читаемый трассер
+docs/analysis/68-segment-armor-wear.md,historical_evidence_or_research,27,4b3fa13635bd1f922e2136e8cce2b94ba9e2cca310b0aaf09525249a9ce17287,# Вмятины на навесной броне
+docs/analysis/69-fire-radiance-continuity.md,historical_evidence_or_research,21,dd20e91423d5cecf2d081e4d1a861078506626c4b4825037f2e504e642c68d09,# Непрерывная яркость пламени
+docs/analysis/70-kinetic-ricochet.md,historical_evidence_or_research,41,c1b0b0690aea5a581f1d1efcc89c22b31fc9ba118a2db97824ed441a2b2a8fe4,# P-64: скользящий удар бронебойного снаряда по стали
+docs/analysis/71-battle-ai.md,historical_evidence_or_research,49,fb6ac8a09b222971cef74ebb8cd5c21e753f7de77ffdaef5e1ff63cce7b76c23,# AI противника в режиме боя
+docs/analysis/72-reset-and-performance-audit.md,historical_evidence_or_research,81,00654f9b13a1e87d5b68584cc5e3a931a19282d4299d031c324b18544d675664,# Сброс повреждений и аудит производительности после боевого AI
+docs/analysis/73-range-reset-templates.md,historical_evidence_or_research,47,e724bed25261b0ae0e553597d51cfc34b58ac64350aa46a750a045fa21700d6f,# Повторная сборка юнитов при сбросе полигона
+docs/analysis/74-compact-terrain-upload.md,historical_evidence_or_research,55,aad0ee0e6a1e103d71ff410621ce555d389bb78c174acf258f8ec13be3153efa,# Компактная отправка изменённого рельефа на GPU
+docs/analysis/75-weapon-impact-visuals.md,historical_evidence_or_research,31,a73c17b035f5aab9cf65429342edf77a9f4061f7a6358d300ffe4f352f6929f5,# Визуал попаданий фугаса и энергопушки
+docs/analysis/76-battle-occupancy-and-debris.md,historical_evidence_or_research,55,237d67a2d52319e491a80376077063be1ee58da1e28354ce3c08f6d8958a874f,# Стоимость теней машин и осевших обломков в бою
+docs/analysis/77-convoy-contact-and-armor-audit.md,historical_evidence_or_research,62,90def9488aee85d1b2796407ae2899798ab7732fcba8d84831e8da77c67bd4a8,# Контакт двух движущихся машин и проверка брони фугасом
+docs/analysis/78-spatial-motion-order.md,historical_evidence_or_research,28,0eaae1e20a21a3a02837d9693cf33f15cdb1b6ceee2d5e27cf27e8fa6f908d47,# Пространственный порядок движения машин
+docs/analysis/79-wreck-marker-batch.md,historical_evidence_or_research,18,ae1aaed082b87a64850850e93d1c270b8cc4dee2d0ab93e88db76dd4d33505dc,# Пакетное удаление старых записей обломков
+docs/analysis/80-settled-query-mask.md,historical_evidence_or_research,30,4d09955dc91f9c5187266c275e070c82c904c4699f4a4cf160e698e1c6086aaf,# Индекс опор обломков без сортировки ячеек запроса
+docs/analysis/81-capture-local-map.md,historical_evidence_or_research,39,3b7deb24aa99b82130d95643d5dee4e916b30559a159c22355964a894aed447e,# Подготовленное преобразование координат для захвата взрыва
+docs/analysis/82-range-crossroads-and-shield.md,historical_evidence_or_research,9,ced61635db658346bc3784628fa0ae8e37babdaf4287d3415a5460d4c8fa29d1,# Перекрёсток полигона и видимый энергетический щит
+docs/analysis/83-range-viaduct.md,historical_evidence_or_research,9,fcfe560423767a87accc13622bf8937bc607a7d70213b48816b39e34f9bda955,# Эстакада на дальнем перегоне
+docs/analysis/84-timber-depot.md,historical_evidence_or_research,9,f1b764359ee603801442786bb19aa9f6e7d09991d2d97772fb8150e48f9b2f2d,# Лесной склад на северном перегоне
+docs/analysis/85-viaduct-supports.md,historical_evidence_or_research,23,b80d2c14b8c9c03014d60c1766f8022e334dfe7334f696542c58acf9ee53e4dc,"# Эстакада: опоры, бортики и очередь обрушения"
+docs/analysis/86-viaduct-performance.md,historical_evidence_or_research,26,9cbc5559594867e8afa379158ba251d7d0f9642b02372a3cb975540db05e5330,# Эстакада: стоимость материалов и сборки обломков
+docs/analysis/87-motion-and-road-queries.md,historical_evidence_or_research,46,d67b44fe5bbb490e7135651b52de3018edcc8ae332ce9d2aa4e35a5096271304,# Движение: контакты подвески и отрезки дорог
+docs/analysis/88-blast-and-fragment-bounds.md,historical_evidence_or_research,40,afa03b0a49bd36aa108fe6ae691c59ab3290b75de711f9895d50e1c2a1d56cc5,# Захват взрыва и габариты обломков
+docs/analysis/89-debris-query-words.md,historical_evidence_or_research,90,9a8b17ec1ac94645a5bd198dfc65cd68ba3c89363e3cb9cdb814d82f202259b3,# Битовые запросы опор и геометрия обломков
+docs/analysis/90-capture-segment-candidates.md,historical_evidence_or_research,88,e5e6f9d0aec0b599b371a02391bb93cdb86ebf27b3d39a179f8d5b18161be32e,# Сегменты машин при захвате взрыва
+docs/analysis/91-collapse-islands.md,historical_evidence_or_research,121,4006a86bebfcce90dcfeef512cc61447da7cd46742f0c78d8c10992e92b59bf7,# Отделение островов без повторного обхода графа
+docs/analysis/92-search-start-pose.md,historical_evidence_or_research,92,e33779fc2a6b115d19c99a14cf213ca5ed2bb5e42761abb816044600b8ade545,# Поиск пути после смещения корпуса
+docs/analysis/93-partial-route-frontier.md,historical_evidence_or_research,128,eee916e05e565b341d76f672ca581f6e37d8383383a805d1174c607d688309d8,# Конец частичного пути на открытом фронте
+docs/analysis/94-route-waiting-and-braking.md,historical_evidence_or_research,108,95f7b45e1b8eb91c4973db56a7c66cfa2dd6306cc0690e8ea35c0ca164a82e92,# Ожидание прохода и торможение перед точками маршрута
+docs/analysis/95-recovery-state-and-contact-exits.md,historical_evidence_or_research,97,5058b97fbf0414e8978f7426bef6426de2ed68f6ede3f6b1658da539ef7fab9e,# Восстановление выхода из застревания и разделяющая ось контакта
+docs/analysis/96-navigation-probe-work.md,historical_evidence_or_research,91,e0ba741167b5255e219f9fc95c432a99e51ee0cbea57cf6646d49d1edce1aa7c,# Повторные проверки грунта в навигации
+docs/analysis/97-collapse-anchor-index.md,historical_evidence_or_research,73,947cc9d1a2ae3d838a650c39d7dfc1b4b60969bf90ed4e1618761a4a575800a3,# Производный индекс поиска опор
+docs/analysis/98-flat-collapse-adjacency.md,historical_evidence_or_research,74,f5ac2f7d24cddebfedd26aeb30dd9908c2bf345856a3af582fbf410be7812970,# Плоский кэш контактов графа обрушения
+docs/analysis/99-range-column-sky.md,historical_evidence_or_research,68,67eb60085965bcfdfec8c769d6674204c0a9d97feee1ac0f03aca2a983a46417,# Пустое небо при холодной сборке полигона

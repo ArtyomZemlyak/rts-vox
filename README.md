@@ -364,6 +364,10 @@ grep -rn '\[QUESTION' docs/
 
 ## Канон
 
+Вход в документацию — [docs/README.md](docs/README.md).
+Текущая очередь оптимизации — [единый план316](docs/analysis/316-optimization-delivery-plan.md),
+свежие измерения и архитектурный разбор — [аудит321](docs/analysis/321-engine-performance-review.md).
+
 | | |
 |---|---|
 | [01-concept.md](docs/01-concept.md) | Что за игра, скоуп, не-цели, риски |
