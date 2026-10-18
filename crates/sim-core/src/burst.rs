@@ -1129,7 +1129,7 @@ mod tests {
         let solid = |[x, y, z]: [i32; 3]| {
             (42..54).contains(&x) && (42..54).contains(&z) && (14..16).contains(&y)
         };
-        for pass in 0..4 {
+        for pass in 0..8 {
             let hull = Hull {
                 pos: [
                     Fx::from_int(48 + pass * 3),
@@ -1188,6 +1188,25 @@ mod tests {
                     f.resting = !f.resting;
                     f.position.y = f.position.y.add(Fx::ONE);
                 }
+                if i % 11 == 0 {
+                    f.mm = if f.mm == 100 { 160 } else { 100 };
+                }
+                if i % 13 == 0 {
+                    f.shape ^= 1;
+                    f.count = f.shape.count_ones();
+                }
+                if i % 17 == 0 {
+                    f.side = (f.side % 4) + 1;
+                }
+                if i % 19 == 0 {
+                    f.basis.rotate_left(1);
+                }
+            }
+            // A sidecar slot follows the dense slice, not an old ID. Changed
+            // geometry must be rechecked after compaction or imported reorder.
+            b.fragments.rotate_left(17);
+            if pass == 4 {
+                b.fragments.truncate(1000);
             }
         }
     }
@@ -1296,6 +1315,121 @@ mod tests {
             b.rubble_with_scratch(&w, &[], &[], &mut scratch, &|_, _| {}),
             b.reference_rubble(&w, &[], &[])
         );
+    }
+    #[test]
+    fn rubble_span_rows_match_cell_enumeration_with_covers_and_reused_storage() {
+        let mut fragments = Vec::new();
+        for i in 0..1537u32 {
+            let turn = (i % 7) as i32 * 2731;
+            let (c, s) = (angle::cos(turn), angle::sin(turn));
+            fragments.push(Fragment {
+                id: u64::from(i) + 1,
+                position: V3::new(
+                    Fx::from_ratio((i % 40) as i32 * 31 - 3, 2),
+                    Fx::from_int(if i % 5 == 0 { -10 } else { 70_000 }),
+                    Fx::from_ratio((i / 40) as i32 * 9 - 3, 2),
+                ),
+                velocity: V3::ZERO,
+                material: 1,
+                paint: None,
+                mm: 150,
+                basis: [
+                    V3::new(c, Fx::ZERO, s),
+                    V3::UP,
+                    V3::new(s.neg(), Fx::ZERO, c),
+                ],
+                mass_g: 1,
+                count: 3,
+                shape: 7,
+                side: 2,
+                chunk: None,
+                held: 0,
+                resting: true,
+            });
+        }
+        let hulls: Vec<_> = (0..64)
+            .map(|i| Hull {
+                pos: [Fx::from_int(i * 9), Fx::ZERO, Fx::from_int(i * 2)],
+                head: i * 2731,
+                half: [Fx::from_int(3), Fx::from_int(5)],
+                height: Fx::ONE,
+                vel: [Fx::ZERO; 3],
+                step: Fx::ONE,
+                solid: None,
+            })
+            .collect();
+        let reach: Vec<_> = hulls.iter().map(Hull::footprint_box).collect();
+        for workers in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            let mut scratch = ColumnMergeScratch::default();
+            for count in [1537, 1024, 17, 1537] {
+                let floor: Vec<_> = (0..count).rev().collect();
+                let bounds: Vec<_> = fragments.iter().map(|f| Some(f.bounds())).collect();
+                // Independent old algorithm: emit every covered cell into an
+                // ordered map, with no ranges, masks, row scatter or reuse.
+                let mut expected = BTreeMap::new();
+                for &i in &floor {
+                    let f = &fragments[i];
+                    let p = arr(f.position);
+                    let (lo, hi) = f.bounds();
+                    let low = [0, 2].map(|a| ((p[a].add(lo[a]).raw() >> 32) as i32).max(0));
+                    let high = [0, 2].map(|a| (p[a].add(hi[a]).raw() >> 32) as i32);
+                    let top =
+                        (-(p[1].add(hi[1]).neg().raw() >> 32)).clamp(0, i64::from(u16::MAX)) as u16;
+                    for z in low[1]..=high[1] {
+                        for x in low[0]..=high[0] {
+                            if hulls
+                                .iter()
+                                .any(|h| !h.covers_point([p[0], p[2]]) && h.covers(x, z))
+                            {
+                                continue;
+                            }
+                            let old = expected.entry([x, z]).or_insert(0u16);
+                            *old = (*old).max(top);
+                        }
+                    }
+                }
+                let actual = pool.install(|| {
+                    gather_column_spans(
+                        &fragments,
+                        &bounds,
+                        &floor,
+                        &hulls,
+                        &reach,
+                        &mut scratch,
+                        &|_, _| {},
+                    )
+                });
+                let Some(actual) = actual else {
+                    assert_eq!(count, 17, "only the sparse input may fall back");
+                    continue;
+                };
+                assert_eq!(
+                    actual,
+                    expected.into_iter().collect::<Vec<_>>(),
+                    "workers={workers} count={count}"
+                );
+                // A legacy fallback may reuse the very same row buffers.
+                let mut fallback = vec![([3, 5], 0), ([3, 5], u16::MAX), ([1, 2], 7)];
+                pool.install(|| merge_columns_observed(&mut fallback, &|_, _| {}, &mut scratch));
+                assert_eq!(fallback, vec![([1, 2], 7), ([3, 5], u16::MAX)]);
+            }
+            let empty = pool.install(|| {
+                gather_column_spans(
+                    &fragments,
+                    &[],
+                    &[],
+                    &hulls,
+                    &reach,
+                    &mut scratch,
+                    &|_, _| {},
+                )
+            });
+            assert!(empty.is_none());
+        }
     }
     #[test]
     fn hull_support_rejects_below_first_roof_without_voxel_queries() {
@@ -6941,6 +7075,20 @@ impl Bursts {
             "physics_rubble_columns_end",
         );
         let reach: Vec<([Fx; 2], [Fx; 2])> = hulls.iter().map(Hull::footprint_box).collect();
+        if floor.len() >= 1024 && hulls.len() <= 64 {
+            if let Some(columns) = gather_column_spans(
+                &self.fragments,
+                bounds,
+                &floor,
+                hulls,
+                &reach,
+                column_merge,
+                task,
+            ) {
+                bounds.clear();
+                return nav::vehicle::Rubble::from_sorted(columns);
+            }
+        }
         // A batch reuses its hull filter and owns its output. Joining batches
         // in floor order keeps both rounding and equal-column input order.
         let gather = |floor: &[usize]| {
@@ -7606,6 +7754,7 @@ fn merge_columns_observed(
                 starts,
                 rows,
                 groups,
+                ..
             } = scratch;
             starts.clear();
             starts.resize(maximum[0] + 2, 0);
@@ -7843,6 +7992,216 @@ struct ColumnMergeScratch {
     starts: Vec<usize>,
     rows: Vec<u32>,
     groups: Vec<ColumnRows>,
+    spans: Vec<RubbleColumnSpan>,
+    span_rows: Vec<RubbleRowSpan>,
+}
+#[derive(Clone, Copy)]
+struct RubbleColumnSpan {
+    lo: [i32; 2],
+    hi: [i32; 2],
+    top: u16,
+    hulls: u64,
+}
+#[derive(Clone, Copy, Default)]
+struct RubbleRowSpan {
+    z: u32,
+    top: u16,
+    hulls: u64,
+}
+/// Gather exact footprint ranges before enumerating cells. Each X row then
+/// consumes its ranges directly into maxima, avoiding a duplicate-heavy voxel
+/// list and its second scatter. Unusual sparse/wide inputs keep the old builder.
+#[allow(clippy::too_many_arguments)]
+fn gather_column_spans(
+    fragments: &[Fragment],
+    bounds: &[Option<([Fx; 3], [Fx; 3])>],
+    floor: &[usize],
+    hulls: &[Hull],
+    reach: &[([Fx; 2], [Fx; 2])],
+    scratch: &mut ColumnMergeScratch,
+    task: &(impl Fn(usize, &'static str) + Sync),
+) -> Option<Vec<([i32; 2], u16)>> {
+    let ColumnMergeScratch {
+        starts,
+        groups,
+        spans,
+        span_rows,
+        ..
+    } = scratch;
+    {
+        let _task = PhysicsTask::new(
+            task,
+            "physics_rubble_gather_dispatch_begin",
+            "physics_rubble_gather_dispatch_end",
+        );
+        let prepare = |floor: &[usize]| {
+            let _task = PhysicsTask::new(
+                task,
+                "physics_rubble_gather_begin",
+                "physics_rubble_gather_end",
+            );
+            let mut out = Vec::with_capacity(floor.len());
+            for &i in floor {
+                let f = &fragments[i];
+                let (low, high) = bounds[i].unwrap();
+                let p = arr(f.position);
+                let lo = [p[0].add(low[0]), p[2].add(low[2])].map(|v| (v.raw() >> 32) as i32);
+                let hi = [p[0].add(high[0]), p[2].add(high[2])].map(|v| (v.raw() >> 32) as i32);
+                let mut covers = 0u64;
+                for (id, (h, (b0, b1))) in hulls.iter().zip(reach).enumerate() {
+                    let near = (0..2).all(|a| {
+                        Fx::from_int(lo[a]) <= b1[a] && Fx::from_int(hi[a]).add(Fx::ONE) >= b0[a]
+                    });
+                    if near && !h.covers_point([p[0], p[2]]) {
+                        covers |= 1u64 << id;
+                    }
+                }
+                let top = -(p[1].add(high[1]).neg().raw() >> 32);
+                let lo = lo.map(|v| v.max(0));
+                if (0..2).all(|a| lo[a] <= hi[a]) {
+                    out.push(RubbleColumnSpan {
+                        lo,
+                        hi,
+                        top: top.clamp(0, i64::from(u16::MAX)) as u16,
+                        hulls: covers,
+                    });
+                }
+            }
+            out
+        };
+        spans.clear();
+        let prepared: Vec<_> = floor.par_chunks(256).map(prepare).collect();
+        for mut group in prepared {
+            spans.append(&mut group);
+        }
+        let mut maximum = [0usize; 2];
+        let mut cells = 0u64;
+        for span in spans.iter() {
+            if span.hi.iter().any(|&v| v >= 65_536) {
+                return None;
+            }
+            for a in 0..2 {
+                maximum[a] = maximum[a].max(span.hi[a] as usize);
+            }
+            cells += (span.hi[0] - span.lo[0] + 1) as u64 * (span.hi[1] - span.lo[1] + 1) as u64;
+        }
+        if cells < (maximum[0] + maximum[1] + 2) as u64 {
+            return None;
+        }
+        starts.clear();
+        starts.resize(maximum[0] + 2, 0);
+        for span in spans.iter() {
+            for x in span.lo[0]..=span.hi[0] {
+                starts[x as usize + 1] += 1;
+            }
+        }
+        for x in 0..starts.len() - 1 {
+            starts[x + 1] += starts[x];
+        }
+        span_rows.resize(*starts.last().unwrap(), RubbleRowSpan::default());
+        for span in spans.iter() {
+            let row = RubbleRowSpan {
+                z: ((span.lo[1] as u32) << 16) | span.hi[1] as u32,
+                top: span.top,
+                hulls: span.hulls,
+            };
+            for x in span.lo[0]..=span.hi[0] {
+                span_rows[starts[x as usize]] = row;
+                starts[x as usize] += 1;
+            }
+        }
+    }
+    let _task = PhysicsTask::new(
+        task,
+        "physics_rubble_merge_begin",
+        "physics_rubble_merge_end",
+    );
+    let max_z = spans.iter().map(|s| s.hi[1] as usize).max().unwrap_or(0);
+    let words = max_z / 64 + 1;
+    let ends = &starts[..starts.len() - 1];
+    let parallel =
+        span_rows.len() >= 16_384 && ends.len() > 512 && rayon::current_num_threads() > 1;
+    let emit = |start: usize, ends: &[usize], stripe: &mut ColumnRows| {
+        let _task = PhysicsTask::new(
+            task,
+            "physics_rubble_merge_rows_begin",
+            "physics_rubble_merge_rows_end",
+        );
+        stripe.out.clear();
+        stripe.tops.resize(max_z + 1, 0);
+        stripe.present.resize(words, 0);
+        stripe.blocks.resize(words.div_ceil(64), 0);
+        let mut begin = if start == 0 { 0 } else { starts[start - 1] };
+        for (offset, &end) in ends.iter().enumerate() {
+            let x = start + offset;
+            let mut active = 0u64;
+            for span in &span_rows[begin..end] {
+                let top = u32::from(span.top) + 1;
+                for z in (span.z >> 16) as usize..=(span.z & 0xffff) as usize {
+                    if stripe.tops[z] >= top {
+                        continue;
+                    }
+                    let mut mask = span.hulls;
+                    let mut covered = false;
+                    while mask != 0 {
+                        let id = mask.trailing_zeros() as usize;
+                        if hulls[id].covers(x as i32, z as i32) {
+                            covered = true;
+                            break;
+                        }
+                        mask &= mask - 1;
+                    }
+                    if covered {
+                        continue;
+                    }
+                    stripe.tops[z] = top;
+                    let word = z / 64;
+                    stripe.present[word] |= 1u64 << (z % 64);
+                    stripe.blocks[word / 64] |= 1u64 << (word % 64);
+                    active |= 1u64 << (word / 64);
+                }
+            }
+            while active != 0 {
+                let block = active.trailing_zeros() as usize;
+                let mut occupied = std::mem::take(&mut stripe.blocks[block]);
+                while occupied != 0 {
+                    let word = block * 64 + occupied.trailing_zeros() as usize;
+                    let mut bits = std::mem::take(&mut stripe.present[word]);
+                    while bits != 0 {
+                        let z = word * 64 + bits.trailing_zeros() as usize;
+                        stripe
+                            .out
+                            .push(([x as i32, z as i32], (stripe.tops[z] - 1) as u16));
+                        stripe.tops[z] = 0;
+                        bits &= bits - 1;
+                    }
+                    occupied &= occupied - 1;
+                }
+                active &= active - 1;
+            }
+            begin = end;
+        }
+    };
+    groups.resize_with(
+        if parallel { ends.len().div_ceil(64) } else { 1 },
+        ColumnRows::default,
+    );
+    if parallel {
+        groups
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(batch, stripe)| {
+                let start = batch * 64;
+                emit(start, &ends[start..(start + 64).min(ends.len())], stripe);
+            });
+    } else {
+        emit(0, ends, &mut groups[0]);
+    }
+    let mut columns = Vec::with_capacity(groups.iter().map(|s| s.out.len()).sum());
+    for group in groups {
+        columns.append(&mut group.out);
+    }
+    Some(columns)
 }
 #[derive(Default)]
 struct ColumnRows {
