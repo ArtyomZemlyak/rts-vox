@@ -1015,6 +1015,10 @@ mod kinetic;
 #[path = "range_index.rs"]
 mod range_index;
 
+#[cfg(test)]
+#[path = "range_terrain_column_tests.rs"]
+mod terrain_column_tests;
+
 pub struct RangeTerrain {
     index: range_index::Index,
     extended: bool,
@@ -1419,12 +1423,6 @@ impl RangeTerrain {
     fn column_of(&self, x: u32, z: u32) -> Column {
         let shift = if self.extended { 160 } else { 0 };
         let road = self.road_at(x, z, 0);
-        let layout_pad = self.layout.as_ref().is_some_and(|r| {
-            x as i32 >= r.clear_min[0]
-                && (x as i32) < r.clear_max[0]
-                && z as i32 >= r.clear_min[1]
-                && (z as i32) < r.clear_max[1]
-        });
         let mut blocks: Vec<_> = self
             .index
             .at(x, z)
@@ -1493,6 +1491,30 @@ impl RangeTerrain {
                     .then(|| self.road_ground(x, z, self.mound_ground(x, z)) as i32)
             });
         let pad_surface = course.map_or(8, |_| range_pad_surface(x, z, road));
+        if let Some(height) = course {
+            // Course material replaces the entire natural column, including
+            // its sky. Only authored blocks/foundations take precedence.
+            // Do not prepare relief, trees or rocks that at() cannot read.
+            return Column {
+                shift,
+                blocks,
+                course,
+                ground: height.max(0) as u32,
+                road,
+                pad_surface,
+                lane: false,
+                wall: false,
+                target: false,
+                tree: None,
+                rock: None,
+            };
+        }
+        let layout_pad = self.layout.as_ref().is_some_and(|r| {
+            x as i32 >= r.clear_min[0]
+                && (x as i32) < r.clear_max[0]
+                && z as i32 >= r.clear_min[1]
+                && (z as i32) < r.clear_max[1]
+        });
         let unit_pad = self.extended && (337..415).contains(&x) && (282..322).contains(&z);
         let ground =
             if layout_pad || unit_pad || (self.extended && x < 448 && (298..387).contains(&z)) {
@@ -1620,6 +1642,34 @@ impl Generator for RangeTerrain {
     /// world asks for every voxel of it, and that is where the time goes.
     fn column(&self, x: u32, z: u32, y0: u32, out: &mut [u16]) {
         let c = self.column_of(x, z);
+        // Large overlap lists keep the finite-top/first-match reader below:
+        // their front blocks may hide every lower-priority span. Both paths
+        // omit natural preparation already replaced by the course.
+        if let Some(height) = c.course.filter(|_| c.blocks.len() <= 2) {
+            // Fill exact constant runs, then overlay lower-priority blocks
+            // first. This is the same first-match precedence as at(), also
+            // for authored air cuts and foundations over later layout solids.
+            let live = (height.max(0) as u32)
+                .saturating_sub(y0)
+                .min(out.len() as u32) as usize;
+            out[..live].fill(1);
+            out[live..].fill(0);
+            if height > 0 {
+                if let Some(top) = (height as u32 - 1).checked_sub(y0) {
+                    if (top as usize) < out.len() {
+                        out[top as usize] = c.pad_surface;
+                    }
+                }
+            }
+            for &(lo, hi, material) in c.blocks.iter().rev() {
+                let start = (i64::from(lo) - i64::from(y0)).clamp(0, out.len() as i64);
+                let end = (i64::from(hi) - i64::from(y0)).clamp(0, out.len() as i64);
+                if start < end {
+                    out[start as usize..end as usize].fill(material);
+                }
+            }
+            return;
+        }
         // All authored and procedural solids have a finite top. The world
         // builder requests the full 192-cell column, although most terrain
         // ends below 60; do not run material precedence for empty sky.
