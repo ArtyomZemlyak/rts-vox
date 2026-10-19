@@ -3214,7 +3214,7 @@ impl BlastRange {
             });
             let room = room.get_or_insert_with(|| self.matter.claim_room());
             physics(6, "physics_wave_apply_begin");
-            w.wave.step_with_room::<true>(
+            w.wave.step_with_room_observed::<true>(
                 &mut self.world,
                 budgets[i],
                 &mut self.units,
@@ -3223,6 +3223,7 @@ impl BlastRange {
                 config,
                 Some(&mut self.matter),
                 Some(room),
+                &|event| physics(6, event),
             );
             physics(6, "physics_wave_apply_end");
             if let Some(before) = before {

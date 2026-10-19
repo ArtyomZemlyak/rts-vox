@@ -2082,9 +2082,36 @@ impl Explosion {
         dents: &mut SurfaceWork,
         changed: &mut Vec<[i32; 3]>,
         c: &ExplosionConfig,
-        mut matter: Option<&mut matter::Matter>,
+        matter: Option<&mut matter::Matter>,
         room: Option<&mut u32>,
     ) {
+        self.step_with_room_observed::<FAIR>(
+            w,
+            budget,
+            units,
+            dents,
+            changed,
+            c,
+            matter,
+            room,
+            &|_| {},
+        );
+    }
+    /// Split the serial wave commit without reading a clock in SIM.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step_with_room_observed<const FAIR: bool>(
+        &mut self,
+        w: &mut World,
+        budget: usize,
+        units: &mut [RangeUnit],
+        dents: &mut SurfaceWork,
+        changed: &mut Vec<[i32; 3]>,
+        c: &ExplosionConfig,
+        mut matter: Option<&mut matter::Matter>,
+        room: Option<&mut u32>,
+        observe: &impl Fn(&'static str),
+    ) {
+        observe("physics_wave_claims_begin");
         let n = self.roster(units.len());
         let units = &mut units[..n];
         if let Some(m) = matter.as_deref_mut() {
@@ -2095,13 +2122,18 @@ impl Explosion {
             }
         }
         self.step_inner::<FAIR>(w, budget, units, dents, changed, c, matter.as_deref_mut());
+        observe("physics_wave_claims_end");
+        observe("physics_wave_contact_release_begin");
         self.drop_contacts();
+        observe("physics_wave_contact_release_end");
+        observe("physics_wave_body_join_begin");
         if let Some(m) = matter {
             let remaining = m.finish_body_batch();
             if let Some(room) = room {
                 *room = remaining;
             }
         }
+        observe("physics_wave_body_join_end");
     }
     /// Read ahead the matter under the cells the next fair step of
     /// `budget` visits (ADR-681). Read-only on the world; the contact

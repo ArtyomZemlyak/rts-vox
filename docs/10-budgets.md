@@ -325,7 +325,11 @@ ADR-069). Опорная сцена порога — **забой с обстр�
 `workload_capture_schema=1`; разные режимы/схемы не образуют FPS A/B.
 
 В подробном SIM-профиле боевые взрывы имеют отдельные worker-семейства:
-capture, heap, filter, read_ground, body_map, apply. Caller stage — 6;
+capture, heap, filter, read_ground, body_map, apply. Внутри apply отдельно
+отмечаются claims, contact_release и body_join (ADR-763): применение
+контактов, освобождение их временного кэша и атомарная сборка металлических
+фрагментов. Эти три интервала не пересекаются; они уже входят в apply.
+Caller stage — 6;
 stage 5 остаётся теплу юнитов. Это включающие границы задач, в том числе
 dispatch/join; они вложены в последовательные интервалы фаз и не
 складываются с ними. CPU часов внутри SIM нет. Подробный capture с OS
