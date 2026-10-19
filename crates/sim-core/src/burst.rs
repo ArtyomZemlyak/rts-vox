@@ -1580,6 +1580,46 @@ mod tests {
         }
     }
     #[test]
+    fn pile_grid_matches_floor_then_euclidean_division_at_signed_boundaries() {
+        let mut positions: Vec<_> = (-2056..=2056).map(|i| Fx::from_ratio(i, 8)).collect();
+        positions.extend([
+            Fx(i64::MIN),
+            Fx(i64::MIN + 1),
+            Fx(i64::MAX),
+            Fx::from_int(i32::MIN),
+            Fx::from_int(i32::MAX),
+        ]);
+        let cells: Vec<u32> = (0..31)
+            .map(|shift| 1u32 << shift)
+            .chain([3, 5, 17, 31, 255, 1 << 31, u32::MAX - 1, u32::MAX])
+            .collect();
+        for cell in cells {
+            let grid = PileGrid::new(cell);
+            assert_eq!(
+                grid.shift.is_some(),
+                cell <= i32::MAX as u32 && cell.is_power_of_two()
+            );
+            for &x in &positions {
+                let position = V3::new(x, Fx(x.raw() / 3), Fx(x.raw().wrapping_neg()));
+                // Old i32 division by -1 also rejects MIN/-1. The normal path
+                // is retained for all nonpositive cast divisors.
+                if cell == u32::MAX && arr(position).iter().any(|v| v.to_int_trunc() == i32::MIN) {
+                    continue;
+                }
+                let expected = arr(position).map(|v| v.to_int_trunc().div_euclid(cell as i32));
+                assert_eq!(grid.at(position), expected, "cell={cell} raw={}", x.raw());
+            }
+        }
+        assert_eq!(
+            PileGrid::new(16).at(V3::new(
+                Fx::from_ratio(-129, 8),
+                Fx::from_ratio(-1, 8),
+                Fx::from_ratio(127, 8)
+            )),
+            [-2, -1, 0]
+        );
+    }
+    #[test]
     fn hull_support_rejects_below_first_roof_without_voxel_queries() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let queries = AtomicUsize::new(0);
@@ -6927,6 +6967,7 @@ impl Bursts {
         // Equal keys always enter the same shard; source slots stay ordered
         // inside it. Each independent table therefore chooses the same first
         // pile owner as the original single table, without shared mutation.
+        let pile_grid = PileGrid::new(t.pile_cell);
         let mut shards: [Vec<(RestingPile, usize)>; 8] = std::array::from_fn(|_| Vec::new());
         let parallel = self.fragments.len() >= 1024;
         for i in 0..self.fragments.len() {
@@ -6934,12 +6975,7 @@ impl Bursts {
                 continue;
             }
             let f = &self.fragments[i];
-            let key = (
-                arr(f.position).map(|v| v.to_int_trunc().div_euclid(t.pile_cell as i32)),
-                f.material,
-                f.paint,
-                f.mm,
-            );
+            let key = (pile_grid.at(f.position), f.material, f.paint, f.mm);
             let hash = (key.0[0] as u32).wrapping_mul(0x9e3779b9).rotate_left(13)
                 ^ (key.0[1] as u32).wrapping_mul(0xc2b2ae35)
                 ^ (key.0[2] as u32).wrapping_mul(0x85ebca6b);
@@ -7795,6 +7831,30 @@ fn world_floor(f: &Fragment, world: &voxel::World) -> Option<Fx> {
         y -= 1;
     }
     Some(Fx::ZERO)
+}
+/// Preserve the floor conversion of Fx::to_int_trunc (its legacy name).
+/// For a positive power-of-two cell, two arithmetic floor shifts combine.
+struct PileGrid {
+    divisor: i32,
+    shift: Option<u32>,
+}
+impl PileGrid {
+    fn new(cell: u32) -> Self {
+        let divisor = cell as i32;
+        Self {
+            divisor,
+            shift: (divisor > 0 && cell.is_power_of_two())
+                .then(|| fx::FRAC_BITS + cell.trailing_zeros()),
+        }
+    }
+    #[inline(always)]
+    fn at(&self, position: V3) -> [i32; 3] {
+        if let Some(shift) = self.shift {
+            arr(position).map(|v| (v.raw() >> shift) as i32)
+        } else {
+            arr(position).map(|v| v.to_int_trunc().div_euclid(self.divisor))
+        }
+    }
 }
 /// A pile with more than one piece in it is a heap (ADR-292): its cells
 /// fill a four-cell box from the bottom layer up, upright, so that it has

@@ -30836,3 +30836,20 @@ Legacy emitter инвалидирует совместно используем�
 Кэш удерживает дополнительные descriptors, offsets и output buffers;
 это не persistent support index и не пропуск физики. Проверки oracle,
 измерения, отвергнутые варианты и пределы — analysis/327-exact-rubble-row-reuse.md.
+
+
+## ADR-750 — Точные координаты pile cells без runtime деления
+
+Статус: принято. Начало фазы слияния строит PileGrid из текущего pile_cell.
+Положительный после прежнего u32→i32 cast divisor степени двойки использует
+raw арифметический сдвиг на FRAC_BITS+log2(divisor). Fx::to_int_trunc имеет
+legacy имя, но выполняет floor conversion. Сдвиг точно объединяет два
+последовательных floor, включая отрицательные дроби и крайние raw значения.
+Иные размеры и неположительные cast значения сохраняют прежнюю формулу.
+
+Это выбор арифметики, не округление формы и не изменение pile_cell данных.
+Ключи полей material/paint/mm, выбор shard, source-order head/donor,
+передача ledger, restack/seat и snapshot/hash сохраняются. Новых выделений
+heap, межтикового кэша или дополнительных игровых лимитов нет.
+Проверки, repeated ordinary пары, отклонённые варианты и ограничения —
+analysis/332-pile-grid-integer-division.md.

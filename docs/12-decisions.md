@@ -966,3 +966,6 @@
 
 
 | 749 | Плотная карта завалов сохраняет результат X-строки только при точном равенстве всех свежих span descriptors, координаты и границ строки, а также неизменности XZ-геометрии влияющих корпусов. Классификация и чтение опор выполняются заново; ответы поддержки и voxel/world state не кэшируются. Legacy emitter инвалидирует общий scratch до обмена буферами. Source order, top0/65535, fallback, квоты, материя и snapshot/hash прежние. Квалификация и пределы — analysis/327-exact-rubble-row-reuse.md. |
+
+
+| 750 | Ключи слияния resting piles используют фазовый PileGrid. Для положительной i32 степени двойки Euclidean cell вычисляется арифметическим сдвигом raw Fx на FRAC_BITS+log2(cell), точно как прежние floor conversion и div_euclid. Остальные параметры сохраняют исходную формулу, включая прежний cast u32→i32. Ключи, shards, source order, переносы ledger, геометрия и snapshot/hash прежние. Проверки и пределы — analysis/332-pile-grid-integer-division.md. |
