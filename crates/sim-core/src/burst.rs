@@ -998,6 +998,7 @@ mod tests {
                     "physics_rubble_gather_dispatch",
                     "physics_rubble_gather",
                     "physics_rubble_merge",
+                    "physics_rubble_publish",
                 ]);
                 assert_eq!(trace.jobs("physics_rubble_support_query_begin"), 1);
                 assert_eq!(
@@ -1086,6 +1087,7 @@ mod tests {
                     "physics_rubble_floor",
                     "physics_rubble_gather",
                     "physics_rubble_columns",
+                    "physics_rubble_publish",
                 ]);
             }
         }
@@ -7349,6 +7351,11 @@ impl Bursts {
                 task,
             ) {
                 bounds.clear();
+                let _publish = PhysicsTask::new(
+                    task,
+                    "physics_rubble_publish_begin",
+                    "physics_rubble_publish_end",
+                );
                 return nav::vehicle::Rubble::from_sorted(columns);
             }
         }
@@ -7418,6 +7425,11 @@ impl Bursts {
             merge_columns_observed(&mut columns, task, column_merge);
         }
         bounds.clear();
+        let _publish = PhysicsTask::new(
+            task,
+            "physics_rubble_publish_begin",
+            "physics_rubble_publish_end",
+        );
         nav::vehicle::Rubble::from_sorted(columns)
     }
     /// Remove the resting pieces whose matter a digger took whole

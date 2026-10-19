@@ -66,11 +66,10 @@ impl Pose {
 /// so that contacts, feet and the planner all stand on the same heaps.
 ///
 /// Columns in ascending order, read by binary search (ADR-465). The map
-/// is rebuilt from the pieces every step, and a battlefield holds some
-/// fifteen thousand columns: built into a tree they cost more than half
-/// a millisecond a step, built from sorted columns at once almost none.
-/// A derived bounds/max tree rejects distant columns in rectangle queries;
-/// point lookup, iteration and equality use only the canonical sorted slice.
+/// is rebuilt from the pieces every step. A derived bounds/max tree rejects
+/// distant columns in rectangle queries and is built on their first use.
+/// Point lookup, iteration and equality use only the canonical sorted slice;
+/// discarded equal maps do not build a temporary rectangle tree.
 ///
 /// The coarse planner's debris tile map is derived too, built on first use
 /// and shared by every route planned until the rubble changes
@@ -78,7 +77,7 @@ impl Pose {
 #[derive(Clone, Debug, Default)]
 pub struct Rubble(
     Vec<([i32; 2], u16)>,
-    rubble_index::Index,
+    std::sync::OnceLock<rubble_index::Index>,
     std::sync::OnceLock<([u32; 2], std::sync::Arc<coarse::DebrisTiles>)>,
 );
 impl Rubble {
@@ -89,9 +88,20 @@ impl Rubble {
     /// gather gives them.
     pub fn from_sorted(columns: Vec<([i32; 2], u16)>) -> Self {
         debug_assert!(columns.windows(2).all(|p| p[0].0 < p[1].0));
-        let mut index = rubble_index::Index::default();
-        index.rebuild(&columns);
-        Self(columns, index, Default::default())
+        Self(columns, Default::default(), Default::default())
+    }
+    /// Only rectangle readers need the derived tree. A freshly gathered map
+    /// may compare equal to the previous map and be discarded without any
+    /// such reader; point lookup, iteration and equality use columns alone.
+    fn rectangle_index(&self) -> Option<&rubble_index::Index> {
+        if self.0.len() <= rubble_index::MIN_COLUMNS {
+            return None;
+        }
+        Some(self.1.get_or_init(|| {
+            let mut index = rubble_index::Index::default();
+            index.rebuild(&self.0);
+            index
+        }))
     }
     pub fn get(&self, at: &[i32; 2]) -> Option<&u16> {
         self.0
@@ -105,7 +115,7 @@ impl Rubble {
     /// Set the top of a column, returning the one it replaced.
     pub fn insert(&mut self, at: [i32; 2], top: u16) -> Option<u16> {
         let old = self.insert_column(at, top);
-        self.1.rebuild(&self.0);
+        self.1 = Default::default();
         self.2 = Default::default();
         old
     }
@@ -122,7 +132,7 @@ impl Rubble {
     pub fn remove(&mut self, at: &[i32; 2]) -> Option<u16> {
         let i = self.0.binary_search_by(|(c, _)| c.cmp(at)).ok()?;
         let old = self.0.remove(i).1;
-        self.1.rebuild(&self.0);
+        self.1 = Default::default();
         self.2 = Default::default();
         Some(old)
     }
@@ -139,8 +149,8 @@ impl Rubble {
         if (0..2).any(|a| lo[a] > hi[a]) {
             return false;
         }
-        if !self.1.is_empty() {
-            return self.1.touches(&self.0, lo, hi);
+        if let Some(index) = self.rectangle_index() {
+            return index.touches(&self.0, lo, hi);
         }
         let first = self.0.partition_point(|(at, _)| at[0] < lo[0]);
         let rest = &self.0[first..];
@@ -155,8 +165,8 @@ impl Rubble {
         if (0..2).any(|a| lo[a] > hi[a]) {
             return 0;
         }
-        if !self.1.is_empty() {
-            return self.1.upper(&self.0, lo, hi, &mut || {});
+        if let Some(index) = self.rectangle_index() {
+            return index.upper(&self.0, lo, hi, &mut || {});
         }
         let first = self.0.partition_point(|(at, _)| at[0] < lo[0]);
         let rest = &self.0[first..];
@@ -199,7 +209,6 @@ impl FromIterator<([i32; 2], u16)> for Rubble {
         for (at, top) in items {
             r.insert_column(at, top);
         }
-        r.1.rebuild(&r.0);
         r
     }
 }

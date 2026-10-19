@@ -1,5 +1,56 @@
 use super::*;
 
+#[test]
+fn rubble_rectangle_tree_is_lazy_and_mutations_invalidate_it() {
+    let mut r = Rubble::from_sorted((0..1024).map(|x| ([x, 0], (x % 97) as u16)).collect());
+    assert!(r.1.get().is_none());
+    assert_eq!(r.get(&[511, 0]), Some(&26));
+    assert_eq!(r.iter().count(), 1024);
+    let cold = r.clone();
+    assert_eq!(r, cold);
+    assert!(r.1.get().is_none() && cold.1.get().is_none());
+    assert!(r.touches([511, 0], [511, 0]));
+    let first = r.1.get().unwrap() as *const _;
+    assert_eq!(r.upper_in([511, 0], [511, 0]), 26);
+    assert_eq!(r.1.get().unwrap() as *const _, first);
+    let warm = r.clone();
+    assert!(warm.1.get().is_some());
+    assert_eq!(r.insert([511, 0], u16::MAX), Some(26));
+    assert!(r.1.get().is_none());
+    assert_eq!(r.upper_in([511, 0], [511, 0]), u16::MAX);
+    assert_eq!(warm.upper_in([511, 0], [511, 0]), 26);
+    assert_eq!(r.remove(&[511, 0]), Some(u16::MAX));
+    assert!(r.1.get().is_none());
+    assert!(!r.touches([511, 0], [511, 0]));
+    // Threshold crossing never retains a tree for a different column set.
+    for x in 0..512 {
+        r.remove(&[x, 0]);
+    }
+    assert!(r.1.get().is_none());
+    assert!(r.touches([700, 0], [700, 0]));
+    assert!(r.1.get().is_none());
+}
+
+#[test]
+fn concurrent_rectangle_readers_share_one_exact_rubble_tree() {
+    let r = Rubble::from_sorted((0..2048).map(|x| ([x, 0], (x % 97) as u16)).collect());
+    let gate = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        let jobs: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    gate.wait();
+                    assert_eq!(r.upper_in([0, 0], [2047, 0]), 96);
+                    assert!(r.touches([17, 0], [17, 0]));
+                    r.1.get().unwrap() as *const _ as usize
+                })
+            })
+            .collect();
+        let trees: Vec<_> = jobs.into_iter().map(|job| job.join().unwrap()).collect();
+        assert!(trees.iter().all(|&tree| tree == trees[0]));
+    });
+}
+
 struct Flat;
 impl voxel::Generator for Flat {
     fn material(&self, _x: u32, y: u32, _z: u32) -> Mat {
@@ -100,13 +151,17 @@ fn rubble_rectangles_follow_replacements_removals_clones_and_small_map_transitio
     for p in &keys[..600] {
         assert!(r.remove(p).is_some());
     }
-    assert!(r.1.is_empty(), "small maps must release the old index");
+    assert!(r.1.get().is_none(), "small maps must release the old index");
     check(&r);
     for &p in &keys[..600] {
         r.insert(p, 1);
     }
-    assert!(!r.1.is_empty());
+    assert!(
+        r.1.get().is_none(),
+        "mutations leave tree construction deferred"
+    );
     check(&r);
+    assert!(r.1.get().is_some());
     // Collection retains the last input value just like ordered insertion,
     // and equality depends only on the canonical columns.
     let expected = r.clone();
@@ -127,7 +182,10 @@ fn local_rubble_upper_query_does_not_scan_distant_sleeping_history() {
                 .collect(),
         );
         let mut examined = 0;
-        let actual = r.1.upper(&r.0, [31, 1], [31, 2], &mut || examined += 1);
+        let actual = r
+            .rectangle_index()
+            .unwrap()
+            .upper(&r.0, [31, 1], [31, 2], &mut || examined += 1);
         assert_eq!(actual, 7, "a high distant heap cannot enter the answer");
         assert!(examined <= 64, "height={height}, examined={examined}");
         assert!(r.touches([31, 1], [31, 2]));

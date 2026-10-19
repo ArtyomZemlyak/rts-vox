@@ -3,7 +3,7 @@
 use super::Rubble;
 
 const LEAF: usize = 32;
-const MIN_COLUMNS: usize = 512;
+pub(super) const MIN_COLUMNS: usize = 512;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct Index(Vec<Node>);
@@ -61,9 +61,6 @@ impl Index {
         }
         self.0[index] = node;
         index
-    }
-    pub(super) fn is_empty(&self) -> bool {
-        self.0.is_empty()
     }
     pub(super) fn upper(
         &self,

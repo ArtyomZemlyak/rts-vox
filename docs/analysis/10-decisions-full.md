@@ -30894,3 +30894,27 @@ World API читает тот же набор integer voxels, что прежн�
 same-tick collision/navigation и snapshot/hash сохраняются. Нового
 persistent индекса геометрии/опор04a нет. Проверки, два порядка A/B,
 итоговая qualification и ограничения — analysis/335-packed-world-box-contacts.md.
+
+
+## ADR-753 — Производный rectangle Index по первому чтению
+
+Статус: принято. Rubble хранит канонический sorted slice и собственный
+OnceLock прежнего точного bounds/max Index. from_sorted/collection создают
+холодный объект. Point get,iteration,equality и cold clone не строят дерево;
+первый rectangle reader синхронно строит его по текущему immutable slice.
+Другие readers ждут тот же Index. До512 колонок остаётся прямой поиск.
+Insert/replace/remove сбрасывают rectangle/coarse caches; warm clone
+копирует готовый производный Index. Нет устаревшего ответа или отложенной
+физики. Прежнее сохранение объекта равной карты ADR-743 теперь не оплачивает
+Index временной карты перед её отбрасыванием.
+
+Колонки, текущие hulls и supports рассчитываются полностью заново. Tree
+split/traversal/leaf size и точность ответов прежние. Квоты, материя,
+SIM frequency, порядок источников, same-tick collision/navigation и
+snapshot/hash сохраняются. Persistent membership04a не вводится.
+
+Новый opt-in PhysicsTask publish измеряет создание Rubble, а не перенесённую
+в query сборку Index. Нужная холодная сборка входит в root/motion; обе фазы
+проверяются вместе. Две ordinary пары дают root−2,71%,late root−3,93%,
+rubble−16,11%,motion+3,18%. Проверки, provenance и пределы qualification —
+analysis/336-lazy-rubble-rectangle-index.md.
