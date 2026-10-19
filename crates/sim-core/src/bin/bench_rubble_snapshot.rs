@@ -58,6 +58,34 @@ fn main() {
         })
         .collect();
     let yielding = &sim.navigation.fell.materials;
+    if args.iter().any(|a| a == "--support-levels") {
+        let levels: Vec<_> = hulls
+            .iter()
+            .map(|h| {
+                if h.solid.is_some() {
+                    (h.pos[1].raw() >> 32) + 1
+                } else {
+                    h.pos[1].add(h.height).raw() >> 32
+                }
+            })
+            .collect();
+        let mut hist = std::collections::BTreeMap::<usize, usize>::new();
+        for f in sim.matter.debris.fragments.iter().filter(|f| f.resting) {
+            let reach = f
+                .position
+                .y
+                .add(f.bounds().0[1])
+                .add(Fx::from_ratio(1, 2))
+                .raw()
+                >> 32;
+            *hist
+                .entry(levels.iter().filter(|&&y| y <= reach).count())
+                .or_default() += 1;
+        }
+        println!("tick={} hash={before:016x} hulls={} roof_levels={levels:?} resting_eligibility={hist:?}",sim.tick,hulls.len());
+        assert_eq!(sim.state_hash(), before);
+        return;
+    }
     let mut expected = None;
     let mut times = Vec::new();
     let rounds = args.get(2).map_or(160, |n| n.parse::<usize>().unwrap());

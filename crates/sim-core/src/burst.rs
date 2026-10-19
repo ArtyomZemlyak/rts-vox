@@ -1359,7 +1359,7 @@ mod tests {
                 resting: true,
             });
         }
-        let hulls: Vec<_> = (0..64)
+        let mut hulls: Vec<_> = (0..64)
             .map(|i| Hull {
                 pos: [Fx::from_int(i * 9), Fx::ZERO, Fx::from_int(i * 2)],
                 head: i * 2731,
@@ -1370,14 +1370,30 @@ mod tests {
                 solid: None,
             })
             .collect();
-        let reach: Vec<_> = hulls.iter().map(Hull::footprint_box).collect();
         for workers in [1, 2, 4, 8] {
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(workers)
                 .build()
                 .unwrap();
             let mut scratch = ColumnMergeScratch::default();
-            for count in [1537, 1024, 17, 1537] {
+            for (revision, count) in [1537, 1537, 1537, 1024, 1024, 17, 1537, 1537, 1537]
+                .into_iter()
+                .enumerate()
+            {
+                if revision == 2 {
+                    hulls[0].head += 3141;
+                }
+                if revision == 4 {
+                    hulls[1].pos[0] = hulls[1].pos[0].add(Fx::ONE);
+                }
+                if revision == 6 {
+                    fragments[0].position.y = Fx::ONE;
+                }
+                if revision == 7 {
+                    fragments.reverse();
+                    hulls.reverse();
+                }
+                let reach: Vec<_> = hulls.iter().map(Hull::footprint_box).collect();
                 let floor: Vec<_> = (0..count).rev().collect();
                 let bounds: Vec<_> = fragments.iter().map(|f| Some(f.bounds())).collect();
                 // Independent old algorithm: emit every covered cell into an
@@ -1428,7 +1444,14 @@ mod tests {
                 let mut fallback = vec![([3, 5], 0), ([3, 5], u16::MAX), ([1, 2], 7)];
                 pool.install(|| merge_columns_observed(&mut fallback, &|_, _| {}, &mut scratch));
                 assert_eq!(fallback, vec![([1, 2], 7), ([3, 5], u16::MAX)]);
+                if revision == 3 {
+                    // Exercise the legacy dense emitter sharing cached buffers.
+                    let mut dense = vec![([3, 5], 8); 20_000];
+                    pool.install(|| merge_columns_observed(&mut dense, &|_, _| {}, &mut scratch));
+                    assert_eq!(dense, vec![([3, 5], 8)]);
+                }
             }
+            let reach: Vec<_> = hulls.iter().map(Hull::footprint_box).collect();
             let empty = pool.install(|| {
                 gather_column_spans(
                     &fragments,
@@ -1441,6 +1464,119 @@ mod tests {
                 )
             });
             assert!(empty.is_none());
+        }
+    }
+    #[test]
+    fn rubble_row_cache_invalidates_cover_geometry_and_removed_maximum() {
+        let piece = || Fragment {
+            id: 1,
+            position: V3::new(
+                Fx::from_ratio(91, 2),
+                Fx::from_int(13),
+                Fx::from_ratio(97, 2),
+            ),
+            velocity: V3::ZERO,
+            material: 1,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 9600,
+            count: 8,
+            shape: 0xff,
+            side: 2,
+            chunk: None,
+            held: 0,
+            resting: true,
+        };
+        let mut fragments = (0..1024).map(|_| piece()).collect::<Vec<_>>();
+        let mut hulls = vec![Hull {
+            pos: [Fx::from_int(50), Fx::from_int(12), Fx::from_int(48)],
+            head: 0,
+            half: [Fx::from_int(4), Fx::from_int(3)],
+            height: Fx::from_int(3),
+            vel: [Fx::ZERO; 3],
+            step: Fx::from_int(4),
+            solid: None,
+        }];
+        let mut scratch = ColumnMergeScratch::default();
+        let mut previous = None;
+        for revision in 0..10 {
+            match revision {
+                2 => hulls[0].head = angle::FULL / 4,
+                3 => hulls[0].half = [Fx::ONE, Fx::from_int(4)],
+                4 => hulls[0].pos[0] = Fx::from_int(40),
+                5 => {
+                    hulls.clear();
+                    fragments[0].position.y = Fx::from_int(30);
+                }
+                6 => {
+                    fragments.remove(0);
+                }
+                7 => hulls.push(Hull {
+                    pos: [Fx::from_int(50), Fx::ZERO, Fx::from_int(48)],
+                    head: 0,
+                    half: [Fx::from_int(4), Fx::from_int(3)],
+                    height: Fx::ONE,
+                    vel: [Fx::ZERO; 3],
+                    step: Fx::ONE,
+                    solid: None,
+                }),
+                8 => {
+                    hulls[0].pos[1] = Fx::from_int(100);
+                    hulls[0].vel = [Fx::ONE; 3];
+                }
+                _ => {}
+            }
+            let floor: Vec<_> = (0..fragments.len()).collect();
+            let bounds: Vec<_> = fragments.iter().map(|f| Some(f.bounds())).collect();
+            let reach: Vec<_> = hulls.iter().map(Hull::footprint_box).collect();
+            let mut expected = BTreeMap::<[i32; 2], u16>::new();
+            for f in &fragments {
+                let p = arr(f.position);
+                let (lo, hi) = f.bounds();
+                let low = [0, 2].map(|a| ((p[a].add(lo[a]).raw() >> 32) as i32).max(0));
+                let high = [0, 2].map(|a| (p[a].add(hi[a]).raw() >> 32) as i32);
+                let top =
+                    (-(p[1].add(hi[1]).neg().raw() >> 32)).clamp(0, i64::from(u16::MAX)) as u16;
+                for x in low[0]..=high[0] {
+                    for z in low[1]..=high[1] {
+                        if hulls
+                            .iter()
+                            .any(|h| !h.covers_point([p[0], p[2]]) && h.covers(x, z))
+                        {
+                            continue;
+                        }
+                        let old = expected.entry([x, z]).or_default();
+                        *old = (*old).max(top);
+                    }
+                }
+            }
+            let actual = gather_column_spans(
+                &fragments,
+                &bounds,
+                &floor,
+                &hulls,
+                &reach,
+                &mut scratch,
+                &|_, _| {},
+            )
+            .unwrap();
+            assert_eq!(
+                actual,
+                expected.into_iter().collect::<Vec<_>>(),
+                "revision={revision}"
+            );
+            if [2, 3, 4, 5, 6, 7].contains(&revision) {
+                assert_ne!(
+                    previous.as_ref().unwrap(),
+                    &actual,
+                    "mutation must affect output revision={revision}"
+                );
+            }
+            if [1, 8, 9].contains(&revision) {
+                assert_eq!(previous.as_ref().unwrap(), &actual);
+            }
+            previous = Some(actual);
         }
     }
     #[test]
@@ -7822,7 +7958,10 @@ fn merge_columns_observed(
                     present,
                     blocks,
                     out,
+                    cache,
                 } = stripe;
+                cache.input_ends.clear();
+                cache.output_ends.clear();
                 out.clear();
                 let _task = PhysicsTask::new(
                     task,
@@ -7874,6 +8013,13 @@ fn merge_columns_observed(
                     begin = end;
                 }
             };
+            // Span gathering retains completed outputs; the legacy serial
+            // allocation swap requires these logical buffers to be empty.
+            for stripe in groups.iter_mut() {
+                stripe.out.clear();
+                stripe.cache.input_ends.clear();
+                stripe.cache.output_ends.clear();
+            }
             columns.clear();
             let ends = &starts[..starts.len() - 1];
             groups.resize_with(
@@ -8024,7 +8170,8 @@ pub(crate) struct RubbleScratch {
     stacked_mask: Vec<u64>,
     column_merge: ColumnMergeScratch,
 }
-/// Scratch only: every call rebuilds the same maxima from the complete input.
+/// Scratch only: support membership is rebuilt from current inputs. Exact row
+/// results may be reused only after comparing their complete current inputs.
 #[derive(Default)]
 struct ColumnMergeScratch {
     starts: Vec<usize>,
@@ -8032,6 +8179,7 @@ struct ColumnMergeScratch {
     groups: Vec<ColumnRows>,
     spans: Vec<RubbleColumnSpan>,
     span_rows: Vec<RubbleRowSpan>,
+    cover_keys: Vec<HullCoverKey>,
 }
 #[derive(Clone, Copy)]
 struct RubbleColumnSpan {
@@ -8040,11 +8188,27 @@ struct RubbleColumnSpan {
     top: u16,
     hulls: u64,
 }
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct RubbleRowSpan {
     z: u32,
     top: u16,
     hulls: u64,
+}
+/// Exactly the fields read by Hull::covers/covers_point. Roof/voxel support
+/// is classified afresh before gathering; it is never cached here.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct HullCoverKey {
+    pos: [Fx; 2],
+    half: [Fx; 2],
+    head: i32,
+}
+#[derive(Default)]
+struct ColumnRowCache {
+    first_x: usize,
+    inputs: Vec<RubbleRowSpan>,
+    input_ends: Vec<usize>,
+    output_ends: Vec<usize>,
+    previous: Vec<([i32; 2], u16)>,
 }
 /// Gather exact footprint ranges before enumerating cells. Each X row then
 /// consumes its ranges directly into maxima, avoiding a duplicate-heavy voxel
@@ -8064,6 +8228,7 @@ fn gather_column_spans(
         groups,
         spans,
         span_rows,
+        cover_keys,
         ..
     } = scratch;
     {
@@ -8159,19 +8324,65 @@ fn gather_column_spans(
     let ends = &starts[..starts.len() - 1];
     let parallel =
         span_rows.len() >= 16_384 && ends.len() > 512 && rayon::current_num_threads() > 1;
+    let keys: Vec<_> = hulls
+        .iter()
+        .map(|h| HullCoverKey {
+            pos: [h.pos[0], h.pos[2]],
+            half: h.half,
+            head: h.head,
+        })
+        .collect();
+    let mut changed_hulls = 0u64;
+    for id in 0..keys.len().max(cover_keys.len()) {
+        if keys.get(id) != cover_keys.get(id) {
+            changed_hulls |= 1u64 << id;
+        }
+    }
+    *cover_keys = keys;
     let emit = |start: usize, ends: &[usize], stripe: &mut ColumnRows| {
         let _task = PhysicsTask::new(
             task,
             "physics_rubble_merge_rows_begin",
             "physics_rubble_merge_rows_end",
         );
+        // Keep last outputs while writing this call's output. Every reused row
+        // compares full descriptors (not just a hash) and all its cover inputs.
+        let cache = &mut stripe.cache;
+        std::mem::swap(&mut stripe.out, &mut cache.previous);
         stripe.out.clear();
         stripe.tops.resize(max_z + 1, 0);
         stripe.present.resize(words, 0);
         stripe.blocks.resize(words.div_ceil(64), 0);
         let mut begin = if start == 0 { 0 } else { starts[start - 1] };
+        let input_start = begin;
+        let mut new_output_ends = Vec::with_capacity(ends.len());
         for (offset, &end) in ends.iter().enumerate() {
             let x = start + offset;
+            let current = &span_rows[begin..end];
+            let old_begin = if offset == 0 {
+                0
+            } else {
+                cache.input_ends.get(offset - 1).copied().unwrap_or(0)
+            };
+            let same = cache.first_x == start
+                && cache
+                    .input_ends
+                    .get(offset)
+                    .is_some_and(|&old_end| cache.inputs.get(old_begin..old_end) == Some(current))
+                && (changed_hulls == 0 || current.iter().all(|s| s.hulls & changed_hulls == 0));
+            if same {
+                let out_begin = if offset == 0 {
+                    0
+                } else {
+                    cache.output_ends[offset - 1]
+                };
+                stripe
+                    .out
+                    .extend_from_slice(&cache.previous[out_begin..cache.output_ends[offset]]);
+                new_output_ends.push(stripe.out.len());
+                begin = end;
+                continue;
+            }
             let mut active = 0u64;
             for span in &span_rows[begin..end] {
                 let top = u32::from(span.top) + 1;
@@ -8217,8 +8428,19 @@ fn gather_column_spans(
                 }
                 active &= active - 1;
             }
+            new_output_ends.push(stripe.out.len());
             begin = end;
         }
+        cache.first_x = start;
+        cache.inputs.clear();
+        cache
+            .inputs
+            .extend_from_slice(&span_rows[input_start..begin]);
+        cache.input_ends.clear();
+        cache
+            .input_ends
+            .extend(ends.iter().map(|&end| end - input_start));
+        cache.output_ends = new_output_ends;
     };
     groups.resize_with(
         if parallel { ends.len().div_ceil(64) } else { 1 },
@@ -8237,7 +8459,7 @@ fn gather_column_spans(
     }
     let mut columns = Vec::with_capacity(groups.iter().map(|s| s.out.len()).sum());
     for group in groups {
-        columns.append(&mut group.out);
+        columns.extend_from_slice(&group.out);
     }
     Some(columns)
 }
@@ -8247,6 +8469,7 @@ struct ColumnRows {
     present: Vec<u64>,
     blocks: Vec<u64>,
     out: Vec<([i32; 2], u16)>,
+    cache: ColumnRowCache,
 }
 type SettledCellRequest = (u32, [i32; 3], [i32; 3]);
 /// X modulo eight owns each contact list. Each worker appends indices in
