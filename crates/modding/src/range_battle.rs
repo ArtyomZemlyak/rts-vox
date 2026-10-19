@@ -148,7 +148,7 @@ impl Tuning {
             || !(10..=150).contains(&t.canister.footprint_radius)
             || !(100..=3000).contains(&t.canister.range)
             || !(1..=1800).contains(&t.canister.reload_ticks)
-            || !(100..=3000).contains(&t.siege.range)
+            || !(100..=crate::attack_ranges::MAX_DISTANCE).contains(&t.siege.range)
             || !(1..=1800).contains(&t.siege.reload_ticks)
             || !(1000..=4000).contains(&t.siege.flight_time_milli)
             || !(100..=3000).contains(&t.kinetic_range)

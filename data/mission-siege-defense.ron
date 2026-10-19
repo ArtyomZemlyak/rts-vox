@@ -1,16 +1,16 @@
 (
  title: "Артиллерия T3: контрбатарея",
  briefing: "На старте свои держат огонь. ПКМ по земле — движение; по врагу — атака. Выведите резерв в золотой круг. T3 сначала прикажите атаковать северную вражескую САУ, затем южную: приоритет батарей важнее ближайшего танка. Резервом добивайте уцелевших. Сохраните базу и орудие T3: потеря её оружия проваливает операцию, даже если ядро цело.",
- zone: (name: "Артиллерия T3: контрбатарея", min: (2800,1800), max: (6800,3700), spawn: (3000,16,2600), target: (6300,16,2600)),
+ zone: (name: "Артиллерия T3: контрбатарея", min: (2800,1800), max: (9600,3700), spawn: (3000,16,2600), target: (9000,16,2600)),
  units: [
   (kind: ArtilleryTurretT3, allied: true, at: (3160,16,2630)),
   (kind: Base, allied: true, at: (3040,16,3300)),
   (kind: Tank, allied: true, at: (3310,16,2210)),
   (kind: Tank, allied: true, at: (3310,16,2910)),
-  (kind: ArtilleryT2, allied: false, at: (6500,16,2230)),
-  (kind: ArtilleryT2, allied: false, at: (6500,16,3080)),
-  (kind: Tank, allied: false, at: (6300,16,2440)),
-  (kind: Tank, allied: false, at: (6300,16,2820)),
+  (kind: ArtilleryT2, allied: false, at: (9200,16,2230)),
+  (kind: ArtilleryT2, allied: false, at: (9200,16,3080)),
+  (kind: Tank, allied: false, at: (9000,16,2440)),
+  (kind: Tank, allied: false, at: (9000,16,2820)),
  ],
  blocks: [
   (min: (4080,16,1970), max: (4110,56,2400), material: 2),

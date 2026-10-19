@@ -174,7 +174,17 @@ fn siege_full_range_survives_high_altitude_snapshot() {
 
 #[test]
 fn siege_stationary_ai_uses_its_actual_weapon_reach() {
-    let mut r = arena_of([RangeUnitKind::ArtilleryTurretT3, RangeUnitKind::Tank]);
+    let mut layout = arena_of([RangeUnitKind::ArtilleryTurretT3, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
+    // Target the added half of the weapon's reach, not a nearby tank that
+    // would also be hittable with the former balance.
+    let target_x = layout.units[0].at[0] + modding::attack_ranges::stock().siege * 4 / 5;
+    layout.size[0] = ((target_x + 300 + 15) / 16 * 16) as u32;
+    layout.clear_max[0] = target_x + 200;
+    layout.units[1].at[0] = target_x;
+    let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut r = BlastRange::with_layout(c, layout).unwrap();
     assert!(r.set_ai_vs_ai(true));
     r.start_battle().unwrap();
     let obs = r.enemy_ai_observation().unwrap();

@@ -11,7 +11,7 @@
     spider_laser: 1800,
     artillery: 1800,
     canister: 2200,
-    siege: 2800,
+    siege: 5600,
     // Acquisition is a sensor, not permission to fire beyond weapon reach.
-    acquisition: 3000,
+    acquisition: 6000,
 )

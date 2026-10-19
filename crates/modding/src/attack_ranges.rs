@@ -3,6 +3,9 @@
 use serde::{de, Deserialize, Deserializer};
 use std::sync::OnceLock;
 
+/// Technical loading ceiling, shared with long-range ballistic tuning.
+pub const MAX_DISTANCE: i32 = 6000;
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttackRanges {
@@ -21,7 +24,11 @@ pub struct AttackRanges {
 impl AttackRanges {
     pub fn from_ron(text: &str) -> Result<Self, String> {
         let value: Self = ron::from_str(text).map_err(|e| e.to_string())?;
-        if value.values().iter().any(|n| !(100..=3000).contains(n)) {
+        if value
+            .values()
+            .iter()
+            .any(|n| !(100..=MAX_DISTANCE).contains(n))
+        {
             return Err("attack distances outside bounded limits".into());
         }
         Ok(value)
@@ -159,7 +166,7 @@ mod tests {
         let source = include_str!("../../../data/attack-ranges.ron");
         for bad in [
             source.replace("flame: 300", "flame: 0"),
-            source.replace("siege: 2800", "siege: 3001"),
+            source.replace("siege: 5600", &format!("siege: {}", MAX_DISTANCE + 1)),
         ] {
             assert!(AttackRanges::from_ron(&bad).is_err());
         }
