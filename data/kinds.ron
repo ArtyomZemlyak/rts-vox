@@ -79,7 +79,7 @@
             name: "шагоход",
             body: "штурмовой бот",
             voxels: 260,
-            speed: 56,
+            speed: 84,
             chassis: Walking,
             weapon: 4,
             cost: 360000,

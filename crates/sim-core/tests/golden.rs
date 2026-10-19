@@ -48,7 +48,9 @@ use sim_core::blast::BlastRange;
 // ADR-726: shared attack-distance balance and centre-based admission;
 // Windows physics 1/4/8 agree (analysis/301).
 // ADR-739/740: stronger T3 charge and growing physical radius; physics 1/4/8 agree (analysis/313).
-const GOLDEN_600: u64 = 0x6352_00a9_c3fc_1530;
+// ADR-754/755: corrected diagonal support patches and Strider speed 84;
+// Windows physics 1/4/8 agree (analysis/338).
+const GOLDEN_600: u64 = 0xc095_73b6_9274_1d37;
 
 /// Сценарий собирается **из тех же данных, что у игры**: `include_str!`
 /// разворачивается на сборке, ввода-вывода в тесте нет, а литералы
