@@ -16,6 +16,14 @@ struct Built {
     segment: Option<usize>,
     turret: bool,
 }
+pub(super) fn body_tint(allied: Option<bool>, id: usize) -> [f32; 3] {
+    match allied {
+        Some(true) => [0.14, 0.30, 0.40],
+        Some(false) => [0.44, 0.17, 0.12],
+        None if id == 0 => [0.38, 0.34, 0.25],
+        None => [0.22, 0.32, 0.27],
+    }
+}
 fn build(unit: &Snapshot, pristine: &voxel::unit::UnitBody, skins: &SkinBindings) -> Vec<Built> {
     let config = &unit.config;
     let id = unit.id;
@@ -43,17 +51,7 @@ fn build(unit: &Snapshot, pristine: &voxel::unit::UnitBody, skins: &SkinBindings
         let mut bufs = std::array::from_fn(|_| MeshBuf::default());
         render::model::body_to_mesh(
             body,
-            if let Some(allied) = unit.allied {
-                if allied {
-                    [0.14, 0.30, 0.40]
-                } else {
-                    [0.44, 0.17, 0.12]
-                }
-            } else if id == 0 {
-                [0.38, 0.34, 0.25]
-            } else {
-                [0.22, 0.32, 0.27]
-            },
+            body_tint(unit.allied, id),
             1.0,
             rows,
             0.35,

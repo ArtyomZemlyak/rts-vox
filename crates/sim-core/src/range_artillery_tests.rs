@@ -219,6 +219,11 @@ fn contended_ai_artillery_crater(kind: RangeUnitKind) {
         field: DebrisField::MaxFlying,
         value: 128,
     });
+    // This fixture tests two queues competing with a partially spent wave.
+    // Fewer metal pieces can let the stock T1 wave finish in the same tick
+    // as its first soil edits, before the competing cut can be seeded.
+    // Stock first-salvo progress is covered by the isolated tests below.
+    super::tests::slow_blasts(&mut r);
     r.start_battle().unwrap();
     assert!(r.battle_order(1, Order::Hold, None));
     let mut soil = 0;
@@ -267,17 +272,19 @@ fn contended_ai_artillery_crater(kind: RangeUnitKind) {
             && r.battle.has_material_work()
         {
             let bytes = r.snapshot();
-            let copy = BlastRange::restore(config, &bytes).expect("contended crater snapshot");
+            let mut copy = BlastRange::restore(config, &bytes).expect("contended crater snapshot");
+            super::tests::slow_blasts(&mut copy);
             assert_eq!(bytes, copy.snapshot());
             replay = Some(copy);
         }
     }
     eprintln!(
-        "AI contested {kind:?} fired={} soil={soil} wood={wood} surface={} ground={:?} felling={}",
+        "AI contested {kind:?} fired={} soil={soil} wood={wood} surface={} ground={:?} felling={} seeded={seeded_felling} replay={}",
         r.battle.actors[0].fired,
         surface.len(),
         r.matter.admission.ground,
-        r.matter.felling_pending()
+        r.matter.felling_pending(),
+        replay.is_some()
     );
     assert!(r.battle.actors[0].fired > 0);
     assert_eq!(r.battle.actors[1].fired, 0);

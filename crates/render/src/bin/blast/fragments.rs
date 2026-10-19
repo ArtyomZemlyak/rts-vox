@@ -55,7 +55,10 @@ pub fn draw(
     } else {
         1.0
     };
-    let mut chunk_builds = 0;
+    // Preserve the former two-large-section ceiling, while allowing several
+    // cheap panels through one bounded frame instead of delaying their birth.
+    const SECTION_WORK: usize = 1024;
+    let mut section_work = 0;
     cache.slots.align(fragments);
     {
         let Cache { slots, chunks, .. } = &mut *cache;
@@ -97,6 +100,24 @@ pub fn draw(
             }
             dense::Prepared::Replace(key, current) => (key, current),
         };
+        let transform = slots::interpolate(current, visual.fragments.get(&f.id).copied(), alpha);
+        let mesh_work = f.chunk.as_ref().map_or(0, |c| {
+            if c.body.is_some() {
+                512
+            } else {
+                c.cells.len().clamp(64, 512)
+            }
+        });
+        // A pending charred/rebuilt section keeps its current mesh and follows
+        // physics until the bounded mesh builder can replace it atomically.
+        if f.chunk.is_some() && section_work + mesh_work > SECTION_WORK {
+            if let Some(slot) = &entry.slot {
+                if let Ok((_, _, mut tr)) = old.get_mut(slot.entity) {
+                    tr.set_if_neq(transform);
+                }
+            }
+            continue;
+        }
         if let Some(slot) = entry.slot.take() {
             let entity = slot.entity;
             if old.contains(entity) {
@@ -104,16 +125,19 @@ pub fn draw(
             }
             chunks.remove(&f.id);
         }
-        let transform = slots::interpolate(current, visual.fragments.get(&f.id).copied(), alpha);
         if let Some(chunk) = &f.chunk {
-            if chunk_builds >= 2 {
-                continue;
-            }
-            chunk_builds += 1;
+            section_work += mesh_work;
             let unit = &scene.sim.units[chunk.template as usize];
             let dead = !unit.status.alive;
             let kind = unit.kind;
             let template = &art.pristine[kind.index()];
+            let tint = witness::body_tint(
+                scene
+                    .sim
+                    .battle_mode()
+                    .then(|| scene.sim.allied(chunk.template as usize)),
+                chunk.template as usize,
+            );
             let mut handles = Vec::new();
             let entity = commands
                 .spawn((
@@ -122,7 +146,9 @@ pub fn draw(
                     Visibility::default(),
                 ))
                 .with_children(|parent| {
-                    for (finish, mut buf) in render::model::section_to_mesh(template, chunk) {
+                    for (finish, mut buf) in
+                        render::model::section_to_mesh_tinted(template, chunk, tint)
+                    {
                         if dead {
                             wreck::charred(&mut buf);
                         }

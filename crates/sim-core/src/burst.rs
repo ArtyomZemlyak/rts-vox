@@ -51,6 +51,8 @@ impl<F: Fn(usize, &'static str)> Drop for PhysicsTask<'_, F> {
     }
 }
 
+#[path = "body_fragments.rs"]
+pub(crate) mod body_fragments;
 #[path = "chunk.rs"]
 pub mod chunk;
 #[path = "hull_queries.rs"]

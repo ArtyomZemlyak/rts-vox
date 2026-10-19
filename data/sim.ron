@@ -9,6 +9,9 @@
 // Пропущенное поле — ошибка разбора, а не ноль: умолчание означало бы,
 // что число всё-таки живёт в коде.
 (
+    // Metal tears into connected panels, independently of soil chip sizes.
+    // Only actually removed cells join; articulated frames stay separate.
+    body_fragment_mm: 1600,
     blast: (
         cell: 2, samples_per_tick: 65536, wave_pops_per_tick: 16384,
         edits_per_tick: 16384, max_pending: 16, max_claims: 4096, max_fragments: 32768, max_flying: 4096, max_resting_fragments: 131072, pile_cell: 16, fragment_box: 4,

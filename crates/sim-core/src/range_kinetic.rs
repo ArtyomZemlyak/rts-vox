@@ -314,10 +314,10 @@ impl BlastRange {
         } else {
             self.kinetic_channel(job, budget) && self.kinetic_lateral(job, budget)
         };
+        let remaining = self.matter.finish_body_batch();
         if let Some(room) = room {
-            *room = self.matter.body_batch_room();
+            *room = remaining;
         }
-        self.matter.finish_body_batch();
         job.remaining_mj = self.matter.remaining_mj;
         self.matter.remaining_mj = previous.0;
         self.matter.fragment_size(u32::from(previous.1));

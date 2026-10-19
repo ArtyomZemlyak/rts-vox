@@ -6,11 +6,15 @@ use crate::damage::Frame;
 use std::collections::BTreeMap;
 
 type Key = (usize, usize, [u32; 3], u8, [i64; 16]);
+type PanelKey = (usize, usize, u8, u8, u8, [i64; 16]);
+type PanelCells = (Frame, u16, u8, Vec<(voxel::impact::Cell, usize)>);
 #[derive(Default)]
 pub(super) struct Batch {
     groups: BTreeMap<Key, (Frame, Vec<(u32, usize)>)>,
-    // One reservation per connected component, with the same boundaries as
-    // finish_body_batch. Temporary cell donors are not independent pieces.
+    panels: BTreeMap<PanelKey, PanelCells>,
+    span_mm: u32,
+    // Conservative legacy component reservations. Panels may join them;
+    // aligned partitions never split them into additional physical objects.
     components: BTreeMap<(Key, u8), Vec<u64>>,
     pub(super) room: Option<u32>,
 }
@@ -119,8 +123,32 @@ impl Batch {
         frame: Frame,
         side: u8,
         tuning: &modding::tuning::Blast,
+        body: &voxel::unit::UnitBody,
     ) {
-        let (key, bit) = Self::location(unit, part, cell, frame, side, tuning);
+        let layer = u8::from(body.turret_y > 0 && cell[1] >= usize::from(body.turret_y));
+        let (key, bit) = Self::location(
+            unit,
+            part * 2 + usize::from(layer),
+            cell,
+            frame,
+            side,
+            tuning,
+        );
+        if self.span_mm > 0 {
+            self.panels
+                .entry((
+                    unit,
+                    part,
+                    layer,
+                    body.part_at(cell[0], cell[1], cell[2]) as u8,
+                    side,
+                    key.4,
+                ))
+                .or_insert_with(|| (frame, body.mm, body.turret_y, Vec::new()))
+                .3
+                .push((cell.map(|v| v as u8), index));
+            return;
+        }
         self.groups
             .entry(key)
             .or_insert_with(|| (frame, Vec::new()))
@@ -146,18 +174,29 @@ impl Matter {
     /// exact remaining component/terrain reservation count. Never across ticks.
     pub(crate) fn begin_body_batch_with_room(&mut self, room: u32) {
         assert!(self.batch.is_none());
-        self.batch = Some(Batch::with_room(Some(room)));
+        let mut batch = Batch::with_room(Some(room));
+        batch.span_mm = self.body_fragment_mm;
+        self.batch = Some(batch);
     }
-    pub(crate) fn body_batch_room(&self) -> u32 {
-        self.batch
-            .as_ref()
-            .and_then(|b| b.room)
-            .expect("atomic reservation cache")
-    }
-    pub(crate) fn finish_body_batch(&mut self) {
+    /// Publish the exact remaining capacity after joining reserved components.
+    /// The caller carries this value to the next wave/job in the same phase.
+    pub(crate) fn finish_body_batch(&mut self) -> u32 {
         let Some(batch) = self.batch.take() else {
-            return;
+            return 0;
         };
+        let room = batch.room;
+        if batch.span_mm > 0 {
+            let reserved: usize = batch.components.values().map(Vec::len).sum();
+            let pieces = self.finish_panels(batch);
+            return room.map_or(0, |room| {
+                room + u32::try_from(
+                    reserved
+                        .checked_sub(pieces)
+                        .expect("aligned panels cannot split reserved components"),
+                )
+                .unwrap()
+            });
+        }
         let mut removed = BTreeSet::new();
         for ((_, _, origin, side, _), (frame, cells)) in batch.groups {
             // Keep subsystem boundaries, but paint scratches do not sever steel.
@@ -220,6 +259,66 @@ impl Matter {
                 }
             }
         }
+        self.compact_body_donors(removed);
+        room.unwrap_or(0)
+    }
+    fn finish_panels(&mut self, batch: Batch) -> usize {
+        use crate::burst::body_fragments::{components, set_geometry, span_cells};
+        let mut removed = BTreeSet::new();
+        let mut count = 0;
+        for ((unit, part, _, _, quantum, _), (frame, mm, turret_y, cells)) in batch.panels {
+            for piece in components(cells, span_cells(mm, batch.span_mm, quantum)) {
+                count += 1;
+                if piece.len() < 2 {
+                    continue;
+                }
+                let first = piece[0].1;
+                let held = self.debris.fragments[first].held;
+                let paint = self.debris.fragments[first].paint;
+                let preserve_finishes = piece
+                    .iter()
+                    .any(|&(_, i)| self.debris.fragments[i].paint != paint);
+                let mut velocity = V3::ZERO;
+                let mut mass = 0;
+                let mut old_motion = 0;
+                for &(_, index) in &piece {
+                    let f = &self.debris.fragments[index];
+                    velocity = velocity.add(f.velocity);
+                    mass += f.mass_g;
+                    old_motion += motion_mj(f);
+                    if index != first {
+                        let container = f.held;
+                        let amount = self.economy.ledger.held(container);
+                        assert_eq!(
+                            self.economy.ledger.transfer(container, held, amount),
+                            amount
+                        );
+                        assert!(self.economy.ledger.retire_empty_debris(container));
+                        removed.insert(index);
+                    }
+                }
+                let f = &mut self.debris.fragments[first];
+                f.velocity = velocity.scale(Fx::from_ratio(1, piece.len() as i32));
+                f.mass_g = mass;
+                set_geometry(
+                    f,
+                    unit as u16,
+                    part.checked_sub(1).map(|p| p as u8),
+                    frame,
+                    piece.into_iter().map(|(cell, _)| cell).collect(),
+                    turret_y,
+                    preserve_finishes,
+                );
+                self.debris.body_motion_mj = self
+                    .debris
+                    .body_motion_mj
+                    .saturating_sub(old_motion.saturating_sub(motion_mj(f)));
+            }
+        }
+        self.compact_body_donors(removed);
+        count
+    }
+    fn compact_body_donors(&mut self, removed: BTreeSet<usize>) {
         if removed.is_empty() {
             return;
         }
@@ -567,6 +666,20 @@ mod tests {
         assert_eq!(m.debris.fragments.iter().map(|f| f.count).sum::<u32>(), 68);
         let mut restored = BTreeSet::new();
         for f in &m.debris.fragments[4..] {
+            if let Some(chunk) = &f.chunk {
+                assert_eq!(
+                    crate::burst::body_fragments::components(
+                        chunk.cells.iter().copied().enumerate().map(|(i, c)| (c, i)),
+                        256
+                    )
+                    .len(),
+                    1
+                );
+                for cell in &chunk.cells {
+                    assert!(restored.insert(cell.map(usize::from)));
+                }
+                continue;
+            }
             let centre = shape_centre(f.shape, f.side);
             let scale = Fx::from_ratio(f.mm as i32, voxel::unit::WORLD_MM as i32);
             for bit in 0..u32::from(f.side).pow(3) {
@@ -624,6 +737,129 @@ mod tests {
     }
 
     #[test]
+    fn panels_of_all_unit_kinds_and_articulated_parts_keep_their_source_and_roundtrip() {
+        use modding::range::RangeUnitKind;
+        let mut units: Vec<_> = RangeUnitKind::ALL
+            .into_iter()
+            .map(|kind| RangeUnit::of_kind(kind, [240, 16, 240]))
+            .collect();
+        let mut matter = Matter::new(&units);
+        matter.begin(u32::MAX, 4);
+        matter.begin_body_batch();
+        let mut removed = Vec::new();
+        for (id, u) in units.iter().enumerate() {
+            for part in 0..=u.body.segments.len() {
+                let b = if part == 0 {
+                    &u.body
+                } else {
+                    &u.body.segments[part - 1].body
+                };
+                let mut count = 0;
+                'cells: for z in 0..usize::from(b.vol.nz) {
+                    for y in 0..usize::from(b.vol.ny) {
+                        for x in 0..usize::from(b.vol.nx) {
+                            if !b.vol.get(x, y, z) {
+                                continue;
+                            }
+                            let frame = if part == 0 {
+                                u.root_frame(y)
+                            } else {
+                                u.seg_frames[part - 1]
+                            };
+                            assert!(matches!(
+                                matter.crush(id, u, part, [x, y, z], &frame),
+                                ClaimResult::Applied
+                            ));
+                            removed.push((id, part, [x, y, z]));
+                            count += 1;
+                            if count == 128 {
+                                break 'cells;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mass = matter
+            .debris
+            .fragments
+            .iter()
+            .map(|f| f.mass_g)
+            .sum::<u64>();
+        let quantity = matter.economy.ledger.in_containers();
+        matter.finish_body_batch();
+        assert_eq!(
+            matter
+                .debris
+                .fragments
+                .iter()
+                .map(|f| f.count as usize)
+                .sum::<usize>(),
+            removed.len()
+        );
+        assert_eq!(
+            matter
+                .debris
+                .fragments
+                .iter()
+                .map(|f| f.mass_g)
+                .sum::<u64>(),
+            mass
+        );
+        assert_eq!(matter.economy.ledger.in_containers(), quantity);
+        assert!(matter
+            .debris
+            .fragments
+            .iter()
+            .any(|f| f.chunk.as_ref().is_some_and(|c| c.segment.is_some())));
+        for f in &matter.debris.fragments {
+            if let Some(chunk) = &f.chunk {
+                let part = chunk.segment.map_or(0, |s| usize::from(s) + 1);
+                assert_eq!(
+                    crate::burst::body_fragments::components(
+                        chunk.cells.iter().copied().enumerate().map(|(i, c)| (c, i)),
+                        256
+                    )
+                    .len(),
+                    1
+                );
+                for cell in &chunk.cells {
+                    assert!(removed.contains(&(
+                        usize::from(chunk.template),
+                        part,
+                        cell.map(usize::from)
+                    )));
+                }
+            }
+        }
+        for (id, part, [x, y, z]) in removed {
+            let b = if part == 0 {
+                &mut units[id].body
+            } else {
+                &mut units[id].body.segments[part - 1].body
+            };
+            assert!(b.remove(x, y, z));
+        }
+        let config = modding::explosion::ExplosionConfig::from_ron(include_str!(
+            "../../../data/explosion.ron"
+        ))
+        .unwrap();
+        let layout =
+            modding::range::RangeLayout::from_ron(include_str!("../../../data/range-cover.ron"))
+                .unwrap();
+        let r = crate::blast::BlastRange::with_layout(config, layout).unwrap();
+        let mut bytes = Blob::new();
+        matter.save(&mut bytes);
+        let mut copy = Matter::new(&units);
+        assert!(copy
+            .load(&mut Scan::new(&bytes.v), &r.world, &units)
+            .is_some());
+        let mut roundtrip = Blob::new();
+        copy.save(&mut roundtrip);
+        assert_eq!(bytes.v, roundtrip.v);
+        assert!(copy.economy.ledger.balanced());
+    }
+    #[test]
     fn armour_batches_keep_matter_and_exact_connected_geometry() {
         let config = modding::explosion::ExplosionConfig::from_ron(include_str!(
             "../../../data/energy-cannon.ron"
@@ -657,6 +893,7 @@ mod tests {
         }
         let before = m.debris.fragments.len();
         let mass: u64 = m.debris.fragments.iter().map(|f| f.mass_g).sum();
+        let motion: u64 = m.debris.fragments.iter().map(motion_mj).sum();
         let held = m.economy.ledger.in_containers();
         m.finish_body_batch();
         let fragments = &m.debris.fragments;
@@ -673,10 +910,26 @@ mod tests {
             cells.len()
         );
         assert_eq!(fragments.iter().map(|f| f.mass_g).sum::<u64>(), mass);
+        assert!(fragments.iter().map(motion_mj).sum::<u64>() <= motion);
         assert_eq!(m.economy.ledger.in_containers(), held);
         assert!(m.economy.ledger.balanced());
         let mut restored = BTreeSet::new();
         for f in fragments {
+            if let Some(chunk) = &f.chunk {
+                assert_eq!(
+                    crate::burst::body_fragments::components(
+                        chunk.cells.iter().copied().enumerate().map(|(i, c)| (c, i)),
+                        256
+                    )
+                    .len(),
+                    1
+                );
+                assert!(chunk.segment.is_none());
+                for cell in &chunk.cells {
+                    assert!(restored.insert(cell.map(usize::from)));
+                }
+                continue;
+            }
             assert_eq!(shape_components(f.shape, f.side), [f.shape]);
             let centre = shape_centre(f.shape, f.side);
             let scale = Fx::from_ratio(f.mm as i32, voxel::unit::WORLD_MM as i32);
@@ -702,6 +955,19 @@ mod tests {
                 assert!(restored.insert(local));
             }
         }
-        assert_eq!(restored, cells.into_iter().collect());
+        assert_eq!(restored, cells.iter().copied().collect());
+        assert!(m.debris.fragments.iter().any(|f| f.chunk.is_some()));
+        for [x, y, z] in cells {
+            assert!(r.units[0].body.remove(x, y, z));
+        }
+        let mut bytes = Blob::new();
+        m.save(&mut bytes);
+        let mut copy = Matter::new(&r.units);
+        assert!(copy
+            .load(&mut Scan::new(&bytes.v), &r.world, &r.units)
+            .is_some());
+        let mut restored = Blob::new();
+        copy.save(&mut restored);
+        assert_eq!(bytes.v, restored.v);
     }
 }

@@ -254,6 +254,9 @@ pub struct Tuning {
     /// Material penetration and queue budgets for real unit volumes.
     pub impact: Impact,
     pub blast: Blast,
+    /// Target span of connected metal body fragments in millimetres.
+    /// Zero retains the legacy weapon-sized chips.
+    pub body_fragment_mm: u32,
     /// Урона за воксель высоты падения (ADR-036). Первый воксель
     /// бесплатен — это правило, а не число, и живёт в коде (ADR-139).
     pub fall_damage_per_voxel: u16,
@@ -428,6 +431,9 @@ impl Tuning {
     /// и загрузчик.
     pub fn from_ron(s: &str) -> Result<Tuning, TuningError> {
         let t: Tuning = ron::from_str(s).map_err(|e| TuningError::Ron(e.to_string()))?;
+        if t.body_fragment_mm > u16::MAX as u32 {
+            return Err(TuningError::Ron("invalid body fragment span".into()));
+        }
         if t.engagement_pct[0] == 0
             || t.engagement_pct[0] >= t.engagement_pct[1]
             || t.engagement_pct[1] > 100

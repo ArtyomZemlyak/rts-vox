@@ -419,7 +419,7 @@ const DEBRIS: [Knob; 14] = [
     k(
         "debris.small_piece_pct",
         Group::Debris,
-        "Доля мелких зон раскола, %",
+        "Мелкие зоны раскола грунта, %",
         5.0,
         0.0,
         100.0,

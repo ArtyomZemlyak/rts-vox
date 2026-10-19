@@ -32,76 +32,127 @@ impl crate::World {
             let cost = e.kinds.at(ki as usize).cost;
             let volume = template.volume_mm3().max(1);
             let cell_volume = (template.mm as u64).pow(3);
-            let mut groups: BTreeMap<([u32; 3], [u8; 3], usize, u8), u64> = BTreeMap::new();
-            for p in &change.removed {
-                let [x, y, z] = p.map(|v| v as usize);
-                let p32 = p.map(u32::from);
-                let (origin, side) = fracture_box(
-                    p32,
-                    self.tuning.blast.fragment_box as u8,
-                    &self.tuning.blast,
-                );
-                let s = u32::from(side);
-                let sub =
-                    (p32[0] - origin[0]) + s * (p32[1] - origin[1]) + s * s * (p32[2] - origin[2]);
-                let paint = [
-                    self.units.owner[id],
-                    template.finish_at(x, y, z),
-                    template.part_at(x, y, z) as u8,
-                ];
-                let layer = usize::from(template.turret_y > 0 && p[1] >= template.turret_y);
-                *groups.entry((origin, paint, layer, side)).or_default() |= 1 << sub;
-            }
-            let density = self.tuning.chassis(self.units.chassis[id]).density.max(1) as u64;
-            for ((origin, paint, layer, side), whole) in groups {
-                for shape in shape_components(whole, side) {
-                    let count = shape.count_ones();
-                    let before = (cost as u128 * state.debris_mm3 as u128 / volume as u128) as u64;
-                    state.debris_mm3 += count as u64 * cell_volume;
-                    debug_assert!(state.debris_mm3 <= state.removed_mm3);
-                    let after = (cost as u128 * state.debris_mm3 as u128 / volume as u128) as u64;
-                    let amount = after - before;
-                    let container = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
-                    let moved = e.ledger.transfer(held, container, amount);
-                    assert_eq!(
-                        moved, amount,
-                        "removed body volume must still be in its container"
-                    );
-                    let cap = e.ledger.get(held).cap;
-                    assert_eq!(e.ledger.lower_cap(held, cap.saturating_sub(amount)), 0);
-                    let frame = frames[layer];
-                    let local = arr(shape_centre(shape, side));
-                    let position = frame.world(std::array::from_fn(|a| {
-                        Fx::from_int(origin[a] as i32)
-                            .add(Fx::from_ratio(1, 2))
-                            .add(local[a])
-                    }));
-                    let mut f = Fragment {
-                        id: 0,
-                        position,
-                        velocity: V3::ZERO,
-                        material: AIR,
-                        paint: Some(paint),
-                        mm: template.mm,
-                        basis: [frame.x, frame.y, frame.z],
-                        mass_g: (density * cell_volume / 1_000_000).max(1) * count as u64,
-                        count,
-                        shape,
-                        side,
-                        chunk: None,
-                        held: container,
-                        resting: false,
-                    };
-                    // A hull at the map edge hangs cells over it (ADR-428).
-                    if let Some(columns) = columns {
-                        f.keep_on_map(columns);
-                    }
-                    let energy = (change.motion_mj as u128 * count as u128
-                        / (change.removed.len() + change.dented.len()).max(1) as u128)
-                        as u64;
-                    self.bursts
-                        .emit_body_fragment(f, change.direction, energy, &self.tuning.blast);
+            let pieces = if self.tuning.body_fragment_mm > 0 {
+                let mut roles = BTreeMap::<(u8, usize), Vec<_>>::new();
+                for (index, &cell) in change.removed.iter().enumerate() {
+                    let [x, y, z] = cell.map(usize::from);
+                    let layer = usize::from(template.turret_y > 0 && cell[1] >= template.turret_y);
+                    roles
+                        .entry((template.part_at(x, y, z) as u8, layer))
+                        .or_default()
+                        .push((cell, index));
                 }
+                let span = body_fragments::span_cells(
+                    template.mm,
+                    self.tuning.body_fragment_mm,
+                    self.tuning.blast.fragment_box as u8,
+                );
+                let mut pieces = Vec::new();
+                for ((role, layer), cells) in roles {
+                    for piece in body_fragments::components(cells, span) {
+                        let cells: Vec<_> = piece.into_iter().map(|(cell, _)| cell).collect();
+                        let [x, y, z] = cells[0].map(usize::from);
+                        let paint = [self.units.owner[id], template.finish_at(x, y, z), role];
+                        pieces.push(([0; 3], paint, layer, 2, 1, Some(cells)));
+                    }
+                }
+                pieces
+            } else {
+                let mut groups: BTreeMap<([u32; 3], [u8; 3], usize, u8), u64> = BTreeMap::new();
+                for p in &change.removed {
+                    let [x, y, z] = p.map(|v| v as usize);
+                    let p32 = p.map(u32::from);
+                    let (origin, side) = fracture_box(
+                        p32,
+                        self.tuning.blast.fragment_box as u8,
+                        &self.tuning.blast,
+                    );
+                    let s = u32::from(side);
+                    let sub = (p32[0] - origin[0])
+                        + s * (p32[1] - origin[1])
+                        + s * s * (p32[2] - origin[2]);
+                    let paint = [
+                        self.units.owner[id],
+                        template.finish_at(x, y, z),
+                        template.part_at(x, y, z) as u8,
+                    ];
+                    let layer = usize::from(template.turret_y > 0 && p[1] >= template.turret_y);
+                    *groups.entry((origin, paint, layer, side)).or_default() |= 1 << sub;
+                }
+                groups
+                    .into_iter()
+                    .flat_map(|((origin, paint, layer, side), whole)| {
+                        shape_components(whole, side)
+                            .into_iter()
+                            .map(move |shape| (origin, paint, layer, side, shape, None))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let density = self.tuning.chassis(self.units.chassis[id]).density.max(1) as u64;
+            for (origin, paint, layer, side, shape, metal_cells) in pieces {
+                let count = metal_cells
+                    .as_ref()
+                    .map_or_else(|| shape.count_ones(), |c| c.len() as u32);
+                let before = (cost as u128 * state.debris_mm3 as u128 / volume as u128) as u64;
+                state.debris_mm3 += count as u64 * cell_volume;
+                debug_assert!(state.debris_mm3 <= state.removed_mm3);
+                let after = (cost as u128 * state.debris_mm3 as u128 / volume as u128) as u64;
+                let amount = after - before;
+                let container = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+                let moved = e.ledger.transfer(held, container, amount);
+                assert_eq!(
+                    moved, amount,
+                    "removed body volume must still be in its container"
+                );
+                let cap = e.ledger.get(held).cap;
+                assert_eq!(e.ledger.lower_cap(held, cap.saturating_sub(amount)), 0);
+                let frame = frames[layer];
+                let local = arr(shape_centre(shape, side));
+                let position = frame.world(std::array::from_fn(|a| {
+                    Fx::from_int(origin[a] as i32)
+                        .add(Fx::from_ratio(1, 2))
+                        .add(local[a])
+                }));
+                let mut f = Fragment {
+                    id: 0,
+                    position,
+                    velocity: V3::ZERO,
+                    material: AIR,
+                    paint: Some(paint),
+                    mm: template.mm,
+                    basis: [frame.x, frame.y, frame.z],
+                    mass_g: (density * cell_volume / 1_000_000).max(1) * count as u64,
+                    count,
+                    shape,
+                    side,
+                    chunk: None,
+                    held: container,
+                    resting: false,
+                };
+                if let Some(cells) = metal_cells {
+                    let preserve_finishes = cells.iter().any(|c| {
+                        template.finish_at(usize::from(c[0]), usize::from(c[1]), usize::from(c[2]))
+                            != paint[1]
+                    });
+                    body_fragments::set_geometry(
+                        &mut f,
+                        state.template,
+                        None,
+                        frame,
+                        cells,
+                        template.turret_y,
+                        preserve_finishes,
+                    );
+                }
+                // A hull at the map edge hangs cells over it (ADR-428).
+                if let Some(columns) = columns {
+                    f.keep_on_map(columns);
+                }
+                let energy = (change.motion_mj as u128 * count as u128
+                    / (change.removed.len() + change.dented.len()).max(1) as u128)
+                    as u64;
+                self.bursts
+                    .emit_body_fragment(f, change.direction, energy, &self.tuning.blast);
             }
         }
     }

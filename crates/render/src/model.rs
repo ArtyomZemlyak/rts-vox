@@ -168,25 +168,58 @@ pub fn body_to_mesh(
     centre: [f32; 3],
     outs: &mut [MeshBuf; crate::look::FINISHES],
 ) {
+    body_to_mesh_region(
+        b,
+        tint,
+        scale,
+        layers,
+        bevel,
+        centre,
+        outs,
+        (
+            [0; 3],
+            [b.vol.nx as usize, b.vol.ny as usize, b.vol.nz as usize],
+        ),
+        |x, y, z| b.vol.get(x, y, z),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn body_to_mesh_region(
+    b: &UnitBody,
+    tint: [f32; 3],
+    scale: f32,
+    layers: (usize, usize),
+    bevel: f32,
+    centre: [f32; 3],
+    outs: &mut [MeshBuf; crate::look::FINISHES],
+    region: ([usize; 3], [usize; 3]),
+    occupied: impl Fn(usize, usize, usize) -> bool,
+) {
     let starts = outs.each_ref().map(|buf| buf.pos.len());
     let (nx, ny, nz) = (b.vol.nx as usize, b.vol.ny as usize, b.vol.nz as usize);
     let bevel = bevel.clamp(0.0, 0.5);
     let half = centre;
+    let lo = [region.0[0], layers.0.max(region.0[1]), region.0[2]];
+    let hi = [
+        region.1[0].min(nx),
+        layers.1.min(ny).min(region.1[1]),
+        region.1[2].min(nz),
+    ];
     let solid = |p: [i32; 3]| -> bool {
-        p[0] >= 0
-            && p[1] >= 0
-            && p[2] >= 0
-            && (p[0] as usize) < nx
-            && (p[1] as usize) >= layers.0
-            && (p[1] as usize) < layers.1.min(ny)
-            && (p[2] as usize) < nz
-            && b.vol.get(p[0] as usize, p[1] as usize, p[2] as usize)
+        p[0] >= lo[0] as i32
+            && p[0] < hi[0] as i32
+            && p[1] >= lo[1] as i32
+            && p[1] < hi[1] as i32
+            && p[2] >= lo[2] as i32
+            && p[2] < hi[2] as i32
+            && occupied(p[0] as usize, p[1] as usize, p[2] as usize)
     };
 
-    for z in 0..nz {
-        for y in layers.0..layers.1.min(ny) {
-            for x in 0..nx {
-                if !b.vol.get(x, y, z) {
+    for z in lo[2]..hi[2] {
+        for y in lo[1]..hi[1] {
+            for x in lo[0]..hi[0] {
+                if !occupied(x, y, z) {
                     continue;
                 }
                 // Отделка воксела решает и цвет, и буфер: код тела,
@@ -228,6 +261,26 @@ pub fn body_to_mesh(
 pub fn section_to_mesh(
     template: &UnitBody,
     chunk: &sim_core::burst::chunk::Chunk,
+) -> Vec<(usize, MeshBuf)> {
+    section_to_mesh_tinted(
+        template,
+        chunk,
+        crate::look::side_tint()[chunk.owner as usize % 2],
+    )
+}
+
+pub fn section_to_mesh_tinted(
+    template: &UnitBody,
+    chunk: &sim_core::burst::chunk::Chunk,
+    tint: [f32; 3],
+) -> Vec<(usize, MeshBuf)> {
+    section_to_mesh_impl::<true>(template, chunk, tint)
+}
+
+fn section_to_mesh_impl<const BOUNDED: bool>(
+    template: &UnitBody,
+    chunk: &sim_core::burst::chunk::Chunk,
+    tint: [f32; 3],
 ) -> Vec<(usize, MeshBuf)> {
     let f32v = |v: [fx::Fx; 3]| Vec3::from_array(v.map(|v| v.raw() as f32 / fx::ONE_RAW as f32));
     let mut out = Vec::new();
@@ -275,38 +328,99 @@ pub fn section_to_mesh(
         }
     };
     for (layer, &(basis, offset)) in frame_parts.iter().enumerate() {
-        let mut part = source.clone();
-        if corpse.is_some() {
-            for (i, col) in part.vol.cols.iter_mut().enumerate() {
-                let y = (i / part.vol.words as usize) % part.vol.ny as usize;
-                if usize::from(part.turret_y > 0 && y >= part.turret_y as usize) != layer {
-                    *col = 0;
-                }
-            }
-        } else {
-            part.vol.cols.fill(0);
+        // Only skip empty iteration space. Neighbour occupancy, original
+        // coordinates, surface mapping and vertex emission order stay exact.
+        let region = if BOUNDED && corpse.is_none() {
+            let mut lo = [usize::MAX; 3];
+            let mut hi = [0; 3];
             for c in &chunk.cells {
-                if usize::from(template.turret_y > 0 && c[1] >= template.turret_y) == layer {
-                    part.vol
-                        .set(c[0] as usize, c[1] as usize, c[2] as usize, true);
+                if usize::from(template.turret_y > 0 && c[1] >= template.turret_y) != layer {
+                    continue;
+                }
+                for a in 0..3 {
+                    lo[a] = lo[a].min(usize::from(c[a]));
+                    hi[a] = hi[a].max(usize::from(c[a]) + 1);
                 }
             }
-        }
+            if lo[0] == usize::MAX {
+                continue;
+            }
+            (lo, hi)
+        } else {
+            (
+                [0; 3],
+                [
+                    source.vol.nx as usize,
+                    source.vol.ny as usize,
+                    source.vol.nz as usize,
+                ],
+            )
+        };
         let mut buffers: [MeshBuf; crate::look::FINISHES] =
             std::array::from_fn(|_| MeshBuf::default());
         let centre = chunk.frames[layer]
             .centre
             .map(|v| v.raw() as f32 / fx::ONE_RAW as f32);
-        let scale = part.mm as f32 / voxel::unit::WORLD_MM as f32;
-        body_to_mesh(
-            &part,
-            crate::look::side_tint()[chunk.owner as usize % 2],
-            scale,
-            (0, part.vol.ny as usize),
-            BEVEL,
-            centre,
-            &mut buffers,
-        );
+        let scale = source.mm as f32 / voxel::unit::WORLD_MM as f32;
+        if BOUNDED && corpse.is_none() {
+            // A panel needs only its own occupancy; keep source coordinates
+            // for finish/role/surface mapping without cloning the whole unit.
+            let dims: [u8; 3] =
+                std::array::from_fn(|a| u8::try_from(region.1[a] - region.0[a]).unwrap());
+            let mut mask = voxel::topo::unit::UnitVol::new(dims[0], dims[1], dims[2]);
+            for c in &chunk.cells {
+                if usize::from(template.turret_y > 0 && c[1] >= template.turret_y) == layer {
+                    let p = c.map(usize::from);
+                    mask.set(
+                        p[0] - region.0[0],
+                        p[1] - region.0[1],
+                        p[2] - region.0[2],
+                        true,
+                    );
+                }
+            }
+            let selected = |x, y, z| mask.get(x - region.0[0], y - region.0[1], z - region.0[2]);
+            body_to_mesh_region(
+                source,
+                tint,
+                scale,
+                (0, source.vol.ny as usize),
+                BEVEL,
+                centre,
+                &mut buffers,
+                region,
+                selected,
+            );
+        } else {
+            let mut part = source.clone();
+            if corpse.is_some() {
+                for (i, col) in part.vol.cols.iter_mut().enumerate() {
+                    let y = (i / part.vol.words as usize) % part.vol.ny as usize;
+                    if usize::from(part.turret_y > 0 && y >= part.turret_y as usize) != layer {
+                        *col = 0;
+                    }
+                }
+            } else {
+                part.vol.cols.fill(0);
+                for c in &chunk.cells {
+                    if usize::from(template.turret_y > 0 && c[1] >= template.turret_y) == layer {
+                        part.vol
+                            .set(c[0] as usize, c[1] as usize, c[2] as usize, true);
+                    }
+                }
+            }
+            body_to_mesh_region(
+                &part,
+                tint,
+                scale,
+                (0, part.vol.ny as usize),
+                BEVEL,
+                centre,
+                &mut buffers,
+                region,
+                |x, y, z| part.vol.get(x, y, z),
+            );
+        }
         for (finish, mut buf) in buffers.into_iter().enumerate() {
             if buf.is_empty() {
                 continue;
@@ -343,7 +457,7 @@ pub fn section_to_mesh(
                 std::array::from_fn(|_| MeshBuf::default());
             body_to_mesh(
                 &segment.body,
-                crate::look::side_tint()[chunk.owner as usize % 2],
+                tint,
                 segment.body.mm as f32 / voxel::unit::WORLD_MM as f32,
                 (0, segment.body.vol.ny as usize),
                 BEVEL,
@@ -720,6 +834,71 @@ pub fn damage_marks(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bounded_section_meshes_match_full_scans_for_every_unit_and_attachment() {
+        use sim_core::{
+            blast::RangeUnit,
+            burst::chunk::{Chunk, Shape},
+        };
+        for kind in modding::range::RangeUnitKind::ALL {
+            let unit = RangeUnit::of_kind(kind, [240, 16, 240]);
+            for part in 0..=unit.body.segments.len() {
+                let source = if part == 0 {
+                    &unit.body
+                } else {
+                    &unit.body.segments[part - 1].body
+                };
+                let mut cells = Vec::new();
+                let mut count = [0; 2];
+                for z in 0..source.vol.nz {
+                    for y in 0..source.vol.ny {
+                        let layer = usize::from(source.turret_y > 0 && y >= source.turret_y);
+                        for x in 0..source.vol.nx {
+                            if source.vol.get(x as usize, y as usize, z as usize)
+                                && (u32::from(x) + 3 * u32::from(y) + 7 * u32::from(z)) % 11 != 0
+                                && count[layer] < 96
+                            {
+                                count[layer] += 1;
+                                cells.push([x, y, z]);
+                            }
+                        }
+                    }
+                }
+                if cells.is_empty() {
+                    continue;
+                }
+                let mut shape = Shape::default();
+                for &c in &cells {
+                    shape.add(c, source.turret_y);
+                }
+                let frames = if part == 0 {
+                    [
+                        unit.root_frame(0),
+                        unit.root_frame(usize::from(source.turret_y)),
+                    ]
+                } else {
+                    [unit.seg_frames[part - 1]; 2]
+                };
+                let mut chunk = Chunk::new(0, 1, cells, frames, shape);
+                if part > 0 {
+                    chunk = chunk.in_segment((part - 1) as u8);
+                }
+                let tint = crate::look::side_tint()[1];
+                let sparse = super::section_to_mesh_impl::<true>(&unit.body, &chunk, tint);
+                let full = super::section_to_mesh_impl::<false>(&unit.body, &chunk, tint);
+                assert_eq!(sparse.len(), full.len(), "{kind:?} part={part}");
+                for ((fa, a), (fb, b)) in sparse.iter().zip(&full) {
+                    assert_eq!(fa, fb);
+                    assert_eq!(a.pos, b.pos);
+                    assert_eq!(a.nrm, b.nrm);
+                    assert_eq!(a.col, b.col);
+                    assert_eq!(a.uv, b.uv);
+                    assert_eq!(a.tan, b.tan);
+                    assert_eq!(a.idx, b.idx);
+                }
+            }
+        }
+    }
     #[test]
     fn a_persistent_corpse_mesh_keeps_the_hole_through_its_hull() {
         let mut template = voxel::unit::tank();

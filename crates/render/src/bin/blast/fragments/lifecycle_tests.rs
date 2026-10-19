@@ -143,6 +143,165 @@ fn assert_drawn_bounds(app: &App, entity: Entity, f: &sim_core::burst::Fragment)
     );
 }
 #[test]
+fn metal_panels_keep_the_source_teams_paint_instead_of_the_neutral_owner_tint() {
+    use sim_core::{
+        burst::chunk::{Chunk, Shape},
+        damage::{Frame, V3},
+    };
+    let mut app = app();
+    let template = voxel::unit::tank();
+    let mut cell = None;
+    'cells: for z in 0..template.vol.nz {
+        for y in 0..template.vol.ny {
+            for x in 0..template.vol.nx {
+                if template.vol.get(x as usize, y as usize, z as usize)
+                    && render::look::finish_of(
+                        template.finish_at(x as usize, y as usize, z as usize),
+                        template.part_at(x as usize, y as usize, z as usize),
+                    ) as usize
+                        == render::look::Finish::Plate as usize
+                {
+                    cell = Some([x, y, z]);
+                    break 'cells;
+                }
+            }
+        }
+    }
+    let cell = cell.expect("painted armour fixture");
+    let frame = Frame::new(&template, V3::ZERO, 0, V3::UP);
+    let mut layout = modding::range::RangeLayout::from_ron(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/range-cover.ron"
+    )))
+    .unwrap();
+    layout.battle = true;
+    layout.units.truncate(2);
+    layout.units[0].allied = true;
+    layout.units[1].allied = false;
+    let mut fragments = Vec::new();
+    for id in 0..2 {
+        let mut shape = Shape::default();
+        shape.add(cell, template.turret_y);
+        let chunk = Chunk::new(id, 1, vec![cell], [frame; 2], shape);
+        let mut f = piece(u64::from(id) + 1);
+        f.position = chunk.centre;
+        f.paint = Some([1, 0, 0]);
+        f.chunk = Some(Box::new(chunk));
+        fragments.push(f);
+    }
+    {
+        let mut scene = app.world_mut().resource_mut::<Scene>();
+        scene.sim.layout = Some(layout);
+        scene.sim.units = (0..2)
+            .map(|_| {
+                sim_core::blast::RangeUnit::of_kind(modding::range::RangeUnitKind::Tank, [0, 16, 0])
+            })
+            .collect();
+        scene.sim.matter.debris.fragments = fragments;
+    }
+    app.update();
+    let shown = pieces(&mut app);
+    let colors = |app: &mut App, entity: Entity| {
+        let world = app.world_mut();
+        let mut query = world.query::<(&ChildOf, &Mesh3d)>();
+        let assets = world.resource::<Assets<Mesh>>();
+        let mut out = Vec::new();
+        for (parent, handle) in query.iter(world) {
+            if parent.parent() != entity {
+                continue;
+            }
+            if let Some(bevy::mesh::VertexAttributeValues::Float32x4(colors)) = assets
+                .get(&handle.0)
+                .unwrap()
+                .attribute(Mesh::ATTRIBUTE_COLOR)
+            {
+                out.extend_from_slice(colors);
+            }
+        }
+        out
+    };
+    let blue = colors(&mut app, shown[&1]);
+    let red = colors(&mut app, shown[&2]);
+    assert!(!blue.is_empty());
+    assert_eq!(blue.len(), red.len());
+    assert_ne!(
+        blue, red,
+        "a neutral debris container must not repaint both teams orange"
+    );
+}
+#[test]
+fn queued_section_replacements_remain_visible_and_follow_physics() {
+    use sim_core::{
+        burst::chunk::{Chunk, Shape},
+        damage::{Frame, V3},
+    };
+    let mut app = app();
+    app.world_mut().resource_mut::<Scene>().sim.units = vec![sim_core::blast::RangeUnit::of_kind(
+        modding::range::RangeUnitKind::Tank,
+        [0, 16, 0],
+    )];
+    let template = voxel::unit::tank();
+    let cell = [template.core.0, template.core.1, template.core.2];
+    let frame = Frame::new(&template, V3::ZERO, 0, V3::UP);
+    let fragments = (1..=48)
+        .map(|id| {
+            let mut shape = Shape::default();
+            shape.add(cell, template.turret_y);
+            let chunk = Chunk::new(0, 1, vec![cell], [frame; 2], shape);
+            let mut f = piece(id);
+            f.position = chunk.centre;
+            f.paint = Some([1, 0, 0]);
+            f.chunk = Some(Box::new(chunk));
+            f
+        })
+        .collect();
+    app.world_mut()
+        .resource_mut::<Scene>()
+        .sim
+        .matter
+        .debris
+        .fragments = fragments;
+    app.update();
+    let initial_count = pieces(&mut app).len();
+    assert!(
+        initial_count > 2 && initial_count < 48,
+        "small-panel work must be bounded and admit more than two"
+    );
+    for _ in 0..48 {
+        app.update();
+        if pieces(&mut app).len() == 48 {
+            break;
+        }
+    }
+    let original = pieces(&mut app);
+    assert_eq!(original.len(), 48);
+    {
+        let mut scene = app.world_mut().resource_mut::<Scene>();
+        scene.sim.units[0].status.alive = false;
+        for f in &mut scene.sim.matter.debris.fragments {
+            f.position.y = f.position.y.add(fx::Fx::ONE);
+        }
+    }
+    for _ in 0..48 {
+        app.update();
+        let shown = pieces(&mut app);
+        assert_eq!(
+            shown.len(),
+            48,
+            "queued replacements must not despawn existing geometry"
+        );
+        for f in &app.world().resource::<Scene>().sim.matter.debris.fragments {
+            let tr = app.world().entity(shown[&f.id]).get::<Transform>().unwrap();
+            assert_eq!(
+                tr.translation,
+                pos([f.position.x, f.position.y, f.position.z])
+            );
+        }
+    }
+    let world = app.world_mut();
+    assert!(world.query::<&Piece>().iter(world).all(|p| p.2));
+}
+#[test]
 fn saturated_pile_draw_stays_inside_physics_after_inventory_growth_and_wake() {
     let mut app = app();
     let mut f = piece(7);

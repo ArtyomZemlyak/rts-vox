@@ -80,6 +80,8 @@ pub struct Matter {
     /// Validated on every access, excluded from snapshots and hashes.
     prices: [Option<FracturePrice>; 8],
     batch: Option<fracture::Batch>,
+    /// Immutable shared metal-fragment policy from sim.ron.
+    body_fragment_mm: u32,
     /// Derived phase-local admission guard, rebuilt from the saved heat field.
     /// It is not additional capacity and never survives a simulation tick.
     thermal_reserve: u32,
@@ -233,6 +235,7 @@ impl Matter {
             source_densities,
             density_history: false,
             batch: None,
+            body_fragment_mm: t.body_fragment_mm,
             thermal_reserve: 0,
             hull_reserve: 0,
             ground_waits: false,
@@ -959,7 +962,7 @@ impl Matter {
         let admitted = if reserved_component {
             self.batch.as_mut().unwrap().reserve(
                 id,
-                part,
+                part * 2 + usize::from(body.turret_y > 0 && cell[1] >= usize::from(body.turret_y)),
                 cell,
                 *frame,
                 self.fragment_box,
@@ -1034,6 +1037,7 @@ impl Matter {
                 *frame,
                 self.fragment_box,
                 &self.tuning,
+                body,
             );
         }
         // Component admission already debited (or returned) the exact number
@@ -1506,7 +1510,8 @@ impl Matter {
         )?;
         let n = s.usize();
         // An atomic body batch can use up to 64 temporary cell containers for
-        // each final piece. Retired donor slots remain on the Ledger free list;
+        // each reserved legacy component, before panels join them further.
+        // Retired donor slots remain on the Ledger free list;
         // they are not live fragments, but must round-trip with the snapshot.
         // Also bound by encoded bytes before allocating an untrusted count.
         let ledger_limit = (self.tuning.max_fragments as usize)

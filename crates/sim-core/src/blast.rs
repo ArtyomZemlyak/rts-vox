@@ -2095,10 +2095,10 @@ impl Explosion {
         self.step_inner::<FAIR>(w, budget, units, dents, changed, c, matter.as_deref_mut());
         self.drop_contacts();
         if let Some(m) = matter {
+            let remaining = m.finish_body_batch();
             if let Some(room) = room {
-                *room = m.body_batch_room();
+                *room = remaining;
             }
-            m.finish_body_batch();
         }
     }
     /// Read ahead the matter under the cells the next fair step of
