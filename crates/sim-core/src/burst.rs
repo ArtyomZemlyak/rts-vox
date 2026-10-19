@@ -4393,6 +4393,59 @@ mod tests {
         assert_eq!(run(1), run(4));
     }
     #[test]
+    fn packed_world_box_contacts_match_the_ordered_row_reference() {
+        let w = world();
+        let reference = |p: [Fx; 3], low: [Fx; 3], high: [Fx; 3], bounds: [u32; 3]| {
+            let lo = [0, 1, 2].map(|a| (p[a].add(low[a]).raw() >> 32) as i32);
+            let hi = [0, 1, 2].map(|a| (p[a].add(high[a]).raw() >> 32) as i32);
+            if lo[1] < 0
+                || [0, 2]
+                    .iter()
+                    .any(|&a| lo[a] < 0 || hi[a] >= bounds[a] as i32)
+            {
+                return true;
+            }
+            for z in lo[2]..=hi[2] {
+                for y in lo[1]..=hi[1].min(bounds[1] as i32 - 1) {
+                    for x in (lo[0]..=hi[0]).step_by(64) {
+                        if w.solid_bits(
+                            x as u32,
+                            y as u32,
+                            z as u32,
+                            (hi[0] - x + 1).min(64) as u32,
+                        ) != 0
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        };
+        let mut rng = fx::rng::Rng::new(335, 12);
+        for _ in 0..4000 {
+            let p = [w.nx, w.ny, w.nz]
+                .map(|n| Fx::from_ratio(rng.range(-100, n as i32 * 100 + 100), 100));
+            let lo = [0, 1, 2].map(|_| Fx::from_ratio(rng.range(-300, 0), 100));
+            let hi = [0, 1, 2].map(|_| Fx::from_ratio(rng.range(0, 300), 100));
+            for bounds in [
+                [w.nx, w.ny, w.nz],
+                [w.nx, 0, w.nz],
+                [w.nx + 8, w.ny + 8, w.nz + 8],
+            ] {
+                assert_eq!(
+                    box_contact(&w, p, lo, hi, bounds),
+                    reference(p, lo, hi, bounds)
+                );
+                assert_eq!(
+                    box_contact(&w, p, hi, lo, bounds),
+                    reference(p, hi, lo, bounds)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn compact_settled_links_preserve_full_lists_and_clear_wide_generations() {
         for workers in [1, 2, 4, 8] {
             let pool = rayon::ThreadPoolBuilder::new()
@@ -9861,18 +9914,11 @@ fn box_contact(
     {
         return true;
     }
-    for z in lo[2]..=hi[2] {
-        for y in lo[1]..=hi[1].min(bounds[1] as i32 - 1) {
-            for x in (lo[0]..=hi[0]).step_by(64) {
-                if world.solid_bits(x as u32, y as u32, z as u32, (hi[0] - x + 1).min(64) as u32)
-                    != 0
-                {
-                    return true;
-                }
-            }
-        }
+    let hi = [hi[0], hi[1].min(bounds[1] as i32 - 1), hi[2]];
+    if (0..3).any(|a| lo[a] > hi[a]) {
+        return false;
     }
-    false
+    world.any_solid_box(lo.map(|v| v as u32), hi.map(|v| v as u32))
 }
 fn fragment_contact(
     f: &Fragment,

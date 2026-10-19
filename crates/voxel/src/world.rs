@@ -785,6 +785,53 @@ impl World {
         }
     }
 
+    /// Any occupied voxel in the inclusive box. Outside-world voxels are
+    /// empty, exactly as for `solid`; inverted boxes are empty as well.
+    /// The current bit volume is read directly, including same-tick edits.
+    #[inline]
+    pub fn any_solid_box(&self, lo: [u32; 3], hi: [u32; 3]) -> bool {
+        let size = [self.nx, self.ny, self.nz];
+        if (0..3).any(|a| lo[a] >= size[a] || lo[a] > hi[a]) {
+            return false;
+        }
+        let hi = [0, 1, 2].map(|a| hi[a].min(size[a] - 1));
+        let first = (lo[0] >> 6) as usize;
+        let last = (hi[0] >> 6) as usize;
+        let low_mask = u64::MAX << (lo[0] & 63);
+        let high_mask = u64::MAX >> (63 - (hi[0] & 63));
+        let stride = self.wx as usize;
+        // Most physical boxes fit in one X word. Compute its mask once;
+        // Y/Z traversal follows the backing volume's contiguous row order.
+        if first == last {
+            let mask = low_mask & high_mask;
+            for y in lo[1]..=hi[1] {
+                let mut row = (y as usize * self.nz as usize + lo[2] as usize) * stride + first;
+                for _ in lo[2]..=hi[2] {
+                    if self.bits[row] & mask != 0 {
+                        return true;
+                    }
+                    row += stride;
+                }
+            }
+        } else {
+            for y in lo[1]..=hi[1] {
+                let mut row = (y as usize * self.nz as usize + lo[2] as usize) * stride;
+                for _ in lo[2]..=hi[2] {
+                    if self.bits[row + first] & low_mask != 0
+                        || self.bits[row + first + 1..row + last]
+                            .iter()
+                            .any(|&v| v != 0)
+                        || self.bits[row + last] & high_mask != 0
+                    {
+                        return true;
+                    }
+                    row += stride;
+                }
+            }
+        }
+        false
+    }
+
     /// Материал воксела. Тронутый чанк — из слоя изменений, нетронутый —
     /// из генератора.
     /// Курсор материала: помнит последний чанк и его начало.
@@ -2717,6 +2764,91 @@ mod fill_tests {
             World::from_bits(nx, ny, nz, 16, Box::new(Holey), vec![0; 5]).is_none(),
             "объём не той длины принят"
         );
+    }
+
+    /// Inclusive volume queries agree with independent per-voxel reads.
+    #[test]
+    fn any_solid_box_matches_per_voxel_queries_at_word_and_world_edges() {
+        struct Sparse;
+        impl Generator for Sparse {
+            fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+                if (x.is_multiple_of(31) && y == 2 && z == 3)
+                    || (x == 128 && y == 4 && z == 6)
+                    || (x == 149 && y == 0 && z == 0)
+                {
+                    1
+                } else {
+                    AIR
+                }
+            }
+        }
+        for nx in [1, 63, 64, 65, 129, 150] {
+            let w = World::new(nx, 5, 7, 64, Box::new(Sparse));
+            let reference = |lo: [u32; 3], hi: [u32; 3]| {
+                (lo[1]..=hi[1].min(w.ny - 1)).any(|y| {
+                    (lo[2]..=hi[2].min(w.nz - 1))
+                        .any(|z| (lo[0]..=hi[0].min(w.nx - 1)).any(|x| w.solid(x, y, z)))
+                })
+            };
+            // The sole occupied voxel lies in the final partial word or
+            // on the final Y/Z row; an early head hit cannot hide a bad tail.
+            for (lo, hi) in [
+                ([0, 4, 6], [149, 4, 6]),
+                ([125, 4, 6], [128, 4, 6]),
+                ([129, 0, 0], [149, 0, 0]),
+            ] {
+                assert_eq!(w.any_solid_box(lo, hi), reference(lo, hi));
+            }
+            let mut rng = fx::rng::Rng::new(u64::from(nx), 335);
+            for _ in 0..2000 {
+                let size = [nx, 5, 7];
+                let lo = size.map(|n| rng.below(n + 3));
+                let hi = [0, 1, 2].map(|a| {
+                    if rng.below(5) == 0 {
+                        rng.below(size[a] + 3)
+                    } else {
+                        lo[a] + rng.below(160)
+                    }
+                });
+                assert_eq!(
+                    w.any_solid_box(lo, hi),
+                    reference(lo, hi),
+                    "nx={nx} {lo:?}..{hi:?}"
+                );
+            }
+            for x in [0, 1, 31, 62, 63, 64, 65, 127, 128, 149, nx, u32::MAX] {
+                for n in [0, 1, 2, 63, 64, 65, 129, u32::MAX] {
+                    let lo = [x, 0, 0];
+                    let hi = [x.saturating_add(n), u32::MAX, u32::MAX];
+                    assert_eq!(w.any_solid_box(lo, hi), reference(lo, hi));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn any_solid_box_reads_same_tick_additions_and_removals() {
+        struct Empty;
+        impl Generator for Empty {
+            fn material(&self, _: u32, _: u32, _: u32) -> Mat {
+                AIR
+            }
+        }
+        let mut w = World::new(150, 5, 7, 64, Box::new(Empty));
+        let lo = [62, 1, 2];
+        let hi = [129, 3, 4];
+        assert!(!w.any_solid_box(lo, hi));
+        w.begin_tick();
+        for x in [63, 64, 128] {
+            w.queue_edit(Edit::put(x, 2, 3, 1));
+        }
+        w.flush();
+        assert!(w.any_solid_box(lo, hi));
+        for x in [63, 64, 128] {
+            w.queue_dig(x, 2, 3);
+        }
+        w.flush();
+        assert!(!w.any_solid_box(lo, hi));
     }
 
     /// **Слово занятости совпадает с побитовым опросом** — на стыке

@@ -30874,3 +30874,23 @@ Membership/геометрия/поддержка строятся заново �
 квоты, fixed tick, same-tick collision/navigation и replay прежние.
 Это не persistent index04a. Измерения, разброс ранней пары, повторные
 контроли и qualification — analysis/334-settled-head-only-lists.md.
+
+## ADR-752 — Объёмный запрос текущей битовой занятости
+
+Статус: принято. World предоставляет общий any_solid_box для inclusive
+u32 lo/hi. Область обрезается миром, внешние клетки считаются воздухом,
+инверсии пусты. Маски краёв X слова готовятся один раз; single-word путь
+читает одну маску каждой строки, широкий путь — head/full interior/tail.
+Y/Z обход соответствует backing volume. Запрос не хранит ответов и не
+выделяет heap; occupancy edits текущего тика читаются непосредственно.
+
+burst::box_contact сохраняет прежнее floor-преобразование Fx, боковые и
+нижнюю границы и отсутствие верхнего потолка. После этой проверки общая
+World API читает тот же набор integer voxels, что прежние solid_bits loops.
+Меняется только порядок чистого boolean чтения, без logical visits/quota
+и source ties. Узкая проверка occupied constituent cells остаётся прежней.
+
+Материя, размер/пустоты формы, сила взрывов, evict, SIM frequency,
+same-tick collision/navigation и snapshot/hash сохраняются. Нового
+persistent индекса геометрии/опор04a нет. Проверки, два порядка A/B,
+итоговая qualification и ограничения — analysis/335-packed-world-box-contacts.md.
