@@ -969,3 +969,5 @@
 
 
 | 750 | Ключи слияния resting piles используют фазовый PileGrid. Для положительной i32 степени двойки Euclidean cell вычисляется арифметическим сдвигом raw Fx на FRAC_BITS+log2(cell), точно как прежние floor conversion и div_euclid. Остальные параметры сохраняют исходную формулу, включая прежний cast u32→i32. Ключи, shards, source order, переносы ledger, геометрия и snapshot/hash прежние. Проверки и пределы — analysis/332-pile-grid-integer-division.md. |
+
+| 751 | Временный индекс опор хранит один head на клетку. Каждая X-stripe читает provider requests в обратном source order и добавляет узел перед head, сохраняя полный прежний порядок контактных источников. Tail и исправление предыдущего successor не нужны. Полные usize successors сохраняет прежний wide fallback. Текущие bounds/query mask/поддержка пересчитываются полностью; persistent membership не вводится. Геометрия, квоты, материя, snapshot/hash прежние. Проверки и измерения — analysis/334-settled-head-only-lists.md. |

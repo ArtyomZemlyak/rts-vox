@@ -30853,3 +30853,24 @@ legacy имя, но выполняет floor conversion. Сдвиг точно �
 heap, межтикового кэша или дополнительных игровых лимитов нет.
 Проверки, repeated ordinary пары, отклонённые варианты и ограничения —
 analysis/332-pile-grid-integer-division.md.
+
+## ADR-751 — Контактные списки опор с одним head
+
+Статус: принято. Settled partition сохраняет исходный порядок provider
+requests в каждой X modulo8 stripe. Builder посещает requests в обратном
+порядке и добавляет каждый новый узел перед head его клетки. Поэтому
+готовый список источников имеет прежний возрастающий source order.
+Порядок arena slots меняется, но читатели получают тот же полный список;
+arena не входит в snapshot/hash и не является авторитетным состоянием.
+
+Клетка хранит один usize вместо пары head/tail. Successor записывается
+сразу в новый узел, без изменения старого tail. Нулевое значение завершает
+список, компактный u32 sentinel использует wide map с полным usize target.
+Нет ограничения новых индексов или усечения source/link; проверочный
+малый COMPACT_LIMIT проходит тот же wide encoding/decoding.
+
+Число узлов, состав и обход клеток, запросы и точные bounds прежние.
+Membership/геометрия/поддержка строятся заново на каждом входе. Материя,
+квоты, fixed tick, same-tick collision/navigation и replay прежние.
+Это не persistent index04a. Измерения, разброс ранней пары, повторные
+контроли и qualification — analysis/334-settled-head-only-lists.md.

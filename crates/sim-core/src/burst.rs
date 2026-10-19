@@ -8532,8 +8532,9 @@ struct ColumnRows {
     cache: ColumnRowCache,
 }
 type SettledCellRequest = (u32, [i32; 3], [i32; 3]);
-/// X modulo eight owns each contact list. Each worker appends indices in
-/// fragment order to its own tables; no merge or shared insertion is needed.
+/// X modulo eight owns each contact list. Each worker prepends indices in
+/// reverse fragment order, retaining ascending source order without a tail.
+/// No merge or shared insertion is needed.
 #[derive(Default)]
 struct SettledCells {
     stripes: [SettledCellStripe; 8],
@@ -8542,7 +8543,7 @@ struct SettledCells {
 }
 #[derive(Default)]
 struct SettledCellStripe {
-    cells: FxLookup<[i32; 3], [usize; 2]>,
+    cells: FxLookup<[i32; 3], usize>,
     nodes: Vec<SettledCellNode>,
     wide: BTreeMap<usize, usize>,
 }
@@ -8593,7 +8594,7 @@ impl SettledCells {
         stripe.cells.get(cell).map(|head| SettledCellList {
             nodes: &stripe.nodes,
             wide: &stripe.wide,
-            next: head[0] + 1,
+            next: *head + 1,
         })
     }
     #[cfg(test)]
@@ -8611,7 +8612,7 @@ impl SettledCells {
                             SettledCellList {
                                 nodes: &stripe.nodes,
                                 wide: &stripe.wide,
-                                next: head[0] + 1,
+                                next: *head + 1,
                             }
                             .collect(),
                         )
@@ -8660,29 +8661,27 @@ impl SettledCells {
         }
         let fill = |(stripe, requests): (&mut SettledCellStripe, &Vec<SettledCellRequest>)| {
             let _task = PhysicsTask::new(task, "physics_cells_begin", "physics_cells_end");
-            for &(i, lo, hi) in requests {
+            // Prepend sources in reverse order: each final contact list is
+            // still in canonical source order, without a tail or a second
+            // arena write to patch the preceding source's successor.
+            for &(i, lo, hi) in requests.iter().rev() {
                 for z in lo[2]..=hi[2] {
                     for x in (lo[0]..=hi[0]).step_by(8) {
                         for y in want.column(x, z, lo[1], hi[1]) {
-                            // Each stripe owns its arena. Append in the same
-                            // source order as the former per-cell vectors;
-                            // no hash-order traversal or cross-stripe links.
                             let index = stripe.nodes.len();
-                            let ends = stripe.cells.entry([x, y, z]).or_insert([usize::MAX; 2]);
-                            if ends[1] == usize::MAX {
-                                ends[0] = index;
+                            let head = stripe.cells.entry([x, y, z]).or_insert(usize::MAX);
+                            let next = if *head == usize::MAX {
+                                0
+                            } else if *head + 1 < COMPACT_LIMIT as usize {
+                                (*head + 1) as u32
                             } else {
-                                if index + 1 < COMPACT_LIMIT as usize {
-                                    stripe.nodes[ends[1]].next = (index + 1) as u32;
-                                } else {
-                                    // No new index cap: rare large successors
-                                    // retain their full usize outside the node.
-                                    stripe.nodes[ends[1]].next = u32::MAX;
-                                    stripe.wide.insert(ends[1], index);
-                                }
-                            }
-                            ends[1] = index;
-                            stripe.nodes.push(SettledCellNode { source: i, next: 0 });
+                                // The compact sentinel never truncates a
+                                // full-width successor; tests force this path.
+                                stripe.wide.insert(index, *head);
+                                u32::MAX
+                            };
+                            *head = index;
+                            stripe.nodes.push(SettledCellNode { source: i, next });
                         }
                     }
                 }
