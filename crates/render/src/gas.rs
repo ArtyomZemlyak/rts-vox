@@ -5,6 +5,7 @@ mod bricks;
 mod display;
 pub mod distant;
 mod regions;
+mod shadows;
 pub use regions::Atmosphere;
 use regions::REGIONS;
 
@@ -14,6 +15,9 @@ use bevy::core_pipeline::prepass::{
     DepthPrepass, NormalPrepass, ViewPrepassTextures, NORMAL_PREPASS_FORMAT,
 };
 use bevy::core_pipeline::{Core3d, Core3dSystems, FullscreenShader};
+use bevy::pbr::{
+    GpuLights, LightMeta, ShadowSamplers, ViewLightsUniformOffset, ViewShadowBindings,
+};
 use bevy::post_process::bloom::bloom;
 use bevy::prelude::*;
 use bevy::render::diagnostic::RecordDiagnostics;
@@ -713,10 +717,14 @@ impl Plugin for GasPlugin {
         ));
         let draw = assets.add(Shader::from_wgsl(
             format!(
-                "{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}",
                 common,
                 sampling,
                 source("energy.wgsl", include_str!("energy.wgsl")),
+                shadows::source(&source(
+                    "mesh_shadows.wgsl",
+                    include_str!("mesh_shadows.wgsl")
+                )),
                 source("gas_draw.wgsl", include_str!("gas_draw.wgsl"))
             ),
             "render/src/gas_draw.wgsl",
@@ -733,6 +741,12 @@ impl Plugin for GasPlugin {
             ExtractResourcePlugin::<GasInput>::default(),
             ExtractComponentPlugin::<GasCamera>::default(),
         ));
+        app.add_systems(
+            PostUpdate,
+            shadows::fit
+                .after(bevy::camera::CameraUpdateSystems)
+                .before(bevy::light::SimulationLightSystems::UpdateDirectionalLightCascades),
+        );
         let Some(r) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -998,6 +1012,9 @@ fn init(
                 (5, storage_buffer_read_only::<Vec<u32>>(false)),
                 (6, texture_2d(TextureSampleType::Float { filterable: true })),
                 (7, storage_buffer_read_only::<Vec<u32>>(false)),
+                (9, texture_2d_array(TextureSampleType::Depth)),
+                (10, sampler(SamplerBindingType::Comparison)),
+                (11, uniform_buffer::<GpuLights>(true)),
             ),
         ),
     );
@@ -1640,12 +1657,23 @@ fn draw_gas(
 /// semantics. A post_process_write between opaque and transparent passes races
 /// the atmosphere's in-place pass, causing black sky and intermittent unit haze.
 fn shade_terrain(
-    view: ViewQuery<(&ViewTarget, &ViewPrepassTextures, &DrawId), With<GasCamera>>,
+    view: ViewQuery<
+        (
+            &ViewTarget,
+            &ViewPrepassTextures,
+            &DrawId,
+            &ViewShadowBindings,
+            &ViewLightsUniformOffset,
+        ),
+        With<GasCamera>,
+    >,
     pipeline: Res<Pipeline>,
     cache: Res<PipelineCache>,
+    lights: Res<LightMeta>,
+    samplers: Res<ShadowSamplers>,
     mut ctx: RenderContext,
 ) {
-    let (target, prepass, id) = view.into_inner();
+    let (target, prepass, id, shadows, offset) = view.into_inner();
     let (Some(draw), Some(depth), Some(normals)) = (
         cache.get_render_pipeline(id.terrain),
         prepass.depth_view(),
@@ -1662,6 +1690,9 @@ fn shade_terrain(
             (5, pipeline.terrain.as_entire_binding()),
             (6, normals),
             (7, pipeline.bricks.buffer.as_entire_binding()),
+            (9, &shadows.directional_light_depth_texture_view),
+            (10, &samplers.directional_light_comparison_sampler),
+            (11, lights.view_gpu_lights.binding().unwrap()),
         )),
     );
     let diagnostics = ctx.diagnostic_recorder();
@@ -1678,7 +1709,7 @@ fn shade_terrain(
             multiview_mask: None,
         });
     pass.set_pipeline(draw);
-    pass.set_bind_group(0, &group, &[]);
+    pass.set_bind_group(0, &group, &[offset.offset]);
     pass.draw(0..3, 0..1);
     drop(pass);
     span.end(ctx.command_encoder());

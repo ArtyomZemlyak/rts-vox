@@ -72,7 +72,7 @@ fn raw_material(q:vec3<i32>)->u32 {
     return 0u;
 }
 struct TerrainHit { t:f32, normal:vec3<f32>, material:u32 };
-fn trace_local(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool)->TerrainHit {
+fn trace_local(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool,actors:bool)->TerrainHit {
     // A parallel axis has no next face. Adding epsilon to the direction
     // changed its sign near zero and made horizontal rays crawl backwards.
     let inv=1.0/select(vec3(1e-30),rd,rd!=vec3(0.0));
@@ -104,7 +104,7 @@ fn trace_local(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool)->TerrainHit {
         if q.y<ceiling {packed=packed_material(q);}
         let m=packed.y;
         // 15 is the render-only occupancy of a PBR unit, used just for shadows.
-        if m>0u && (m!=15u || shadow) {
+        if m>0u && (m!=15u || actors) {
             // Persisted work selects an eroded subcell surface. Collision and
             // shadows retain the authoritative solid voxel until it fractures.
             var inset=0.0;
@@ -181,7 +181,16 @@ fn trace_distant(ro:vec3<f32>,rd:vec3<f32>,limit:f32)->TerrainHit {
     return miss;
 }
 fn trace_terrain(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool)->TerrainHit {
-    let close=trace_local(ro,rd,limit,shadow);
+    let close=trace_local(ro,rd,limit,shadow,shadow);
+    let distant=trace_distant(ro,rd,close.t);
+    if distant.material>0u {return distant;}
+    return close;
+}
+// Mesh shadow maps follow the interpolated model. Do not union the unit's
+// tick-quantised voxel silhouette with that same moving mesh a second time.
+// Other ray callers retain actor occupancy for gas and effect visibility.
+fn trace_ground_sun(ro:vec3<f32>,rd:vec3<f32>,limit:f32)->TerrainHit {
+    let close=trace_local(ro,rd,limit,true,false);
     let distant=trace_distant(ro,rd,close.t);
     if distant.material>0u {return distant;}
     return close;

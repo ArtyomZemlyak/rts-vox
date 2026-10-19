@@ -116,8 +116,12 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
     if m==0u || m==15u {discard;}
     let sun=normalize(p.sun.xyz);
     let surface_offset=select(0.12,0.45,m>=9u && m<=11u);
-    let shadow=trace_terrain(pos+normal*surface_offset,sun,240.0,true).material>0u;
-    let diffuse=max(0.0,dot(normal,sun))*select(1.0,0.025,shadow);
+    let facing=max(0.0,dot(normal,sun));
+    var visibility=0.0;
+    if facing>0.0 && trace_ground_sun(pos+normal*surface_offset,sun,240.0).material==0u {
+        visibility=mesh_sun_visibility(pos,normal);
+    }
+    let diffuse=facing*mix(0.025,1.0,visibility);
     let vertical_scale=length(vec3(p.clip_from_world[0].y,p.clip_from_world[1].y,p.clip_from_world[2].y));
     let footprint=2.0/(vertical_scale*f32(textureDimensions(depth).y));
     let c=surface_colour(m,pos,normal,footprint);
