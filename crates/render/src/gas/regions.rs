@@ -13,6 +13,8 @@ const PENDING: usize = 32;
 const DEPOSITS: usize = 16;
 const LIFETIME: u32 = 24 * 60;
 const FADE: u32 = 3 * 60;
+// Old smoke must not hold a new impact behind a three-second natural fade.
+const PRESSURE_FADE: u32 = 6;
 
 #[derive(Clone)]
 pub(super) struct Deposit {
@@ -31,12 +33,15 @@ pub struct Region {
     pub(super) mask: Arc<Vec<u32>>,
     pub(super) mask_revision: u64,
     mask_window: TerrainWindow,
-    retire: Option<u32>,
+    retire: Option<u32>, // Start of the short pressure fade, in 60 Hz steps.
 }
 impl Region {
     pub(super) fn opacity(&self, now: u32) -> f32 {
-        let end = (self.last + LIFETIME).min(self.retire.unwrap_or(u32::MAX));
-        ((end.saturating_sub(now)) as f32 / FADE as f32).min(1.0)
+        let natural = ((self.last + LIFETIME).saturating_sub(now) as f32 / FADE as f32).min(1.0);
+        let pressure = self.retire.map_or(1.0, |start| {
+            (start + PRESSURE_FADE).saturating_sub(now) as f32 / PRESSURE_FADE as f32
+        });
+        natural.min(pressure)
     }
     fn accepts(&self, p: &GasParams) -> bool {
         let margin = (p.source.w * 1.5).max(self.params.origin.w * 2.0);
@@ -62,6 +67,9 @@ pub struct Atmosphere {
     pending: VecDeque<(u32, GasParams)>,
     /// Presentation overload only: never removes an already visible effect.
     pub omitted: u64,
+    /// Admission latency/pressure, separate from GPU transport catch-up.
+    pub peak_pending: usize,
+    pub max_wait_steps: u32,
 }
 impl Atmosphere {
     /// Resize already visible cubes without restarting any field or clock.
@@ -88,6 +96,7 @@ impl Atmosphere {
     pub fn emit_at(&mut self, params: GasParams, clock: u32) {
         if self.pending.len() < PENDING {
             self.pending.push_back((clock, params));
+            self.peak_pending = self.peak_pending.max(self.pending.len());
         } else {
             self.omitted += 1;
         }
@@ -137,28 +146,21 @@ impl Atmosphere {
                 }
             }
         }
-        while let Some(&(at, mut p)) = self.pending.front() {
+        // One bounded pass: a distant blocked source cannot hold up a later
+        // compatible hit. Unserved sources keep their relative FIFO order.
+        for _ in 0..self.pending.len() {
+            let (at, mut p) = self.pending.pop_front().unwrap();
             let nearby = self
                 .regions
                 .iter()
                 .position(|r| r.as_ref().is_some_and(|r| r.accepts(&p)));
             let free = self.regions.iter().position(Option::is_none);
             let Some(i) = nearby.or(free) else {
-                // Under pressure retire one region smoothly, keeping the new
-                // deposits queued. Never teleport a live volume to a new hit.
-                if !self.regions.iter().flatten().any(|r| r.retire.is_some()) {
-                    let r = self
-                        .regions
-                        .iter_mut()
-                        .flatten()
-                        .min_by_key(|r| (r.last, r.id))
-                        .unwrap();
-                    r.retire = Some(clock + FADE);
-                }
-                break;
+                self.pending.push_back((at, p));
+                continue;
             };
-            self.pending.pop_front();
             self.serial += 1;
+            self.max_wait_steps = self.max_wait_steps.max(clock.saturating_sub(at));
             if nearby.is_none() {
                 p.origin.x = (p.source.x - GAS_N as f32 * p.origin.w * 0.5).floor();
                 p.origin.z = (p.source.z - GAS_N as f32 * p.origin.w * 0.5).floor();
@@ -192,6 +194,27 @@ impl Atmosphere {
                 step: at.saturating_sub(r.born),
                 params: p,
             });
+        }
+        // Service compatible hits first, then prefer the least recently used
+        // fields. Continuous refire cannot starve a distant impact. Recycle
+        // enough old fields concurrently, within the same pool.
+        let retiring = self
+            .regions
+            .iter()
+            .flatten()
+            .filter(|r| r.retire.is_some())
+            .count();
+        for _ in 0..self.pending.len().saturating_sub(retiring).min(REGIONS) {
+            let Some(r) = self
+                .regions
+                .iter_mut()
+                .flatten()
+                .filter(|r| r.retire.is_none() && r.born < clock)
+                .min_by_key(|r| (r.last, r.id))
+            else {
+                break;
+            };
+            r.retire = Some(clock);
         }
     }
 }
@@ -596,6 +619,73 @@ mod tests {
         assert_eq!(r.params.source.x, 180.0);
     }
     #[test]
+    fn queued_distant_hit_does_not_block_a_compatible_live_field() {
+        let mut a = Atmosphere::default();
+        for i in 0..REGIONS {
+            a.emit(shot(i as f32 * 300.0, false));
+        }
+        advance(&mut a, 0);
+        a.emit_at(shot(4000.0, false), 60);
+        a.emit_at(shot(10.0, false), 60);
+        advance(&mut a, 60);
+        let nearby = a.regions[0].as_ref().unwrap();
+        assert_eq!(
+            nearby.deposits.len(),
+            2,
+            "a distant hit blocked this impact"
+        );
+        assert_eq!(nearby.deposits[1].params.source.x, 10.0);
+        assert!(nearby.retire.is_none());
+        assert_eq!(nearby.deposits[1].step, 60);
+        assert_eq!(a.pending.len(), 1);
+    }
+    #[test]
+    fn a_distant_salvo_gets_fields_within_one_hundred_milliseconds() {
+        let mut a = Atmosphere::default();
+        for i in 0..REGIONS {
+            a.emit(shot(i as f32 * 300.0, false));
+        }
+        advance(&mut a, 0);
+        for i in 0..REGIONS {
+            a.emit_at(shot(4000.0 + i as f32 * 300.0, false), 60);
+        }
+        advance(&mut a, 60);
+        assert_eq!(a.regions.iter().flatten().count(), REGIONS);
+        advance(&mut a, 63);
+        assert!(a.regions.iter().flatten().all(|r| r.opacity(63) == 0.5));
+        advance(&mut a, 66);
+        assert!(a.pending.is_empty(), "salvo still waits for old smoke");
+        assert!(a
+            .regions
+            .iter()
+            .flatten()
+            .all(|r| r.params.source.x >= 4000.0));
+        assert_eq!(a.omitted, 0);
+        assert_eq!(a.max_wait_steps, PRESSURE_FADE);
+        assert_eq!(a.peak_pending, REGIONS);
+    }
+    #[test]
+    fn continuously_refreshed_fields_cannot_starve_a_distant_impact() {
+        let mut a = Atmosphere::default();
+        for i in 0..REGIONS {
+            a.emit_at(shot(i as f32 * 300.0, false), 0);
+        }
+        advance(&mut a, 0);
+        for i in 0..REGIONS {
+            a.emit_at(shot(i as f32 * 300.0, false), 60);
+        }
+        a.emit_at(shot(4000.0, false), 60);
+        advance(&mut a, 60);
+        assert!(a.regions.iter().flatten().any(|r| r.retire.is_some()));
+        advance(&mut a, 66);
+        assert!(a.pending.is_empty());
+        assert!(a
+            .regions
+            .iter()
+            .flatten()
+            .any(|r| r.params.source.x == 4000.0));
+    }
+    #[test]
     fn overload_fades_before_recycling_and_upload_ack_does_not_kill_a_plume() {
         let mut a = Atmosphere::default();
         for i in 0..REGIONS {
@@ -610,12 +700,12 @@ mod tests {
         assert!(r.deposits.is_empty());
         assert_eq!(r.opacity(60), 1.0);
         assert_eq!(a.pending.len(), 1);
-        advance(&mut a, 60 + FADE / 2);
+        advance(&mut a, 60 + PRESSURE_FADE / 2);
         assert_eq!(a.regions[0].as_ref().unwrap().opacity(a.clock), 0.5);
-        advance(&mut a, 60 + FADE);
+        advance(&mut a, 60 + PRESSURE_FADE);
         assert!(a.pending.is_empty());
         assert_eq!(a.regions[0].as_ref().unwrap().params.source.x, 4000.0);
-        advance(&mut a, 60 + FADE + LIFETIME);
+        advance(&mut a, 60 + PRESSURE_FADE + LIFETIME);
         assert!(a.regions.iter().all(Option::is_none));
     }
     #[test]
@@ -649,6 +739,35 @@ mod tests {
 #[cfg(test)]
 mod surface_tests {
     use super::*;
+    #[test]
+    fn side_impact_escapes_a_tall_wall_where_the_old_upward_source_is_buried() {
+        let window = TerrainWindow {
+            origin: [0; 3],
+            dims: [64; 3],
+        };
+        let mut words = vec![0; window.words()];
+        for y in 0..64 {
+            for z in 0..64 {
+                let i = window.index([32, y, z]).unwrap();
+                words[i / 8] |= 3 << ((i % 8) * 4);
+            }
+        }
+        let hit = Vec3::new(32.0, 20.0, 32.0);
+        let old = surface_source(&words, window, hit, Vec3::Y, 5);
+        assert_eq!(old, hit, "fixture must reproduce a buried source");
+        let source = surface_source(&words, window, hit, Vec3::NEG_X, 5);
+        assert!(source.x < hit.x);
+        assert_eq!(source.y, hit.y);
+        assert_eq!(
+            solid(
+                &words,
+                window,
+                source.floor().as_ivec3() - IVec3::splat(4),
+                9
+            ),
+            0
+        );
+    }
     #[test]
     fn resizing_visible_and_queued_clouds_keeps_their_field_and_lifetime() {
         let window = TerrainWindow {

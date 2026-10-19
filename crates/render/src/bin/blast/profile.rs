@@ -743,6 +743,12 @@ pub fn end(
         p.rows.iter().map(|r| r.ms[10] as usize).max().unwrap_or(0)
     );
     println!(
+        "PROFILE gas_admission peak_pending={} max_wait_ms={:.3} omitted={}",
+        gas.atmosphere.peak_pending,
+        gas.atmosphere.max_wait_steps as f64 * 1000.0 / 60.0,
+        gas.atmosphere.omitted,
+    );
+    println!(
         "PROFILE render_extract_peak_ms={:.3}",
         gas.timings.extract_peak_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0
     );

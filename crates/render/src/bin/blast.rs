@@ -1879,7 +1879,12 @@ fn advance(
             params.energy = Vec3::from(impact.at.map(|v| v as f32)).extend(0.0);
             params.beam = Vec4::ZERO;
             params.source = gas
-                .surface_source(Vec3::from(impact.at.map(|v| v as f32)), Vec3::Y)
+                .surface_source(
+                    Vec3::from(impact.at.map(|v| v as f32)),
+                    Vec3::from(std::array::from_fn::<_, 3, _>(|a| {
+                        (impact.from[a] - impact.at[a]) as f32
+                    })),
+                )
                 .extend(c.gas_source_radius as f32);
             gas.atmosphere.emit_at(params, scene.sim.tick * 2);
         }

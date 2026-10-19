@@ -5,6 +5,51 @@ use super::*;
 use modding::explosion::Delivery;
 use modding::range::RangeUnitDef;
 
+#[test]
+fn projectile_impact_events_keep_the_incident_side_of_a_tall_wall() {
+    for weapon in [
+        Weapon::Blast,
+        Weapon::Canister,
+        Weapon::Siege,
+        Weapon::Energy,
+        Weapon::Annihilation,
+        Weapon::Kinetic,
+    ] {
+        let mut r = arena_of([RangeUnitKind::Tank; 2]);
+        for y in 50..110 {
+            r.world.queue_edit(voxel::Edit::put(300, y, 336, 3));
+        }
+        while r.world.queued() > 0 {
+            r.world.flush();
+        }
+        let mut b = Battle::new(&r.units, 180);
+        b.rounds.push(Round {
+            owner: 0,
+            weapon,
+            pos: [Fx::from_int(299), Fx::from_int(80), Fx::from_int(336)],
+            previous: [Fx::from_int(299), Fx::from_int(80), Fx::from_int(336)],
+            velocity: [Fx::from_int(300), Fx::ZERO, Fx::ZERO],
+            distance: Fx::from_int(100),
+        });
+        r.battle_flight(&mut b);
+        assert_eq!(b.impacts.len(), 1, "{weapon:?} lost its contact");
+        let impact = b.impacts[0];
+        assert_eq!(impact.at[0], 300);
+        assert!(
+            impact.from[0] < impact.at[0],
+            "{weapon:?} lost the incident side"
+        );
+        assert_eq!(material(&r.world, impact.from), 0);
+        // Events are transient presentation data, not a new saved SIM state.
+        r.battle = b;
+        let hash = r.state_hash();
+        let bytes = r.snapshot();
+        r.battle.impacts[0].from = [0; 3];
+        assert_eq!(r.state_hash(), hash);
+        assert_eq!(r.snapshot(), bytes);
+    }
+}
+
 fn canister_salvo() -> BlastRange {
     let mut r = arena_of([RangeUnitKind::ArtilleryT2, RangeUnitKind::Tank]);
     r.start_battle().unwrap();

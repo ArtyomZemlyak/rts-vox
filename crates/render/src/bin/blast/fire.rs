@@ -1409,10 +1409,12 @@ mod tests {
         sim.battle.impacts = vec![
             sim_core::blast::battle::Impact {
                 at: [160, 20, 300],
+                from: [160, 21, 300],
                 weapon: BattleWeapon::Kinetic,
             },
             sim_core::blast::battle::Impact {
                 at: [240, 20, 300],
+                from: [240, 21, 300],
                 weapon: BattleWeapon::Kinetic,
             },
         ];
@@ -1657,10 +1659,12 @@ mod tests {
         sim.battle.impacts = vec![
             Impact {
                 at: [200, 20, 300],
+                from: [200, 21, 300],
                 weapon: BattleWeapon::Energy,
             },
             Impact {
                 at: [400, 20, 300],
+                from: [400, 21, 300],
                 weapon: BattleWeapon::Annihilation,
             },
         ];

@@ -209,6 +209,9 @@ mod energy;
 #[derive(Clone, Copy)]
 pub struct Impact {
     pub at: [i32; 3],
+    /// Last free sweep sample, for presentation on the incident side.
+    /// Transient event only: not part of snapshots or authoritative hashes.
+    pub from: [i32; 3],
     pub weapon: Weapon,
 }
 pub struct Battle {
@@ -2926,6 +2929,7 @@ impl BlastRange {
                     // its line, as the single gun's (ADR-454, ADR-456).
                     b.impacts.push(Impact {
                         at,
+                        from: prev,
                         weapon: r.weapon,
                     });
                     let mut velocity = r.velocity;
@@ -2968,6 +2972,7 @@ impl BlastRange {
                     );
                     b.impacts.push(Impact {
                         at,
+                        from: prev,
                         weapon: r.weapon,
                     });
                 } else {
@@ -2980,6 +2985,7 @@ impl BlastRange {
                     );
                     b.impacts.push(Impact {
                         at,
+                        from: prev,
                         weapon: r.weapon,
                     });
                 }
