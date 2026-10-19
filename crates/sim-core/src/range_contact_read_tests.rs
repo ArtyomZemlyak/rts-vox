@@ -1,6 +1,118 @@
 //! Read-ahead is disposable: it must preserve ordered contacts and live matter.
 use super::*;
 
+// Compare disposable read caches by resolved contacts, not by whether an
+// unaffordable cell needed a material payload during read-ahead.
+fn resolved_cache(
+    e: &Explosion,
+    w: &World,
+) -> (Vec<([i32; 3], contact_mask::Mask, u32)>, Vec<u16>) {
+    let mut cells = Vec::new();
+    let mut mats = Vec::new();
+    let offsets = subcell_offsets(e.cell);
+    for (cell, mask, start) in &e.solid {
+        let base = mats.len() as u32;
+        if *start == UNPRICED {
+            for i in mask.indices_from(0) {
+                let q = std::array::from_fn(|a| e.origin[a] + cell[a] * e.cell + offsets[i][a]);
+                mats.push(material(w, q));
+            }
+        } else {
+            let start = *start as usize;
+            mats.extend_from_slice(&e.solid_mats[start..start + mask.count_ones() as usize]);
+        }
+        cells.push((*cell, mask.clone(), base));
+    }
+    (cells, mats)
+}
+
+#[test]
+fn estimated_exhaustion_keeps_parallel_material_payload_for_affordable_live_share() {
+    let (w, mut e) = fixture(9, 128);
+    let mut c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    c.material_energy_j = 1;
+    let m = matter::Matter::new(&[]);
+    let energy = unpaid_bounds(&m, &c).unwrap().0 * 2;
+    e.read_contacts_with(&w, 65536, &[], Some((&m, &c, energy)));
+    assert!(
+        e.solid.len() > 1,
+        "estimate did not reach its exhausted suffix"
+    );
+    assert!(e.solid.iter().all(|(_, _, start)| *start != UNPRICED));
+    assert!(!e.solid_mats.is_empty());
+}
+
+#[test]
+fn occupancy_only_contacts_fall_back_for_live_energy_and_weak_pressure() {
+    let (w, mut e) = fixture(9, 128);
+    let mut c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    c.material_energy_j = 1;
+    let mut m = matter::Matter::new(&[]);
+    e.read_contacts_with(&w, 65536, &[], Some((&m, &c, 0)));
+    let saved_before = saved(&e);
+    assert!(e.solid.iter().any(|(_, _, start)| *start == UNPRICED));
+    let cells: Vec<_> = e.solid.iter().map(|(cell, _, _)| *cell).collect();
+    let offsets = subcell_offsets(9);
+    for i in [0, cells.len() - 1, 1] {
+        let cell = cells[i];
+        let (mask, start) = e.solid_cell(&w, cell, &offsets, true);
+        assert_eq!(start, UNPRICED as usize);
+        assert!(e.ground_spent(Some(&m), &c, 100_000, &mask, start));
+        let mut expected = Vec::new();
+        let want = read_cell_into(&w, e.origin, 9, cell, &offsets, &mut expected);
+        let (mask, start) = e.solid_cell(&w, cell, &offsets, false);
+        assert_eq!(mask, want);
+        assert_eq!(&e.solid_mats[start..start + expected.len()], expected);
+        m.remaining_mj = 1_000_000_000_000;
+        assert!(!e.ground_spent(Some(&m), &c, 100_000, &mask, start));
+        m.remaining_mj = 0;
+        assert!(!e.ground_spent(Some(&m), &c, 1, &mask, start));
+    }
+    assert_eq!(saved(&e), saved_before);
+}
+
+#[test]
+fn bulk_unpaid_contacts_match_scalar_frame_and_resume_counters() {
+    struct Air;
+    impl Generator for Air {
+        fn material(&self, _: u32, _: u32, _: u32) -> u16 {
+            0
+        }
+    }
+    let w = World::new(32, 24, 40, 100, Box::new(Air));
+    let mut actual = matter::Matter::new(&[]);
+    let mut reference = matter::Matter::new(&[]);
+    for edge in [1, 2, 4, 9, 16] {
+        for stride in [1, 5] {
+            let mut mask = contact_mask::Mask::for_voxels((edge as usize).pow(3));
+            for i in (0..(edge as usize).pow(3)).step_by(stride) {
+                mask.insert(i);
+            }
+            let offsets = subcell_offsets(edge);
+            for p in [
+                [-3, -1, -2],
+                [0, 0, 0],
+                [5, 3, 7],
+                [30, 22, 38],
+                [31, 23, 39],
+            ] {
+                for from in [0, 1, 63, 128, (edge as usize).pow(3)] {
+                    actual.admission.ground.fill(0);
+                    reference.admission.ground.fill(0);
+                    for i in mask.indices_from(from) {
+                        reference.count_unpaid(&w, std::array::from_fn(|a| p[a] + offsets[i][a]));
+                    }
+                    actual.count_unpaid_mask(&w, p, edge, &mask, from);
+                    assert_eq!(
+                        actual.admission.ground, reference.admission.ground,
+                        "edge={edge} stride={stride} p={p:?} from={from}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn heavy_pressure_cells_destroy_ground_beyond_the_old_radius() {
     struct Flat;
@@ -185,8 +297,7 @@ fn coarse_read_batches_preserve_energy_limited_prefixes() {
                     for budget in [0, 1, 65, 129, 65536] {
                         let spent = Some((&matter, &c, energy));
                         e.read_contacts_inner::<0>(&w, budget, &[], spent, &|_| {});
-                        let solid = e.solid.clone();
-                        let mats = e.solid_mats.clone();
+                        let (solid, mats) = resolved_cache(&e, &w);
                         let state = saved(&e);
                         for policy in [1, 2] {
                             if policy == 1 {
@@ -194,8 +305,8 @@ fn coarse_read_batches_preserve_energy_limited_prefixes() {
                             } else {
                                 e.read_contacts_inner::<2>(&w, budget, &[], spent, &|_| {});
                             }
-                            assert_eq!(e.solid, solid, "edge={edge} enabled={enabled} energy={energy} budget={budget} policy={policy}");
-                            assert_eq!(e.solid_mats, mats);
+                            assert_eq!(resolved_cache(&e, &w), (solid.clone(), mats.clone()),
+                                "edge={edge} enabled={enabled} energy={energy} budget={budget} policy={policy}");
                             assert_eq!(saved(&e), state);
                         }
                     }

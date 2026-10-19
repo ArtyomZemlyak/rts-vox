@@ -573,9 +573,45 @@ impl Matter {
     }
     /// Count a ground claim the wave has no energy for, as `ground`
     /// would refuse it: on the frame, or unaffordable. Diagnostic only.
+    #[cfg(test)]
     pub(crate) fn count_unpaid(&mut self, w: &World, p: [i32; 3]) {
         let gate = if claimable(w, p) { 1 } else { 5 };
         self.admission.ground[gate] += 1;
+    }
+    /// Same refused claims as the scalar path, without visiting every voxel.
+    /// Only exact occupancy is needed when pressure is sufficient and no
+    /// registered material is affordable. The world's frame remains separate.
+    pub(super) fn count_unpaid_mask(
+        &mut self,
+        w: &World,
+        p: [i32; 3],
+        edge: i32,
+        mask: &super::contact_mask::Mask,
+        from: usize,
+    ) {
+        let total = mask.count_ones() as usize - mask.rank(from);
+        let lo = [0, 1, 2].map(|a| (1 - p[a]).clamp(0, edge));
+        // The top of the world is not part of its immutable frame.
+        let end = [w.nx as i32 - 1, w.ny as i32, w.nz as i32 - 1];
+        let hi = [0, 1, 2].map(|a| (end[a] - p[a]).clamp(0, edge));
+        let inner = if lo == [0; 3] && hi == [edge; 3] {
+            total
+        } else {
+            let mut count = 0;
+            if lo[0] < hi[0] {
+                for z in lo[2]..hi[2] {
+                    for y in lo[1]..hi[1] {
+                        let row = (edge * (y + edge * z)) as usize;
+                        count += mask
+                            .count_range((row + lo[0] as usize).max(from), row + hi[0] as usize)
+                            as usize;
+                    }
+                }
+            }
+            count
+        };
+        self.admission.ground[1] += inner as u64;
+        self.admission.ground[5] += (total - inner) as u64;
     }
     /// What claiming one voxel of this ground costs, millijoules.
     pub(crate) fn ground_price(&self, mat: u16) -> u64 {

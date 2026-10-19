@@ -2216,17 +2216,7 @@ impl Explosion {
         // conservative energy estimate, sufficiently strong contacts cost only
         // their visit. Larger batches then contain no discarded material work.
         let spent_bounds = if POLICY == 1 && coarse {
-            spent
-                .filter(|(_, c, _)| c.material_energy_j > 0)
-                .map(|(m, c, _)| {
-                    let mut price = u64::MAX;
-                    let mut work = 0;
-                    for mat in m.economy.mats.definitions().filter(|mat| mat.id != 0) {
-                        price = price.min(m.ground_price(mat.id));
-                        work = work.max(material_work(mat.id, c));
-                    }
-                    (price, work)
-                })
+            spent.and_then(|(m, c, _)| unpaid_bounds(m, c))
         } else {
             None
         };
@@ -2286,6 +2276,14 @@ impl Explosion {
                     .min(left)
                     .min((left / estimated).clamp(chunk, batch_limit))
             };
+            // An estimated budget can run out early on deferred claims.
+            // Only an already-unaffordable live share can omit materials;
+            // otherwise retain parallel material reads instead of falling
+            // back to thousands of serial reads during application.
+            let unpriced = spent_run > 0
+                && spent_bounds.is_some_and(|(price, _)| {
+                    spent.is_some_and(|(_, _, energy)| self.ground_share(energy) < price)
+                });
             let task_chunk = if spent_run > 0 { READ_CHUNK } else { chunk };
             let hits = &order[next..next + batch];
             next += batch;
@@ -2295,9 +2293,11 @@ impl Explosion {
                     let mut masks = Vec::with_capacity(chunk.len());
                     let mut mats = Vec::new();
                     for hit in chunk {
-                        masks.push(read_cell_into(
-                            w, origin, edge, hit.cell, &offsets, &mut mats,
-                        ));
+                        masks.push(if unpriced {
+                            read_occupancy(w, origin, edge, hit.cell)
+                        } else {
+                            read_cell_into(w, origin, edge, hit.cell, &offsets, &mut mats)
+                        });
                     }
                     (masks, mats)
                 })
@@ -2322,6 +2322,12 @@ impl Explosion {
                     let hit = hits[k];
                     k += 1;
                     let count = mask.count_ones() as usize;
+                    if unpriced {
+                        // Store occupancy only, and recheck the live proof at use.
+                        self.solid.push((hit.cell, mask, UNPRICED));
+                        left -= 1;
+                        continue;
+                    }
                     self.solid.push((hit.cell, mask, start as u32));
                     let cell_mats = &self.solid_mats[start..start + count];
                     start += count;
@@ -2469,6 +2475,9 @@ impl Explosion {
         mask: &contact_mask::Mask,
         start: usize,
     ) -> bool {
+        if start == UNPRICED as usize {
+            return true;
+        }
         let Some(m) = matter else {
             return false;
         };
@@ -2489,13 +2498,18 @@ impl Explosion {
         w: &World,
         cell: [i32; 3],
         offsets: &[[i32; 3]],
+        unpaid: bool,
     ) -> (contact_mask::Mask, usize) {
         let end = (self.solid_next + 4).min(self.solid.len());
         for k in self.solid_next..end {
             let (c, mask, start) = self.solid[k].clone();
             if c == cell {
                 self.solid_next = k + 1;
-                return (mask, start as usize);
+                return if start == UNPRICED && !unpaid {
+                    self.read_cell(w, cell, offsets)
+                } else {
+                    (mask, start as usize)
+                };
             }
         }
         // Canonical visits normally consume the read-ahead in order. Build
@@ -2513,7 +2527,11 @@ impl Explosion {
             let k = self.solid_index[i].1 as usize;
             let (_, mask, start) = self.solid[k].clone();
             self.solid_next = k + 1;
-            return (mask, start as usize);
+            return if start == UNPRICED && !unpaid {
+                self.read_cell(w, cell, offsets)
+            } else {
+                (mask, start as usize)
+            };
         }
         self.read_cell(w, cell, offsets)
     }
@@ -2713,6 +2731,7 @@ impl Explosion {
         let mut here: Vec<usize> = Vec::new();
         let offsets = subcell_offsets(self.cell);
         let mut contacts = Vec::new();
+        let unpaid_bounds = matter.as_deref().and_then(|m| unpaid_bounds(m, c));
         'contact: while visits > 0 && work > 0 {
             let Some(hit) = self.pending.front().copied() else {
                 break;
@@ -2910,17 +2929,27 @@ impl Explosion {
                     // left of it is ground alone, subcell by subcell in the
                     // same order, without walking the bodies again; and an
                     // empty cell has none (ADR-681).
-                    let (mask, start) = self.solid_cell(w, hit.cell, &offsets);
+                    let (mask, start) = self.solid_cell(
+                        w,
+                        hit.cell,
+                        &offsets,
+                        unpaid_bounds.is_some_and(|(price, work)| {
+                            hit.pressure >= work
+                                && matter
+                                    .as_deref()
+                                    .is_some_and(|m| self.ground_share(m.remaining_mj) < price)
+                        }),
+                    );
                     let spent = self.ground_spent(matter.as_deref(), c, hit.pressure, &mask, start);
-                    for s in mask.indices_from(subcell) {
-                        if spent {
-                            if let Some(m) = matter.as_deref_mut() {
-                                let o = offsets[s];
-                                m.count_unpaid(w, [p[0] + o[0], p[1] + o[1], p[2] + o[2]]);
-                            }
-                            continue;
+                    if spent {
+                        if let Some(m) = matter.as_deref_mut() {
+                            m.count_unpaid_mask(w, p, self.cell, &mask, subcell);
                         }
-                        let m = self.solid_mats[start + mask.rank(s)];
+                        self.finish_contact();
+                        continue 'contact;
+                    }
+                    for (rank, s) in mask.ranked_from(subcell) {
+                        let m = self.solid_mats[start + rank];
                         self.contact_cursor = s * actors + units.len();
                         let o = offsets[s];
                         let q = [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
@@ -3007,6 +3036,7 @@ impl Explosion {
         }
         let actors = count + 1;
         let offsets = subcell_offsets(self.cell);
+        let unpaid_bounds = matter.as_deref().and_then(|m| unpaid_bounds(m, c));
         'contact: while visits > 0 && work > 0 {
             let Some(hit) = self.pending.front().copied() else {
                 break;
@@ -3020,17 +3050,27 @@ impl Explosion {
             let from = self.contact_cursor / actors;
             // Only ground is left of this contact: its cells with matter,
             // read ahead, or read now.
-            let (mask, start) = self.solid_cell(w, hit.cell, &offsets);
+            let (mask, start) = self.solid_cell(
+                w,
+                hit.cell,
+                &offsets,
+                unpaid_bounds.is_some_and(|(price, work)| {
+                    hit.pressure >= work
+                        && matter
+                            .as_deref()
+                            .is_some_and(|m| self.ground_share(m.remaining_mj) < price)
+                }),
+            );
             let spent = self.ground_spent(matter.as_deref(), c, hit.pressure, &mask, start);
-            for subcell in mask.indices_from(from) {
-                if spent {
-                    if let Some(m) = matter.as_deref_mut() {
-                        let o = offsets[subcell];
-                        m.count_unpaid(w, [p[0] + o[0], p[1] + o[1], p[2] + o[2]]);
-                    }
-                    continue;
+            if spent {
+                if let Some(m) = matter.as_deref_mut() {
+                    m.count_unpaid_mask(w, p, self.cell, &mask, from);
                 }
-                let m = self.solid_mats[start + mask.rank(subcell)];
+                self.finish_contact();
+                continue 'contact;
+            }
+            for (rank, subcell) in mask.ranked_from(from) {
+                let m = self.solid_mats[start + rank];
                 // No body can remain in this subcell. Preserve the canonical
                 // ground cursor before attempting a possibly deferred claim.
                 self.contact_cursor = subcell * actors + count;
@@ -3382,6 +3422,43 @@ fn subcell_offsets(edge: i32) -> Vec<[i32; 3]> {
 const READ_BATCH: usize = 2048;
 const READ_CHUNK: usize = 64;
 
+// Transient cache tag: no material payload was read for a provably unpaid cell.
+const UNPRICED: u32 = u32::MAX;
+
+fn unpaid_bounds(m: &matter::Matter, c: &ExplosionConfig) -> Option<(u64, u32)> {
+    if c.material_energy_j == 0 {
+        return None;
+    }
+    let mut price = u64::MAX;
+    let mut work = 0;
+    for mat in m.economy.mats.definitions().filter(|mat| mat.id != 0) {
+        price = price.min(m.ground_price(mat.id));
+        work = work.max(material_work(mat.id, c));
+    }
+    (price != u64::MAX).then_some((price, work))
+}
+
+/// Occupancy only: no procedural material generation for unaffordable work.
+fn read_occupancy(w: &World, origin: [i32; 3], edge: i32, cell: [i32; 3]) -> contact_mask::Mask {
+    let p: [i32; 3] = std::array::from_fn(|a| origin[a] + cell[a] * edge);
+    let mut mask = contact_mask::Mask::for_voxels((edge as usize).pow(3));
+    let x0 = p[0].max(0);
+    let x1 = (p[0] + edge).min(w.nx as i32);
+    if x0 < x1 {
+        for z in p[2].max(0)..(p[2] + edge).min(w.nz as i32) {
+            for y in p[1].max(0)..(p[1] + edge).min(w.ny as i32) {
+                let mut bits = w.solid_bits(x0 as u32, y as u32, z as u32, (x1 - x0) as u32);
+                while bits != 0 {
+                    let x = x0 + bits.trailing_zeros() as i32;
+                    bits &= bits - 1;
+                    mask.insert((x - p[0] + edge * (y - p[1] + edge * (z - p[2]))) as usize);
+                }
+            }
+        }
+    }
+    mask
+}
+
 /// Ground prices by material, asked once each per read-ahead.
 #[derive(Default)]
 struct Prices(Vec<Option<u64>>);
@@ -3422,14 +3499,22 @@ fn read_cell_into(
             let y1 = (p[1] + edge).min(w.ny as i32);
             if x0 < x1 && y0 < y1 {
                 for z in p[2].max(0)..(p[2] + edge).min(w.nz as i32) {
+                    plane.fill(0);
                     for x in x0..x1 {
+                        // Occupancy ceilings are authoritative after live edits.
+                        // The rest of this column is proven air, including holes
+                        // in otherwise nonempty coarse cells.
+                        let top = y1.min(w.column_ceiling(x as u32, z as u32) as i32);
+                        if top <= y0 {
+                            continue;
+                        }
                         w.column(
                             x as u32,
                             z as u32,
                             y0 as u32,
-                            &mut column[..(y1 - y0) as usize],
+                            &mut column[..(top - y0) as usize],
                         );
-                        for y in y0..y1 {
+                        for y in y0..top {
                             plane[(x - p[0] + edge * (y - p[1])) as usize] =
                                 column[(y - y0) as usize];
                         }
