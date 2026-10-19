@@ -1198,10 +1198,28 @@ impl<'a> Probe<'a> {
     /// gap on the ground either side of it, it rides up a rise over the
     /// run-up rather than at the instant of contact, and it cannot grip a
     /// grade steeper than the tilt limit however level the hull sits.
+    #[cfg(test)]
     fn contact(&mut self, p: [Fx; 2], radius: Fx, dir: [Fx; 2], s: Shape, grade: Fx) -> (Fx, bool) {
+        self.contact_for::<true>(p, radius, dir, s, grade)
+    }
+    fn contact_for<const FOOTPRINT: bool>(
+        &mut self,
+        p: [Fx; 2],
+        radius: Fx,
+        dir: [Fx; 2],
+        s: Shape,
+        grade: Fx,
+    ) -> (Fx, bool) {
         if s.ramp >= Fx::ZERO && s.step >= 0 && grade >= Fx::ZERO && radius >= Fx::ZERO {
             let span = Fx::from_int(if s.span >= 2 { s.span } else { 0 });
-            let r = dir.map(|v| v.abs().mul(span).max(radius));
+            // Negate after the signed product to round the extent outward:
+            // a negative Fx corner can be one raw unit farther than +corner.
+            let r = if FOOTPRINT {
+                let edge = radius.mul(dir[0].abs().add(dir[1].abs()).neg()).neg();
+                dir.map(|v| v.mul(span).abs().max(edge))
+            } else {
+                dir.map(|v| v.abs().mul(span).max(radius))
+            };
             // Include the bilinear neighbour at the high edge and round the
             // low edge down, also for fractional/negative world positions.
             let lo = [0, 1].map(|a| (p[a].sub(r[a]).raw() >> 32) as i32);
@@ -1260,16 +1278,22 @@ impl<'a> Probe<'a> {
         // edge is not ridden by the corner and refused by the belt a
         // degree later. A slope across the patch is left to the tilt limit.
         let half = radius.div(Fx::from_int(2));
+        // Approach is the established route-cost envelope. It does not set
+        // the physical suspension floors; those use the rotated footprint.
+        let patch_dir = if FOOTPRINT { dir } else { [Fx::ONE, Fx::ZERO] };
         for (x, z) in [(-1, -1), (1, -1), (-1, 1), (1, 1)] {
-            let corner = self.surface([
-                p[0].add(radius.mul(Fx::from_int(x))),
-                p[1].add(radius.mul(Fx::from_int(z))),
-            ]);
+            // The patch belongs to the track, so it turns with the hull.
+            // World-axis corners reach outside a diagonal footprint and can
+            // hold the whole hull above a crater on banks it never touches.
+            let along = patch_dir[0]
+                .mul(Fx::from_int(x))
+                .sub(patch_dir[1].mul(Fx::from_int(z)));
+            let across = patch_dir[1]
+                .mul(Fx::from_int(x))
+                .add(patch_dir[0].mul(Fx::from_int(z)));
+            let corner = self.surface([p[0].add(radius.mul(along)), p[1].add(radius.mul(across))]);
             height = height.max(corner.sub(s.ramp.mul(radius)));
-            let mid = self.surface([
-                p[0].add(half.mul(Fx::from_int(x))),
-                p[1].add(half.mul(Fx::from_int(z))),
-            ]);
+            let mid = self.surface([p[0].add(half.mul(along)), p[1].add(half.mul(across))]);
             if s.span >= 2 && corner.sub(mid) > step {
                 steep = true;
             }
@@ -1281,7 +1305,8 @@ impl<'a> Probe<'a> {
         // end makes a neighbouring wall lift even a parked vehicle.
         // Route clearance still looks ahead over the full approach span.
         s.span = s.span.min((s.half[0] - s.support[0]).max(0));
-        self.pose(pos, head, s)
+        self.flat_pose(pos, s)
+            .unwrap_or_else(|| self.probe_pose_contact::<true>(pos, head, s, false, true, false))
     }
     /// Suspension only needs the four contact floors, not another full hull
     /// clearance scan. Movement and planning still use the complete pose.
@@ -1290,9 +1315,17 @@ impl<'a> Probe<'a> {
         if let Some(pose) = self.flat_pose(pos, s) {
             return pose.floors;
         }
-        self.contacts(pos, head, s).0
+        self.contacts_for::<true>(pos, head, s).0
     }
     fn contacts(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> ([Fx; 4], bool) {
+        self.contacts_for::<false>(pos, head, s)
+    }
+    fn contacts_for<const FOOTPRINT: bool>(
+        &mut self,
+        pos: [Fx; 2],
+        head: i32,
+        s: Shape,
+    ) -> ([Fx; 4], bool) {
         let (c, sin) = (angle::cos(head), angle::sin(head));
         let point = |x: i32, z: i32| {
             [
@@ -1323,7 +1356,7 @@ impl<'a> Probe<'a> {
         let mut steep = false;
         let mut floors = [(-1, -1), (1, -1), (-1, 1), (1, 1)].map(|(x, z)| {
             let p = point(x * s.support[0], z * s.support[1]);
-            let (h, too_steep) = self.contact(p, radius, [c, sin], s, grade);
+            let (h, too_steep) = self.contact_for::<FOOTPRINT>(p, radius, [c, sin], s, grade);
             steep |= too_steep;
             h
         });
@@ -1529,7 +1562,19 @@ impl<'a> Probe<'a> {
         count_crush: bool,
         leave_steep: bool,
     ) -> Pose {
-        let (floors, steep) = self.contacts(pos, head, s);
+        self.probe_pose_contact::<false>(pos, head, s, stop_on_refusal, count_crush, leave_steep)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn probe_pose_contact<const FOOTPRINT: bool>(
+        &mut self,
+        pos: [Fx; 2],
+        head: i32,
+        s: Shape,
+        stop_on_refusal: bool,
+        count_crush: bool,
+        leave_steep: bool,
+    ) -> Pose {
+        let (floors, steep) = self.contacts_for::<FOOTPRINT>(pos, head, s);
         let (c, sin) = (angle::cos(head), angle::sin(head));
         let height = floors
             .iter()
@@ -3155,15 +3200,17 @@ mod tests {
             // degree later. A slope across the patch is left to the tilt limit.
             let half = radius.div(Fx::from_int(2));
             for (x, z) in [(-1, -1), (1, -1), (-1, 1), (1, 1)] {
-                let corner = self.surface([
-                    p[0].add(radius.mul(Fx::from_int(x))),
-                    p[1].add(radius.mul(Fx::from_int(z))),
-                ]);
+                let local = |r: Fx| {
+                    let x = Fx::from_int(x);
+                    let z = Fx::from_int(z);
+                    [
+                        p[0].add(r.mul(dir[0].mul(x).sub(dir[1].mul(z)))),
+                        p[1].add(r.mul(dir[1].mul(x).add(dir[0].mul(z)))),
+                    ]
+                };
+                let corner = self.surface(local(radius));
                 height = height.max(corner.sub(s.ramp.mul(radius)));
-                let mid = self.surface([
-                    p[0].add(half.mul(Fx::from_int(x))),
-                    p[1].add(half.mul(Fx::from_int(z))),
-                ]);
+                let mid = self.surface(local(half));
                 if s.span >= 2 && corner.sub(mid) > step {
                     steep = true;
                 }

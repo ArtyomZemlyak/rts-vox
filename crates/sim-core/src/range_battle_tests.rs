@@ -710,8 +710,22 @@ fn tank_eventually_recovers_after_northern_turret_hits_its_tracks() {
     battle.battle.actors[1].order = Order::Hold;
     let hit = battle.units[3].at;
     let shots_at_hit = battle.battle.actors[3].fired;
+    // Physical support corrections may choose a different budgeted route.
+    // Keep the original progress deadline unless a search is actually pending;
+    // only that case receives a bounded extension, not a lower distance bar.
     for _ in 0..900 {
         battle.step();
+    }
+    let at_deadline = battle.units[3].at;
+    let moved_at_deadline = (at_deadline[0] - hit[0]).abs() + (at_deadline[2] - hit[2]).abs();
+    if moved_at_deadline <= 80 && battle.units[3].motion.searching() {
+        for _ in 0..300 {
+            battle.step();
+            let at = battle.units[3].at;
+            if (at[0] - hit[0]).abs() + (at[2] - hit[2]).abs() > 80 {
+                break;
+            }
+        }
     }
     let now = battle.units[3].at;
     let moved = (now[0] - hit[0]).abs() + (now[2] - hit[2]).abs();

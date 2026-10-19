@@ -4405,6 +4405,78 @@ mod tests {
         }
     }
     #[test]
+    fn a_moving_diagonal_tank_cannot_ride_on_crater_banks_outside_its_tracks() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _x: u32, y: u32, _z: u32) -> u16 {
+                if y < 64 {
+                    1
+                } else {
+                    0
+                }
+            }
+        }
+        let mut w = World::new(256, 96, 256, 100, Box::new(Flat));
+        let body = voxel::unit::tank();
+        let mut m = Motion::new([128, 64, 128], RangeUnitKind::Tank, &body);
+        m.enabled = true;
+        m.drive.head = angle::FULL / 8;
+        for tick in 0..10 {
+            step(&mut m, &w, &body, &[], tick);
+        }
+        // An elongated crater clears the entire diagonal footprint. The
+        // adjacent banks remain high; they are outside the actual tracks.
+        for x in 80..192 {
+            for z in 80..192 {
+                if (x as i32 - z as i32).abs() <= 23 {
+                    for y in 1..64 {
+                        w.queue_dig(x, y, z);
+                    }
+                }
+            }
+        }
+        while w.queued() > 0 {
+            w.flush();
+        }
+        let mut changed = nav::vehicle::Changed::default();
+        changed.columns((80..192).flat_map(|x| (80..192).map(move |z| [x, z])));
+        let rubble = nav::vehicle::Rubble::new();
+        // Keep a straight movement order inside the cleared area so that
+        // routing around the crater cannot make this test pass accidentally.
+        m.path = vec![[160, 160]];
+        m.destination = Some([160, 160]);
+        let start = m.pos;
+        let unchanged = nav::vehicle::Changed::default();
+        for tick in 10..190 {
+            m.step(
+                &w,
+                &body,
+                true,
+                true,
+                crate::mobility::Mobility::intact(true),
+                &[],
+                tick,
+                98,
+                &rubble,
+                if tick == 10 { &changed } else { &unchanged },
+            );
+            assert!(
+                m.floors.iter().all(|f| *f == Fx::ONE),
+                "false crater support at tick {tick}: {:?}",
+                m.floors
+            );
+        }
+        assert!(
+            m.pos[0] > start[0] && m.pos[2] > start[2],
+            "the drive order did not advance"
+        );
+        assert!(
+            m.pos[1].sub(Fx::ONE).abs() < Fx::from_ratio(1, 10),
+            "tank did not land: {:?}",
+            m.pos
+        );
+    }
+    #[test]
     fn early_separation_matches_all_four_contact_axes() {
         // Keep the former all-axis calculation as the bitwise oracle. This
         // covers both separated pairs and the exact positive overlap used

@@ -1,6 +1,116 @@
 use super::*;
 
 #[test]
+fn diagonal_crater_banks_outside_the_tracks_cannot_support_the_hull() {
+    struct Trench {
+        diagonal: i32,
+        banks: bool,
+    }
+    impl voxel::Generator for Trench {
+        fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+            let across = (x as i32 - 128) - self.diagonal * (z as i32 - 128);
+            if y < 1 || (self.banks && y < 64 && across.abs() > 23) {
+                1
+            } else {
+                0
+            }
+        }
+    }
+    let shape = Shape {
+        half: [30, 15],
+        support: [25, 12],
+        clearance: Fx::from_int(4),
+        step: 3,
+        min_up: Fx::from_ratio(91, 100),
+        height: 30,
+        span: 5,
+        ramp: Fx::from_ratio(60, 100),
+    };
+    for diagonal in [-1i32, 1] {
+        let rubble: Rubble = (0..256)
+            .flat_map(|x| {
+                (0..256).filter_map(move |z| {
+                    (((x - 128) - diagonal * (z - 128)).abs() > 23).then_some(([x, z], 64))
+                })
+            })
+            .collect();
+        for banks in [false, true] {
+            let world = World::new(256, 96, 256, 100, Box::new(Trench { diagonal, banks }));
+            world.prepare_navigation([4, 5]);
+            let empty = Rubble::new();
+            let rubble = if banks { &empty } else { &rubble };
+            for head in [
+                angle::FULL / 8,
+                angle::FULL * 3 / 8,
+                angle::FULL * 5 / 8,
+                angle::FULL * 7 / 8,
+            ] {
+                if (head == angle::FULL / 8 || head == angle::FULL * 5 / 8) != (diagonal == 1) {
+                    continue;
+                }
+                for fraction in [
+                    Fx::ZERO,
+                    Fx::from_ratio(1, 4),
+                    Fx::from_ratio(1, 2),
+                    Fx::from_ratio(3, 4),
+                ] {
+                    let at = [
+                        Fx::from_int(128).add(fraction),
+                        Fx::from_int(128).add(fraction.mul(Fx::from_int(diagonal))),
+                    ];
+                    let mut fast = Probe::with_yield(&world, &[4, 5]).with_rubble(rubble);
+                    let mut full = Probe::new(&world).with_rubble(rubble);
+                    for _ in 0..2 {
+                        assert_eq!(
+                            fast.support_floors(at, head, shape),
+                            [Fx::ONE; 4],
+                            "banks={banks} diagonal={diagonal} head={head} fraction={fraction:?}"
+                        );
+                        assert_eq!(full.support_floors(at, head, shape), [Fx::ONE; 4]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn uniform_contact_proof_covers_the_rotated_patch_corners() {
+    struct Floor;
+    impl voxel::Generator for Floor {
+        fn material(&self, _x: u32, y: u32, _z: u32) -> Mat {
+            if y < 1 {
+                1
+            } else {
+                0
+            }
+        }
+    }
+    let world = World::new(256, 32, 256, 100, Box::new(Floor));
+    world.prepare_navigation([4, 5]);
+    let rubble = Rubble::from([([128, 139], 16)]);
+    let shape = Shape {
+        half: [8, 8],
+        support: [0, 0],
+        clearance: Fx::ONE,
+        step: 8,
+        min_up: Fx::ONE,
+        height: 8,
+        span: 0,
+        ramp: Fx::ZERO,
+    };
+    let at = [Fx::from_int(128); 2];
+    let full = Probe::new(&world)
+        .with_rubble(&rubble)
+        .support_floors(at, angle::FULL / 8, shape);
+    let fast = Probe::with_yield(&world, &[4, 5])
+        .with_rubble(&rubble)
+        .support_floors(at, angle::FULL / 8, shape);
+    assert!(full.iter().all(|f| *f > Fx::ONE));
+    assert_eq!(fast, full, "uniform proof missed the rotated corner");
+}
+
+#[test]
 fn rubble_rectangle_tree_is_lazy_and_mutations_invalidate_it() {
     let mut r = Rubble::from_sorted((0..1024).map(|x| ([x, 0], (x % 97) as u16)).collect());
     assert!(r.1.get().is_none());

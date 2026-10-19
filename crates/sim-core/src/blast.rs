@@ -7449,6 +7449,59 @@ mod tests {
     }
     use super::*;
 
+    #[test]
+    fn a_tank_falls_to_the_floor_of_a_real_explosion_crater() {
+        let mut c =
+            ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        c.energy = 5400;
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        layout.course = None;
+        layout.clear_min = [150, 150];
+        layout.clear_max = [550, 550];
+        layout.units.clear();
+        layout.target = [350, FLOOR - 1, 350];
+        layout.blocks.clear();
+        layout.shields.clear();
+        layout.airburst_on_target = false;
+        let mut r = BlastRange::with_layout(c, layout).unwrap();
+        for _ in 0..400 {
+            r.step();
+        }
+        let rubble = r.current_rubble();
+        let body = voxel::unit::tank();
+        let mut m = motion::Motion::new([350, FLOOR, 350], RangeUnitKind::Tank, &body);
+        m.enabled = true;
+        let at = [Fx::from_int(350); 2];
+        let bare = nav::vehicle::Probe::with_yield(&r.world, &[4, 5]).support_floors(
+            at,
+            0,
+            m.shape(&body),
+        );
+        let debris = nav::vehicle::Probe::with_yield(&r.world, &[4, 5])
+            .with_rubble(&rubble)
+            .support_floors(at, 0, m.shape(&body));
+        assert!(r.removed > 0);
+        assert_eq!(bare, [Fx::ONE; 4]);
+        assert_eq!(debris, bare);
+        for tick in 0..120 {
+            m.step(
+                &r.world,
+                &body,
+                true,
+                true,
+                crate::mobility::Mobility::intact(true),
+                &[],
+                tick,
+                98,
+                &rubble,
+                &nav::vehicle::Changed::default(),
+            );
+        }
+        assert_eq!(m.floors, [Fx::ONE; 4]);
+        assert!(m.pos[1] < Fx::from_int(FLOOR - 2));
+    }
+
     /// The integer road profile equals the former `f64`/`hypot` one on every
     /// column of every road shoulder of the stock kilometre map (P-74). The
     /// float reference lives only here, in test code.
