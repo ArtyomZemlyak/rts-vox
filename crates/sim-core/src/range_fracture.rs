@@ -741,7 +741,13 @@ mod tests {
         use modding::range::RangeUnitKind;
         let mut units: Vec<_> = RangeUnitKind::ALL
             .into_iter()
-            .map(|kind| RangeUnit::of_kind(kind, [240, 16, 240]))
+            .map(|kind| {
+                let mut unit = RangeUnit::of_kind(kind, [240, 64, 240]);
+                unit.motion.drive.head = fx::angle::FULL / 7;
+                unit.turret_pitch = fx::angle::FULL / 24;
+                unit.update_pose(-fx::angle::FULL / 11);
+                unit
+            })
             .collect();
         let mut matter = Matter::new(&units);
         matter.begin(u32::MAX, 4);
@@ -754,11 +760,12 @@ mod tests {
                 } else {
                     &u.body.segments[part - 1].body
                 };
-                let mut count = 0;
-                'cells: for z in 0..usize::from(b.vol.nz) {
+                let mut count = [0; 2];
+                for z in 0..usize::from(b.vol.nz) {
                     for y in 0..usize::from(b.vol.ny) {
                         for x in 0..usize::from(b.vol.nx) {
-                            if !b.vol.get(x, y, z) {
+                            let layer = usize::from(b.turret_y > 0 && y >= usize::from(b.turret_y));
+                            if !b.vol.get(x, y, z) || count[layer] == 128 {
                                 continue;
                             }
                             let frame = if part == 0 {
@@ -771,10 +778,7 @@ mod tests {
                                 ClaimResult::Applied
                             ));
                             removed.push((id, part, [x, y, z]));
-                            count += 1;
-                            if count == 128 {
-                                break 'cells;
-                            }
+                            count[layer] += 1;
                         }
                     }
                 }
@@ -814,7 +818,14 @@ mod tests {
             .any(|f| f.chunk.as_ref().is_some_and(|c| c.segment.is_some())));
         for f in &matter.debris.fragments {
             if let Some(chunk) = &f.chunk {
+                assert_eq!(
+                    f.basis,
+                    crate::burst::IDENTITY,
+                    "captured pose must not turn twice"
+                );
+                assert_eq!(f.position, chunk.centre);
                 let part = chunk.segment.map_or(0, |s| usize::from(s) + 1);
+                let unit = &units[usize::from(chunk.template)];
                 assert_eq!(
                     crate::burst::body_fragments::components(
                         chunk.cells.iter().copied().enumerate().map(|(i, c)| (c, i)),
@@ -824,6 +835,21 @@ mod tests {
                     1
                 );
                 for cell in &chunk.cells {
+                    let frame = if part == 0 {
+                        unit.root_frame(usize::from(cell[1]))
+                    } else {
+                        unit.seg_frames[part - 1]
+                    };
+                    let body = if part == 0 {
+                        &unit.body
+                    } else {
+                        &unit.body.segments[part - 1].body
+                    };
+                    let layer = usize::from(body.turret_y > 0 && cell[1] >= body.turret_y);
+                    assert_eq!(
+                        chunk.frames[layer], frame,
+                        "{part}: aimed frame changed at birth"
+                    );
                     assert!(removed.contains(&(
                         usize::from(chunk.template),
                         part,
@@ -858,6 +884,109 @@ mod tests {
         copy.save(&mut roundtrip);
         assert_eq!(bytes.v, roundtrip.v);
         assert!(copy.economy.ledger.balanced());
+    }
+    #[test]
+    fn repeated_hits_after_reaiming_keep_old_panels_and_pay_each_cell_once() {
+        let mut unit = RangeUnit::of_kind(modding::range::RangeUnitKind::Tank, [240, 64, 240]);
+        let mut matter = Matter::new(std::slice::from_ref(&unit));
+        let initial = matter.economy.ledger.held(matter.bodies[0]);
+        let mut removed = BTreeSet::new();
+        let mut old = Vec::new();
+        let mut old_ledger = Vec::new();
+        for hit in 0..3 {
+            unit.motion.drive.head = fx::angle::FULL / (7 + hit);
+            unit.turret_pitch = fx::angle::FULL / (24 + hit);
+            unit.update_pose(-fx::angle::FULL / (11 + hit));
+            let mut cells = Vec::new();
+            let mut count = [0; 2];
+            for z in 0..usize::from(unit.body.vol.nz) {
+                for y in 0..usize::from(unit.body.vol.ny) {
+                    let layer = usize::from(y >= usize::from(unit.body.turret_y));
+                    for x in 0..usize::from(unit.body.vol.nx) {
+                        if unit.body.vol.get(x, y, z) && count[layer] < 128 {
+                            cells.push([x, y, z]);
+                            count[layer] += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(count, [128; 2], "both hull and aimed turret must be hit");
+            matter.begin(u32::MAX, 4);
+            matter.begin_body_batch();
+            let start = matter.debris.fragments.len();
+            for &cell in &cells {
+                assert!(removed.insert(cell), "a removed cell was hit again");
+                assert!(matches!(
+                    matter.body(0, &unit, cell, &unit.root_frame(cell[1]), [200, 64, 240]),
+                    ClaimResult::Applied
+                ));
+                assert!(
+                    matches!(
+                        matter.body(0, &unit, cell, &unit.root_frame(cell[1]), [200, 64, 240]),
+                        ClaimResult::Deferred
+                    ),
+                    "duplicate claim must not create matter or geometry"
+                );
+                assert!(unit.body.remove(cell[0], cell[1], cell[2]));
+            }
+            let room = matter.finish_body_batch();
+            assert_eq!(room, matter.claim_room());
+            assert!(matter.debris.fragments[start..]
+                .iter()
+                .any(|f| f.chunk.is_some()));
+            assert_eq!(
+                matter
+                    .debris
+                    .fragments
+                    .iter()
+                    .map(|f| f.count as usize)
+                    .sum::<usize>(),
+                removed.len()
+            );
+            assert_eq!(
+                initial - matter.economy.ledger.held(matter.bodies[0]),
+                removed.len() as u64 * u64::from(matter.source_density(3))
+            );
+            assert!(matter.economy.ledger.balanced());
+            for (f, (id, position, velocity, basis, chunk_hash)) in
+                matter.debris.fragments.iter().zip(&old)
+            {
+                assert_eq!(
+                    (
+                        f.id,
+                        f.position,
+                        f.velocity,
+                        f.basis,
+                        f.chunk.as_ref().map(|c| c.hash())
+                    ),
+                    (*id, *position, *velocity, *basis, *chunk_hash),
+                    "later aiming/damage changed an earlier panel"
+                );
+            }
+            for &(container, amount) in &old_ledger {
+                assert_eq!(matter.economy.ledger.held(container), amount);
+            }
+            old = matter
+                .debris
+                .fragments
+                .iter()
+                .map(|f| {
+                    (
+                        f.id,
+                        f.position,
+                        f.velocity,
+                        f.basis,
+                        f.chunk.as_ref().map(|c| c.hash()),
+                    )
+                })
+                .collect();
+            old_ledger = matter
+                .debris
+                .fragments
+                .iter()
+                .map(|f| (f.held, matter.economy.ledger.held(f.held)))
+                .collect();
+        }
     }
     #[test]
     fn armour_batches_keep_matter_and_exact_connected_geometry() {

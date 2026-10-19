@@ -105,6 +105,11 @@ impl BlastRange {
             }
         };
         matter.aside(mj, |m| {
+            // A crash tears one face in the same atomic metal-fragment path
+            // as a hit. Its partition must not inherit the last weapon's box.
+            let previous = m.fragment_box();
+            m.fragment_size(m.tuning.fragment_box);
+            m.begin_body_batch();
             for &(_, part, _, cell) in &face {
                 if u.section_holds(part, cell.map(|v| v as u8)) {
                     continue;
@@ -132,6 +137,8 @@ impl BlastRange {
                 }
                 receive(u, part, cell, need);
             }
+            m.finish_body_batch();
+            m.fragment_size(u32::from(previous));
         });
         if (u.removed.len(), u.seg_removed.len()) != before {
             u.refresh_damage(id);
@@ -224,6 +231,16 @@ mod tests {
         }
         let pieces = painted(&r);
         assert_eq!(pieces.iter().map(|p| p.2).sum::<usize>(), lost[0] + lost[1]);
+        println!(
+            "crash removed={} pieces={} max_cells={}",
+            lost[0] + lost[1],
+            pieces.len(),
+            pieces.iter().map(|p| p.2).max().unwrap()
+        );
+        assert!(
+            pieces.len() < lost[0] + lost[1],
+            "crash still emitted one chip per cell"
+        );
         let mid = r.units[0].motion.pos[0]
             .add(r.units[1].motion.pos[0])
             .div(Fx::from_int(2));
@@ -271,5 +288,61 @@ mod tests {
             assert_eq!(a.state_hash(), b.state_hash());
         }
         assert!(a.units[0].detached > 0);
+    }
+
+    #[test]
+    fn a_crash_partition_does_not_depend_on_the_previous_weapon() {
+        let mut a = head_on(40);
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
+        a.matter.fragment_size(1);
+        b.matter.fragment_size(4);
+        a.step();
+        b.step();
+        assert!(a.units[0].detached > 0);
+        // Preserve each unrelated weapon's state, then compare the complete
+        // authoritative result after normalising only that known input.
+        assert_eq!(a.matter.fragment_box(), 1);
+        assert_eq!(b.matter.fragment_box(), 4);
+        a.matter.fragment_size(4);
+        assert_eq!(a.snapshot(), b.snapshot());
+    }
+
+    #[test]
+    fn a_heavy_contact_exports_large_panels_without_extra_damage_or_launch_energy() {
+        let mut r = head_on(40);
+        let before = r.matter.economy.ledger.held(r.matter.body_container(0));
+        // A controlled contact-energy budget, not a change to stock crash
+        // balance. Exercise a broad cut rather than the eight-cell minor crash.
+        let cells = 1024;
+        let energy = r.matter.crush_price() * cells;
+        r.crush_face(0, 1, energy);
+        let removed = r.units[0].removed.len() + r.units[0].seg_removed.len();
+        assert_eq!(removed, cells as usize);
+        let fragments = &r.matter.debris.fragments;
+        assert_eq!(
+            fragments.iter().map(|f| u64::from(f.count)).sum::<u64>(),
+            cells
+        );
+        assert!(fragments.len() < removed / 2);
+        assert!(fragments.iter().any(|f| f.chunk.is_some()));
+        assert!(fragments.iter().all(|f| f.velocity == phys::V3::ZERO));
+        assert_eq!(r.matter.debris.body_motion_mj, 0);
+        let transferred: u64 = fragments
+            .iter()
+            .map(|f| r.matter.economy.ledger.held(f.held))
+            .sum();
+        assert_eq!(
+            before - r.matter.economy.ledger.held(r.matter.body_container(0)),
+            transferred
+        );
+        assert!(r.matter.economy.ledger.balanced());
+        println!(
+            "heavy_contact removed={removed} pieces={} max_cells={}",
+            fragments.len(),
+            fragments.iter().map(|f| f.count).max().unwrap()
+        );
+        let bytes = r.snapshot();
+        let restored = BlastRange::restore(r.config, &bytes).expect("contact panels must restore");
+        assert_eq!(bytes, restored.snapshot());
     }
 }

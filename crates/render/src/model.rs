@@ -841,7 +841,10 @@ mod tests {
             burst::chunk::{Chunk, Shape},
         };
         for kind in modding::range::RangeUnitKind::ALL {
-            let unit = RangeUnit::of_kind(kind, [240, 16, 240]);
+            let mut unit = RangeUnit::of_kind(kind, [240, 64, 240]);
+            unit.motion.drive.head = fx::angle::FULL / 7;
+            unit.turret_pitch = fx::angle::FULL / 24;
+            unit.update_pose(-fx::angle::FULL / 11);
             for part in 0..=unit.body.segments.len() {
                 let source = if part == 0 {
                     &unit.body
