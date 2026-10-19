@@ -1,6 +1,6 @@
 # Единый план производительности движка
 
-Актуализация: **19.10.2026**, база `main 2e4ca6a`, срез327. Это **единственная рабочая
+Актуализация: **19.10.2026**, база `main 12300a8`, принятый срез327. Это **единственная рабочая
 очередь оптимизации**. Номера OPT316 сохранены. Здесь находятся статусы,
 зависимости и приёмка; измерения и архитектурное обоснование —
 [сводный аудит321](321-engine-performance-review.md).
@@ -87,6 +87,15 @@ evidence valid,FPS acceptance false. Свежий reverse native baseline даё
 Отвергнуты [324](324-hull-support-candidates.md),
 [325](325-settled-column-heads.md), [326](326-hull-roof-levels.md):
 улучшение внутренних кандидатов не ускорило весь тик; runtime прототипы удалены.
+
+Дополнительные пробы328–331 не приняты: [компактные посадки328](328-compact-fragment-landings.md),
+[узкие endpoints329](329-compact-settled-endpoints.md),
+[полный skip mask330](330-complete-hull-skip-mask.md),
+[rigid contact geometry331](331-rigid-fragment-contact-geometry.md).
+Одна первая пара328 имела меньший root, но targeted translation не ускорилась;
+в остальных root дороже. Все варианты сохранили36 игровых полей и hash,
+но этого недостаточно для performance gate. Runtime прототипы удалены;
+полные/native проверки не приписываются адресным debug и probe runs.
 
 ## OPT316-00. Наблюдаемость по потребности
 
