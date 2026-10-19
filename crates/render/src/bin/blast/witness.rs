@@ -333,6 +333,7 @@ pub(super) fn update(
             RangeUnitKind::ArtilleryT2 => 7,
             RangeUnitKind::ArtilleryTurretT2 => 8,
             RangeUnitKind::ArtilleryTurretT3 => 9,
+            RangeUnitKind::NuclearSilo => 10,
         };
         let pristine = art.pristine.clone();
         let skins = art.skins.clone();
@@ -386,6 +387,7 @@ mod tests {
             RangeUnitKind::ArtilleryT2,
             RangeUnitKind::ArtilleryTurretT2,
             RangeUnitKind::ArtilleryTurretT3,
+            RangeUnitKind::NuclearSilo,
         ] {
             let sim = single(kind);
             let pristine = sim.units[0].body.clone();
@@ -462,6 +464,7 @@ mod tests {
             RangeUnitKind::ArtilleryT2,
             RangeUnitKind::ArtilleryTurretT2,
             RangeUnitKind::ArtilleryTurretT3,
+            RangeUnitKind::NuclearSilo,
         ] {
             let mut sim = single(kind);
             let pristine = sim.units[0].body.clone();

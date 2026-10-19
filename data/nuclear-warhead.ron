@@ -1,0 +1,17 @@
+// Shared bounded pressure/matter/heat engine. Larger cells cover a wider area.
+(
+ delivery: Blast, motion: Ballistic,
+ charge_ticks: 60, fire_tick: 60,
+ half_cells: 32, cell_units: 16, energy: 1000000,
+ material_energy_j: 4000000000,
+ air_cost: 100, soil_resistance: 60, concrete_resistance: 150,
+ steel_resistance: 3000,
+ unit_ablation_resistance: 1,
+ unit_role_resistance_milli: (1000, 1800, 650, 1100, 350),
+ wave_work_per_tick: 65536, capture_cells_per_tick: 147456,
+ edits_per_tick: 65536, fragment_box: 4, hull_impulse_milli: 3,
+ shell_speed: 700, gravity: 98, heat_units: 32, heat_per_cell: 800,
+ gas_cell_units: 8, gas_display_mm: 1280, gas_source_radius: 128,
+ gas_temperature_k: 6000, gas_fuel_milli: 2200, gas_pressure_milli: 3000,
+ reaction_milli: 2000, cooling_milli: 400, buoyancy_milli: 2400,
+)

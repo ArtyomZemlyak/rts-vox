@@ -5,6 +5,9 @@ use super::*;
 use modding::explosion::Delivery;
 use modding::range::RangeUnitDef;
 
+#[path = "range_nuclear_tests.rs"]
+mod nuclear_tests;
+
 #[test]
 fn projectile_impact_events_keep_the_incident_side_of_a_tall_wall() {
     for weapon in [

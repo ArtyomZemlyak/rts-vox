@@ -146,10 +146,24 @@ fn hot(input: Input<'_>) -> MeshBuf {
                     | BattleWeapon::Kinetic
                     | BattleWeapon::Canister
                     | BattleWeapon::Siege
+                    | BattleWeapon::Nuclear
             )
         }) {
             let t = fraction;
             let at = point(r.previous).lerp(point(r.pos), t);
+            if r.weapon == BattleWeapon::Nuclear {
+                let axis = (point(r.pos) - point(r.previous)).normalize_or(Vec3::Y);
+                beam(&mut hot, at - axis * 18.0, at, 4.5, [1.4, 1.4, 1.3, 1.0]);
+                cube(&mut hot, at, 5.0, [3.0, 0.4, 0.08, 1.0]);
+                beam(
+                    &mut hot,
+                    at - axis * 32.0,
+                    at - axis * 18.0,
+                    3.0,
+                    [7.0, 2.4, 0.25, 0.85],
+                );
+                continue;
+            }
             if matches!(r.weapon, BattleWeapon::Canister | BattleWeapon::Siege) {
                 let direction = (point(r.pos) - point(r.previous)).normalize_or_zero();
                 beam(

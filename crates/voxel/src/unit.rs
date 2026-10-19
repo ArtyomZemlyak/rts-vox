@@ -1508,6 +1508,80 @@ pub fn artillery_turret_t2() -> UnitBody {
     u
 }
 
+/// Fixed launch bunker with a connected upright missile and protected core.
+pub fn nuclear_silo() -> UnitBody {
+    let mut u = UnitBody::new_scaled(64, 72, 64, 16, 150);
+    fill_f(&mut u, (2, 62), (1, 9), (2, 62), Part::Armour, FINISH_STEEL);
+    fill_f(
+        &mut u,
+        (7, 57),
+        (9, 22),
+        (7, 57),
+        Part::Armour,
+        FINISH_PLATE,
+    );
+    fill(&mut u, (24, 40), (3, 20), (24, 40), Part::Core);
+    // Connected launch tube and upright missile; the command bunker is offset.
+    fill_f(
+        &mut u,
+        (20, 44),
+        (22, 48),
+        (20, 44),
+        Part::Weapon,
+        FINISH_GUN,
+    );
+    fill_f(
+        &mut u,
+        (26, 38),
+        (48, 63),
+        (26, 38),
+        Part::Weapon,
+        FINISH_STEEL,
+    );
+    fill_f(
+        &mut u,
+        (28, 36),
+        (63, 69),
+        (28, 36),
+        Part::Weapon,
+        FINISH_GUN,
+    );
+    for z in [16, 44] {
+        fill_f(
+            &mut u,
+            (17, 47),
+            (22, 26),
+            (z, z + 4),
+            Part::Armour,
+            FINISH_STEEL,
+        );
+    }
+    fill_f(
+        &mut u,
+        (6, 18),
+        (22, 33),
+        (8, 24),
+        Part::Armour,
+        FINISH_PLATE,
+    );
+    fill_f(
+        &mut u,
+        (7, 12),
+        (33, 38),
+        (10, 16),
+        Part::Sensor,
+        FINISH_OPTIC,
+    );
+    let mut u = seat(u, "ядерная ракетная шахта");
+    u.turret_y = 72; // Entire building stays fixed while targeting.
+    u.push_weapon_path(WeaponPath {
+        min: [26, 22, 26],
+        max: [38, 69, 38],
+        axis: 1,
+    });
+    u
+}
+
 /// Fixed T3 siege gun: broad plinth, heavy single barrel and recoil rails.
 /// All silhouettes are connected, damageable voxels; the engine supplies its footing.
 pub fn artillery_turret_t3() -> UnitBody {

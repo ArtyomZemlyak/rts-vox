@@ -29,6 +29,7 @@ pub enum Tool {
     ArtilleryT2,
     ArtilleryTurretT2,
     ArtilleryTurretT3,
+    NuclearSilo,
     TurretT1,
     TurretT2,
     Base,
@@ -580,6 +581,7 @@ impl Workshop {
             | Tool::ArtilleryT2
             | Tool::ArtilleryTurretT2
             | Tool::ArtilleryTurretT3
+            | Tool::NuclearSilo
             | Tool::TurretT1
             | Tool::TurretT2
             | Tool::Base => {
@@ -590,6 +592,8 @@ impl Workshop {
                         RangeUnitKind::Tank
                     } else if self.tool == Tool::Spider {
                         RangeUnitKind::Spider
+                    } else if self.tool == Tool::NuclearSilo {
+                        RangeUnitKind::NuclearSilo
                     } else if self.tool == Tool::ArtilleryTurretT3 {
                         RangeUnitKind::ArtilleryTurretT3
                     } else if self.tool == Tool::ArtilleryTurretT2 {
@@ -991,7 +995,7 @@ fn battle_units_in_screen_rect(
 pub fn input(
     mut scene: ResMut<Scene>,
     mut edit: ResMut<Workshop>,
-    panel: Option<Res<panel::Panel>>,
+    mut panel: Option<ResMut<panel::Panel>>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut wheel: MessageReader<MouseWheel>,
@@ -1210,6 +1214,16 @@ pub fn input(
                                         order,
                                         Some([hit[0], hit[2]]),
                                     );
+                                    if accepted > 0
+                                        && fire
+                                        && ids.iter().all(|&id| {
+                                            scene.sim.units[id].kind == RangeUnitKind::NuclearSilo
+                                        })
+                                    {
+                                        if let Some(panel) = panel.as_mut() {
+                                            panel.ground_fire = false;
+                                        }
+                                    }
                                     if eligible == 0 && order == Order::Move {
                                         scene.notice = "В выделении нет подвижных юнитов".into();
                                     } else if accepted == eligible && accepted > 0 {
@@ -1222,6 +1236,13 @@ pub fn input(
                                         scene.notice = format!(
                                             "Приказ получили {accepted} из {eligible} юнитов"
                                         );
+                                    } else if fire
+                                        && ids.iter().all(|&id| {
+                                            scene.sim.units[id].kind == RangeUnitKind::NuclearSilo
+                                        })
+                                    {
+                                        scene.notice =
+                                            "Шахта не готова или точка вне радиуса запуска".into();
                                     } else {
                                         scene.notice = "Приказ недоступен: проверьте фазу боя и состояние отряда".into();
                                     }

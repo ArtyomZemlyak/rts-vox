@@ -1,0 +1,20 @@
+(
+ title: "Ядерный полигон",
+ briefing: "Выберите ядерную шахту. Нажмите «Запустить ядерную ракету» и укажите центр укреплённой базы. Запуск ручной, подготовка занимает 2 секунды, перезарядка — 60 секунд. Удар поражает и своих: держитесь подальше от цели.",
+ zone: (name: "Ядерный полигон", min: (5800,5800), max: (9900,8200), spawn: (6100,16,7000), target: (8800,15,7000)),
+ units: [
+  (kind: NuclearSilo, allied: true, at: (6150,16,7000)),
+  (kind: Base, allied: false, at: (8800,16,7000)),
+  (kind: TurretT1, allied: false, at: (8640,16,6860)),
+  (kind: TurretT2, allied: false, at: (8950,16,7150)),
+  (kind: Tank, allied: false, at: (8700,16,7150)),
+ ],
+ blocks: [
+  (min: (8530,16,6750), max: (8550,60,7250), material: 2),
+  (min: (8530,16,6750), max: (9160,60,6770), material: 2),
+  (min: (8530,16,7230), max: (9160,60,7250), material: 2),
+ ],
+ mission: Some((focus: NuclearSilo, protect: [0], protect_weapons: [0], steps: [
+  (text: "Запустите ракету по центру базы и уничтожьте укрепления", goal: Destroy(actors: [1,2,3])),
+ ])),
+)

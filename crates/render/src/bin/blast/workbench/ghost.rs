@@ -87,6 +87,7 @@ pub fn setup(
             RangeUnitKind::ArtilleryTurretT3,
             voxel::unit::artillery_turret_t3(),
         ),
+        (RangeUnitKind::NuclearSilo, voxel::unit::nuclear_silo()),
         (RangeUnitKind::TurretT1, voxel::unit::turret_t1()),
         (RangeUnitKind::TurretT2, voxel::unit::turret_t2()),
         (RangeUnitKind::Base, voxel::unit::command_base()),

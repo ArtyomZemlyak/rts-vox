@@ -5,7 +5,7 @@ use fx::blob::{Blob, Scan};
 use modding::battle_ai::Tuning;
 use modding::range::RangeRoad;
 
-pub const OBSERVATION_VERSION: u32 = 3;
+pub const OBSERVATION_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnitObservation {

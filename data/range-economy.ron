@@ -27,6 +27,7 @@
         (kind: Base, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 1000000),
         (kind: ArtilleryT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
         (kind: ArtilleryTurretT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+        (kind: NuclearSilo, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
         (kind: ArtilleryTurretT3, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
     ],
     bank: Some((

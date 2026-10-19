@@ -38,6 +38,8 @@ pub struct Unit {
     pub loadout: Option<Option<Weapon>>,
     pub attack_range: Option<i32>,
     pub order: Option<Order>,
+    pub reload_until: Option<u32>,
+    pub charge_until: Option<u32>,
     pub patrol_laps: Option<u32>,
     /// Matter in the unit's tank and its capacity; `None` without a tank
     /// (ADR-672, ADR-673).
@@ -61,6 +63,8 @@ impl Unit {
             loadout: None,
             attack_range: None,
             order: None,
+            reload_until: None,
+            charge_until: None,
             patrol_laps: (!unit.motion.route.is_empty()).then_some(unit.motion.laps),
             tank: None,
             hauling: false,
@@ -146,6 +150,8 @@ impl View {
             item.loadout = world.battle.actors.get(id).map(|actor| actor.weapon);
             item.attack_range = world.battle_attack_range(id);
             item.order = world.battle.actors.get(id).map(|actor| actor.order);
+            item.reload_until = world.battle_reload_until(id);
+            item.charge_until = world.battle_charge(id);
             item.tank = world.tank_fill(id).map(|(held, cap)| [held, cap]);
             item.hauling = world.hauling(id);
             self.units.push(item);

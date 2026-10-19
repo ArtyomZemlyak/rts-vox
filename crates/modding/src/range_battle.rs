@@ -48,6 +48,17 @@ impl Default for Siege {
     }
 }
 
+/// Strategic payload keeps its finite energy in millijoules at execution.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Nuclear {
+    #[serde(deserialize_with = "crate::attack_ranges::deserialize")]
+    pub range: i32,
+    pub reload_ticks: u32,
+    pub flight_time_milli: i32,
+    pub material_energy_j: u64,
+    pub body_energy_pct: u32,
+}
+
 /// Which round a tank loads for what it aims at (ADR-456): `Blast` is the
 /// high-explosive shell, `Kinetic` the armour-piercing one.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -75,6 +86,8 @@ pub struct Tuning {
     pub canister: Canister,
     #[serde(default)]
     pub siege: Siege,
+    #[serde(default = "default_nuclear")]
+    pub nuclear: Nuclear,
     #[serde(deserialize_with = "crate::attack_ranges::deserialize")]
     pub kinetic_range: i32,
     #[serde(deserialize_with = "crate::attack_ranges::deserialize")]
@@ -117,6 +130,9 @@ pub struct Tuning {
     pub zone: RangeZone,
     pub units: Vec<RangeUnitDef>,
 }
+fn default_nuclear() -> Nuclear {
+    ron::from_str(include_str!("../../../data/range-nuclear.ron")).expect("nuclear tuning")
+}
 fn default_turret_t2_power() -> u32 {
     1000
 }
@@ -151,6 +167,11 @@ impl Tuning {
             || !(100..=crate::attack_ranges::MAX_DISTANCE).contains(&t.siege.range)
             || !(1..=1800).contains(&t.siege.reload_ticks)
             || !(1000..=4000).contains(&t.siege.flight_time_milli)
+            || !(100..=crate::attack_ranges::MAX_DISTANCE).contains(&t.nuclear.range)
+            || !(1..=1800).contains(&t.nuclear.reload_ticks)
+            || !(1000..=4000).contains(&t.nuclear.flight_time_milli)
+            || !(1..=1_000_000_000_000).contains(&t.nuclear.material_energy_j)
+            || t.nuclear.body_energy_pct > 100
             || !(100..=3000).contains(&t.kinetic_range)
             || !(100..=3000).contains(&t.energy_range)
             || !(100..=3000).contains(&t.anni_range)
@@ -181,6 +202,44 @@ impl Tuning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nuclear_payload_is_finite_and_rejects_invalid_budgets() {
+        let source = include_str!("../../../data/range-battle.ron");
+        let stock = Tuning::from_ron(source).unwrap();
+        assert!(stock.nuclear.material_energy_j > u64::from(u32::MAX));
+        assert_eq!(stock.nuclear.range, crate::attack_ranges::stock().nuclear);
+        let nuke = include_str!("../../../data/range-nuclear.ron");
+        let explicit = nuke
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Tuning::from_ron(&source.replacen(
+            "tank_power_milli:",
+            &format!("nuclear: {explicit}, tank_power_milli:"),
+            1,
+        ))
+        .unwrap();
+        for bad in [
+            nuke.replace("20000000000", "0"),
+            nuke.replace("20000000000", "1000000000001"),
+            nuke.replace("body_energy_pct: 90", "body_energy_pct: 101"),
+            nuke.replace("reload_ticks: 1800", "reload_ticks: 1801"),
+        ] {
+            let plain = bad
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let modified = source.replacen(
+                "tank_power_milli:",
+                &format!("nuclear: {plain}, tank_power_milli:"),
+                1,
+            );
+            assert!(Tuning::from_ron(&modified).is_err());
+        }
+    }
 
     #[test]
     fn siege_defaults_and_authored_limits_are_validated() {

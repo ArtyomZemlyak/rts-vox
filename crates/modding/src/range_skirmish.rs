@@ -162,6 +162,7 @@ pub const STOCK: &[&str] = &[
     include_str!("../../../data/mission-canister-defense.ron"),
     include_str!("../../../data/mission-siege-defense.ron"),
     include_str!("../../../data/mission-base.ron"),
+    include_str!("../../../data/mission-nuclear.ron"),
 ];
 pub fn stock(id: usize) -> Result<Skirmish, String> {
     Skirmish::from_ron(STOCK.get(id).ok_or("Unknown encounter")?)
@@ -241,6 +242,7 @@ mod tests {
                                 ranges.canister
                             }
                             RangeUnitKind::ArtilleryTurretT3 => ranges.siege,
+                            RangeUnitKind::NuclearSilo => 0, // Manual strategic launch never opens a mission automatically.
                         };
                         let max = reach(own).max(reach(enemy));
                         assert!(
@@ -251,7 +253,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(focus.len(), 12);
+        assert_eq!(focus.len(), 13);
         assert!(RangeUnitKind::ALL.iter().all(|kind| focus.contains(kind)));
         assert!(stock(STOCK.len()).is_err());
     }
@@ -299,7 +301,10 @@ mod tests {
         for side in [true, false] {
             let army: Vec<_> = preset.units.iter().filter(|u| u.allied == side).collect();
             assert_eq!(army.len(), 31);
-            for kind in RangeUnitKind::ALL {
+            for kind in RangeUnitKind::ALL
+                .into_iter()
+                .filter(|k| *k != RangeUnitKind::NuclearSilo)
+            {
                 assert!(
                     army.iter().any(|u| u.kind == kind),
                     "missing {kind:?} on side {side}"

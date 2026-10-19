@@ -412,6 +412,7 @@ pub enum Action {
     Edit,
     Pause,
     Fire,
+    NuclearLaunch,
     AutoAttack,
     Stop,
     Reset,
@@ -690,6 +691,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                     ("САУ T2", Action::Tool(Tool::ArtilleryT2)),
                     ("Арт. турель T2", Action::Tool(Tool::ArtilleryTurretT2)),
                     ("Осадная турель T3", Action::Tool(Tool::ArtilleryTurretT3)),
+                    ("Ядерная шахта", Action::Tool(Tool::NuclearSilo)),
                     ("Турель T1", Action::Tool(Tool::TurretT1)),
                     ("Турель T2", Action::Tool(Tool::TurretT2)),
                     ("База", Action::Tool(Tool::Base)),
@@ -887,7 +889,10 @@ pub fn actions(
         scene.notice.clear();
         if scene.sim.battle_mode()
             && scene.sim.battle.phase == sim_core::blast::battle::Phase::Setup
-            && matches!(action, Action::Fire | Action::AutoAttack)
+            && matches!(
+                action,
+                Action::Fire | Action::AutoAttack | Action::NuclearLaunch
+            )
         {
             scene.notice = "В свободном управлении доступны движение и остановка. Для стрельбы нажмите «Начать бой».".into();
             continue;
@@ -1231,6 +1236,38 @@ pub fn actions(
                 }
                 key(KeyCode::KeyR, &mut panel);
             }
+            Action::NuclearLaunch => {
+                if !scene.sim.battle_mode()
+                    || scene.sim.battle.phase != sim_core::blast::battle::Phase::Fighting
+                {
+                    scene.notice = "Ядерный запуск доступен после начала боя".into();
+                    continue;
+                }
+                let ids: Vec<_> = edit
+                    .battle_selected_ids(&scene.sim)
+                    .into_iter()
+                    .filter(|&id| {
+                        scene.sim.units[id].kind == RangeUnitKind::NuclearSilo
+                            && scene.sim.units[id].status.weapon
+                            && scene
+                                .sim
+                                .battle_reload_until(id)
+                                .is_some_and(|t| t <= scene.sim.tick)
+                    })
+                    .collect();
+                if ids.is_empty() {
+                    scene.notice =
+                        "Шахта не готова: проверьте выделение, орудие и перезарядку".into();
+                    continue;
+                }
+                edit.selected_units = ids;
+                edit.controlled = edit.selected_units.first().copied();
+                edit.selected = edit.controlled.map(Selection::Unit);
+                edit.editing = false;
+                panel.ground_fire = true;
+                scene.paused = false;
+                scene.notice = "Ядерный запуск: укажите точку ЛКМ. «Стоп» отменяет подготовку. Взрыв опасен и для своих.".into();
+            }
             Action::Fire => {
                 scene.sim.set_auto_attack(false);
                 panel.ground_fire = !panel.ground_fire;
@@ -1281,7 +1318,8 @@ pub fn actions(
                         RangeUnitKind::Artillery => 0,
                         RangeUnitKind::ArtilleryT2
                         | RangeUnitKind::ArtilleryTurretT2
-                        | RangeUnitKind::ArtilleryTurretT3 => 0,
+                        | RangeUnitKind::ArtilleryTurretT3
+                        | RangeUnitKind::NuclearSilo => 0,
                         RangeUnitKind::TurretT1 => 5,
                         RangeUnitKind::TurretT2 => 1,
                         RangeUnitKind::Base => 0,
@@ -1827,7 +1865,7 @@ pub fn refresh(
             Action::Play => !edit.editing,
             Action::Edit => edit.editing,
             Action::Pause => scene.paused,
-            Action::Fire => panel.ground_fire,
+            Action::Fire | Action::NuclearLaunch => panel.ground_fire,
             Action::AutoAttack => {
                 if view.battle {
                     edit.controlled
@@ -1867,14 +1905,14 @@ pub fn refresh(
     };
     let instructions = if edit.editing {
         "ЛКМ — поставить / выбрать\nПКМ — переместить выбранное"
+    } else if panel.ground_fire {
+        "ЛКМ — указать точку удара\nСтоп — отменить подготовку"
     } else if view.battle && view.phase == sim_core::blast::battle::Phase::Setup {
         "ЛКМ / рамка — выбрать своих\nПКМ — движение группы\nСтрельба и ИИ — после «Начать бой»"
     } else if view.battle {
         "ЛКМ — выбрать своего · рамка — отряд
 Shift+ЛКМ — добавить / убрать
 ПКМ — движение / атака всей группы"
-    } else if panel.ground_fire {
-        "Укажите точку выстрела на карте"
     } else if view.auto_attack {
         "Автоатака — мишени в радиусе\nПКМ — ехать и продолжать стрельбу"
     } else {

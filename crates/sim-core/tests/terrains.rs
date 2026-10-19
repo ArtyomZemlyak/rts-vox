@@ -155,7 +155,8 @@ fn passable(t: Terrain, kind: RangeUnitKind, eighth: i32) -> bool {
         RangeUnitKind::Strider | RangeUnitKind::Spider => 65,
         RangeUnitKind::Base
         | RangeUnitKind::ArtilleryTurretT2
-        | RangeUnitKind::ArtilleryTurretT3 => 0,
+        | RangeUnitKind::ArtilleryTurretT3
+        | RangeUnitKind::NuclearSilo => 0,
     };
     match t {
         Terrain::Trench { depth, .. } => depth <= 4 || eighth == 2,
@@ -203,6 +204,7 @@ fn run(t: Terrain, kind: RangeUnitKind, heading: i32, back: bool) -> Run {
         RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
         RangeUnitKind::ArtilleryTurretT2 => voxel::unit::artillery_turret_t2(),
         RangeUnitKind::ArtilleryTurretT3 => voxel::unit::artillery_turret_t3(),
+        RangeUnitKind::NuclearSilo => voxel::unit::nuclear_silo(),
         RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
         RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
         RangeUnitKind::Base => voxel::unit::command_base(),
@@ -322,6 +324,7 @@ fn probe_poses_along_the_run() {
             RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
             RangeUnitKind::ArtilleryTurretT2 => voxel::unit::artillery_turret_t2(),
             RangeUnitKind::ArtilleryTurretT3 => voxel::unit::artillery_turret_t3(),
+            RangeUnitKind::NuclearSilo => voxel::unit::nuclear_silo(),
             RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
             RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
             RangeUnitKind::Base => voxel::unit::command_base(),

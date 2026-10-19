@@ -39,9 +39,10 @@ pub enum Weapon {
     Laser = 5,
     Canister = 6,
     Siege = 7,
+    Nuclear = 8,
 }
 impl Weapon {
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 9;
     pub fn from_code(code: u8) -> Option<Self> {
         Some(match code {
             0 => Self::MachineGun,
@@ -52,6 +53,7 @@ impl Weapon {
             5 => Self::Laser,
             6 => Self::Canister,
             7 => Self::Siege,
+            8 => Self::Nuclear,
             _ => return None,
         })
     }
@@ -68,7 +70,12 @@ impl Weapon {
     pub fn bursts(self) -> bool {
         matches!(
             self,
-            Self::Blast | Self::Energy | Self::Annihilation | Self::Canister | Self::Siege
+            Self::Blast
+                | Self::Energy
+                | Self::Annihilation
+                | Self::Canister
+                | Self::Siege
+                | Self::Nuclear
         )
     }
 }
@@ -230,6 +237,7 @@ pub struct Battle {
     bullet_config: ExplosionConfig,
     pub canister_config: ExplosionConfig,
     pub siege_config: ExplosionConfig,
+    pub nuclear_config: ExplosionConfig,
     pub energy_config: ExplosionConfig,
     pub anni_config: ExplosionConfig,
     pub(super) ai: ai::Controller,
@@ -263,6 +271,7 @@ pub(super) fn attack_range(
         Weapon::MachineGun => machine_gun,
         Weapon::Canister => tuning.canister.range,
         Weapon::Siege => tuning.siege.range,
+        Weapon::Nuclear => tuning.nuclear.range,
         Weapon::Laser => motion::spider_tuning().laser.range,
     }
 }
@@ -271,6 +280,7 @@ fn loft(t: &Tuning, weapon: Weapon) -> i32 {
     match weapon {
         Weapon::Canister => t.canister.flight_time_milli,
         Weapon::Siege => t.siege.flight_time_milli,
+        Weapon::Nuclear => t.nuclear.flight_time_milli,
         _ => 1000,
     }
 }
@@ -283,6 +293,9 @@ fn effective_weapon(
     target: Option<RangeUnitKind>,
     tuning: &Tuning,
 ) -> Option<Weapon> {
+    if kind == RangeUnitKind::NuclearSilo {
+        return Some(Weapon::Nuclear);
+    }
     if kind == RangeUnitKind::Base {
         return None;
     }
@@ -331,7 +344,11 @@ impl Actor {
     pub(super) fn of(u: &RangeUnit) -> Self {
         Actor {
             turret: crate::turret::Traverse::new(u.motion.drive.head),
-            order: Order::Auto,
+            order: if u.kind == RangeUnitKind::NuclearSilo {
+                Order::Hold
+            } else {
+                Order::Auto
+            },
             target: None,
             next: 0,
             charge: None,
@@ -341,6 +358,7 @@ impl Actor {
             fired: 0,
             weapon: match u.kind {
                 RangeUnitKind::ArtilleryTurretT3 => Some(Weapon::Siege),
+                RangeUnitKind::NuclearSilo => Some(Weapon::Nuclear),
                 RangeUnitKind::Tank => Some(Weapon::Kinetic),
                 RangeUnitKind::Artillery => Some(Weapon::Blast),
                 RangeUnitKind::ArtilleryT2 | RangeUnitKind::ArtilleryTurretT2 => {
@@ -409,6 +427,7 @@ impl Battle {
         canister_config.unit_ablation_resistance = resistance;
         let mut siege_config = energetic(include_str!("../../../data/siege-shell.ron"));
         siege_config.unit_ablation_resistance = resistance;
+        let nuclear_config = energetic(include_str!("../../../data/nuclear-warhead.ron"));
         Self {
             phase: Phase::Setup,
             actors: units.iter().map(Actor::of).collect(),
@@ -425,6 +444,7 @@ impl Battle {
             bullet_config,
             canister_config,
             siege_config,
+            nuclear_config,
             energy_config,
             anni_config,
             ai: ai::Controller::new(),
@@ -479,10 +499,18 @@ impl Battle {
             Weapon::Kinetic => &self.kinetic_config,
             Weapon::Canister => &self.canister_config,
             Weapon::Siege => &self.siege_config,
+            Weapon::Nuclear => &self.nuclear_config,
             Weapon::Energy => &self.energy_config,
             Weapon::Annihilation => &self.anni_config,
             Weapon::MachineGun => &self.bullet_config,
             Weapon::Laser => &self.laser_config,
+        }
+    }
+    fn material_energy_mj(&self, weapon: Weapon) -> u64 {
+        if weapon == Weapon::Nuclear {
+            self.tuning.nuclear.material_energy_j * 1000
+        } else {
+            u64::from(self.config(weapon).material_energy_j) * 1000
         }
     }
     pub(super) fn shot_config(&self, weapon: Weapon, kind: RangeUnitKind) -> ExplosionConfig {
@@ -744,16 +772,19 @@ impl Battle {
             let distance = s.fx();
             if owner >= units.len()
                 || (weapon == Weapon::Canister && !units[owner].kind.canister())
+                || (weapon == Weapon::Nuclear && units[owner].kind != RangeUnitKind::NuclearSilo)
                 || (weapon == Weapon::Siege
                     && units[owner].kind != RangeUnitKind::ArtilleryTurretT3)
                 || !super::restored_round(pos, velocity, size)
                 || distance <= Fx::ZERO
                 || distance
-                    > Fx::from_int(if matches!(weapon, Weapon::Canister | Weapon::Siege) {
-                        100000
-                    } else {
-                        10000
-                    })
+                    > Fx::from_int(
+                        if matches!(weapon, Weapon::Canister | Weapon::Siege | Weapon::Nuclear) {
+                            100000
+                        } else {
+                            10000
+                        },
+                    )
             {
                 return None;
             }
@@ -782,7 +813,7 @@ impl Battle {
                 return None;
             }
             let energy = s.u64();
-            if energy > u64::from(self.config(weapon).material_energy_j) * 1000 {
+            if energy > self.material_energy_mj(weapon) {
                 return None;
             }
             self.waves.push(Burst {
@@ -983,6 +1014,9 @@ impl BlastRange {
     pub fn battle_charge(&self, id: usize) -> Option<u32> {
         self.battle.actors.get(id)?.charge
     }
+    pub fn battle_reload_until(&self, id: usize) -> Option<u32> {
+        self.battle.actors.get(id).map(|a| a.next)
+    }
     pub fn battle_muzzles(&self, id: usize) -> Vec<[Fx; 3]> {
         match (self.units.get(id), self.battle.actors.get(id)) {
             (Some(unit), Some(actor)) => weapons::muzzles(unit, actor.turret.angle),
@@ -1012,7 +1046,13 @@ impl BlastRange {
             })
             || matches!(
                 weapon,
-                Some(Weapon::MachineGun | Weapon::Laser | Weapon::Canister | Weapon::Siege)
+                Some(
+                    Weapon::MachineGun
+                        | Weapon::Laser
+                        | Weapon::Canister
+                        | Weapon::Siege
+                        | Weapon::Nuclear
+                )
             )
         {
             return commands::Outcome::Rejected;
@@ -1109,7 +1149,7 @@ impl BlastRange {
                     id,
                     allied: self.allied(id),
                     alive: unit.status.alive,
-                    armed: unit.status.weapon,
+                    armed: unit.status.weapon && unit.kind != RangeUnitKind::NuclearSilo,
                     mobile: unit.status.engine && unit.motion.can_drive(unit.mobility),
                     can_reposition: unit.status.engine
                         && !unit.kind.emplacement()
@@ -1902,6 +1942,7 @@ impl BlastRange {
             bullet_config: self.battle.bullet_config,
             canister_config: self.battle.canister_config,
             siege_config: self.battle.siege_config,
+            nuclear_config: self.battle.nuclear_config,
             energy_config: self.battle.energy_config,
             anni_config: self.battle.anni_config,
             ai: self.battle.ai.clone(),
@@ -1984,6 +2025,7 @@ impl BlastRange {
                             RangeUnitKind::TurretT1 => Some(Weapon::Kinetic),
                             RangeUnitKind::TurretT2 => Some(Weapon::Energy),
                             RangeUnitKind::ArtilleryTurretT3 => Some(Weapon::Siege),
+                            RangeUnitKind::NuclearSilo => Some(Weapon::Nuclear),
                             RangeUnitKind::ArtilleryT2 | RangeUnitKind::ArtilleryTurretT2 => {
                                 Some(Weapon::Canister)
                             }
@@ -2105,6 +2147,12 @@ impl BlastRange {
                     && self.allied(other) != self.allied(id)
             };
             let a = &mut b.actors[id];
+            if kind == RangeUnitKind::NuclearSilo && !matches!(a.order, Order::Ground(_)) {
+                record_gate(&mut b.fire_trace, id, FireGate::Hold);
+                a.target = None;
+                a.charge = None;
+                continue;
+            }
             if matches!(a.order, Order::Attack(i) if !hostile(i))
                 || (a.order == Order::Move
                     && self.units[id].motion.destination.is_none()
@@ -2117,7 +2165,9 @@ impl BlastRange {
                 a.target = None;
                 continue;
             }
-            let target = if let Order::Attack(i) = a.order {
+            let target = if kind == RangeUnitKind::NuclearSilo {
+                None // A manual point cannot inherit moving automatic targets.
+            } else if let Order::Attack(i) = a.order {
                 hostile(i).then_some(i)
             } else {
                 (0..self.units.len())
@@ -2149,6 +2199,7 @@ impl BlastRange {
                 Weapon::Kinetic => &b.kinetic_config,
                 Weapon::Canister => &b.canister_config,
                 Weapon::Siege => &b.siege_config,
+                Weapon::Nuclear => &b.nuclear_config,
                 Weapon::Energy => &b.energy_config,
                 Weapon::Annihilation => &b.anni_config,
                 Weapon::MachineGun => &b.bullet_config,
@@ -2212,7 +2263,13 @@ impl BlastRange {
             let yaw_limits = tracking.map_or(self.turret_limits, |t| {
                 crate::turret::Limits::of(t.yaw, crate::TICKS_PER_SECOND)
             });
-            a.turret.step(angle, yaw_limits);
+            if kind == RangeUnitKind::NuclearSilo {
+                // A silo launches freely into its ballistic arc; no traversing barrel.
+                a.turret.angle = angle;
+                a.turret.rate = 0;
+            } else {
+                a.turret.step(angle, yaw_limits);
+            }
             if let Some(aim) = &artillery_aim {
                 a.elevation.step(aim.pitch, self.turret_limits);
                 let pitch = fx::angle::diff(a.elevation.angle, 0);
@@ -2564,6 +2621,7 @@ impl BlastRange {
                     | RangeUnitKind::ArtilleryT2
                     | RangeUnitKind::ArtilleryTurretT2
                     | RangeUnitKind::ArtilleryTurretT3
+                    | RangeUnitKind::NuclearSilo
                     | RangeUnitKind::TurretT1
                     | RangeUnitKind::TurretT2
             );
@@ -2607,12 +2665,28 @@ impl BlastRange {
                 angle: a.turret.angle,
                 shell,
                 count,
-                artillery_velocity: kind.artillery().then(|| {
-                    artillery::along_barrel(
-                        &self.units[id],
-                        artillery::velocity(muzzles[0], p, weapon, config, loft(&b.tuning, weapon)),
-                    )
-                }),
+                artillery_velocity: if kind == RangeUnitKind::NuclearSilo {
+                    Some(artillery::velocity(
+                        muzzles[0],
+                        p,
+                        weapon,
+                        config,
+                        loft(&b.tuning, weapon),
+                    ))
+                } else {
+                    kind.artillery().then(|| {
+                        artillery::along_barrel(
+                            &self.units[id],
+                            artillery::velocity(
+                                muzzles[0],
+                                p,
+                                weapon,
+                                config,
+                                loft(&b.tuning, weapon),
+                            ),
+                        )
+                    })
+                },
                 muzzles,
                 ready: a.charge.unwrap_or(self.tick),
             };
@@ -2696,6 +2770,7 @@ impl BlastRange {
             Weapon::Kinetic => &b.kinetic_config,
             Weapon::Canister => &b.canister_config,
             Weapon::Siege => &b.siege_config,
+            Weapon::Nuclear => &b.nuclear_config,
             Weapon::Energy => &b.energy_config,
             Weapon::Annihilation => &b.anni_config,
             Weapon::MachineGun => &b.bullet_config,
@@ -2789,7 +2864,7 @@ impl BlastRange {
                 pos: muzzle,
                 previous: muzzle,
                 velocity,
-                distance: if matches!(weapon, Weapon::Canister | Weapon::Siege) {
+                distance: if matches!(weapon, Weapon::Canister | Weapon::Siege | Weapon::Nuclear) {
                     // A lofted arc travels farther than its horizontal range.
                     Fx::from_int(range * 2)
                         .add(Fx::from_int(config.gravity).mul(time).mul(time))
@@ -2800,11 +2875,17 @@ impl BlastRange {
             });
         }
         a.fired = a.fired.wrapping_add(1);
+        if weapon == Weapon::Nuclear {
+            a.order = Order::Hold;
+            a.target = None;
+        }
         a.charge = None;
         if shell {
             a.next = tick
                 + if weapon == Weapon::Canister {
                     b.tuning.canister.reload_ticks
+                } else if weapon == Weapon::Nuclear {
+                    b.tuning.nuclear.reload_ticks
                 } else if weapon == Weapon::Siege {
                     b.tuning.siege.reload_ticks
                 } else if kind == RangeUnitKind::TurretT2 {
@@ -2945,22 +3026,25 @@ impl BlastRange {
                     }
                 } else if r.weapon.bursts() {
                     let old = self.matter.remaining_mj;
-                    self.matter
-                        .begin(config.material_energy_j, config.fragment_box);
-                    let energy = self.matter.remaining_mj;
+                    let energy = b.material_energy_mj(r.weapon);
+                    self.matter.begin_mj(energy, config.fragment_box);
                     self.matter.remaining_mj = old;
                     let side = (r.owner < self.units.len()).then(|| self.allied(r.owner));
+                    let mut wave = Explosion::begin_impact(
+                        &self.world,
+                        at,
+                        prev,
+                        &config,
+                        &self.units,
+                        self.matter.tuning.body_energy_pct,
+                    );
+                    if r.weapon == Weapon::Nuclear {
+                        wave.material_budget(energy, b.tuning.nuclear.body_energy_pct);
+                    }
                     b.waves.push(Burst {
                         side,
                         weapon: r.weapon,
-                        wave: Explosion::begin_impact(
-                            &self.world,
-                            at,
-                            prev,
-                            &config,
-                            &self.units,
-                            self.matter.tuning.body_energy_pct,
-                        ),
+                        wave,
                         energy,
                     });
                     self.heat.deposit(
@@ -3021,6 +3105,7 @@ impl BlastRange {
             anni_config,
             canister_config,
             siege_config,
+            nuclear_config,
             shell_config,
             wave_held,
             ..
@@ -3030,6 +3115,7 @@ impl BlastRange {
             Weapon::Annihilation => &*anni_config,
             Weapon::Canister => &*canister_config,
             Weapon::Siege => &*siege_config,
+            Weapon::Nuclear => &*nuclear_config,
             _ => &*shell_config,
         };
         // Each wave captures and advances by its own preset's budget, in

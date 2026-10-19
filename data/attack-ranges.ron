@@ -12,6 +12,7 @@
     artillery: 1800,
     canister: 2200,
     siege: 5600,
+    nuclear: 6000,
     // Acquisition is a sensor, not permission to fire beyond weapon reach.
     acquisition: 6000,
 )

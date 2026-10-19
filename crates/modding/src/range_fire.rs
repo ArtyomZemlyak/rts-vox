@@ -50,6 +50,7 @@ impl Tuning {
             crate::range::RangeUnitKind::TurretT1
             | crate::range::RangeUnitKind::ArtilleryTurretT2
             | crate::range::RangeUnitKind::ArtilleryTurretT3
+            | crate::range::RangeUnitKind::NuclearSilo
             | crate::range::RangeUnitKind::TurretT2
             | crate::range::RangeUnitKind::Base => &self.tank,
         }

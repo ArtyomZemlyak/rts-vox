@@ -27,6 +27,15 @@ impl Explosion {
         e
     }
 
+    /// Replace the finite payload while retaining frozen receiver eligibility.
+    /// No new energy is created by claims; the caller supplies the same total
+    /// to Matter and Burst, and the reservation is serialized with the wave.
+    pub(super) fn material_budget(&mut self, energy_mj: u64, body_energy_pct: u32) {
+        if self.body_energy_mj.is_some() {
+            self.body_energy_mj = Some(energy_mj / 100 * u64::from(body_energy_pct.min(100)));
+        }
+    }
+
     /// Expose only the receiver's share to existing paid claims. No energy is
     /// supplied here; failed/deferred claims spend nothing.
     pub(crate) fn claim_energy(

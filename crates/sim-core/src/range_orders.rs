@@ -40,6 +40,12 @@ pub(super) fn validate(
     {
         return Admission::Rejected;
     }
+    if range.units[id].kind == RangeUnitKind::NuclearSilo
+        && (replacement == Replacement::Maintain
+            || !matches!(order, Order::Ground(_) | Order::Hold))
+    {
+        return Admission::Rejected;
+    }
     if let Order::Attack(target) = order {
         if range.allied(target) == side || !range.units.get(target).is_some_and(|u| u.status.alive)
         {
@@ -49,6 +55,15 @@ pub(super) fn validate(
     if let Order::Ground(p) = order {
         if (0..3).any(|a| p[a] < 0 || p[a] >= range.size[a] as i32) {
             return Admission::Rejected;
+        }
+        if range.units[id].kind == RangeUnitKind::NuclearSilo {
+            let pos = range.units[id].motion.pos;
+            let dx = i64::from(p[0] - pos[0].to_int_trunc());
+            let dz = i64::from(p[2] - pos[2].to_int_trunc());
+            let reach = i64::from(range.battle.tuning.nuclear.range);
+            if dx * dx + dz * dz > reach * reach || range.tick < actors[id].next {
+                return Admission::Rejected;
+            }
         }
     }
     // A face inside the map, for a kind with a tank; the approach is the

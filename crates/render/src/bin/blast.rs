@@ -1417,6 +1417,7 @@ fn setup(
             SkinBindings::new(&voxel::unit::artillery_t2()),
             SkinBindings::new(&voxel::unit::artillery_turret_t2()),
             SkinBindings::new(&voxel::unit::artillery_turret_t3()),
+            SkinBindings::new(&voxel::unit::nuclear_silo()),
         ]),
         pristine: Arc::new([
             voxel::unit::tank(),
@@ -1429,6 +1430,7 @@ fn setup(
             voxel::unit::artillery_t2(),
             voxel::unit::artillery_turret_t2(),
             voxel::unit::artillery_turret_t3(),
+            voxel::unit::nuclear_silo(),
         ]),
         seen: Vec::new(),
         pending: Vec::new(),
@@ -1857,6 +1859,7 @@ fn advance(
         {
             let mut params = gas.params;
             let c = scene.sim.battle.config(impact.weapon);
+            params.origin.w = c.gas_cell_units as f32;
             params.control.z = 1.0;
             params.control.y = 0.0;
             params.weapon.x = match impact.weapon {
@@ -1879,11 +1882,12 @@ fn advance(
             params.energy = Vec3::from(impact.at.map(|v| v as f32)).extend(0.0);
             params.beam = Vec4::ZERO;
             params.source = gas
-                .surface_source(
+                .surface_source_for(
                     Vec3::from(impact.at.map(|v| v as f32)),
                     Vec3::from(std::array::from_fn::<_, 3, _>(|a| {
                         (impact.from[a] - impact.at[a]) as f32
                     })),
+                    c.gas_cell_units,
                 )
                 .extend(c.gas_source_radius as f32);
             gas.atmosphere.emit_at(params, scene.sim.tick * 2);

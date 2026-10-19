@@ -19,7 +19,18 @@ pub struct AttackRanges {
     pub artillery: i32,
     pub canister: i32,
     pub siege: i32,
+    #[serde(default = "default_nuclear")]
+    pub nuclear: i32,
     pub acquisition: i32,
+}
+fn default_nuclear() -> i32 {
+    #[derive(Deserialize)]
+    struct Nuclear {
+        nuclear: i32,
+    }
+    ron::from_str::<Nuclear>(include_str!("../../../data/attack-ranges.ron"))
+        .expect("stock nuclear reach")
+        .nuclear
 }
 impl AttackRanges {
     pub fn from_ron(text: &str) -> Result<Self, String> {
@@ -33,7 +44,7 @@ impl AttackRanges {
         }
         Ok(value)
     }
-    fn values(&self) -> [i32; 11] {
+    fn values(&self) -> [i32; 12] {
         [
             self.flame,
             self.tank_blast,
@@ -45,6 +56,7 @@ impl AttackRanges {
             self.artillery,
             self.canister,
             self.siege,
+            self.nuclear,
             self.acquisition,
         ]
     }
@@ -60,6 +72,7 @@ impl AttackRanges {
             "artillery" => self.artillery,
             "canister" => self.canister,
             "siege" => self.siege,
+            "nuclear" => self.nuclear,
             "acquisition" => self.acquisition,
             _ => return None,
         })
@@ -162,7 +175,7 @@ mod tests {
         assert!(t.machine_gun < t.artillery);
         assert!(t.spider_laser < t.canister);
         assert!(t.artillery < t.canister && t.canister < t.siege);
-        assert!(t.acquisition >= *t.values()[..10].iter().max().unwrap());
+        assert!(t.acquisition >= *t.values()[..t.values().len() - 1].iter().max().unwrap());
         let source = include_str!("../../../data/attack-ranges.ron");
         for bad in [
             source.replace("flame: 300", "flame: 0"),

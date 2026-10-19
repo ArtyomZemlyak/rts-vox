@@ -516,6 +516,7 @@ impl RangeUnit {
         static ARTILLERY_T2: std::sync::OnceLock<voxel::unit::UnitBody> =
             std::sync::OnceLock::new();
         static ARTILLERY_TURRET_T2: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static NUCLEAR: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static ARTILLERY_TURRET_T3: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static ARTILLERY: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static TURRET_T1: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
@@ -535,6 +536,7 @@ impl RangeUnit {
             RangeUnitKind::ArtilleryTurretT3 => ARTILLERY_TURRET_T3
                 .get_or_init(voxel::unit::artillery_turret_t3)
                 .clone(),
+            RangeUnitKind::NuclearSilo => NUCLEAR.get_or_init(voxel::unit::nuclear_silo).clone(),
             RangeUnitKind::TurretT1 => TURRET_T1.get_or_init(voxel::unit::turret_t1).clone(),
             RangeUnitKind::TurretT2 => TURRET_T2.get_or_init(voxel::unit::turret_t2).clone(),
             RangeUnitKind::Base => BASE.get_or_init(voxel::unit::command_base).clone(),
@@ -5251,6 +5253,7 @@ impl BlastRange {
                     3 if version >= 43 => Some(battle::Weapon::Energy),
                     4 if version >= 43 => Some(battle::Weapon::Annihilation),
                     6 if version >= 51 && unit.kind.canister() => Some(battle::Weapon::Canister),
+                    8 if unit.kind == RangeUnitKind::NuclearSilo => Some(battle::Weapon::Nuclear),
                     7 if unit.kind == RangeUnitKind::ArtilleryTurretT3 => {
                         Some(battle::Weapon::Siege)
                     }
@@ -5263,7 +5266,13 @@ impl BlastRange {
                         | RangeUnitKind::ArtilleryT2
                         | RangeUnitKind::ArtilleryTurretT2
                         | RangeUnitKind::ArtilleryTurretT3
+                        | RangeUnitKind::NuclearSilo
                 ) && actor.weapon.is_some()
+                {
+                    return None;
+                }
+                if unit.kind == RangeUnitKind::NuclearSilo
+                    && !matches!(actor.weapon, None | Some(battle::Weapon::Nuclear))
                 {
                     return None;
                 }
@@ -5504,6 +5513,8 @@ impl BlastRange {
             // Direct field projectiles share tactical reach; heat/fracture
             // tuning must not act as an implicit weapon-type switch.
             battle::Weapon::Energy
+        } else if self.gun.kind == RangeUnitKind::NuclearSilo {
+            battle::Weapon::Nuclear
         } else if self.gun.kind == RangeUnitKind::ArtilleryTurretT3 {
             battle::Weapon::Siege
         } else if self.gun.kind.canister() {

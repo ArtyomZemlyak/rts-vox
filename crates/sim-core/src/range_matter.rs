@@ -563,8 +563,12 @@ impl Matter {
         self.fragment_box
     }
     pub fn begin(&mut self, joules: u32, fragment_box: u32) {
+        self.begin_mj(u64::from(joules) * 1000, fragment_box);
+    }
+    /// Finite payload budget; shared by small charges and strategic warheads.
+    pub fn begin_mj(&mut self, energy_mj: u64, fragment_box: u32) {
         self.fragment_box = fragment_box.clamp(1, 4) as u8;
-        self.remaining_mj = u64::from(joules) * 1000;
+        self.remaining_mj = energy_mj;
         self.supplied_mj += self.remaining_mj;
     }
     /// Count a ground claim the wave has no energy for, as `ground`
@@ -1491,6 +1495,7 @@ impl Matter {
                     modding::range::RangeUnitKind::ArtilleryTurretT3 => {
                         voxel::unit::artillery_turret_t3()
                     }
+                    modding::range::RangeUnitKind::NuclearSilo => voxel::unit::nuclear_silo(),
                     modding::range::RangeUnitKind::Strider => voxel::unit::strider(),
                     modding::range::RangeUnitKind::Spider => voxel::unit::spider(),
                     modding::range::RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),

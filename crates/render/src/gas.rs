@@ -390,13 +390,10 @@ impl GasInput {
     /// Move a surface emitter toward the incident air, keeping the whole gas
     /// cell clear even when it joins a region with a different grid origin.
     pub fn surface_source(&self, point: Vec3, outward: Vec3) -> Vec3 {
-        regions::surface_source(
-            &self.terrain_words,
-            self.window,
-            point,
-            outward,
-            self.params.origin.w as i32,
-        )
+        self.surface_source_for(point, outward, self.params.origin.w as i32)
+    }
+    pub fn surface_source_for(&self, point: Vec3, outward: Vec3, edge: i32) -> Vec3 {
+        regions::surface_source(&self.terrain_words, self.window, point, outward, edge)
     }
     pub fn advance(&mut self, step: u32) {
         let new_dirty = &self.terrain_dirty[self.mask_dirty_cursor..];

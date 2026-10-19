@@ -387,6 +387,51 @@ impl Effects {
             );
         }
     }
+    /// A bounded rising stem and broad cap; these clouds never issue damage.
+    fn nuclear_cloud(&mut self, at: Vec3, now: f32) {
+        const CLOUD: usize = 84;
+        let needed = self
+            .particles
+            .len()
+            .saturating_add(CLOUD)
+            .saturating_sub(CAP);
+        self.particles.drain(..needed);
+        for i in 0..CLOUD {
+            let n = i as u32;
+            let seed = self.serial;
+            let a = n as f32 * 2.399963;
+            let radial = Vec3::new(a.cos(), 0.0, a.sin());
+            let cap = i >= 28;
+            let radius = if cap {
+                9.0 + noise(seed) * 28.0
+            } else {
+                3.0 + noise(seed) * 9.0
+            };
+            let speed = if cap {
+                16.0 + noise(seed + 1) * 18.0
+            } else {
+                1.5 + noise(seed + 1) * 4.0
+            };
+            self.add(
+                at + radial * radius + Vec3::Y * if cap { 12.0 } else { 2.0 },
+                radial * speed
+                    + Vec3::Y
+                        * if cap {
+                            34.0 + noise(seed + 2) * 11.0
+                        } else {
+                            3.0 + (i % 7) as f32 * 6.0
+                        },
+                now,
+                7.0 + noise(seed + 3) * 4.0,
+                if cap {
+                    18.0 + noise(seed + 4) * 22.0
+                } else {
+                    12.0 + noise(seed + 4) * 9.0
+                },
+                true,
+            );
+        }
+    }
     /// Presentation-only contact: a hot pinch, sparks and cold cubic spall.
     /// Reserve the complete burst even when old smoke has filled the pool.
     fn kinetic_contact(&mut self, at: Vec3, normal: Vec3, now: f32) {
@@ -473,10 +518,16 @@ impl Effects {
             let at = Vec3::from(i.at.map(|v| v as f32));
             if matches!(
                 i.weapon,
-                BattleWeapon::Blast | BattleWeapon::Canister | BattleWeapon::Siege
+                BattleWeapon::Blast
+                    | BattleWeapon::Canister
+                    | BattleWeapon::Siege
+                    | BattleWeapon::Nuclear
             ) {
                 let c = sim.battle.config(i.weapon);
                 self.shell_burst(at, now, c.energy, c.gas_source_radius);
+                if i.weapon == BattleWeapon::Nuclear {
+                    self.nuclear_cloud(at, now);
+                }
             } else if i.weapon == BattleWeapon::Kinetic {
                 self.kinetic_contact(at, self.kinetic_normal(at), now);
             }
@@ -1187,6 +1238,20 @@ fn fire_mesh(mut buf: MeshBuf) -> Mesh {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nuclear_cloud_recycles_old_smoke_and_keeps_the_pool_bounded() {
+        let mut fx = Effects::default();
+        for _ in 0..CAP {
+            fx.add(Vec3::ZERO, Vec3::ZERO, 0.0, 12.0, 1.0, true);
+        }
+        fx.nuclear_cloud(Vec3::new(100.0, 20.0, 100.0), 1.0);
+        assert_eq!(fx.particles.len(), CAP);
+        let cloud: Vec<_> = fx.particles.iter().filter(|p| p.born == 1.0).collect();
+        assert_eq!(cloud.len(), 84);
+        assert!(cloud.iter().all(|p| p.smoke && p.life <= 11.0));
+        assert!(cloud.iter().any(|p| p.edge > 30.0));
+    }
+
     use super::*;
     #[test]
     fn burning_light_crosses_colour_and_noise_phases_without_a_flash() {

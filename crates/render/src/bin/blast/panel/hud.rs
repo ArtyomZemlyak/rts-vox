@@ -122,6 +122,8 @@ fn button(p: &mut ChildSpawnerCommands, font: &TextFont, text: &str, action: Act
             p.commands().entity(e).insert(HudText(4));
         } else if action == Action::Reset {
             p.commands().entity(e).insert(HudText(6));
+        } else if action == Action::NuclearLaunch {
+            p.commands().entity(e).insert(HudText(8));
         }
     })
     .id()
@@ -239,6 +241,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 p.spawn(row()).with_children(|p| {
                     for (name, a) in [
                         ("Атаковать точку", Action::Fire),
+                        ("Запустить ядерную ракету", Action::NuclearLaunch),
                         ("Стоп", Action::Stop),
                         ("Автоатака", Action::AutoAttack),
                         ("Радиусы выбранных", Action::Ranges),
@@ -411,6 +414,7 @@ fn weapon_name(w: BattleWeapon) -> &'static str {
         BattleWeapon::Laser => "Тяжёлый лазер",
         BattleWeapon::Canister => "Картечь",
         BattleWeapon::Siege => "Осадный фугас T3",
+        BattleWeapon::Nuclear => "Ядерная ракета · ручной запуск",
     }
 }
 
@@ -559,8 +563,30 @@ pub fn refresh(
             Some(!battle)
         } else if matches!(action, Some(Action::FreeControl)) {
             Some(battle && edit.editing && view.phase == sim_core::blast::battle::Phase::Setup)
+        } else if matches!(action, Some(Action::NuclearLaunch)) {
+            Some(
+                battle
+                    && !edit.editing
+                    && view.phase == sim_core::blast::battle::Phase::Fighting
+                    && selected_ids.iter().any(|&id| {
+                        view.units.get(id).is_some_and(|u| {
+                            u.kind == RangeUnitKind::NuclearSilo
+                                && u.status.alive
+                                && u.status.weapon
+                        })
+                    }),
+            )
         } else if matches!(action, Some(Action::Fire | Action::AutoAttack)) {
-            Some(!battle || view.phase == sim_core::blast::battle::Phase::Fighting)
+            Some(
+                !battle
+                    || (view.phase == sim_core::blast::battle::Phase::Fighting
+                        && (selected_ids.is_empty()
+                            || selected_ids.iter().any(|&id| {
+                                view.units
+                                    .get(id)
+                                    .is_some_and(|u| u.kind != RangeUnitKind::NuclearSilo)
+                            }))),
+            )
         } else if matches!(action, Some(Action::BattleReplay)) {
             Some(battle && view.phase != sim_core::blast::battle::Phase::Setup)
         } else if matches!(action, Some(Action::BattleChoose)) {
@@ -612,6 +638,14 @@ pub fn refresh(
                     "выкл"
                 }
             ),
+            8 => selected
+                .filter(|(_, u)| u.kind == RangeUnitKind::NuclearSilo)
+                .and_then(|(_, u)| u.reload_until)
+                .filter(|t| *t > view.tick)
+                .map_or_else(
+                    || "Запустить ядерную ракету".into(),
+                    |t| format!("Перезарядка: {} с", (t - view.tick).div_ceil(30)),
+                ),
             n if n >= 100 => view
                 .units
                 .get((n - 100) as usize)
@@ -622,6 +656,8 @@ pub fn refresh(
                             "П"
                         } else if u.kind == RangeUnitKind::Tank {
                             "Т"
+                        } else if u.kind == RangeUnitKind::NuclearSilo {
+                            "ЯДЕРНАЯ ШАХТА"
                         } else if u.kind == RangeUnitKind::ArtilleryTurretT3 {
                             "ОСАДНАЯ ТУРЕЛЬ T3"
                         } else if u.kind == RangeUnitKind::ArtilleryTurretT2 {
@@ -695,6 +731,35 @@ pub fn refresh(
             1 => selected.map_or_else(
                 || "Выберите свой юнит".into(),
                 |(id, u)| {
+                    if u.kind == RangeUnitKind::NuclearSilo {
+                        let state = if !u.status.alive {
+                            "УНИЧТОЖЕНА".into()
+                        } else if !u.status.weapon {
+                            "ПУСКОВАЯ ПОВРЕЖДЕНА".into()
+                        } else if let Some(t) = u.charge_until {
+                            if t > view.tick {
+                                format!("ПОДГОТОВКА: {} с", (t - view.tick).div_ceil(30))
+                            } else {
+                                "ПУСК ПОДГОТОВЛЕН".into()
+                            }
+                        } else if u.reload_until.is_some_and(|t| t > view.tick) {
+                            format!(
+                                "ПЕРЕЗАРЯДКА: {} с",
+                                u.reload_until
+                                    .unwrap()
+                                    .saturating_sub(view.tick)
+                                    .div_ceil(30)
+                            )
+                        } else {
+                            "ГОТОВА К РУЧНОМУ ЗАПУСКУ".into()
+                        };
+                        return format!(
+                            "ЯДЕРНАЯ ШАХТА {:02}\n{} · Ядро {}%",
+                            id + 1,
+                            state,
+                            u.integrity.core.mul(fx::Fx::from_int(100)).to_int_trunc()
+                        );
+                    }
                     if u.kind == RangeUnitKind::Base {
                         return format!(
                             "БАЗА {:02}  ·  {}\nЯдро {}%   ·   ЦЕЛЬ БОЯ",
@@ -1270,6 +1335,38 @@ pub(crate) mod tests {
         let e = app.world_mut().spawn((action, Interaction::Pressed)).id();
         app.update();
         app.world_mut().despawn(e);
+    }
+    #[test]
+    fn nuclear_launch_button_selects_only_silos_and_arms_point_selection() {
+        let mut app = app();
+        let source = &app.world().resource::<Scene>().sim;
+        let cfg = source.config;
+        let mut layout = source.layout.clone().unwrap();
+        layout.units[0].kind = RangeUnitKind::NuclearSilo;
+        let mut sim = BlastRange::with_layout(cfg, layout).unwrap();
+        sim.start_battle().unwrap();
+        app.world_mut().resource_mut::<Scene>().sim = sim;
+        {
+            let mut edit = app.world_mut().resource_mut::<Workshop>();
+            edit.editing = false;
+            edit.controlled = Some(0);
+            edit.selected_units = vec![0, 1];
+        }
+        click(&mut app, Action::NuclearLaunch);
+        assert!(app.world().resource::<Panel>().ground_fire);
+        assert_eq!(app.world().resource::<Workshop>().selected_units, vec![0]);
+        assert!(!app.world().resource::<Scene>().paused);
+        assert_eq!(
+            app.world().resource::<Scene>().sim.battle.actors[0].fired,
+            0,
+            "button must await a map point"
+        );
+        click(&mut app, Action::Stop);
+        assert!(!app.world().resource::<Panel>().ground_fire);
+        assert_eq!(
+            app.world().resource::<Scene>().sim.battle.actors[0].order,
+            sim_core::blast::battle::Order::Hold
+        );
     }
     fn rebuild_pending(app: &mut App) {
         let (config, layout) = app
