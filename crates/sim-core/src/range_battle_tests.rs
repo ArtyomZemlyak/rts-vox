@@ -3702,6 +3702,7 @@ fn battle_weapon_codes_fit_diagnostic_counters() {
         Weapon::Laser,
         Weapon::Canister,
         Weapon::Siege,
+        Weapon::Nuclear,
     ] {
         assert_eq!(Weapon::from_code(weapon as u8), Some(weapon));
         counts[weapon as usize] += 1;

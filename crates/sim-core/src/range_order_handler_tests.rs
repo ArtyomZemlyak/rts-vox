@@ -48,7 +48,12 @@ fn controller(range: &mut BlastRange, decision: ai::Decision, side: bool, old: b
 
 #[test]
 fn shared_order_handler_matches_legacy_player_controller_and_formation() {
-    for kind in RangeUnitKind::ALL {
+    // The legacy oracle predates the manual-only silo contract. Its distinct
+    // player policy is covered by nuclear_tests, and controllers below.
+    for kind in RangeUnitKind::ALL
+        .into_iter()
+        .filter(|&kind| kind != RangeUnitKind::NuclearSilo)
+    {
         let (mut a, mut b) = (arena(kind), arena(kind));
         for phase in [Phase::Setup, Phase::Fighting, Phase::Victory] {
             a.battle.phase = phase;
@@ -125,6 +130,34 @@ fn shared_order_handler_matches_legacy_player_controller_and_formation() {
         assert!(!a.battle_order(0, Order::Attack(1), None));
         assert!(!b.legacy_order(0, Order::Attack(1), None));
         same(&a, &b);
+    }
+}
+
+#[test]
+fn manual_nuclear_silo_rejects_controller_orders_without_mutating_state() {
+    let mut r = arena(RangeUnitKind::NuclearSilo);
+    r.battle.phase = Phase::Fighting;
+    let before = r.snapshot();
+    let hash = r.state_hash();
+    for side in [false, true] {
+        let id = usize::from(!side);
+        for order in [
+            ai::AiOrder::Attack(id),
+            ai::AiOrder::Attack(1 - id),
+            ai::AiOrder::Move([-1, 336]),
+            ai::AiOrder::Move([260, 336]),
+            ai::AiOrder::Hold,
+            ai::AiOrder::Auto,
+        ] {
+            assert!(!controller(
+                &mut r,
+                ai::Decision { actor: id, order },
+                side,
+                false,
+            ));
+            assert_eq!(r.state_hash(), hash);
+            assert_eq!(r.snapshot(), before);
+        }
     }
 }
 

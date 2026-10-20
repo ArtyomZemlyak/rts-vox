@@ -8598,7 +8598,9 @@ struct ColumnRows {
     out: Vec<([i32; 2], u16)>,
     cache: ColumnRowCache,
 }
-type SettledCellRequest = (u32, [i32; 3], [i32; 3]);
+// Bounds remain in the immutable selected slice. A stripe needs only the
+// source and its first owned X, rather than another copy of both corners.
+type SettledCellRequest = (u32, i32);
 /// X modulo eight owns each contact list. Each worker prepends indices in
 /// reverse fragment order, retaining ascending source order without a tail.
 /// No merge or shared insertion is needed.
@@ -8722,7 +8724,7 @@ impl SettledCells {
                     continue;
                 };
                 for x in (lo[0]..=hi[0]).take(8) {
-                    self.requests[x.rem_euclid(8) as usize].push((i as u32, [x, lo[1], lo[2]], hi));
+                    self.requests[x.rem_euclid(8) as usize].push((i as u32, x));
                 }
             }
         }
@@ -8731,9 +8733,10 @@ impl SettledCells {
             // Prepend sources in reverse order: each final contact list is
             // still in canonical source order, without a tail or a second
             // arena write to patch the preceding source's successor.
-            for &(i, lo, hi) in requests.iter().rev() {
+            for &(i, first_x) in requests.iter().rev() {
+                let (lo, hi) = selected[i as usize].expect("selected settled source");
                 for z in lo[2]..=hi[2] {
-                    for x in (lo[0]..=hi[0]).step_by(8) {
+                    for x in (first_x..=hi[0]).step_by(8) {
                         for y in want.column(x, z, lo[1], hi[1]) {
                             let index = stripe.nodes.len();
                             let head = stripe.cells.entry([x, y, z]).or_insert(usize::MAX);
