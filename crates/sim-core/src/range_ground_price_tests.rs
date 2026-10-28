@@ -133,3 +133,26 @@ fn measure_fracture_price_memo() {
         }
     }
 }
+
+#[test]
+fn large_scaled_soil_cost_stays_unaffordable_without_overflow_or_edits() {
+    struct Ground;
+    impl voxel::Generator for Ground {
+        fn material(&self, _: u32, y: u32, _: u32) -> u16 {
+            u16::from(y < 16)
+        }
+    }
+    let mut m = Matter::new(&[]);
+    m.tuning.fracture_kj_m3_per_strength = u32::MAX;
+    let mut material = *m.economy.mats.get(1).unwrap();
+    material.strength = modding::MAX_STRENGTH;
+    m.economy.mats.replace(material).unwrap();
+    m.begin(u32::MAX, 4);
+    let mut w = World::new(32, 32, 32, 100, Box::new(Ground));
+    assert!(matches!(
+        m.ground_or_pulverize_scaled(&mut w, [8, 8, 8], 1, [8, 16, 8], 100_000),
+        ClaimResult::Unaffordable
+    ));
+    assert_eq!(w.queued(), 0);
+    assert!(m.economy.ledger.balanced());
+}

@@ -142,8 +142,8 @@ mod tests {
         assert_eq!(w.bursts.corpses.len(), 1);
         let f = w.bursts.corpses.values().next().unwrap();
         assert_eq!(f.count, body.solid_count());
-        assert_eq!(f.velocity.x, Fx::from_int(3));
-        assert_eq!(f.velocity.y, Fx::from_int(-2));
+        assert_eq!(f.velocity.x, Fx::from_ratio(90, crate::TICKS_PER_SECOND));
+        assert_eq!(f.velocity.y, Fx::from_ratio(-60, crate::TICKS_PER_SECOND));
         assert_eq!(
             f.chunk.as_ref().unwrap().body.as_ref().unwrap().vol.cols,
             body.vol.cols

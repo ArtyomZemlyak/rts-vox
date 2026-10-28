@@ -322,11 +322,11 @@ fn every_armed_kind_damages_wood_with_its_stock_weapon() {
                 replay = Some(BlastRange::restore(config, &r.snapshot()).unwrap());
             }
             assert!(r.matter.economy.ledger.balanced());
-            if r.removed_materials[5] > 0 || kind == RangeUnitKind::Base {
+            if r.removed_materials[5] > 0 || matches!(kind, RangeUnitKind::Base | RangeUnitKind::Crawler) {
                 break;
             }
         }
-        if kind == RangeUnitKind::Base {
+        if matches!(kind, RangeUnitKind::Base | RangeUnitKind::Crawler) {
             assert_eq!(r.battle_weapon(0), None);
             assert_eq!(r.battle.actors[0].fired, 0);
             assert_eq!(r.removed_materials[5], 0);

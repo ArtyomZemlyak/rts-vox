@@ -23,6 +23,8 @@ $valid = Get-RangeValidity $rows -Scenario world-battle -Log $log
 $pressure = Get-RangeValidity $rows -Scenario world-battle -Log $log -OsPressure
 Assert-Profile ($pressure.ValidForComparison -and -not $pressure.AcceptanceEligible -and $pressure.Mode -eq 'os_pressure_diagnostic') 'OS pressure capture accepted as FPS benchmark'
 Assert-Profile ($valid.ValidForComparison -and $valid.AcceptanceEligible -and $valid.MeetsSimulationRate) 'Good run rejected'
+$shader = Get-RangeValidity $rows -Scenario world-battle -Log $log -ShaderOverride
+Assert-Profile ($shader.ValidForComparison -and -not $shader.AcceptanceEligible -and $shader.Mode -eq 'shader_diagnostic') 'Shader override accepted as embedded-release FPS'
 $maximizedLog = $log + "`nPROFILE window_maximize_requested=true"
 Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log $maximizedLog -Maximized).AcceptanceEligible) 'Declared maximized run rejected'
 Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log $log -Maximized).Reasons -contains 'window_maximize_mode_mismatch') 'Legacy executable silently ignoring maximization accepted'
@@ -200,6 +202,14 @@ try {
     Assert-Profile ($present.Count -eq 1 -and $present[0].Exists -and $present[0].Path -eq 'out/range-tuning.txt') 'Saved tuning evidence missing'
     Assert-Profile ($present[0].Sha256 -eq (Get-FileHash -LiteralPath $tuningTestFile).Hash) 'Wrong saved tuning fingerprint'
     Assert-Profile (@(Get-RangeInputHashes -Repo $tuningTestRepo).Count -eq 0) 'Stock mode reads saved-player tuning'
+    Assert-Profile ($null -eq (Get-RangeShaderOverride -Directory '')) 'Embedded shaders invented an override'
+    $shaderFile = Join-Path $tuningTestData 'gas.wgsl'
+    'original' | Set-Content -LiteralPath $shaderFile
+    $shaderBefore = Get-RangeShaderOverride -Directory $tuningTestData
+    'modified' | Set-Content -LiteralPath $shaderFile
+    $shaderAfter = Get-RangeShaderOverride -Directory $tuningTestData
+    Assert-Profile ($shaderBefore.Files.Count -eq 1 -and $shaderBefore.Files[0].Name -eq 'gas.wgsl' -and $shaderBefore.Files[0].Sha256 -ne $shaderAfter.Files[0].Sha256) 'Shader contents absent from provenance'
+    Remove-Item -LiteralPath $shaderFile
     'melt.3 61' | Set-Content -LiteralPath $tuningTestFile
     $changed = @(Get-RangeInputHashes -Repo $tuningTestRepo -SavedTuning)
     Assert-Profile ($changed[0].Sha256 -ne $present[0].Sha256) 'Saved tuning changes are invisible'
@@ -207,10 +217,34 @@ try {
     $deleted = @(Get-RangeInputHashes -Repo $tuningTestRepo -SavedTuning)
     Assert-Profile (-not $deleted[0].Exists -and $null -eq $deleted[0].Sha256) 'Saved tuning deletion is invisible'
 } finally {
+    if ($shaderFile -and (Test-Path -LiteralPath $shaderFile)) { Remove-Item -LiteralPath $shaderFile }
     if (Test-Path -LiteralPath $tuningTestFile) { Remove-Item -LiteralPath $tuningTestFile }
     # Only the three empty directories created above; no recursive removal.
     foreach ($tuningEmpty in $tuningTestData, $tuningTestOut, $tuningTestRepo) {
         if (Test-Path -LiteralPath $tuningEmpty) { Remove-Item -LiteralPath $tuningEmpty }
+    }
+}
+$hashRepo = Join-Path $env:TEMP ("rts-vox-hash-order-" + [guid]::NewGuid().ToString('N'))
+$hashData = Join-Path $hashRepo 'data'
+$hashFiles = @('ab.ron', 'a_b.ron', 'a-b.ron')
+$hashCulture = [System.Threading.Thread]::CurrentThread.CurrentCulture
+try {
+    New-Item -ItemType Directory -Path $hashData -Force | Out-Null
+    foreach ($name in $hashFiles) { Set-Content -LiteralPath (Join-Path $hashData $name) -Value 'fixture' }
+    foreach ($culture in 'ru-RU', 'en-US', 'tr-TR') {
+        [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo($culture)
+        $hashes = @(Get-RangeInputHashes -Repo $hashRepo)
+        Assert-Profile (($hashes.Path -join '|') -ceq 'data/a-b.ron|data/a_b.ron|data/ab.ron') "Input hash order depends on culture: $culture"
+        Assert-Profile (@($hashes | Where-Object { $_.Sha256 -notmatch '^[0-9A-F]{64}$' }).Count -eq 0) 'Input hash lost content evidence'
+    }
+} finally {
+    [System.Threading.Thread]::CurrentThread.CurrentCulture = $hashCulture
+    foreach ($name in $hashFiles) {
+        $hashFile = Join-Path $hashData $name
+        if (Test-Path -LiteralPath $hashFile) { Remove-Item -LiteralPath $hashFile }
+    }
+    foreach ($emptyHashDir in $hashData, $hashRepo) {
+        if (Test-Path -LiteralPath $emptyHashDir) { Remove-Item -LiteralPath $emptyHashDir }
     }
 }
 $null = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'profile-range.ps1'), [ref]$parserTokens, [ref]$parserErrors)

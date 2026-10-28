@@ -131,7 +131,7 @@ fn player_artillery_surface_blast_keeps_ground_energy_and_replays() {
         }
         if replay.is_none() && r.matter.admission.ground[0] > 0 && r.has_wave_energy() {
             let bytes = r.snapshot();
-            assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 59);
+            assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 59);
             let copy = BlastRange::restore(c, &bytes).expect("player material blast snapshot");
             assert!(
                 !copy.weapon_configured,
@@ -543,7 +543,7 @@ fn legacy_artillery_without_elevation_restores_and_invalid_pitch_is_rejected() {
         r.save_after(&mut tail, version);
         let mut old = r.snapshot();
         old.truncate(old.len() - tail.v.len());
-        old[..4].copy_from_slice(&version.to_le_bytes());
+        old[8..12].copy_from_slice(&version.to_le_bytes());
         let restored = BlastRange::restore(r.config, &old).unwrap();
         assert_eq!(restored.units[0].turret_pitch, 0);
         assert_eq!(

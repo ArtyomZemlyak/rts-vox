@@ -2,7 +2,7 @@
 // the blue discharge is presentation and does not model real plasma confinement.
 (
     motion: Direct,
-    charge_ticks: 45,
+    charge_ticks: 30,
     half_cells: 20,
     cell_units: 2,
     energy: 1800,
@@ -10,6 +10,8 @@
     material_energy_j: 0,
     air_cost: 100,
     soil_resistance: 165,
+    // Soil confinement per world unit below the impact; hull work is unchanged.
+    soil_depth_cost: 300,
     concrete_resistance: 380,
     // Stock discharge leaves a dent, 2x stresses the face and 4x can tear it.
     steel_resistance: 6000,
@@ -25,7 +27,7 @@
     // the shell's over ten ticks, so a fifth of the shell's milli gives a
     // tank a metre from the burst the same shove.
     hull_impulse_milli: 20,
-    fire_tick: 75,
+    fire_tick: 50,
     shell_speed: 1200,
     // A bolt heats a small spot hard (ADR-277).
     heat_units: 8,

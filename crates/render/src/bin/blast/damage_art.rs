@@ -139,6 +139,7 @@ mod tests {
                     modding::range::RangeUnitKind::ArtilleryTurretT2 => 8,
                     modding::range::RangeUnitKind::ArtilleryTurretT3 => 9,
                     modding::range::RangeUnitKind::NuclearSilo => 10,
+                    modding::range::RangeUnitKind::Crawler => 11,
                 };
                 let pristine = &templates[kind];
                 pristine

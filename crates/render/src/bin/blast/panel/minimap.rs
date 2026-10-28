@@ -105,6 +105,7 @@ fn ground_footprint(
     transform: &Transform,
     projection: &Projection,
     viewport: Vec2,
+    ground: f32,
 ) -> Option<[Vec2; 4]> {
     let Projection::Orthographic(ortho) = projection else {
         return None;
@@ -123,7 +124,6 @@ fn ground_footprint(
     if forward.y >= -0.01 {
         return None;
     }
-    let ground = sim_core::blast::FLOOR as f32;
     Some(std::array::from_fn(|i| {
         let (x, y) = [(-1.0, 1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)][i];
         let origin = transform.translation + right * (x * width * 0.5) + up * (y * height * 0.5);
@@ -197,7 +197,7 @@ pub fn update_view(
         .unwrap_or(Vec2::new(1600.0, 900.0));
     let Some(view) = &snapshot.view else { return };
     let size = view.size;
-    let polygon = ground_footprint(transform, projection, viewport)
+    let polygon = ground_footprint(transform, projection, viewport, view.ground_level as f32)
         .map(|corners| {
             clip_to_map(corners.map(|p| Vec2::new(p.x / size[0] as f32, p.y / size[2] as f32)))
         })
@@ -474,13 +474,14 @@ mod tests {
         });
         let transform = Transform::from_xyz(500.0, 400.0, 800.0)
             .looking_at(Vec3::new(500.0, 16.0, 500.0), Vec3::Y);
-        let corners = ground_footprint(&transform, &projection, Vec2::new(800.0, 600.0)).unwrap();
+        let corners =
+            ground_footprint(&transform, &projection, Vec2::new(800.0, 600.0), 16.0).unwrap();
         let centre = corners.iter().copied().sum::<Vec2>() / 4.0;
         assert!((centre - Vec2::new(500.0, 500.0)).length() < 0.01);
         let rotated = Transform::from_xyz(800.0, 400.0, 500.0)
             .looking_at(Vec3::new(500.0, 16.0, 500.0), Vec3::Y);
         let rotated_corners =
-            ground_footprint(&rotated, &projection, Vec2::new(800.0, 600.0)).unwrap();
+            ground_footprint(&rotated, &projection, Vec2::new(800.0, 600.0), 16.0).unwrap();
         assert!((corners[0] - rotated_corners[0]).length() > 10.0);
 
         let clipped = clip_to_map([

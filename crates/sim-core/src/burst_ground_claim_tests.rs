@@ -165,3 +165,76 @@ fn ground_admission_and_release_match_original_reservations() {
         }
     }
 }
+#[test]
+fn grouped_confirmation_matches_per_voxel_reservations_and_saved_state() {
+    for side in 1..=4 {
+        for cap in [0, 1, 32, 1024] {
+            for slice in [1, 13, 1024] {
+                for reserve in [0, 8] {
+                    let mut t = crate::Tuning::from_ron(include_str!("../../../data/sim.ron"))
+                        .unwrap()
+                        .blast;
+                    t.max_fragments = cap;
+                    t.max_flying = cap;
+                    let (mut actual, mut expected) = (Bursts::default(), Bursts::default());
+                    let mut a = crate::blast::matter::Matter::new(&[]);
+                    let mut b = crate::blast::matter::Matter::new(&[]);
+                    let mut completed = Vec::new();
+                    for i in 0..256u32 {
+                        let k = i * 173 % 256;
+                        let p = [8 + k % 8, 4 + k / 8 % 4, 8 + k / 32];
+                        let mat = [1, 5, 3][(k / 64 % 3) as usize];
+                        let claim = Claim {
+                            at: [20 + (k / 128) as i32, 16, 20],
+                            motion_mj: 11 + u64::from(k),
+                            side,
+                            mat,
+                        };
+                        actual.add_claim(p, claim, &t);
+                        expected.add_claim(p, claim, &t);
+                        // No-op removal, replaced material, successful dig,
+                        // unrelated edit and repeated notification in one stream.
+                        let old = match i % 11 {
+                            0 => 0,
+                            1 => 6,
+                            _ => mat,
+                        };
+                        let edit = Edit::dig_if(p[0], p[1], p[2], mat);
+                        completed.push((edit, old));
+                        if i % 17 == 0 {
+                            completed.push((edit, old));
+                        }
+                        if i % 29 == 0 {
+                            completed.push((Edit::put(1, 1, 1, 2), 0));
+                        }
+                    }
+                    for edits in completed.chunks(slice) {
+                        actual.confirm_reserving(edits, &mut a.economy, &t, reserve);
+                        expected.confirm_reserving_inner::<false>(
+                            edits,
+                            &mut b.economy,
+                            &t,
+                            reserve,
+                        );
+                        assert_eq!(actual.groups, expected.groups);
+                        assert_eq!(actual.reserved, expected.reserved);
+                        assert_eq!(actual.dusted, expected.dusted);
+                        let (mut aa, mut bb) = (Blob::new(), Blob::new());
+                        actual.save(&mut aa);
+                        expected.save(&mut bb);
+                        assert_eq!(
+                            aa.v, bb.v,
+                            "side={side} cap={cap} slice={slice} reserve={reserve}"
+                        );
+                        a.save(&mut aa);
+                        b.save(&mut bb);
+                        assert_eq!(aa.v, bb.v);
+                        assert!(a.economy.balanced() && b.economy.balanced());
+                    }
+                    assert!(actual.claims.is_empty() && actual.groups.is_empty());
+                    assert_eq!(actual.reserved, 0);
+                }
+            }
+        }
+    }
+}

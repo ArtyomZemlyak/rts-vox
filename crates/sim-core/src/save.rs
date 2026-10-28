@@ -31,7 +31,8 @@
 //! ```text
 //! 0  8  "RTSVOXSV"
 //! 8  4  версия, u32
-//! 12 …  тело
+//! 12 4  частота симуляции, u32
+//! 16 …  тело
 //! ```
 //!
 //! **Версия растёт при любом изменении раскладки.** Незнакомую версию
@@ -41,6 +42,8 @@
 //! материального боя до версии 11 отклоняются: правила отказов изменены.
 //! С версии 15 заявка на воксель грунта хранит ожидаемый материал
 //! (ADR-659); более старая берёт его из мира, где копка ещё не прошла.
+//! С версии 16 частота записана явно; прежние файлы и файлы с другим
+//! шагом отклоняются без преобразования динамического состояния (ADR-792).
 
 use crate::{ground, shot, Order, Reference, Tuning, Units, World};
 use fx::blob::{Blob, Scan};
@@ -50,7 +53,7 @@ use fx::rng::Rng;
 pub const MAGIC: [u8; 8] = *b"RTSVOXSV";
 
 /// Версия раскладки. Меняется **вместе** с любым полем формата.
-pub const VERSION: u32 = 15;
+pub const VERSION: u32 = 16;
 
 /// Почему файл не прочитан.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +101,7 @@ pub fn save(r: &Reference) -> Vec<u8> {
     let mut b = Blob::new();
     b.v.extend_from_slice(&MAGIC);
     b.u32(VERSION);
+    b.u32(crate::TICKS_PER_SECOND as u32);
 
     // Сценарий: сид, параметры генератора, копатели, генератор
     // случайных чисел.
@@ -156,11 +160,15 @@ pub fn load_with(
     }
     let mut s = Scan::new(&buf[MAGIC.len()..]);
     let v = s.u32();
-    if v != VERSION && !(8..=14).contains(&v) {
+    if v != VERSION {
         return Err(LoadError::Version {
             found: v,
             want: VERSION,
         });
+    }
+
+    if s.u32() != crate::TICKS_PER_SECOND as u32 {
+        return Err(LoadError::WorldMismatch);
     }
 
     let seed = s.u64();
@@ -1105,7 +1113,7 @@ mod tests {
         let full = save(&r);
         // After the magic, the version and the seed: nx, ny, nz,
         // base height, relief, feature.
-        let field = |k: usize| MAGIC.len() + 4 + 8 + 4 * k;
+        let field = |k: usize| MAGIC.len() + 4 + 4 + 8 + 4 * k;
         for (k, bad) in [(1, 4u32), (1, 0), (0, 1), (5, 3_000_000)] {
             let mut b = full.clone();
             b[field(k)..field(k) + 4].copy_from_slice(&bad.to_le_bytes());

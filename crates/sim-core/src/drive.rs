@@ -110,10 +110,29 @@ const TAU: Fx = Fx::from_ratio(710, 113);
 
 /// Cadence from accepted translation plus support travel along a turning arc.
 /// Derived once per chassis/phase. No per-unit square root or new state.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct StepCycle {
     linear: Fx,
     turn: Fx,
+}
+
+/// Geometry only: support radii and stride change through live chassis edits,
+/// never through terrain. No cached world answers or saved simulation state.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StepCycleCache {
+    key: Option<[i32; 3]>,
+    value: Option<StepCycle>,
+}
+impl StepCycleCache {
+    pub fn get(&mut self, chassis: &Chassis) -> Option<StepCycle> {
+        let gait = chassis.gait?;
+        let key = [chassis.support_x_cm, chassis.support_z_cm, gait.stride_cm];
+        if self.key != Some(key) {
+            self.value = StepCycle::of(chassis);
+            self.key = Some(key);
+        }
+        self.value
+    }
 }
 impl StepCycle {
     pub fn of(c: &Chassis) -> Option<Self> {
@@ -239,6 +258,20 @@ pub(crate) fn stopping_speed(distance: Fx, brake: Fx, tps: i32, limit: Fx) -> Fx
         }
     }
     Fx(((budget + tail(lo)) / lo).min(cap) as i64)
+}
+
+/// Pure-pursuit curvature is 2 sin(error) / target distance. Use an
+/// axis-distance lower bound so the speed cap is conservative without sqrt.
+pub(crate) fn corner_speed(delta: [Fx; 2], error: i32, turn: i32, tps: i32, cap: Fx) -> Fx {
+    let sine = angle::sin(error).abs();
+    if sine == Fx::ZERO {
+        return cap;
+    }
+    let omega = Fx::from_ratio(turn.max(0) * tps, angle::FULL).mul(TAU);
+    omega
+        .mul(delta[0].abs().max(delta[1].abs()))
+        .div(sine.add(sine))
+        .min(cap)
 }
 
 /// Один тик хода.
@@ -377,6 +410,41 @@ mod tests {
 
     fn inv_tick() -> Fx {
         Fx::from_ratio(1, TICKS_PER_SECOND)
+    }
+
+    #[test]
+    fn cached_step_geometry_tracks_live_stride_supports_and_gait_changes() {
+        let mut cache = StepCycleCache::default();
+        let mut c = walking();
+        let original_gait = c.gait;
+        for edit in 0..32 {
+            c.support_x_cm += edit + 1;
+            c.support_z_cm += 2 * edit + 1;
+            if let Some(gait) = c.gait.as_mut() {
+                gait.stride_cm += edit + 1;
+            }
+            let expected = StepCycle::of(&c);
+            assert_eq!(cache.get(&c), expected);
+            assert_eq!(cache.get(&c), expected, "warm cache changed geometry");
+            let mut cloned = cache.clone();
+            assert_eq!(cloned.get(&c), expected);
+        }
+        c.gait = None;
+        assert_eq!(cache.get(&c), None);
+        c.gait = original_gait;
+        let expected = StepCycle::of(&c);
+        assert_eq!(cache.get(&c), expected);
+        let mut cold = StepCycleCache::default();
+        for (path, yaw) in [
+            (Fx::ZERO, 0),
+            (Fx::from_ratio(17, 30), -391),
+            (Fx::from_int(5), 2048),
+        ] {
+            assert_eq!(
+                cache.get(&c).unwrap().advance(path, yaw),
+                cold.get(&c).unwrap().advance(path, yaw)
+            );
+        }
     }
 
     #[test]

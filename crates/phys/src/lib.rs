@@ -267,6 +267,30 @@ pub fn step(
     r: &Ride,
     dt: Fx,
 ) {
+    // Spring integration has an accuracy limit independent of the world's
+    // scheduling frequency. Reuse the same immutable support sample for
+    // bounded substeps; AI, terrain queries and collision admission run once.
+    let maximum = Fx::from_ratio(1, 30);
+    let steps = if dt <= maximum {
+        1
+    } else {
+        (dt.raw().saturating_add(maximum.raw() - 1) / maximum.raw()).clamp(1, 4) as i32
+    };
+    let slice = dt.div(Fx::from_int(steps));
+    for _ in 0..steps {
+        step_once(c, supports, ground, heading, sway, r, slice);
+    }
+}
+#[allow(clippy::too_many_arguments)]
+fn step_once(
+    c: &mut Chassis,
+    supports: &[Support],
+    ground: &[Fx],
+    heading: (Fx, Fx),
+    sway: V3,
+    r: &Ride,
+    dt: Fx,
+) {
     debug_assert_eq!(supports.len(), ground.len(), "опор и высот поровну");
     let (hc, hs) = heading;
     let (mut fy, mut tx, mut tz) = (Fx::ZERO, Fx::ZERO, Fx::ZERO);

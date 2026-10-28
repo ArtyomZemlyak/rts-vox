@@ -14,12 +14,16 @@
 
 pub mod attack_ranges;
 pub mod battle_ai;
+pub mod clock;
 pub mod data;
 pub mod explosion;
 pub mod foundation;
+pub mod granular;
 pub mod heat;
 pub mod integrity;
 pub mod kinds;
+pub mod laboratory;
+pub mod lab_tools;
 pub mod navigation;
 pub mod range;
 pub mod range_battle;
@@ -34,6 +38,8 @@ pub mod turret;
 pub mod unit_heat;
 pub mod vox;
 pub mod weapons;
+pub mod water;
+pub mod upheaval;
 
 pub use data::{load_pack, merge_materials, LoadError, Pack, UnitDef, UnitModel};
 pub use kinds::{KindDef, Kinds};
@@ -342,3 +348,5 @@ mod tests {
 
 /// Authored battles for the live range HUD.
 pub mod range_skirmish;
+
+pub mod unit_armour;

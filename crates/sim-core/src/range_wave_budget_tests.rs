@@ -179,7 +179,7 @@ fn wave_sides_survive_a_snapshot() {
     r.battle.waves[0].side = Some(true);
     r.battle.waves[1].side = Some(false);
     let saved = r.snapshot();
-    assert_eq!(u32::from_le_bytes(saved[..4].try_into().unwrap()), 60);
+    assert_eq!(u32::from_le_bytes(saved[8..12].try_into().unwrap()), 60);
     let restored = BlastRange::restore(r.config, &saved).unwrap();
     let sides: Vec<_> = restored.battle.waves.iter().map(|w| w.side).collect();
     assert_eq!(sides, [Some(true), Some(false), None]);
@@ -192,7 +192,7 @@ fn wave_sides_survive_a_snapshot() {
         w.side = None;
     }
     let older = r.snapshot();
-    assert!(u32::from_le_bytes(older[..4].try_into().unwrap()) < 60);
+    assert!(u32::from_le_bytes(older[8..12].try_into().unwrap()) < 60);
     let restored = BlastRange::restore(r.config, &older).unwrap();
     assert!(restored.battle.waves.iter().all(|w| w.side.is_none()));
 }

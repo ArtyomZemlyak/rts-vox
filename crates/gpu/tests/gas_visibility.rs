@@ -65,11 +65,16 @@ fn weak_impact_light_is_bounded_continuous_and_keeps_bright_light() {
     };
     // Compile the complete production fragment module, so the oracle exercises
     // the same helper/constants as terrain rendering. No copied fade formula.
+    let mesh_shadows = include_str!("../../render/src/mesh_shadows.wgsl")
+        .replace("$CASCADES", "1")
+        .replace("$DIRECTIONAL", "1")
+        .replace("$RECT", "1");
     let shader = format!(
-        "{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../../render/src/terrain_common.wgsl"),
         include_str!("../../render/src/gas_sampling.wgsl"),
         include_str!("../../render/src/energy.wgsl"),
+        mesh_shadows,
         include_str!("../../render/src/gas_draw.wgsl"),
         r#"
 @group(0) @binding(9) var<storage,read_write> weights:array<f32>;

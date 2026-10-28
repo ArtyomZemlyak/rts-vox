@@ -52,7 +52,15 @@ use sim_core::blast::BlastRange;
 // Windows physics 1/4/8 agree (analysis/338).
 // ADR-758: doubled T3 siege reach and matching acquisition radius;
 // Windows physics 1/4/8 agree. Prior ADR-756 hash: 01f7e33e10af3d47.
-const GOLDEN_600: u64 = 0x0617_1a5b_8d70_3658;
+// ADR-792: 20 Hz, coarser conserved debris groups and normalized stream time.
+// All 600 Windows CLI hashes agree on physics 1/4 (analysis/376).
+// ADR-800: larger connected body panels; terrain chip splitting is unchanged.
+// Geometry policy changes intentionally; snapshot wire format is unchanged.
+// ADR-813: progressive route prefixes and moving turns through crushable
+// forest intentionally change movement. Physics 1/4/8 agree (analysis/398).
+// ADR-815: tiered mechanical grades and physical-volume fracture prices.
+// All 600 tick hashes agree on physics 1/4 (analysis/400).
+const GOLDEN_600: u64 = 0x8b8e_c5ae_b10f_421e;
 
 /// Сценарий собирается **из тех же данных, что у игры**: `include_str!`
 /// разворачивается на сборке, ввода-вывода в тесте нет, а литералы

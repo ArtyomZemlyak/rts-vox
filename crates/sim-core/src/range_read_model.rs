@@ -79,6 +79,7 @@ pub struct View {
     pub generation: u64,
     pub tick: u32,
     pub size: [u32; 3],
+    pub ground_level: i32,
     pub battle: bool,
     pub phase: Phase,
     pub autonomous: bool,
@@ -101,6 +102,7 @@ impl View {
             generation,
             tick: world.tick,
             size: world.size(),
+            ground_level: world.ground_level(),
             battle: world.battle_mode(),
             phase: world.battle.phase,
             autonomous: world.battle.autonomous,
@@ -125,6 +127,7 @@ impl View {
         self.generation = generation;
         self.tick = world.tick;
         self.size = world.size();
+        self.ground_level = world.ground_level();
         self.battle = world.battle_mode();
         self.phase = world.battle.phase;
         self.autonomous = world.battle.autonomous;

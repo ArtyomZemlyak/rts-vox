@@ -1,14 +1,23 @@
-// Shared bounded pressure/matter/heat engine. Larger cells cover a wider area.
+// Same 204.8 m capture ceiling; gameplay pressure decays before this boundary.
+// Hulls are steel: only modest role differences above the world's steel900.
+// Wide square terraces, a deep core and shallow outer shelves; air blast stays broad.
+// Finite strategic fracture payload remains 2 TJ in range-nuclear.ron.
 (
  delivery: Blast, motion: Ballistic,
- charge_ticks: 60, fire_tick: 60,
- half_cells: 32, cell_units: 16, energy: 1000000,
+ charge_ticks: 40, fire_tick: 40,
+ half_cells: 32, cell_units: 64, energy: 2400,
  material_energy_j: 4000000000,
  air_cost: 100, soil_resistance: 60, concrete_resistance: 150,
- steel_resistance: 3000,
- unit_ablation_resistance: 1,
- unit_role_resistance_milli: (1000, 1800, 650, 1100, 350),
- wave_work_per_tick: 65536, capture_cells_per_tick: 147456,
+ soil_depth_cost: 32,
+ soil_crater: Some((spread: 7, step: 32, layer: 4,
+  deep_half_width: 64, middle_half_width: 128,
+  middle_depth: 32, outer_depth: 4, taper_units: 256)),
+ steel_resistance: 900,
+ // Air, soil, concrete, steel, foliage, wood, rock, turf, compacted soil.
+ material_resistance: Some((0, 60, 150, 900, 10, 20, 220, 60, 60)),
+ unit_ablation_resistance: 1050,
+ unit_role_resistance_milli: (1000, 1100, 950, 1000, 900),
+ wave_work_per_tick: 65536, capture_cells_per_tick: 32768,
  edits_per_tick: 65536, fragment_box: 4, hull_impulse_milli: 3,
  shell_speed: 700, gravity: 98, heat_units: 32, heat_per_cell: 800,
  gas_cell_units: 8, gas_display_mm: 1280, gas_source_radius: 128,

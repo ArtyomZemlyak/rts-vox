@@ -1,0 +1,24 @@
+(
+    id: "custom-0001",
+    name: "Мой элемент 0001",
+    category: Custom,
+    blocks: [
+        (
+            min: (-8, 0, -8),
+            max: (8, 16, 8),
+            material: 3,
+        ),
+        (
+            min: (8, 0, -8),
+            max: (24, 16, 8),
+            material: 3,
+        ),
+        (
+            min: (24, 0, -8),
+            max: (40, 16, 8),
+            material: 3,
+        ),
+    ],
+    units: [],
+    shields: [],
+)

@@ -99,7 +99,8 @@ pub struct Thermals {
     cells: BTreeMap<Cell, u32>,
     cursor: Option<Cell>,
     pub melted: u64,
-    /// Saturated direct deposits dissipate; never silently evict another cell.
+    /// Heat rejected at capacity or dissipated when a direct hit replaces a
+    /// near-cold cell. Passive deposits never silently evict another cell.
     pub rejected_heat: u64,
 }
 impl Thermals {
@@ -164,6 +165,24 @@ impl Thermals {
         let used = heat.min(HEAT_CAP - *h);
         *h += used;
         self.rejected_heat = self.rejected_heat.saturating_add(u64::from(heat - used));
+    }
+    /// A direct weapon hit must not be blocked by a field full of near-cold
+    /// diffusion leftovers. Reclaim only a bounded, weak cell from the next
+    /// processing slice; account for its remaining heat as dissipated.
+    pub(super) fn deposit_direct(&mut self, p: Cell, heat: u32, t: &Tuning) {
+        if heat > 0 && self.cells.len() >= t.max_cells && !self.cells.contains_key(&p) {
+            let threshold = t.smoke.min(heat / 4);
+            let victim = self.batch_after(self.cursor, 32.min(self.cells.len()))
+                .into_iter()
+                .filter_map(|cell| self.cells.get(&cell).copied().map(|h| (h, cell)))
+                .filter(|(h, _)| *h <= threshold)
+                .min();
+            if let Some((h, cell)) = victim {
+                self.cells.remove(&cell);
+                self.rejected_heat = self.rejected_heat.saturating_add(u64::from(h));
+            }
+        }
+        self.deposit(p, heat, t);
     }
     pub fn step(&mut self, units: &mut [RangeUnit], matter: &mut Matter, t: &Tuning) {
         self.step_observed(units, matter, t, |_| {}, &|_, _| {});
@@ -396,7 +415,10 @@ impl BlastRange {
             &self.matter.economy.mats,
             self.heat_tuning.cells_per_tick,
             self.thermal_tuning.cells_per_tick.saturating_sub(slots),
-            |p| self.matter.debris.claimed(p),
+            |p| self.matter.debris.claimed(p) || self.heat_tuning.melt_flow.iter().flatten().any(|f| {
+                let mat = self.world.material(p[0],p[1],p[2]);
+                f.solid == mat || f.liquid == mat
+            }),
         );
         self.matter.reserve_heat(slots, ground);
     }
@@ -812,6 +834,27 @@ mod tests {
         assert_eq!(r.thermals.heat(q), 450);
     }
     #[test]
+    fn direct_heat_reclaims_only_cold_cells_and_replays_at_capacity() {
+        let mut r = range();
+        let p = cell(&r, Part::Engine);
+        let q = p.neighbours().find(|q| q.body(&r.units).is_some()).unwrap();
+        r.thermal_tuning.max_cells = 1;
+        r.thermals.deposit(p, 1, &r.thermal_tuning);
+        let mut copy = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+        copy.thermal_tuning.max_cells = 1;
+        for sim in [&mut r, &mut copy] {
+            sim.thermals.deposit_direct(q, 500, &sim.thermal_tuning);
+            assert_eq!(sim.thermals.heat(p), 0);
+            assert_eq!(sim.thermals.heat(q), 500);
+            assert_eq!(sim.thermals.hot(), 1);
+            assert_eq!(sim.thermals.rejected_heat, 1);
+            sim.thermals.deposit_direct(p, 500, &sim.thermal_tuning);
+            assert_eq!(sim.thermals.heat(q), 500, "hot cells must not be evicted");
+            assert_eq!(sim.thermals.rejected_heat, 501);
+        }
+        assert_eq!(r.state_hash(), copy.state_hash());
+    }
+    #[test]
     fn moving_segment_retains_local_heat_and_snapshot_replays_cooling() {
         let mut a = range();
         let seg = &a.units[0].body.segments[0].body;
@@ -859,7 +902,7 @@ mod tests {
         let mut tail = Blob::new();
         r.save_after(&mut tail, 31);
         data.truncate(data.len() - tail.v.len());
-        data[..4].copy_from_slice(&31u32.to_le_bytes());
+        data[8..12].copy_from_slice(&31u32.to_le_bytes());
         let restored = BlastRange::restore(r.config, &data).unwrap();
         assert_eq!(restored.thermals.hot(), 0);
         assert_eq!(r.state_hash(), restored.state_hash());

@@ -170,3 +170,50 @@ fn collapse_batch_large_admission_benchmark() {
         }
     });
 }
+
+#[test]
+fn collapse_bulk_ingress_keeps_last_writer_and_canonical_snapshot_order() {
+    for (old_count, fresh_count) in [
+        (0, 0),
+        (0, 1),
+        (0, 255),
+        (0, 256),
+        (73, 8192),
+        (8192, 7),
+        (8192, 256),
+        (8192, 4096),
+    ] {
+        let mut scalar = CollapseBacklog::default();
+        for i in 0..old_count {
+            let e = Edit::put(i % 127, i / 127, i % 41, 3);
+            scalar.insert(e);
+        }
+        let mut bulk = scalar.clone();
+        let fresh: Vec<_> = (0..fresh_count)
+            .map(|i| {
+                let x = if i % 3 == 0 { u32::MAX } else { i % 127 };
+                let y = if i % 5 == 0 { u32::MAX } else { i / 127 };
+                let mut e = Edit::put(x, y, i % 41, if i % 2 == 0 { 2 } else { 0 });
+                e.by = i;
+                e
+            })
+            .rev()
+            .chain([
+                Edit::put(0, 0, 0, 2),
+                Edit::dig(0, 0, 0),
+                Edit::put(0, 0, 0, 7),
+            ])
+            .collect();
+        for &e in &fresh {
+            scalar.insert(e);
+        }
+        bulk.extend(&fresh);
+        assert_eq!(scalar, bulk, "old={old_count} fresh={fresh_count}");
+        assert_eq!(scalar.cells(), bulk.cells());
+        assert_eq!(scalar.len(), bulk.len());
+        assert_eq!(
+            scalar.prepare(&fresh, &mut |_| {}),
+            bulk.prepare(&fresh, &mut |_| {})
+        );
+    }
+}

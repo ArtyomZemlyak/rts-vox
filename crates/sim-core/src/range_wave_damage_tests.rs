@@ -299,7 +299,7 @@ fn pre_47_active_bursts_restore_with_their_legacy_contact_semantics() {
         .unwrap()
         .save_contacts(&mut extension);
     bytes.truncate(bytes.len() - extension.v.len());
-    bytes[..4].copy_from_slice(&46u32.to_le_bytes());
+    bytes[8..12].copy_from_slice(&46u32.to_le_bytes());
     let restored = BlastRange::restore(c, &bytes).unwrap();
     assert!(restored.explosion.as_ref().unwrap().point_contacts);
     assert_eq!(restored.state_hash(), range.state_hash());

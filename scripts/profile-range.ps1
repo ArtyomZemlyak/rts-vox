@@ -1,14 +1,18 @@
 param(
     [ValidateRange(5, 3600)][int]$Seconds = 30,
-    [ValidateSet('battle', 'battle-eight', 'world-battle', 'canister', 'siege', 'energy', 'shell', 'clouds', 'drive', 'stream', 'flame', 'actions')]
+    [ValidateSet('battle', 'battle-eight', 'world-battle', 'snapshot', 'canister', 'siege', 'energy', 'shell', 'clouds', 'drive', 'stream', 'flame', 'actions')]
     [string[]]$Scenarios = @('battle', 'battle-eight', 'energy', 'shell', 'clouds', 'drive', 'flame'),
     [string]$Output = '',
+    # Reproduce an explicit saved simulation, including its queued commands.
+    [string]$SnapshotPath = '',
     [switch]$SkipBuild,
     # Reproduce the ordinary player's persisted knobs; stock remains default.
     [switch]$SavedTuning,
     [switch]$Gpu,
     [switch]$CheckBudget,
     [ValidateRange(30, 1000)][int]$TargetFps = 120,
+    # Presentation ceiling, separate from the acceptance target. Zero is uncapped.
+    [ValidateRange(0, 1000)][int]$FpsLimit = 200,
     # Zero preserves the scene default; 1 selects the serial route path.
     [ValidateRange(0, 8)][int]$NavigationWorkers = 0,
     [switch]$CpuThreads,
@@ -34,6 +38,12 @@ param(
     # Maximize before profile warmup; actual client pixels come from RenderContext.
     # Width/height are the restored window size in this mode.
     [switch]$Maximized,
+    # Opt-in only. Background is the safe default and never requests activation.
+    [switch]$Foreground,
+    [ValidateSet('Hidden', 'Normal', 'Maximized')][string]$LaunchWindowStyle = 'Hidden',
+    # Offline only: the game and OS sampler have exited before export starts.
+    [switch]$ExportTrace,
+    [ValidateRange(1, 5000000)][int]$TraceEventLimit = 500000,
     [switch]$AllowContaminated
 )
 $ErrorActionPreference = 'Stop'
@@ -44,8 +54,11 @@ $originalRustLog = $env:RUST_LOG
 Push-Location $repo
 try {
     if ($RayonWorkers -gt 0) { $env:RAYON_NUM_THREADS = "$RayonWorkers" }
+    if (($SnapshotPath -and ($Scenarios.Count -ne 1 -or $Scenarios[0] -ne 'snapshot')) -or ($Scenarios -contains 'snapshot' -and -not $SnapshotPath)) { throw '-SnapshotPath requires exactly the snapshot scenario.' }
+    if ($SnapshotPath) { $SnapshotPath = (Resolve-Path -LiteralPath $SnapshotPath).Path }
     if ($CorePhases -and $TriggerMilliseconds -gt 0) { throw '-CorePhases and -TriggerMilliseconds are separate diagnostic modes.' }
     if ($BinaryPath -and -not $SkipBuild) { throw '-BinaryPath requires -SkipBuild.' }
+    if (-not $Foreground -and ($Maximized -or $LaunchWindowStyle -ne 'Hidden')) { throw 'Background profiling does not activate/maximize windows. Use explicit -WindowWidth/-WindowHeight; -Foreground is required for an activating launch.' }
     if ($RenderSpanLimit -gt 0 -and -not $RenderTimeline) { throw '-RenderSpanLimit requires -RenderTimeline.' }
     if ($RenderTasks -and -not $RenderTimeline) { throw '-RenderTasks requires -RenderTimeline.' }
     # Cached SystemMeta spans are INFO; retain other inherited log settings.
@@ -72,29 +85,32 @@ try {
         $manifest = $null
         try {
             $manifestPath = Join-Path $directory "$scenario.manifest.json"
-            foreach ($artifact in "$scenario.manifest.json", "$scenario.csv", "$scenario.log", "$scenario.err", "$scenario.camera.csv", "$scenario.core.csv", "$scenario.physics.csv", "$scenario.stall.csv", "$scenario.render.csv", "$scenario.tasks.csv", "$scenario.gpu.csv", "$scenario.task-names.csv", "$scenario-cpu") {
+            foreach ($artifact in "$scenario.manifest.json", "$scenario.csv", "$scenario.log", "$scenario.err", "$scenario.camera.csv", "$scenario.core.csv", "$scenario.physics.csv", "$scenario.stall.csv", "$scenario.render.csv", "$scenario.tasks.csv", "$scenario.gpu.csv", "$scenario.task-names.csv", "$scenario.trace.json", "$scenario.trace.json.tmp", "$scenario.slow-frames.jsonl", "$scenario.trace-export.json", "$scenario.analysis.json", "$scenario.analysis.md", "$scenario-cpu") {
                 if (Test-Path -LiteralPath (Join-Path $directory $artifact)) { throw "Existing run retained: $artifact. Use a fresh output directory." }
             }
             $binaryName = [System.IO.Path]::GetFileNameWithoutExtension($binary)
             $preflight = @(Get-RangeCompetingProcesses -Exclude @($PID) -AdditionalNames @($binaryName))
             $binaryHash = (Get-FileHash -LiteralPath $binary).Hash
             $buildEvidence = Get-RangeBuildEvidence -BinaryPath $binary -BinarySha256 $binaryHash
+            $shaderOverride = Get-RangeShaderOverride -Directory $env:RTS_VOX_SHADER_DIR
             $manifest = [ordered]@{
-                Schema = 2; Scenario = $scenario; RequestedSeconds = $Seconds; TargetFps = $TargetFps
+                Schema = 2; Scenario = $scenario; RequestedSeconds = $Seconds; TargetFps = $TargetFps; FpsLimit = $FpsLimit
                 StartedUtc = (Get-Date).ToUniversalTime().ToString('o')
                 GitHead = (& git rev-parse HEAD); SourceAtLaunch = @(& git status --short)
                 SourceProvenance = 'SourceAtLaunch is not proof of the source used to build this binary; BinarySha256 identifies the measured executable.'
                 BinaryPath = $binary; BinarySha256 = $binaryHash; BuildEvidence = $buildEvidence
                 TuningMode = if ($SavedTuning) { 'saved' } else { 'stock' }
-                InputHashes = @(Get-RangeInputHashes -Repo $repo -SavedTuning:$SavedTuning)
+                InputHashes = @(Get-RangeInputHashes -Repo $repo -SavedTuning:$SavedTuning -SnapshotPath $SnapshotPath)
                 RayonEnvironment = $env:RAYON_NUM_THREADS; NavigationWorkers = $NavigationWorkers
-                PhysicsWorkers = $PhysicsWorkers
+                PhysicsWorkers = $PhysicsWorkers; LaunchWindowStyle = $LaunchWindowStyle
                 ComputeWorkers = $ComputeWorkers
+                Background = -not [bool]$Foreground
                 CameraTour = [bool]$CameraTour
                 GpuTimestamps = [bool]$Gpu; CpuThreads = [bool]$CpuThreads; OsPressure = [bool]$OsPressure; CorePhases = [bool]$CorePhases; CoreTriggerMilliseconds = $TriggerMilliseconds; RenderTimeline = [bool]$RenderTimeline
                 RenderSpanLimit = $renderBudget
                 RenderTasks = [bool]$RenderTasks
                 RustLog = $env:RUST_LOG
+                ShaderOverride = $shaderOverride
                 EnvironmentSampleIntervalMs = 1000; PreflightProcesses = $preflight
                 RequestedWindow = @($WindowWidth, $WindowHeight)
                 RequestedMaximized = [bool]$Maximized
@@ -112,6 +128,7 @@ try {
                 'battle'       { @('--battle') }
                 'battle-eight' { @('--battle-eight') }
                 'world-battle' { @('--world-battle', '--ai-vs-ai') }
+                'snapshot'     { @('--load', ('"' + $SnapshotPath + '"'), '--view', 'overview') }
                 'canister'     { @('--skirmish', '4') }
                 'siege'        { @('--skirmish', '5', '--ai-vs-ai') }
                 'energy'       { @('--weapon', 'energy', '--power', '4000', '--open', '--view', 'exposed') }
@@ -125,7 +142,10 @@ try {
             if ($scenario -eq 'actions' -and $Seconds -lt 15) { throw 'The actions scenario needs at least 15 seconds.' }
             $log = Join-Path $directory "$scenario.log"
             $err = Join-Path $directory "$scenario.err"
-            $arguments = @('--range', 'data/range-km.ron', '--window', "$WindowWidth,$WindowHeight", '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
+            $rangeArgs = if ($scenario -eq 'snapshot') { @() } else { @('--range', 'data/range-km.ron') }
+            $arguments = $rangeArgs + @('--window', "$WindowWidth,$WindowHeight", '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
+            $arguments += @('--fps-limit', $FpsLimit)
+            if (-not $Foreground) { $arguments += '--profile-background' }
             if (-not $SavedTuning) {
                 $arguments += '--stock-tuning'
             } else {
@@ -154,7 +174,7 @@ try {
             $manifest.Arguments = $arguments
             $manifest.Status = 'running'
             Save-RangeManifest $manifest $manifestPath
-            $process = Start-Process -FilePath $binary -ArgumentList $arguments -WorkingDirectory $repo -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err -PassThru
+            $process = Start-Process -FilePath $binary -ArgumentList $arguments -WorkingDirectory $repo -WindowStyle $LaunchWindowStyle -RedirectStandardOutput $log -RedirectStandardError $err -PassThru
             $null = $process.Handle
             $manifest.ProcessId = $process.Id
             Save-RangeManifest $manifest $manifestPath
@@ -177,9 +197,13 @@ try {
                 if (@(Import-Csv -LiteralPath $environmentPath).Count -gt 0) { $reasons.Add('competing_process_during_run') }
             } else { $reasons.Add('environment_observations_missing') }
             if ((Get-FileHash -LiteralPath $binary).Hash -ne $manifest.BinarySha256) { $reasons.Add('binary_changed_during_run') }
-            if ((@(Get-RangeInputHashes -Repo $repo -SavedTuning:$SavedTuning) | ConvertTo-Json -Compress) -ne ($manifest.InputHashes | ConvertTo-Json -Compress)) { $reasons.Add('inputs_changed_during_run') }
+            if ((@(Get-RangeInputHashes -Repo $repo -SavedTuning:$SavedTuning -SnapshotPath $SnapshotPath) | ConvertTo-Json -Compress) -ne ($manifest.InputHashes | ConvertTo-Json -Compress)) { $reasons.Add('inputs_changed_during_run') }
+            if ((Get-RangeShaderOverride -Directory $env:RTS_VOX_SHADER_DIR | ConvertTo-Json -Depth 5 -Compress) -ne ($shaderOverride | ConvertTo-Json -Depth 5 -Compress)) { $reasons.Add('shader_inputs_changed_during_run') }
             $rows = if (Test-Path -LiteralPath $csv) { @(Import-Csv -LiteralPath $csv) } else { @() }
             $content = if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Raw } else { '' }
+            if ($content -notmatch "(?m)^PROFILE fps_limit=$FpsLimit\r?$") { $reasons.Add('fps_limit_unconfirmed') }
+            $backgroundValue = if ($Foreground) { 'false' } else { 'true' }
+            if ($content -notmatch "(?m)^PROFILE background=$backgroundValue\r?$") { $reasons.Add('background_mode_unconfirmed') }
             if ($CameraTour -and -not (Test-Path -LiteralPath (Join-Path $directory "$scenario.camera.csv"))) {
                 $reasons.Add('camera_tour_artifact_missing')
             }
@@ -198,9 +222,10 @@ try {
             if ($Gpu -and -not (Test-Path -LiteralPath (Join-Path $directory "$scenario.gpu.csv"))) {
                 $reasons.Add('gpu_samples_artifact_missing')
             }
-            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline -RenderSpanLimit $renderBudget -RenderTasks:$RenderTasks -ComputeWorkers $ComputeWorkers -PhysicsWorkers $PhysicsWorkers -NavigationWorkers $NavigationWorkers -CameraTour:$CameraTour -OsPressure:$OsPressure -Maximized:$Maximized -Gpu:$Gpu
+            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline -RenderSpanLimit $renderBudget -RenderTasks:$RenderTasks -ComputeWorkers $ComputeWorkers -PhysicsWorkers $PhysicsWorkers -NavigationWorkers $NavigationWorkers -CameraTour:$CameraTour -OsPressure:$OsPressure -Maximized:$Maximized -Gpu:$Gpu -ShaderOverride:($null -ne $shaderOverride)
             $manifest.Validity = $validity
-            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|render_timeline_schema|render_tasks_|stall_retained_frame|physics_task_sampling=|tick_rate=|camera_tour_|adapter|state_hash=|battle=|compute_workers=|compute_override=|physics_workers=|physics_override=|navigation_override=|simulation_ticks=|render_context|window_maximize_requested=|gpu_capture_schema=)' })
+            if (-not $Foreground) { $validity.AcceptanceEligible = $false; $validity.Mode = 'background_diagnostic' }
+            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|background=|fps_limit=|runtime_status_dropped=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|render_timeline_schema|render_tasks_|stall_retained_frame|physics_task_sampling=|tick_rate=|camera_tour_|adapter|state_hash=|battle=|compute_workers=|compute_override=|physics_workers=|physics_override=|navigation_override=|simulation_ticks=|render_context|window_maximize_requested=|gpu_capture_schema=)' })
             $manifest.Status = 'completed'
             $manifest.FinishedUtc = (Get-Date).ToUniversalTime().ToString('o')
             Save-RangeManifest $manifest $manifestPath
@@ -211,6 +236,10 @@ try {
             if ($times.Count -eq 0) { throw 'No monotonic frame intervals; FPS cannot be evaluated.' }
             $p99 = $times[[int][Math]::Floor($times.Count * 0.99)]
             $mean = ($times | Measure-Object -Average).Average
+            # Inverse of the mean duration of the slowest 1% of frames.
+            # Min/max FPS are single-frame extrema, not sustained rates.
+            $slowCount = [Math]::Max(1, [int][Math]::Ceiling($times.Count * 0.01))
+            $slowMean = ($times[($times.Count - $slowCount)..($times.Count - 1)] | Measure-Object -Average).Average
             $result = [pscustomobject]@{
                 Scenario = $scenario
                 ValidForComparison = $validity.ValidForComparison
@@ -223,6 +252,9 @@ try {
                 FrameTimingMetric = $frameTiming.Metric
                 Frames = $times.Count
                 MeanFps = [Math]::Round(1000.0 / $mean, 1)
+                MinInstantFps = [Math]::Round(1000.0 / $times[-1], 1)
+                MaxInstantFps = [Math]::Round(1000.0 / $times[0], 1)
+                OnePercentLowFps = [Math]::Round(1000.0 / $slowMean, 1)
                 P95ms = [Math]::Round($times[[int][Math]::Floor($times.Count * 0.95)], 3)
                 P99ms = [Math]::Round($p99, 3)
                 MaxMs = [Math]::Round($times[-1], 3)
@@ -250,6 +282,15 @@ try {
     $report | ConvertTo-RangeInvariantCsvRow | Export-Csv -LiteralPath (Join-Path $directory 'summary.csv') -NoTypeInformation -Encoding UTF8
     $report | Format-Table -AutoSize
     Write-Host "Results: $directory"
+    if ($ExportTrace) {
+        foreach ($scenario in $Scenarios) {
+            & python "$PSScriptRoot/analyze-range-profile.py" $directory --scenario $scenario --trace --trace-event-limit $TraceEventLimit
+            if ($LASTEXITCODE -ne 0) {
+                # Raw capture/validity was already saved and remains intact.
+                throw "Offline trace export failed for $scenario; raw capture retained in $directory"
+            }
+        }
+    }
     if ($CheckBudget -and @($report | Where-Object { -not $_.MeetsP99 -or ($CheckEveryFrame -and -not $_.MeetsEveryFrame) }).Count -gt 0) {
         throw "The $TargetFps FPS budget was exceeded; maxima and slow frames are retained in summary.csv."
     }

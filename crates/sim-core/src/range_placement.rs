@@ -76,7 +76,7 @@ impl Footprint {
 }
 
 pub struct Validator {
-    footprints: [std::sync::OnceLock<Footprint>; RangeUnitKind::COUNT * 2],
+    footprints: [std::sync::OnceLock<Footprint>; RangeUnitKind::COUNT * 4],
 }
 impl Default for Validator {
     fn default() -> Self {
@@ -87,8 +87,11 @@ impl Default for Validator {
 }
 impl Validator {
     fn footprint(&self, kind: RangeUnitKind, reverse: bool) -> &Footprint {
-        self.footprints[kind.index() + usize::from(reverse) * RangeUnitKind::COUNT]
-            .get_or_init(|| Footprint::of(kind, if reverse { fx::angle::FULL / 2 } else { 0 }))
+        self.footprint_yaw(kind, u8::from(reverse) * 2)
+    }
+    fn footprint_yaw(&self, kind: RangeUnitKind, yaw: u8) -> &Footprint {
+        self.footprints[kind.index() + usize::from(yaw) * RangeUnitKind::COUNT]
+            .get_or_init(|| Footprint::of(kind, i32::from(yaw) * fx::angle::FULL / 4))
     }
 
     /// Prepare both spawn orientations outside the simulation tick. Only
@@ -111,7 +114,7 @@ impl Validator {
         at: [i32; 3],
         bounds: ([i32; 3], [i32; 3]),
     ) -> bool {
-        let shape = self.footprints[kind.index() + usize::from(reverse) * RangeUnitKind::COUNT]
+        let shape = self.footprints[kind.index() + usize::from(reverse) * 2 * RangeUnitKind::COUNT]
             .get()
             .expect("product geometry is prepared at scene construction");
         let (lo, hi) = bounds;
@@ -140,14 +143,15 @@ impl Validator {
         layout.validate().map_err(Rejection::Layout)?;
         let terrain = RangeTerrain::new(true, Some(layout.clone()));
         let mut units = vec![(self.footprint(layout.gun_kind, false), layout.gun)];
-        if layout.battle {
+        if layout.battle || layout.gun_point {
             units.clear();
         }
         units.extend(
             layout
                 .units
                 .iter()
-                .map(|u| (self.footprint(u.kind, layout.battle && !u.allied), u.at)),
+                .enumerate()
+                .map(|(i, u)| (self.footprint_yaw(u.kind, layout.unit_yaw(i)), u.at)),
         );
         for (i, &(shape, at)) in units.iter().enumerate() {
             if (0..3)
@@ -155,6 +159,7 @@ impl Validator {
             {
                 return Err(Rejection::Outside);
             }
+            if layout.allow_overlap {continue;}
             if units[..i]
                 .iter()
                 .any(|&(other, there)| shape.overlaps(at, other, there))

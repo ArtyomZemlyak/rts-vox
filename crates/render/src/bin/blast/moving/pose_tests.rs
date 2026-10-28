@@ -252,7 +252,7 @@ fn interpolated_turrets_feet_death_and_reset_keep_the_same_picture() {
             visual.battle_turrets = vec![65000; 8];
             let mut scene = world.resource_mut::<Scene>();
             scene.paused = false;
-            scene.acc = alpha / 30.0;
+            scene.acc = alpha / sim_core::TICKS_PER_SECOND as f32;
             for actor in &mut scene.sim.battle.actors {
                 actor.turret.angle = 300;
             }

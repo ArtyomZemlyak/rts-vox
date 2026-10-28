@@ -1,0 +1,16 @@
+// Active patches only; these limits bound work independently of map size.
+(
+ scans_per_tick: 4096, moves_per_tick: 1024, contacts_per_tick: 256,
+ contact_moves_per_tick:512,
+ push_reach: 8,
+ motion:(active_cells:8192,active_per_tick:2048,path_checks_per_tick:32768,max_steps:8),
+ slope:(checks_per_tick:32768,max_cells:1024,reach:4,scuff_moves_per_step:8,roll_support_milli:750,roll_turn_per_cell:10430),
+ erosion:(checks_per_tick:128, moves_per_tick:4, min_flow_units:256,
+  saturation_milli:500, pressure_per_voxel:4800),
+ materials: [
+  (id:10, repose_drop:1, yield_pressure:120), // dry sand
+  (id:1, repose_drop:3, yield_pressure:900), // cohesive soil
+  (id:7, repose_drop:4, yield_pressure:1200), // rooted surface
+  (id:8, repose_drop:5, yield_pressure:1800), // compacted soil
+ ],
+)

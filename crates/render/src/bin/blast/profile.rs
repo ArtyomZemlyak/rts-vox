@@ -456,6 +456,7 @@ pub struct Output<'w> {
 }
 pub fn end(
     time: Res<Time<Real>>,
+    runtime_log: Res<RuntimeLog>,
     scene: Res<Scene>,
     gas: Res<GasInput>,
     art: Res<WitnessArt>,
@@ -541,7 +542,7 @@ pub fn end(
             .last_end_ns
             .map_or(0, |last| start_ns.saturating_sub(last));
         let pacing = [
-            f64::from(scene.acc) * 30.0,
+            f64::from(scene.acc) * f64::from(sim_core::TICKS_PER_SECOND),
             f64::from(p.dropped_ticks),
             p.batch_ms,
             f64::from(p.budget_limited_steps),
@@ -728,6 +729,7 @@ pub fn end(
         }
     }
     let tick_count: u64 = p.rows.iter().map(|r| r.ms[13] as u64).sum();
+    println!("PROFILE runtime_status_dropped={}", runtime_log.0.dropped());
     let core_ms: f64 = p.rows.iter().map(|r| r.ms[14]).sum();
     println!(
         "PROFILE simulation_ticks={} mean_core_tick_ms={:.3}",

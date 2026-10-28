@@ -1,10 +1,10 @@
 // A solid tank round. Finite work is shared by penetration and local armour spall.
 // Crossing a sloped or thick plate consumes more cells; fragments are real
-// removed matter. World unit = 100 mm, simulation = 30 ticks/second.
+// removed matter. World unit = 100 mm, simulation = 20 ticks/second.
 (
     delivery: Kinetic,
     motion: Ballistic,
-    charge_ticks: 12,
+    charge_ticks: 8,
     half_cells: 20,
     cell_units: 2,
     // 2x launch speed, 4x finite work; armour stays harder than internal core.
@@ -21,7 +21,7 @@
     edits_per_tick: 8192,
     fragment_box: 4,
     hull_impulse_milli: 0,
-    fire_tick: 45,
+    fire_tick: 30,
     shell_speed: 560,
     spall: Some((radius: 3, work_milli: 750)),
     ricochet: Some((

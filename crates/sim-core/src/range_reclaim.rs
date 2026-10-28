@@ -131,7 +131,6 @@ impl Reclaim {
         }
     }
     /// The piece this slot works and the edits spent on it.
-    #[cfg(test)]
     pub(crate) fn piece_work(&self, id: usize) -> Option<(u64, u32)> {
         match self.work.get(id).copied().flatten() {
             Some(Work::Piece { id, spent }) => Some((id, spent)),

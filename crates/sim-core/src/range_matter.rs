@@ -48,6 +48,10 @@ mod ground_melt;
 mod fragment_admission_tests;
 
 #[cfg(test)]
+#[path = "range_nuclear_felling_tests.rs"]
+mod nuclear_felling_tests;
+
+#[cfg(test)]
 #[path = "range_section_tests.rs"]
 mod section_tests;
 
@@ -56,6 +60,7 @@ mod section_tests;
 mod ground_price_tests;
 
 type FracturePrice = ([u32; 3], (u64, u64));
+type BodyFracturePrice = ([u32; 5], (u64, u64));
 
 // A signed 21-bit coordinate per axis fits the game's current and planned
 // world sizes. Biasing each component preserves the old lexicographic order
@@ -79,6 +84,7 @@ pub struct Matter {
     /// Derived exact memo: strength, fracture coefficient and motion share.
     /// Validated on every access, excluded from snapshots and hashes.
     prices: [Option<FracturePrice>; 8],
+    body_prices: [Option<BodyFracturePrice>; 16],
     batch: Option<fracture::Batch>,
     /// Immutable shared metal-fragment policy from sim.ron.
     body_fragment_mm: u32,
@@ -104,6 +110,8 @@ pub struct Matter {
     fragment_box: u8,
     pub economy: Economy,
     pub tuning: modding::tuning::Blast,
+    phase_changes:[Option<modding::heat::Transformation>;4],
+    melt_flow:[Option<modding::heat::MeltFlow>;3],
     pub remaining_mj: u64,
     pub supplied_mj: u64,
     pub spent_mj: u64,
@@ -196,6 +204,8 @@ fn body_cells(u: &RangeUnit) -> u64 {
 }
 
 impl Matter {
+    #[cfg(test)]
+    pub(super) fn legacy_melt_for_test(&mut self) { self.melt_flow = [None; 3]; }
     /// Matter of an intact body of this unit's template: its cells times
     /// the fixed pack's density of body material — what a produced unit
     /// costs (ADR-675) and what a placed unit's body holds.
@@ -232,6 +242,7 @@ impl Matter {
             .collect();
         Self {
             prices: [None; 8],
+            body_prices: [None; 16],
             source_densities,
             density_history: false,
             batch: None,
@@ -247,6 +258,8 @@ impl Matter {
             fragment_box: 2,
             economy,
             tuning: t.blast,
+            phase_changes:modding::heat::HeatTuning::from_ron(include_str!("../../../data/heat.ron")).expect("heat tuning").transforms,
+            melt_flow:modding::heat::HeatTuning::from_ron(include_str!("../../../data/heat.ron")).expect("heat tuning").melt_flow,
             remaining_mj: 0,
             supplied_mj: 0,
             spent_mj: 0,
@@ -375,6 +388,49 @@ impl Matter {
                     self.admission.felling[0] +=
                         u64::from(self.felling.insert((fell_key(q), seed_key)));
                 }
+            }
+        }
+    }
+    /// A paid, confirmed trunk cut releases its connected crown by the same
+    /// bounded frontier as a vehicle cut. No second fracture charge or kick.
+    /// Nearby cuts share one upper seed per radius-wide horizontal tile, so
+    /// a wave does not queue an independent crown walk for every trunk voxel.
+    pub(super) fn release_nuclear_crowns(
+        &mut self,
+        w: &World,
+        f: &Felling,
+        fields: &[([i32; 3], [i32; 3])],
+    ) {
+        if !f.materials.contains(&5) {
+            return;
+        }
+        let tile = f.radius.max(1);
+        let mut seeds = std::collections::BTreeMap::<[i32; 2], [i32; 3]>::new();
+        for &(edit, previous) in w.completed() {
+            if edit.mat != AIR || previous != 5 {
+                continue;
+            }
+            let p = [edit.x as i32, edit.y as i32, edit.z as i32];
+            if !fields
+                .iter()
+                .any(|(lo, hi)| (0..3).all(|a| lo[a] <= p[a] && p[a] < hi[a]))
+            {
+                continue;
+            }
+            let key = [p[0].div_euclid(tile), p[2].div_euclid(tile)];
+            seeds
+                .entry(key)
+                .and_modify(|seed| {
+                    if p[1] > seed[1] || (p[1] == seed[1] && p < *seed) {
+                        *seed = p;
+                    }
+                })
+                .or_insert(p);
+        }
+        for seed in seeds.into_values() {
+            // A later fill in the same drain can have repaired the cut.
+            if material(w, seed) == AIR {
+                self.spread(seed, seed, f.radius);
             }
         }
     }
@@ -590,6 +646,9 @@ impl Matter {
         from: usize,
     ) {
         let total = mask.count_ones() as usize - mask.rank(from);
+        if total == 0 {
+            return;
+        }
         let lo = [0, 1, 2].map(|a| (1 - p[a]).clamp(0, edge));
         // The top of the world is not part of its immutable frame.
         let end = [w.nx as i32 - 1, w.ny as i32, w.nz as i32 - 1];
@@ -836,6 +895,17 @@ impl Matter {
         m: voxel::store::Mat,
         at: [i32; 3],
     ) -> ClaimResult {
+        self.ground_or_pulverize_scaled(w, p, m, at, 1000)
+    }
+
+    pub(crate) fn ground_or_pulverize_scaled(
+        &mut self,
+        w: &mut World,
+        p: [i32; 3],
+        m: voxel::store::Mat,
+        at: [i32; 3],
+        price_milli: u32,
+    ) -> ClaimResult {
         if !claimable(w, p) {
             self.admission.ground[5] += 1;
             return ClaimResult::Indestructible;
@@ -845,6 +915,11 @@ impl Matter {
             return ClaimResult::Deferred;
         }
         let (cost, motion) = self.cost_cached(m);
+        let cost = if price_milli == 1000 {
+            cost
+        } else {
+            (u128::from(cost) * u128::from(price_milli) / 1000).min(u128::from(u64::MAX)) as u64
+        };
         if cost > self.remaining_mj {
             self.admission.ground[1] += 1;
             return ClaimResult::Unaffordable;
@@ -963,6 +1038,35 @@ impl Matter {
         let (cost, motion) = self.cost(3);
         cost - motion
     }
+    /// Exact mechanical price for this cell's physical volume and material grade.
+    pub fn body_price(&mut self, body: &voxel::unit::UnitBody, cell: [usize; 3]) -> (u64, u64) {
+        let strength = self.economy.mats.get(3).expect("body steel").strength;
+        let role = body.part_at(cell[0], cell[1], cell[2]) as usize;
+        let key = [
+            strength,
+            self.tuning.fracture_kj_m3_per_strength,
+            self.tuning.motion_pct,
+            u32::from(body.mm),
+            body.fracture_milli[role],
+        ];
+        let index = (usize::from(body.mm) ^ role ^ body.fracture_milli[role] as usize)
+            % self.body_prices.len();
+        if let Some((saved, price)) = self.body_prices[index] {
+            if saved == key {
+                return price;
+            }
+        }
+        let (cost, motion) = crate::burst::fracture_cost_mj(strength, body.mm, &self.tuning);
+        let grade =
+            u128::from(body.fracture_milli[body.part_at(cell[0], cell[1], cell[2]) as usize]);
+        // Tougher material raises separation work, not the kinetic energy of
+        // an otherwise identical fragment. Density, mass and momentum stay fixed.
+        let fracture = ((u128::from(cost - motion) * grade).div_ceil(1000))
+            .min(u128::from(u64::MAX - motion)) as u64;
+        let price = (fracture + motion, motion);
+        self.body_prices[index] = Some((key, price));
+        price
+    }
     /// Work beside a burst in flight pays from a budget of its own
     /// (ADR-455): the burst's remaining energy is set aside for the call
     /// and given back after it, so a crash in mid-burst neither spends nor
@@ -987,7 +1091,7 @@ impl Matter {
         frame: &crate::damage::Frame,
         from: Option<[i32; 3]>,
     ) -> ClaimResult {
-        let (mut cost, mut motion) = self.cost_cached(3);
+        let (mut cost, mut motion) = self.body_price(body, cell);
         if from.is_none() {
             (cost, motion) = (cost - motion, 0);
         }
@@ -1377,7 +1481,7 @@ impl Matter {
         // Unclaimed compare-and-remove edits are ablation, even alongside a
         // conventional wave. Claimed edits belong to debris, not this sink.
         for &(edit, old) in w.completed() {
-            if edit.expected_material() == Some(old)
+            if edit.mat == AIR && edit.expected_material() == Some(old)
                 && old != AIR
                 && !self.debris.claimed([edit.x, edit.y, edit.z])
             {
@@ -1523,6 +1627,7 @@ impl Matter {
                 .iter()
                 .map(|u| match u.kind {
                     modding::range::RangeUnitKind::Tank => voxel::unit::tank(),
+                    modding::range::RangeUnitKind::Crawler => voxel::unit::crawler(),
                     modding::range::RangeUnitKind::Artillery => voxel::unit::artillery(),
                     modding::range::RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
                     modding::range::RangeUnitKind::ArtilleryTurretT2 => {

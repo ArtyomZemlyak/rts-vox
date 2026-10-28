@@ -2,10 +2,13 @@
 // the wave units the weapons declare as `energy`; what burns and at what
 // heat is a property of each material in range-materials.ron.
 (
-    // Three percent of a cell's heat per tick, at least one unit: a burst's
-    // sixty units on bare soil are gone in about forty ticks.
-    cooling_milli: 30,
+    // Cooling per 20 Hz tick, at least one unit. The fraction is normalized
+    // to the previous per-second thermal decay.
+    cooling_milli: 45,
     cells_per_tick: 4096,
     // A lit voxel burns two seconds, then it is gone.
-    burn_ticks: 60,
+    burn_ticks: 40,
+    transforms:(Some((from:10,to:12)),None,None,None),
+    melt_flow:(Some((solid:3,liquid:13,freeze:180)),Some((solid:2,liquid:14,freeze:450)),Some((solid:12,liquid:16,freeze:1200))),
+    melt_moves_per_tick:128,
 )

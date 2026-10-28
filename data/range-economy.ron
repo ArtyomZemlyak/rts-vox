@@ -29,6 +29,7 @@
         (kind: ArtilleryTurretT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
         (kind: NuclearSilo, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
         (kind: ArtilleryTurretT3, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+        (kind: Crawler, tank: 900000, dig_radius: 4, dig_reach: 35, dig_edits_per_tick: 16),
     ],
     bank: Some((
         // Each side's store with no dock standing.

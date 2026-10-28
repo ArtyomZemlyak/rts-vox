@@ -6,7 +6,7 @@
 // bolt is presentation.
 (
     motion: Direct,
-    charge_ticks: 45,
+    charge_ticks: 30,
     half_cells: 20,
     cell_units: 2,
     energy: 4000,
@@ -25,7 +25,7 @@
     fragment_box: 2,
     // Annihilated matter pushes nothing (ADR-286).
     hull_impulse_milli: 0,
-    fire_tick: 75,
+    fire_tick: 50,
     shell_speed: 1200,
     heat_units: 0,
     heat_per_cell: 0,

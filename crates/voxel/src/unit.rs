@@ -105,6 +105,9 @@ impl ResampleFail {
 
 #[derive(Clone)]
 pub struct UnitBody {
+    /// Immutable material-grade work factors by Part; 1000 is ordinary steel.
+    pub ablation_milli: [u32; 5],
+    pub fracture_milli: [u32; 5],
     pub vol: UnitVol,
     /// Метка на воксель — **разделяемая**.
     ///
@@ -338,6 +341,8 @@ impl UnitBody {
         // из чужой колонки (ADR-179).
         let words = nx.div_ceil(64) as usize;
         UnitBody {
+            ablation_milli: [1000; 5],
+            fracture_milli: [1000; 5],
             vol: UnitVol::new(nx, ny, nz),
             part: std::sync::Arc::new(vec![Part::Armour as u8; n]),
             masks: vec![0; 3 * ny as usize * nz as usize * words],
@@ -510,6 +515,8 @@ impl UnitBody {
         // посчитанный умножением, перестаёт быть сплошным ядром —
         // ровно так не садилось ядро у трёх машин из четырнадцати.
         let mut out = UnitBody::new_scaled(nx, ny, nz, 1, mm);
+        out.ablation_milli = self.ablation_milli;
+        out.fracture_milli = self.fracture_milli;
         out.turret_y = ((self.turret_y as u32 * src) / mm as u32).min(255) as u8;
 
         for z in 0..nz as u32 {
@@ -1024,6 +1031,31 @@ fn subsystem_slot(p: Part) -> Option<usize> {
 /// на всю ленту приходилось четыре воксела по высоте, и ничего, кроме
 /// бруска, туда не ложилось.
 pub const BODY_MM: u16 = 100;
+
+/// Tracked utility vehicle: a protected engine and core, an open cargo
+/// hopper, and a broad low salvage blade. All parts are damageable voxels.
+pub fn crawler() -> UnitBody {
+    let mut u = UnitBody::new_scaled(48, 25, 28, 4, BODY_MM);
+    let a = Part::Armour;
+    running_gear(&mut u, (2, 46), 8, (1, 6), a);
+    running_gear(&mut u, (2, 46), 8, (22, 27), a);
+    fill(&mut u, (4, 44), (2, 10), (6, 22), a);
+    fill(&mut u, (5, 19), (10, 18), (6, 22), a);
+    fill(&mut u, (7, 17), (4, 12), (9, 19), Part::Engine);
+    fill(&mut u, (19, 25), (4, 10), (11, 17), Part::Core);
+    fill_f(&mut u, (7, 16), (17, 21), (8, 20), a, FINISH_PLATE);
+    fill_f(&mut u, (9, 14), (19, 21), (7, 8), Part::Sensor, FINISH_OPTIC);
+    // Cargo hopper with substantial side walls and an open top.
+    fill_f(&mut u, (20, 39), (10, 12), (7, 21), a, FINISH_STEEL);
+    fill_f(&mut u, (20, 39), (12, 19), (7, 9), a, FINISH_PLATE);
+    fill_f(&mut u, (20, 39), (12, 19), (19, 21), a, FINISH_PLATE);
+    fill_f(&mut u, (20, 22), (12, 19), (9, 19), a, FINISH_STEEL);
+    fill_f(&mut u, (38, 40), (12, 17), (9, 19), a, FINISH_STEEL);
+    // Intake and blade are structural, so hits can sever them normally.
+    fill_f(&mut u, (40, 47), (3, 7), (7, 21), a, FINISH_STEEL);
+    fill_f(&mut u, (46, 48), (1, 5), (4, 24), a, FINISH_GUN);
+    seat(u, "краулер")
+}
 
 /// Танк: 6.0 × 3.0 × 3.0 м при вокселе 100 мм — том 60×30×30.
 ///
@@ -1799,6 +1831,14 @@ pub fn command_base() -> UnitBody {
     // Recessed entrance, cooling shutters and antenna groups break up the
     // large surfaces without introducing a non-physical decorative mesh.
     carve(&mut u, (70, 80), (7, 23), (34, 46));
+    // The receiving bay is readable on the same destructible facade:
+    // contrasting guide bars and a signal above each side of the entrance.
+    for z in [24, 28, 48, 52] {
+        mark(&mut u, (72, 73), (8, 15), (z, z + 2), FINISH_GUN);
+    }
+    for z in [31, 47] {
+        mark(&mut u, (72, 73), (12, 15), (z, z + 2), FINISH_OPTIC);
+    }
     for z in [23, 30, 47, 54] {
         // Reach the main shell at x=16; a one-cell gap left all four
         // shutter groups detached even before the base took damage.
@@ -1824,6 +1864,7 @@ mod command_base_tests {
     fn battle_templates_begin_with_supported_root_voxels() {
         for (name, body) in [
             ("tank", tank()),
+            ("crawler", crawler()),
             ("artillery", artillery()),
             ("turret T1", turret_t1()),
             ("turret T2", turret_t2()),
@@ -1838,6 +1879,21 @@ mod command_base_tests {
                 "{name} has unsupported starting pieces"
             );
         }
+    }
+    #[test]
+    fn crawler_has_a_working_engine_and_a_destructible_core() {
+        let mut unit = crawler();
+        let status = unit.status(&mut CoreBufs::new());
+        assert!(status.alive && status.engine && !status.weapon);
+        let (x, y, z) = unit.core;
+        for dz in 0..unit.core_size as usize {
+            for dy in 0..unit.core_size as usize {
+                for dx in 0..unit.core_size as usize {
+                    unit.remove(x as usize + dx, y as usize + dy, z as usize + dz);
+                }
+            }
+        }
+        assert!(!unit.status(&mut CoreBufs::new()).alive);
     }
     #[test]
     fn command_base_is_stationary_and_loses_when_its_core_is_destroyed() {
@@ -2489,11 +2545,26 @@ pub fn spider() -> UnitBody {
     pack(&mut u, (60, 62), (40, 41), (43, 45));
     let mut u = seat(u, "паук");
     u.turret_y = 40;
-    u.push_weapon_path(WeaponPath {
+    let laser_path = WeaponPath {
         min: [56, 42, 37],
         max: [88, 49, 44],
         axis: 0,
-    });
+    };
+    // The breech cradle is part of the laser mechanism. Its two solid
+    // support slices used to retain the exterior armour role, making this
+    // essential neck much easier to fracture than the reinforced barrel.
+    // Reclassify existing cells only: shape, finish and matter stay intact.
+    for x in laser_path.min[0]..58 {
+        for y in laser_path.min[1]..laser_path.max[1] {
+            for z in laser_path.min[2]..laser_path.max[2] {
+                let [x, y, z] = [x, y, z].map(usize::from);
+                if u.vol.get(x, y, z) && u.part_at(x, y, z) == Part::Armour {
+                    u.set(x, y, z, Part::Weapon);
+                }
+            }
+        }
+    }
+    u.push_weapon_path(laser_path);
     u
 }
 

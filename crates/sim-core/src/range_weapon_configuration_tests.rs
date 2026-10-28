@@ -146,7 +146,7 @@ fn weapon_configuration_snapshot_owns_constructor_and_live_config_with_every_tun
                     Outcome::Applied
                 );
                 let bytes = r.snapshot();
-                assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 58);
+                assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 58);
                 let mut wrong = stock();
                 wrong.edits_per_tick = 1;
                 wrong.unit_ablation_resistance = 0;
@@ -186,7 +186,12 @@ fn weapon_configuration_wire_roundtrips_all_presets_and_rejects_malformed_struct
                 "truncation {end}"
             );
         }
-        for offset in [0, 1, 98] {
+        let prefix = if c.soil_depth_cost == 0 && c.soil_fracture_milli == 1000 {
+            0
+        } else {
+            9
+        };
+        for offset in [0, prefix, prefix + 1, prefix + 98] {
             // Delivery, motion, ricochet option.
             let mut bad = b.v.clone();
             bad[offset] = 255;
@@ -203,7 +208,7 @@ fn weapon_configuration_applied_snapshot_rejects_bad_configs_prefixes_and_trunca
     c.energy += 1;
     r.execute_command(Command::ConfigureWeapon { config: c });
     let bytes = r.snapshot();
-    let mut s = Scan::new(&bytes[10..]);
+    let mut s = Scan::new(&bytes[18..]);
     load(&mut s).unwrap();
     let current = bytes.len() - s.left();
     load(&mut s).unwrap();
@@ -211,7 +216,12 @@ fn weapon_configuration_applied_snapshot_rejects_bad_configs_prefixes_and_trunca
     assert!(s.bool());
     s.u8s();
     let prefix = bytes.len() - s.left();
-    for at in [10 + 18, current + 18] {
+    let depth_prefix = if c.soil_depth_cost == 0 && c.soil_fracture_milli == 1000 {
+        0
+    } else {
+        9
+    };
+    for at in [18 + depth_prefix + 18, current + depth_prefix + 18] {
         // energy is a gameplay value.
         let mut bad = bytes.clone();
         bad[at..at + 4].copy_from_slice(&0u32.to_le_bytes());
@@ -222,7 +232,7 @@ fn weapon_configuration_applied_snapshot_rejects_bad_configs_prefixes_and_trunca
         bad[at] = 2;
         assert!(BlastRange::restore(stock(), &bad).is_none(), "prefix {at}");
     }
-    for end in 10..=after_configs {
+    for end in 18..=after_configs {
         assert!(BlastRange::restore(stock(), &bytes[..end]).is_none());
     }
 }
@@ -265,4 +275,87 @@ fn weapon_configuration_during_flight_and_wave_restores_exact_continuation() {
         r.units[0].revision > 0 || r.removed > 0,
         "must actually damage matter"
     );
+}
+
+#[test]
+fn soil_depth_wire_extension_and_legacy_configs_roundtrip() {
+    for depth in [0, 140, 1_000_000] {
+        let mut c = stock();
+        c.soil_depth_cost = depth;
+        let mut bytes = Blob::new();
+        save(&c, &mut bytes);
+        assert_eq!(bytes.v[0] == 128, depth != 0);
+        let mut scan = Scan::new(&bytes.v);
+        assert_eq!(load(&mut scan), Some(c));
+        assert_eq!(scan.left(), 0);
+    }
+}
+
+#[test]
+fn material_work_wire_extension_roundtrips_presets_and_pending_invalid_values() {
+    for depth in [0, 260] {
+        let mut c =
+            ExplosionConfig::from_ron(include_str!("../../../data/nuclear-warhead.ron")).unwrap();
+        // Exercise the previous material-work extension independently.
+        c.soil_crater = None;
+        c.soil_depth_cost = depth;
+        let mut b = Blob::new();
+        save(&c, &mut b);
+        assert_eq!(b.v[0], 129);
+        let mut scan = Scan::new(&b.v);
+        assert_eq!(load(&mut scan), Some(c));
+        assert_eq!(scan.left(), 0);
+        for end in 0..b.v.len() {
+            assert!(load(&mut Scan::new(&b.v[..end])).is_none());
+        }
+        for (index, value) in [(0, 1), (4, 0), (8, u32::MAX)] {
+            let mut invalid = c;
+            invalid.material_resistance.as_mut().unwrap()[index] = value;
+            assert!(invalid.validate().is_err());
+            let mut b = Blob::new();
+            save(&invalid, &mut b);
+            // Pending commands decode gameplay values, then reject at admission.
+            assert_eq!(load(&mut Scan::new(&b.v)), Some(invalid));
+        }
+    }
+    let c = stock();
+    assert!(c.material_resistance.is_none());
+    let mut b = Blob::new();
+    save(&c, &mut b);
+    assert_ne!(b.v[0], 129);
+    assert_eq!(load(&mut Scan::new(&b.v)), Some(c));
+}
+
+#[test]
+fn soil_crater_wire_extension_owns_shape_and_preserves_legacy_configs() {
+    let c = ExplosionConfig::from_ron(include_str!("../../../data/nuclear-warhead.ron")).unwrap();
+    let mut b = Blob::new();
+    save(&c, &mut b);
+    assert_eq!(b.v[0], 130);
+    let mut scan = Scan::new(&b.v);
+    assert_eq!(load(&mut scan), Some(c));
+    assert_eq!(scan.left(), 0);
+    for end in 0..b.v.len() {
+        assert!(load(&mut Scan::new(&b.v[..end])).is_none());
+    }
+    let mut legacy = c;
+    legacy.soil_crater = None;
+    let mut old = Blob::new();
+    save(&legacy, &mut old);
+    assert_eq!(&b.v[33..], old.v.as_slice());
+    assert_eq!(load(&mut Scan::new(&old.v)), Some(legacy));
+    for (offset, value) in [
+        (1, 0),
+        (5, 0),
+        (9, 0),
+        (17, 0),
+        (21, u32::MAX),
+        (25, 0),
+        (29, 0),
+    ] {
+        let mut invalid = b.v.clone();
+        invalid[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        let pending = load(&mut Scan::new(&invalid)).expect("decode invalid pending shape");
+        assert!(pending.validate().is_err());
+    }
 }

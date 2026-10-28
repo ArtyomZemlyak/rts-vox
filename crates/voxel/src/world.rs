@@ -58,7 +58,7 @@ pub struct Edit {
 }
 
 impl Edit {
-    /// Unowned compare-and-remove. The reserved requester range encodes the
+    /// Unowned conditional edit. The reserved requester range encodes the
     /// expected material, preserving the existing fixed-width edit wire format.
     /// Unit requester IDs must stay below 0xfffe0000.
     pub fn dig_if(x: u32, y: u32, z: u32, expected: Mat) -> Edit {
@@ -71,7 +71,12 @@ impl Edit {
         }
     }
     pub fn expected_material(self) -> Option<Mat> {
-        (self.mat == AIR && self.by & 0xffff0000 == 0xfffe0000).then_some(self.by as Mat)
+        (self.by & 0xffff0000 == 0xfffe0000).then_some(self.by as Mat)
+    }
+
+    /// Replace only the material that was observed by the producer.
+    pub fn replace_if(x: u32, y: u32, z: u32, expected: Mat, mat: Mat) -> Edit {
+        Edit { x, y, z, mat, by: 0xfffe0000 | expected as u32 }
     }
 
     /// Снятие воксела без заказчика — обвал, воронка, оснастка теста.
@@ -107,6 +112,25 @@ impl Edit {
 /// фазе, что весь мир не переносится между потоками (ADR-125).
 pub trait Generator: Send + Sync {
     fn material(&self, x: u32, y: u32, z: u32) -> Mat;
+
+    /// Optional exact certificate for a nonempty half-open box. None means
+    /// unknown; Some must equal every point query in the box.
+    fn uniform_box(&self, _min: [u32; 3], _max: [u32; 3]) -> Option<Mat> {
+        None
+    }
+
+    /// Optional conservative material set for a nonempty half-open box.
+    /// Every point material must occur in the set; extra IDs are permitted.
+    /// Unknown generators keep the exact ordinary reader via None.
+    fn material_candidates(&self, _min: [u32; 3], _max: [u32; 3]) -> Option<Vec<Mat>> {
+        None
+    }
+
+    /// Pristine earth surface, excluding buildings and vegetation. Optional
+    /// pure metadata for bounded blast confinement; it does not replace solids.
+    fn soil_height(&self, _x: u32, _z: u32) -> Option<u32> {
+        None
+    }
 
     /// Performance hint for readers that can use either exact points or
     /// columns. Opt in when column() shares expensive X/Z preparation;
@@ -544,6 +568,27 @@ impl World {
         u32::from(self.ceiling[x as usize + self.nx as usize * z as usize])
     }
 
+    /// Maximum live ceiling in a half-open X/Z rectangle. Contiguous rows
+    /// avoid a bounds check per column and permit packed integer reduction.
+    pub fn column_box_ceiling(&self, min: [u32; 2], max: [u32; 2]) -> u32 {
+        let end = [max[0].min(self.nx), max[1].min(self.nz)];
+        if min[0] >= end[0] || min[1] >= end[1] {
+            return 0;
+        }
+        let mut top = 0;
+        for z in min[1]..end[1] {
+            let row = z as usize * self.nx as usize;
+            top = top.max(
+                self.ceiling[row + min[0] as usize..row + end[0] as usize]
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(0),
+            );
+        }
+        u32::from(top)
+    }
+
     /// Prepare the shared traversal surface during map loading, before orders.
     /// Fixed workers fill disjoint tiles; values are independent of scheduling.
     pub fn prepare_navigation(&self, yielding: [Mat; 2]) {
@@ -611,6 +656,31 @@ impl World {
         self.floor_tiles[i]
             .get()
             .and_then(|(key, bounds, _, _)| (*key == yielding).then_some(*bounds))
+    }
+    /// Contiguous floor tiles, read lazily in X order. Bounds and row stride
+    /// are checked once; cold or differently profiled tiles retain floor_tile's
+    /// exact scan. No answer is retained beyond this immutable world view.
+    pub fn floor_tile_row(
+        &self,
+        x: u32,
+        z: u32,
+        count: usize,
+        yielding: [Mat; 2],
+    ) -> Option<impl ExactSizeIterator<Item = [u16; 2]> + '_> {
+        let width = self.nx.div_ceil(8);
+        if x > width || z >= self.nz.div_ceil(8) || count > (width - x) as usize {
+            return None;
+        }
+        let first = x as usize + width as usize * z as usize;
+        Some(
+            self.floor_tiles[first..first + count]
+                .iter()
+                .enumerate()
+                .map(move |(dx, tile)| match tile.get() {
+                    Some((key, bounds, _, _)) if *key == yielding => *bounds,
+                    _ => self.floor_tile(x + dx as u32, z, yielding).unwrap(),
+                }),
+        )
     }
     /// Uniform bare floor across an inclusive column box of prepared tiles.
     /// `None` means the caller must check the exact columns instead.
@@ -942,6 +1012,194 @@ impl World {
     /// Whether the procedural source opts into column-based material queries.
     pub fn batches_material_columns(&self) -> bool {
         self.gen.batches_columns()
+    }
+
+    /// Exact bounded X/Y plane. Edited chunks copy packed X runs; pristine
+    /// spans evaluate the generator once per column, never underneath edits.
+    pub fn material_plane(
+        &self,
+        min: [u32; 3],
+        width: usize,
+        height: usize,
+        stride: usize,
+        out: &mut [Mat],
+    ) {
+        assert!(width > 0 && width <= 64 && height > 0 && height <= 64);
+        assert!(stride >= width && out.len() >= (height - 1) * stride + width);
+        assert!(
+            min[0] + width as u32 <= self.nx
+                && min[1] + height as u32 <= self.ny
+                && min[2] < self.nz
+        );
+        let mut column = [AIR; 64];
+        let mut dx = 0;
+        while dx < width {
+            let x = min[0] + dx as u32;
+            let run = (CS - x as usize % CS).min(width - dx);
+            let mut dy = 0;
+            while dy < height {
+                let y = min[1] + dy as u32;
+                let rows = (CS - y as usize % CS).min(height - dy);
+                if let Some(chunk) = &self.chunks[self.chunk_index(x, y, min[2])] {
+                    for row in 0..rows {
+                        let start = (dy + row) * stride + dx;
+                        chunk.copy_row(
+                            x as usize % CS,
+                            y as usize % CS + row,
+                            min[2] as usize % CS,
+                            &mut out[start..start + run],
+                        );
+                    }
+                    dy += rows;
+                } else {
+                    let start = dy;
+                    dy += rows;
+                    while dy < height {
+                        let next = min[1] + dy as u32;
+                        if self.chunks[self.chunk_index(x, next, min[2])].is_some() {
+                            break;
+                        }
+                        dy += (CS - next as usize % CS).min(height - dy);
+                    }
+                    for col in 0..run {
+                        self.gen.column(
+                            x + col as u32,
+                            min[2],
+                            min[1] + start as u32,
+                            &mut column[..dy - start],
+                        );
+                        for row in start..dy {
+                            out[row * stride + dx + col] = column[row - start];
+                        }
+                    }
+                }
+            }
+            dx += run;
+        }
+    }
+
+    /// Certify a uniform box without generating its pristine voxels. Edited
+    /// portions must match the generator's certificate in their packed data.
+    /// Unknown and out-of-world regions retain the ordinary exact reader.
+    pub fn uniform_box(&self, min: [u32; 3], max: [u32; 3]) -> Option<Mat> {
+        let size = [self.nx, self.ny, self.nz];
+        if (0..3).any(|a| min[a] >= max[a] || max[a] > size[a]) {
+            return None;
+        }
+        let material = self.gen.uniform_box(min, max)?;
+        for z in min[2] / CS as u32..=(max[2] - 1) / CS as u32 {
+            for y in min[1] / CS as u32..=(max[1] - 1) / CS as u32 {
+                for x in min[0] / CS as u32..=(max[0] - 1) / CS as u32 {
+                    let origin = [x, y, z].map(|v| v * CS as u32);
+                    if let Some(chunk) =
+                        &self.chunks[self.chunk_index(origin[0], origin[1], origin[2])]
+                    {
+                        let lo = std::array::from_fn(|a| min[a].saturating_sub(origin[a]) as usize);
+                        let hi =
+                            std::array::from_fn(|a| (max[a] - origin[a]).min(CS as u32) as usize);
+                        if !chunk.box_is_material(lo, hi, material) {
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+        Some(material)
+    }
+
+    /// Certify a single material with arbitrary air holes, including committed
+    /// edits. Unknown procedural content retains the ordinary material reader.
+    pub fn box_is_material_or_air(&self, min: [u32; 3], max: [u32; 3], mat: Mat) -> bool {
+        let size = [self.nx, self.ny, self.nz];
+        if (0..3).any(|a| min[a] >= max[a] || max[a] > size[a]) {
+            return false;
+        }
+        let mut procedural = None;
+        for z in min[2] / CS as u32..=(max[2] - 1) / CS as u32 {
+            for y in min[1] / CS as u32..=(max[1] - 1) / CS as u32 {
+                for x in min[0] / CS as u32..=(max[0] - 1) / CS as u32 {
+                    let origin = [x, y, z].map(|v| v * CS as u32);
+                    if let Some(chunk) =
+                        &self.chunks[self.chunk_index(origin[0], origin[1], origin[2])]
+                    {
+                        let lo = std::array::from_fn(|a| min[a].saturating_sub(origin[a]) as usize);
+                        let hi =
+                            std::array::from_fn(|a| (max[a] - origin[a]).min(CS as u32) as usize);
+                        if !chunk.box_is_material_or_air(lo, hi, mat) {
+                            return false;
+                        }
+                    } else if !*procedural.get_or_insert_with(|| {
+                        self.gen
+                            .uniform_box(min, max)
+                            .is_some_and(|m| m == AIR || m == mat)
+                    }) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Conservative live material set. Edited chunk palettes can retain old
+    /// entries: these only weaken the proof, never hide a live material.
+    pub fn material_candidates(&self, min: [u32; 3], max: [u32; 3]) -> Option<Vec<Mat>> {
+        let size = [self.nx, self.ny, self.nz];
+        if (0..3).any(|a| min[a] >= max[a] || max[a] > size[a]) {
+            return None;
+        }
+        let mut materials = self.gen.material_candidates(min, max)?;
+        let first = min.map(|v| (v / CS as u32) as usize);
+        let end = max.map(|v| ((v - 1) / CS as u32 + 1) as usize);
+        // Short palette lists keep the original append path. Promote only
+        // when actual duplicated entries justify a full u16 membership set,
+        // not merely because the query covers many mostly pristine chunks.
+        let mut seen: Option<Box<[u64; 1024]>> = None;
+        for z in first[2]..end[2] {
+            for y in first[1]..end[1] {
+                let start = (z * self.cy as usize + y) * self.cx as usize;
+                for chunk in self.chunks[start + first[0]..start + end[0]]
+                    .iter()
+                    .flatten()
+                {
+                    let palette = chunk.material_candidates();
+                    if seen.is_none() && materials.len() + palette.len() > 512 {
+                        let mut bits = Box::new([0u64; 1024]);
+                        for &mat in &materials {
+                            bits[usize::from(mat) / 64] |= 1u64 << (mat % 64);
+                        }
+                        materials.clear();
+                        seen = Some(bits);
+                    }
+                    if let Some(bits) = seen.as_mut() {
+                        for &mat in palette {
+                            bits[usize::from(mat) / 64] |= 1u64 << (mat % 64);
+                        }
+                    } else {
+                        materials.extend_from_slice(palette);
+                    }
+                }
+            }
+        }
+        if let Some(bits) = seen {
+            for (word, mut present) in bits.iter().copied().enumerate() {
+                while present != 0 {
+                    materials.push((word * 64 + present.trailing_zeros() as usize) as Mat);
+                    present &= present - 1;
+                }
+            }
+        } else {
+            materials.sort_unstable();
+            materials.dedup();
+        }
+        Some(materials)
+    }
+
+    pub fn soil_height(&self, x: u32, z: u32) -> Option<u32> {
+        if x >= self.nx || z >= self.nz {
+            return None;
+        }
+        self.gen.soil_height(x, z)
     }
 
     /// Restore the authored map without rebuilding untouched occupancy.

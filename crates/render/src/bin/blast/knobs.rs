@@ -1270,7 +1270,7 @@ pub fn build(commands: &mut Commands, camera: Entity, text_font: &TextFont) {
 }
 
 /// The character a key types into a number, if any.
-fn typed(key: KeyCode) -> Option<char> {
+pub(super) fn typed(key: KeyCode) -> Option<char> {
     Some(match key {
         KeyCode::Digit0 | KeyCode::Numpad0 => '0',
         KeyCode::Digit1 | KeyCode::Numpad1 => '1',
@@ -1312,7 +1312,9 @@ pub fn actions(
     interactions: Query<(&Action, &Interaction), Changed<Interaction>>,
     keys: Res<ButtonInput<KeyCode>>,
     edit: Res<Workshop>,
+    laboratory: Option<Res<laboratory::Laboratory>>,
 ) {
+    if laboratory.as_ref().is_some_and(|l| l.active()) { return; }
     if edit.layout.is_none() {
         return;
     }

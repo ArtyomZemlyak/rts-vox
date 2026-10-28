@@ -15,6 +15,8 @@ use modding::Registry;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use voxel::{store::AIR, World};
+#[path = "heat_melt_flow.rs"]
+mod melt_flow;
 
 /// The edit slot fire digs by: the ledger sends what it took to the
 /// combustion sink instead of crediting a unit.
@@ -31,6 +33,8 @@ pub struct HeatCell {
 pub struct Heat {
     cells: BTreeMap<[u32; 3], HeatCell>,
     cursor: Option<[u32; 3]>,
+    // Rebuilt from saved heat and world material on load; never serialized.
+    molten: BTreeSet<[u32; 3]>,
     /// Voxels lit this tick, for the image of fire; transient.
     pub ignited: Vec<[u32; 3]>,
     /// Voxels consumed this tick; the ledger sinks their matter. Transient.
@@ -118,9 +122,16 @@ impl Heat {
     pub(crate) fn take_heat(&mut self, p: [u32; 3], amount: u32) {
         if let Some(c) = self.cells.get_mut(&p) {
             c.heat = c.heat.saturating_sub(amount);
-            if c.heat == 0 && c.burn == 0 {
+            if c.heat == 0 && c.burn == 0 && !self.molten.contains(&p) {
                 self.cells.remove(&p);
             }
+        }
+    }
+    pub(crate) fn quench(&mut self,p:[u32;3],amount:u32,kindling:u32) {
+        if let Some(c)=self.cells.get_mut(&p) {
+            c.heat=c.heat.saturating_sub(amount);
+            if kindling>0 && c.heat<kindling {c.burn=0;}
+            if c.heat==0 && c.burn==0 && !self.molten.contains(&p) {self.cells.remove(&p);}
         }
     }
     pub fn hot(&self) -> usize {
@@ -480,7 +491,7 @@ impl Heat {
                     let lost = (c.heat * t.cooling_milli / 1000).max(1);
                     c.heat = c.heat.saturating_sub(lost);
                 }
-                if c.heat == 0 && c.burn == 0 {
+                if c.heat == 0 && c.burn == 0 && !t.melt_flow.iter().flatten().any(|f| f.liquid == m) {
                     self.cells.remove(&p);
                 } else {
                     self.cells.insert(p, c);
@@ -556,7 +567,7 @@ impl Heat {
                 let lost = (c.heat * t.cooling_milli / 1000).max(1);
                 c.heat = c.heat.saturating_sub(lost);
             }
-            if c.heat == 0 && c.burn == 0 {
+            if c.heat == 0 && c.burn == 0 && !t.melt_flow.iter().flatten().any(|f| f.liquid == m) {
                 removed.push(p);
             } else {
                 *entry = c;
@@ -589,6 +600,7 @@ impl Heat {
     /// A voxel the range took: its heat went with it.
     pub fn forget(&mut self, p: [u32; 3]) {
         self.cells.remove(&p);
+        self.molten.remove(&p);
     }
     pub fn save(&self, b: &mut Blob) {
         b.u32(self.cells.len() as u32);
@@ -625,7 +637,7 @@ impl Heat {
             if !inside(w, p)
                 || heat > HEAT_CAP
                 || burn > u32::from(t.burn_ticks)
-                || (heat == 0 && burn == 0)
+                || (heat == 0 && burn == 0 && !t.melt_flow.iter().flatten().any(|f| f.liquid == w.material(p[0],p[1],p[2])))
                 || previous.is_some_and(|q| q >= p)
             {
                 return None;
@@ -638,6 +650,9 @@ impl Heat {
                     burn: burn as u16,
                 },
             );
+            if t.melt_flow.iter().flatten().any(|f| f.liquid == w.material(p[0],p[1],p[2])) {
+                h.molten.insert(p);
+            }
         }
         if s.bool() {
             let c = [s.u32(), s.u32(), s.u32()];

@@ -5,6 +5,7 @@ use sim_core::{blast::RangeUnit, burst::Fragment};
 
 #[derive(Clone, Copy)]
 pub(super) enum Prepared {
+    Batched,
     Existing(Option<Transform>),
     Replace((u64, bool), Transform),
 }
@@ -43,7 +44,7 @@ impl Entry {
         self.prepared = Prepared::Replace(key, transform(f));
     }
 }
-fn transform(f: &Fragment) -> Transform {
+pub(super) fn transform(f: &Fragment) -> Transform {
     let current = pos([f.position.x, f.position.y, f.position.z]);
     let basis = f.basis.map(|v| pos([v.x, v.y, v.z]));
     let rotation = Quat::from_mat3(&Mat3::from_cols(basis[0], basis[1], basis[2])).normalize();
@@ -68,28 +69,38 @@ impl Slots {
         units: &[RangeUnit],
         previous: &super::history::History,
         alpha: f32,
+        batched: &[bool],
         exists: impl Fn(Entity) -> bool + Sync,
         pool: Option<&bevy::tasks::TaskPool>,
     ) {
-        let prepare = |entries: &mut [Entry], pieces: &[Fragment]| {
+        let prepare = |start: usize, entries: &mut [Entry], pieces: &[Fragment]| {
             let Some(first) = pieces.first() else {
                 return;
             };
             let mut origins =
                 previous.cursor(first.id, pieces.windows(2).all(|w| w[0].id < w[1].id));
-            for (entry, f) in entries.iter_mut().zip(pieces) {
+            for (offset, (entry, f)) in entries.iter_mut().zip(pieces).enumerate() {
+                if batched.get(start + offset) == Some(&true) {
+                    entry.prepared = Prepared::Batched;
+                    continue;
+                }
                 entry.prepare(f, units, origins.next(f.id), alpha, &exists);
             }
         };
         if let Some(pool) = pool.filter(|_| pieces.len() >= 2048) {
             pool.scope(|scope| {
-                for (entries, pieces) in self.entries.chunks_mut(2048).zip(pieces.chunks(2048)) {
+                for (i, (entries, pieces)) in self
+                    .entries
+                    .chunks_mut(2048)
+                    .zip(pieces.chunks(2048))
+                    .enumerate()
+                {
                     let prepare = &prepare;
-                    scope.spawn(async move { prepare(entries, pieces) });
+                    scope.spawn(async move { prepare(i * 2048, entries, pieces) });
                 }
             });
         } else {
-            prepare(&mut self.entries, pieces);
+            prepare(0, &mut self.entries, pieces);
         }
     }
     fn retire(&mut self, entry: Entry) {
@@ -219,8 +230,8 @@ mod tests {
             for alpha in [0.0, 0.25, 0.75, 1.0] {
                 // Emulate external entity removal and a changed mesh on reset.
                 let exists = |e: Entity| e.to_bits() % 11 != 0;
-                serial.prepare(&pieces, &[], &previous, alpha, exists, None);
-                parallel.prepare(&pieces, &[], &previous, alpha, exists, Some(&pool));
+                serial.prepare(&pieces, &[], &previous, alpha, &[], exists, None);
+                parallel.prepare(&pieces, &[], &previous, alpha, &[], exists, Some(&pool));
                 for (a, b) in serial.entries.iter().zip(&parallel.entries) {
                     match (a.prepared, b.prepared) {
                         (Prepared::Existing(a), Prepared::Existing(b)) => assert_eq!(a, b),

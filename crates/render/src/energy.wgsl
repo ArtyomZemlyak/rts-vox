@@ -66,7 +66,7 @@ fn energy_ball(ro:vec3<f32>,rd:vec3<f32>,centre:vec3<f32>,radius:f32,limit:f32,t
 // and, for a moment, around the point it struck. Presentation only: the
 // offset is applied to the already-drawn scene before any light is added.
 fn anni_warp_one(uv:vec2<f32>,e:EnergySource)->vec2<f32> {
-    if e.weapon.x<1.5 {return vec2(0.0);}
+    if e.weapon.x<1.5 || e.weapon.x>2.5 {return vec2(0.0);}
     var centre=vec3(0.0);var strength=0.0;var radius=0.0;
     if e.energy.w>0.0 {
         centre=e.energy.xyz;strength=0.035;radius=0.13;
@@ -119,11 +119,11 @@ fn anni_core_one(ro:vec3<f32>,rd:vec3<f32>,limit:f32,e:EnergySource)->vec2<f32> 
     return out;
 }
 fn anni_absorb_one(ro:vec3<f32>,rd:vec3<f32>,limit:f32,e:EnergySource)->f32 {
-    if e.weapon.x<1.5 {return 0.0;}
+    if e.weapon.x<1.5 || e.weapon.x>2.5 {return 0.0;}
     return anni_core_one(ro,rd,limit,e).x*0.97;
 }
 fn energy_effect_one(ro:vec3<f32>,rd:vec3<f32>,limit:f32,e:EnergySource)->vec3<f32> {
-    if e.weapon.x<0.5 {return vec3(0.0);}
+    if e.weapon.x<0.5 || e.weapon.x>2.5 {return vec3(0.0);}
     var colour=vec3(0.0);let time=e.weapon.y;
     if e.weapon.x>1.5 {
         // The annihilation bolt: the rim of the dark core, a thin cold

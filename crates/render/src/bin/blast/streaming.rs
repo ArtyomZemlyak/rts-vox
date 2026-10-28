@@ -97,7 +97,7 @@ impl Row {
             let shift = (x as usize % dx % 8) * 4;
             let mut word = x as usize % dx / 8 + w.origin[1] as usize % dy * stride;
             for &material in materials {
-                self.words[word] |= u32::from(material) << shift;
+                self.words[word] |= surface_tint(material, 0, 1) << shift;
                 word += stride;
                 if word >= self.words.len() {
                     word -= self.words.len();
@@ -455,7 +455,7 @@ fn write_rows(
                 // Entering rows were cleared above. A column has a fixed
                 // nibble and advances by one packed row, not three modulo
                 // operations plus a bounds query for every voxel.
-                words[word] |= u32::from(material) << shift;
+                words[word] |= surface_tint(material, 0, 1) << shift;
                 word += row_words;
                 if word >= base + slab_words {
                     word -= slab_words;
@@ -534,11 +534,15 @@ pub fn camera(
     stream.map_scale = false;
     gas.params.terrain.w = 0.0;
     let ray = transform.forward();
-    let distance = (sim_core::blast::FLOOR as f32 - transform.translation.y) / ray.y.min(-0.01);
-    let p = transform.translation + ray * distance;
+    let distance = (scene.sim.ground_level() as f32 - transform.translation.y) / ray.y.min(-0.01);
+    let p = if matches!(*projection, Projection::Perspective(_)) {
+        transform.translation
+    } else {
+        transform.translation + ray * distance
+    };
     let want = TerrainWindow::around(
         scene.sim.size(),
-        [p.x as i32, 16, p.z as i32],
+        [p.x as i32, scene.sim.ground_level(), p.z as i32],
         TERRAIN_WINDOW,
         WINDOW_STEP,
     );
@@ -699,6 +703,7 @@ mod tests {
             dims: [64, 64, 64],
         };
         sim.world.queue_edit(voxel::world::Edit::put(72, 24, 82, 3));
+        sim.world.queue_edit(voxel::world::Edit::put(73, 24, 82, 10));
         sim.world.flush();
         sim.surface_work.insert([72, 24, 82], 380);
         let mut expected = vec![0; (window.dims[0] * window.dims[1] / 8) as usize];
@@ -724,7 +729,7 @@ mod tests {
         assert_eq!(row.input.header.generation, 7);
         assert_eq!(
             surface_tint(3, u32::MAX, 1),
-            11,
+            10,
             "saturated work cannot overflow presentation"
         );
     }

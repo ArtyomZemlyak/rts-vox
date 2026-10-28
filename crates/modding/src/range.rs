@@ -11,11 +11,17 @@ pub const MAX_RANGE_ZONES: usize = 16;
 pub struct RangeEditor {
     pub clearing_side: i32,
     pub clearing_height: i32,
+    #[serde(default)]
+    pub subsoil_units: i32,
 }
 impl RangeEditor {
     pub fn from_ron(s: &str) -> Result<Self, String> {
         let c: Self = ron::from_str(s).map_err(|e| e.to_string())?;
-        if !(64..=256).contains(&c.clearing_side) || !(32..=160).contains(&c.clearing_height) {
+        if !(64..=256).contains(&c.clearing_side)
+            || !(32..=160).contains(&c.clearing_height)
+            || !(0..=256).contains(&c.subsoil_units)
+            || c.subsoil_units % 16 != 0
+        {
             return Err("invalid range editor clearing".into());
         }
         Ok(c)
@@ -79,11 +85,12 @@ pub enum RangeUnitKind {
     ArtilleryTurretT2,
     ArtilleryTurretT3,
     NuclearSilo,
+    Crawler,
 }
 
 impl RangeUnitKind {
     /// Canonical order for kind-indexed capability tables.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Tank,
         Self::Strider,
         Self::Spider,
@@ -95,6 +102,7 @@ impl RangeUnitKind {
         Self::ArtilleryTurretT2,
         Self::ArtilleryTurretT3,
         Self::NuclearSilo,
+        Self::Crawler,
     ];
     pub const COUNT: usize = Self::ALL.len();
     pub const fn index(self) -> usize {
@@ -110,6 +118,7 @@ impl RangeUnitKind {
             Self::ArtilleryTurretT2 => 8,
             Self::ArtilleryTurretT3 => 9,
             Self::NuclearSilo => 10,
+            Self::Crawler => 11,
         }
     }
 
@@ -218,16 +227,31 @@ pub struct RangeLayout {
     /// Battle actors are the placed roster; the test gun is parked off-scene.
     #[serde(default)]
     pub battle: bool,
+    /// Passive hostile targets keep their positions and never acquire orders.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub idle_enemies: bool,
     /// Side, height and side of the world this layout is laid out in,
     /// world units (ADR-315). A layout without one keeps the stock
     /// range, so that every preset written before the size moved into
     /// the data goes on meaning what it meant.
     #[serde(default = "stock_size")]
     pub size: [u32; 3],
+    /// Absolute level of the flat ground, including destructible subsoil.
+    #[serde(default = "stock_ground", skip_serializing_if = "is_stock_ground")]
+    pub ground_level: i32,
     #[serde(default)]
     pub course: Option<RangeCourse>,
     #[serde(default = "stock_gun")]
     pub gun: [i32; 3],
+    /// A model-free emitter uses `gun` as its exact origin and has no physical chassis.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gun_point: bool,
+    #[serde(default,skip_serializing_if="std::ops::Not::not")]
+    pub laboratory:bool,
+    #[serde(default,skip_serializing_if="std::ops::Not::not")]
+    pub allow_overlap:bool,
+    #[serde(default,skip_serializing_if="Vec::is_empty")]
+    pub lab_devices:Vec<crate::lab_tools::Device>,
     #[serde(default)]
     pub gun_kind: RangeUnitKind,
     #[serde(default)]
@@ -242,6 +266,9 @@ pub struct RangeLayout {
     pub clear_min: [i32; 2],
     pub clear_max: [i32; 2],
     pub units: Vec<RangeUnitDef>,
+    /// Optional absolute quarter turns; omitted entries keep the side's spawn heading.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unit_yaws: Vec<u8>,
     /// Later blocks override earlier blocks, allowing cladding and cutouts.
     pub blocks: Vec<RangeBlock>,
     #[serde(default)]
@@ -257,6 +284,12 @@ pub struct RangeLayout {
     /// tanks and no dig orders, and reads and writes as it did before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub economy: Option<crate::range_economy::RangeEconomy>,
+}
+fn stock_ground() -> i32 {
+    16
+}
+fn is_stock_ground(v: &i32) -> bool {
+    *v == stock_ground()
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RangeRamp {
@@ -325,6 +358,61 @@ pub const fn stock_size() -> [u32; 3] {
     [640, 192, 640]
 }
 impl RangeLayout {
+    pub fn unit_yaw(&self, index: usize) -> u8 {
+        self.unit_yaws.get(index).copied().unwrap_or_else(|| {
+            if self.battle && !self.units[index].allied { 2 } else { 0 }
+        })
+    }
+    /// Translate the complete authored scene once, preserving sky clearance.
+    /// Saved editor layouts already carry their level, so reopening is idempotent.
+    pub fn with_ground_level(mut self, level: i32) -> Result<Self, String> {
+        self.validate()?;
+        if !(16..=272).contains(&level) || (level - 16) % 16 != 0 {
+            return Err("invalid range ground level".into());
+        }
+        let dy = level - self.ground_level;
+        if dy == 0 {
+            return Ok(self);
+        }
+        self.size[1] = u32::try_from(i64::from(self.size[1]) + i64::from(dy))
+            .map_err(|_| "invalid translated range height")?;
+        let shift = |p: &mut [i32; 3]| p[1] += dy;
+        shift(&mut self.gun);
+        shift(&mut self.target);
+        for u in &mut self.units {
+            shift(&mut u.at);
+        }
+        for device in &mut self.lab_devices {shift(&mut device.at);if let Some(c)=device.collector.as_mut(){shift(&mut c.dock);shift(&mut c.area);if let Some(p)=c.aim.as_mut(){shift(p);}}}
+        for b in &mut self.blocks {
+            shift(&mut b.min);
+            shift(&mut b.max);
+        }
+        for m in &mut self.mounds {
+            shift(&mut m.min);
+            shift(&mut m.max);
+        }
+        for s in &mut self.shields {
+            shift(&mut s.at);
+        }
+        for z in &mut self.zones {
+            shift(&mut z.spawn);
+            shift(&mut z.target);
+            if let Some(s) = &mut z.scenario {
+                for p in &mut s.shots {
+                    shift(p);
+                }
+            }
+        }
+        if let Some(c) = &mut self.course {
+            for r in &mut c.ramps {
+                shift(&mut r.min);
+                shift(&mut r.max);
+            }
+        }
+        self.ground_level = level;
+        self.validate()?;
+        Ok(self)
+    }
     pub fn to_ron(&self) -> Result<String, String> {
         self.validate()?;
         // The text is part of the authoritative snapshot/hash. RON's
@@ -347,9 +435,19 @@ impl RangeLayout {
         if r.size
             .iter()
             .any(|v| !(128..=16384).contains(v) || v % 16 != 0)
+            || !(16..=272).contains(&r.ground_level)
+            || (r.ground_level - 16) % 16 != 0
+            || r.ground_level >= size[1]
             || r.unit_resistance == 0
             || r.unit_resistance > 1_000_000
+            || r.lab_devices.len()>crate::lab_tools::Tuning::stock().devices
+            || (!r.laboratory && (!r.lab_devices.is_empty()||r.allow_overlap))
+            || r.lab_devices.iter().any(|d|d.turns>3 || (0..3).any(|a|d.at[a]<1||d.at[a]>=size[a]-1)
+                || (d.kind==crate::lab_tools::DeviceKind::Collector)!=d.collector.is_some()
+                || d.collector.as_ref().is_some_and(|c|!c.valid(size)))
             || r.units.len() > MAX_RANGE_UNITS
+            || r.unit_yaws.len() > r.units.len()
+            || r.unit_yaws.iter().any(|yaw| *yaw > 3)
             || r.units.iter().any(|u| !u.valid_loadout())
             || !(1..=100_000).contains(&r.auto_attack_range)
             || r.blocks.len() > MAX_RANGE_BLOCKS
@@ -370,15 +468,18 @@ impl RangeLayout {
             || r.power_milli.is_empty()
             || r.power_milli.len() > 8
             || r.power_milli.iter().any(|p| !(100..=4000).contains(p))
-            || r.target[0] <= 160
+            || (r.target[0] <= 160 && !r.gun_point)
             || (0..3).any(|a| r.target[a] < 0 || r.target[a] >= size[a])
             || (0..2).any(|a| {
                 r.clear_min[a] < 0
                     || r.clear_max[a] > size[a * 2]
                     || r.clear_min[a] >= r.clear_max[a]
             })
+            || (r.blocks.iter().any(|b|b.material==crate::water::MATERIAL) && r.blocks.iter().filter(|b|b.material==crate::water::MATERIAL).map(|b|
+                (0..3).map(|a|u64::try_from(b.max[a]-b.min[a]).unwrap_or(u64::MAX)).fold(1u64,|v,n|v.saturating_mul(n))
+            ).fold(0u64,|v,n|v.saturating_add(n)) > crate::water::Tuning::stock().max_cells as u64)
             || r.blocks.iter().any(|b| {
-                ![0, 1, 2, 3, 4, 5, 6, 8].contains(&b.material)
+                ![0, 1, 2, 3, 4, 5, 6, 8, 10, 11, 12].contains(&b.material)
                     || (0..3).any(|a| b.min[a] < 0 || b.max[a] > size[a] || b.min[a] >= b.max[a])
             })
             || std::iter::once(r.gun)
@@ -583,5 +684,28 @@ mod tests {
         assert!(r.validate().is_ok());
         r.units.push(r.units[0].clone());
         assert!(r.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod subsoil_tests {
+    use super::*;
+    #[test]
+    fn complete_catalogue_translation_is_reversible_and_survives_editor_save() {
+        let stock = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        let deep = stock.clone().with_ground_level(80).unwrap();
+        assert_eq!(deep.size[1], stock.size[1] + 64);
+        assert_eq!(deep.gun[1], stock.gun[1] + 64);
+        assert_eq!(
+            deep.zones[0].scenario.as_ref().unwrap().shots[0][1],
+            stock.zones[0].scenario.as_ref().unwrap().shots[0][1] + 64
+        );
+        assert_eq!(
+            deep,
+            RangeLayout::from_ron(&deep.to_ron().unwrap()).unwrap()
+        );
+        assert_eq!(stock, deep.with_ground_level(16).unwrap());
+        assert!(!stock.to_ron().unwrap().contains("ground_level"));
+        assert!(stock.clone().with_ground_level(81).is_err());
     }
 }

@@ -5,8 +5,9 @@
 (
     capacity: 4000,
     // A spent dome fills in twenty seconds.
+    // Authored 30 Hz charge quantum, integrated without fractional loss.
     recharge_per_tick: 7,
     // Three seconds down after a collapse.
-    overload_ticks: 90,
+    overload_ticks: 60,
     default_radius: 40,
 )

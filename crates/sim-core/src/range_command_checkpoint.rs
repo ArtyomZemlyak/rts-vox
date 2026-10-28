@@ -255,6 +255,9 @@ impl Reader<'_> {
                     at: std::array::from_fn(|_| self.0.i32()),
                 },
                 6 => super::super::GunCommand::Refire,
+                8 => super::super::GunCommand::Origin { at: std::array::from_fn(|_| self.0.i32()) },
+                9 => super::super::GunCommand::Detonate { at: std::array::from_fn(|_| self.0.i32()) },
+                10 => super::super::GunCommand::LabStream { origin: std::array::from_fn(|_| self.0.i32()), target: std::array::from_fn(|_| self.0.i32()), enabled: self.boolean()? },
                 7 => super::super::GunCommand::Aim {
                     at: if self.boolean()? {
                         Some(std::array::from_fn(|_| self.0.i32()))
@@ -300,6 +303,16 @@ impl Reader<'_> {
                     3 => Order::Attack(self.size()?),
                     4 => Order::Ground([self.0.i32(), self.0.i32(), self.0.i32()]),
                     5 => Order::Dig([self.0.i32(), self.0.i32(), self.0.i32()]),
+                    6 => {
+                        let throttle = self.0.u8();
+                        let turn = self.0.u8();
+                        Order::Pilot {
+                            throttle: throttle.wrapping_sub(1) as i8,
+                            turn: turn.wrapping_sub(1) as i8,
+                            aim: [self.0.i32(), self.0.i32(), self.0.i32()],
+                            fire: self.boolean()?,
+                        }
+                    }
                     _ => return None,
                 };
                 let destination = self.boolean()?.then(|| [self.0.i32(), self.0.i32()]);
@@ -331,6 +344,7 @@ impl Reader<'_> {
                 kind: *crate::blast::RangeUnitKind::ALL.get(usize::from(self.0.u8()))?,
             },
             12 => Command::Cancel { actor },
+            13 if actor==0 => Command::Sculpt{at:std::array::from_fn(|_|self.0.i32()),edge:self.0.u32(),material:self.0.u16(),erase:self.boolean()?},
             2 => Command::TuneMotion {
                 kind: *crate::blast::RangeUnitKind::ALL.get(actor)?,
                 include_gun: self.boolean()?,
@@ -612,6 +626,9 @@ pub(super) fn save_inbox(b: &mut Blob, inbox: &Inbox) {
                         }
                     }
                     GunCommand::Refire => b.u8(6),
+                    GunCommand::Origin { at } => { b.u8(8); for x in at { b.i32(x); } }
+                    GunCommand::Detonate { at } => { b.u8(9); for x in at { b.i32(x); } }
+                    GunCommand::LabStream { origin, target, enabled } => { b.u8(10); for x in origin.into_iter().chain(target) { b.i32(x); } b.bool(enabled); }
                     GunCommand::Aim { at } => {
                         b.u8(7);
                         b.bool(at.is_some());
@@ -715,6 +732,20 @@ pub(super) fn save_inbox(b: &mut Blob, inbox: &Inbox) {
                             b.i32(x);
                         }
                     }
+                    Order::Pilot {
+                        throttle,
+                        turn,
+                        aim,
+                        fire,
+                    } => {
+                        b.u8(6);
+                        b.u8(throttle.wrapping_add(1) as u8);
+                        b.u8(turn.wrapping_add(1) as u8);
+                        for x in aim {
+                            b.i32(x);
+                        }
+                        b.bool(fire);
+                    }
                 }
                 b.bool(destination.is_some());
                 if let Some(at) = destination {
@@ -738,6 +769,9 @@ pub(super) fn save_inbox(b: &mut Blob, inbox: &Inbox) {
                 b.u8(11);
                 b.usize(actor);
                 b.u8(kind.index() as u8);
+            }
+            Command::Sculpt{at,edge,material,erase}=> {
+                b.u8(13);b.usize(0);for v in at {b.i32(v);}b.u32(edge);b.u16(material);b.bool(erase);
             }
             Command::Cancel { actor } => {
                 b.u8(12);
@@ -806,6 +840,9 @@ mod wire_tests {
             (Command::SetPatrols { enabled: false }, vec![10, 0]),
         ];
         let mut movement = vec![9, 1];
+        let mut origin = vec![9, 8];
+        for x in [192i32,48,336] {origin.extend(x.to_le_bytes());}
+        pairs.push((Command::Gun(G::Origin{at:[192,48,336]}),origin));
         for x in [-1i32, 365] {
             movement.extend(x.to_le_bytes());
         }
@@ -836,6 +873,17 @@ mod wire_tests {
             }
             pairs.push((Command::Gun(input), payload));
         }
+        for (input,tag) in [(G::Origin {at:[32,48,64]},8),(G::Detonate {at:[32,48,64]},9)] {
+            let mut payload=vec![9,tag];
+            for x in [32i32,48,64] {payload.extend(x.to_le_bytes());}
+            pairs.push((Command::Gun(input),payload));
+        }
+        for enabled in [true,false] {
+            let mut payload=vec![9,10];
+            for x in [32i32,48,64,60,30,60] {payload.extend(x.to_le_bytes());}
+            payload.push(u8::from(enabled));
+            pairs.push((Command::Gun(G::LabStream{origin:[32,48,64],target:[60,30,60],enabled}),payload));
+        }
         for (command, payload) in pairs {
             let mut bytes = vec![payload[0]];
             bytes.extend(0u64.to_le_bytes());
@@ -851,6 +899,10 @@ mod wire_tests {
             }
             if matches!(command, Command::Gun(G::AutoAttack { .. } | G::Aim { .. })) {
                 bytes[10] = 2;
+                assert!(Reader(Scan::new(&bytes)).command().is_none());
+            }
+            if matches!(command,Command::Gun(G::LabStream{..})) {
+                *bytes.last_mut().unwrap()=2;
                 assert!(Reader(Scan::new(&bytes)).command().is_none());
             }
         }

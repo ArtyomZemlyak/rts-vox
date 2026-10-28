@@ -148,6 +148,7 @@ fn passable(t: Terrain, kind: RangeUnitKind, eighth: i32) -> bool {
     // tan of the tilt limits in sim.ron: 91 % and 84 % of up.
     let grade_pct = match kind {
         RangeUnitKind::Tank
+        | RangeUnitKind::Crawler
         | RangeUnitKind::Artillery
         | RangeUnitKind::ArtilleryT2
         | RangeUnitKind::TurretT1
@@ -198,6 +199,7 @@ fn run(t: Terrain, kind: RangeUnitKind, heading: i32, back: bool) -> Run {
     let w = World::new(640, 64, 640, 100, Box::new(Ground(t)));
     let body = match kind {
         RangeUnitKind::Tank => voxel::unit::tank(),
+        RangeUnitKind::Crawler => voxel::unit::crawler(),
         RangeUnitKind::Strider => voxel::unit::strider(),
         RangeUnitKind::Spider => voxel::unit::spider(),
         RangeUnitKind::Artillery => voxel::unit::artillery(),
@@ -318,6 +320,7 @@ fn probe_poses_along_the_run() {
         let w = World::new(640, 64, 640, 100, Box::new(Ground(t)));
         let body = match kind {
             RangeUnitKind::Tank => voxel::unit::tank(),
+            RangeUnitKind::Crawler => voxel::unit::crawler(),
             RangeUnitKind::Strider => voxel::unit::strider(),
             RangeUnitKind::Spider => voxel::unit::spider(),
             RangeUnitKind::Artillery => voxel::unit::artillery(),
@@ -428,7 +431,10 @@ fn every_terrain_is_crossed_from_every_heading_without_pose_jumps() {
                         r.routed
                             && r.arrived.is_some()
                             && (!r.reversed || recovery_allowed)
-                            && r.ddy < Fx::from_ratio(7, 10)
+                            // A second difference scales with dt². Preserve
+                            // the former 30 Hz acceleration bound in seconds.
+                            && r.ddy.mul(Fx::from_int(sim_core::TICKS_PER_SECOND.pow(2)))
+                                < Fx::from_ratio(7 * 30 * 30, 10)
                             && r.tilt < Fx::from_ratio(1, 4)
                             && r.blocked <= if recovery_allowed { 60 } else { 12 }
                     } else {

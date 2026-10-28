@@ -144,11 +144,12 @@ fn a_battle_restored_mid_fight_continues_bit_for_bit() {
 /// версии вне принимаемого окна отвергается, а не толкуется по-новому.
 fn refuses_foreign_headers_of(bytes: &[u8]) {
     let version = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-    assert!(
-        (27..=66).contains(&version),
-        "версия {version} в первых байтах"
+    assert_eq!(version, 67, "оболочка частоты в первых байтах");
+    assert_eq!(
+        u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+        sim_core::TICKS_PER_SECOND as u32
     );
-    for foreign in [0, 26, 67, u32::MAX] {
+    for foreign in [0, 26, 66, 68, u32::MAX] {
         let mut b = bytes.to_vec();
         b[..4].copy_from_slice(&foreign.to_le_bytes());
         assert!(
@@ -159,10 +160,11 @@ fn refuses_foreign_headers_of(bytes: &[u8]) {
     // Флаг настроек оружия — байт, а не логическое «не ноль»:
     // любое значение, кроме нуля и единицы, — порча. Он стоит сразу
     // за версией, флагами сцены и тиком выстрела начиная с версии 59.
+    let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
     let (inner, flag) = if version == 66 {
-        (u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 14)
+        (u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 22)
     } else {
-        (version, 10)
+        (version, 18)
     };
     if inner >= 59 {
         let mut b = bytes.to_vec();
@@ -201,10 +203,11 @@ fn a_live_wave_rejects_a_non_boolean_weapon_configuration_flag() {
     }
     assert!(r.explosion.as_ref().is_some_and(|e| e.working()));
     let mut bytes = r.snapshot();
-    let version = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+    assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 67);
+    let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
     assert!((59..=65).contains(&version), "fixture version {version}");
     assert!(BlastRange::restore(c, &bytes).is_some());
-    bytes[10] = 2;
+    bytes[18] = 2;
     assert!(BlastRange::restore(c, &bytes).is_none());
 }
 

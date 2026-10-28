@@ -2,7 +2,9 @@
 //! Applied saves own both the constructor base and the current live setting.
 use super::{battle::commands::Outcome, BlastRange};
 use fx::blob::{Blob, Scan};
-use modding::explosion::{Delivery, ExplosionConfig, ProjectileMotion, Ricochet, Spall};
+use modding::explosion::{
+    Delivery, ExplosionConfig, ProjectileMotion, Ricochet, SoilCrater, Spall,
+};
 
 impl BlastRange {
     pub(super) fn configure_weapon(&mut self, mut config: ExplosionConfig) -> Outcome {
@@ -24,6 +26,34 @@ impl BlastRange {
 }
 
 pub(super) fn save(c: &ExplosionConfig, b: &mut Blob) {
+    if let Some(shape) = c.soil_crater {
+        b.u8(130);
+        for value in [
+            shape.spread,
+            shape.step,
+            shape.layer,
+            shape.deep_half_width,
+            shape.middle_half_width,
+            shape.middle_depth,
+            shape.outer_depth,
+            shape.taper_units,
+        ] {
+            b.u32(value);
+        }
+    }
+    if let Some(work) = c.material_resistance {
+        b.u8(129);
+        for value in work {
+            b.u32(value);
+        }
+    }
+    // Self-describing extension: legacy configs still start with delivery
+    // 0..=4, including old applied saves and queued configuration commands.
+    if c.soil_depth_cost != 0 || c.soil_fracture_milli != 1000 {
+        b.u8(128);
+        b.u32(c.soil_depth_cost);
+        b.u32(c.soil_fracture_milli);
+    }
     b.u8(match c.delivery {
         Delivery::Blast => 0,
         Delivery::Kinetic => 1,
@@ -96,8 +126,37 @@ fn size(s: &mut Scan) -> Option<usize> {
 /// Decode wire structure only: invalid pending gameplay inputs must still reach
 /// the executor and receive Rejected. Applied snapshot callers also validate.
 pub(super) fn load(s: &mut Scan) -> Option<ExplosionConfig> {
+    let mut first = s.u8();
+    let soil_crater = if first == 130 {
+        let shape = SoilCrater {
+            spread: s.u32(),
+            step: s.u32(),
+            layer: s.u32(),
+            deep_half_width: s.u32(),
+            middle_half_width: s.u32(),
+            middle_depth: s.u32(),
+            outer_depth: s.u32(),
+            taper_units: s.u32(),
+        };
+        first = s.u8();
+        Some(shape)
+    } else {
+        None
+    };
+    let material_resistance = if first == 129 {
+        let work = std::array::from_fn(|_| s.u32());
+        first = s.u8();
+        Some(work)
+    } else {
+        None
+    };
+    let (soil_depth_cost, soil_fracture_milli, delivery) = if first == 128 {
+        (s.u32(), s.u32(), s.u8())
+    } else {
+        (0, 1000, first)
+    };
     let c = ExplosionConfig {
-        delivery: match s.u8() {
+        delivery: match delivery {
             0 => Delivery::Blast,
             1 => Delivery::Kinetic,
             2 => Delivery::Laser,
@@ -117,8 +176,12 @@ pub(super) fn load(s: &mut Scan) -> Option<ExplosionConfig> {
         material_energy_j: s.u32(),
         air_cost: s.u32(),
         soil_resistance: s.u32(),
+        soil_depth_cost,
+        soil_crater,
+        soil_fracture_milli,
         concrete_resistance: s.u32(),
         steel_resistance: s.u32(),
+        material_resistance,
         unit_ablation_resistance: s.u32(),
         unit_role_resistance_milli: std::array::from_fn(|_| s.u32()),
         wave_work_per_tick: size(s)?,

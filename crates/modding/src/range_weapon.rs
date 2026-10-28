@@ -2,7 +2,9 @@
 use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize)]
 pub struct Stream {
+    /// Duration in authored 30 Hz samples, independent of simulation Hz.
     pub burst_ticks: u32,
+    /// Sample interval; fractional simulation deadlines retain salvo count.
     pub interval_ticks: u32,
     #[serde(deserialize_with = "crate::attack_ranges::deserialize")]
     pub range: i32,
@@ -12,6 +14,7 @@ pub struct Stream {
     pub heat: u32,
     pub heat_radius: i32,
     pub fracture_j: u32,
+    /// Cooldown in simulation ticks.
     pub reload_ticks: u32,
 }
 #[derive(Clone, Debug, Deserialize)]

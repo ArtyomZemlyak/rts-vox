@@ -7,7 +7,7 @@
         tank_terrain_tilt_pct: 88,
         tank_terrain_approach_pct: 70,
         walker_terrain_approach_pct: 90,
-        arrival: 4, reload_ticks: 60, turn_alignment_pct: 97, replan_ticks: 90,
+        arrival: 4, reload_ticks: 40, turn_alignment_pct: 97, replan_ticks: 60,
         ramps: [
             (min: (365,16,410), max: (445,28,480), axis: 0, reverse: false),
             (min: (445,16,410), max: (525,28,480), axis: 0, reverse: true),

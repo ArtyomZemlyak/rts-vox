@@ -166,7 +166,7 @@ fn partially_applied_channel_survives_save_and_matches_unconstrained_damage() {
     assert!(r.units[0].removed.len() < reference.units[0].removed.len());
     assert_eq!(r.pending_kinetic_impacts(), 1);
     assert_eq!(
-        u32::from_le_bytes(r.snapshot()[..4].try_into().unwrap()),
+        u32::from_le_bytes(r.snapshot()[8..12].try_into().unwrap()),
         55
     );
     let mut restored = BlastRange::restore(r.config, &r.snapshot()).expect("pending snapshot");
@@ -178,12 +178,12 @@ fn partially_applied_channel_survives_save_and_matches_unconstrained_damage() {
     same_damage(&r, &reference);
     assert_eq!(r.kinetic.version(), 48);
     assert_eq!(
-        u32::from_le_bytes(r.snapshot()[..4].try_into().unwrap()),
+        u32::from_le_bytes(r.snapshot()[8..12].try_into().unwrap()),
         55
     );
     r.matter.tuning = r.debris_defaults;
     assert_eq!(
-        u32::from_le_bytes(r.snapshot()[..4].try_into().unwrap()),
+        u32::from_le_bytes(r.snapshot()[8..12].try_into().unwrap()),
         48
     );
 }
@@ -469,7 +469,7 @@ fn stock_machine_gun_dents_are_credited_once_before_and_after_waiting() {
 fn heavy_artillery_snapshot_preserves_mixed_pending_contacts_and_the_empty_tail() {
     let mut r = range_with_t2(true);
     assert_eq!(
-        u32::from_le_bytes(r.snapshot()[..4].try_into().unwrap()),
+        u32::from_le_bytes(r.snapshot()[8..12].try_into().unwrap()),
         52
     );
     occupy(&mut r);
@@ -477,7 +477,7 @@ fn heavy_artillery_snapshot_preserves_mixed_pending_contacts_and_the_empty_tail(
     shot(&mut r);
     assert_eq!(r.pending_kinetic_impacts(), 2);
     let snapshot = r.snapshot();
-    assert_eq!(u32::from_le_bytes(snapshot[..4].try_into().unwrap()), 55);
+    assert_eq!(u32::from_le_bytes(snapshot[8..12].try_into().unwrap()), 55);
     let mut copy = BlastRange::restore(r.config, &snapshot).unwrap();
     assert_eq!(copy.matter.tuning, r.matter.tuning);
     assert_eq!(snapshot, copy.snapshot());

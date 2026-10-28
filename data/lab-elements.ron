@@ -1,0 +1,29 @@
+(elements: [
+    (id:"steel-block", name:"Стальной блок", category:Block,
+        blocks:[(min:(-8,0,-8),max:(8,16,8),material:3)]),
+    (id:"concrete-wall", name:"Бетонная стена", category:Structure,
+        blocks:[(min:(-2,0,-24),max:(2,32,24),material:2)]),
+    (id:"bunker", name:"Бетонный бункер", category:Structure, blocks:[
+        (min:(-24,0,-24),max:(24,4,24),material:2),
+        (min:(-24,4,-24),max:(24,32,-20),material:2),
+        (min:(-24,4,20),max:(24,32,24),material:2),
+        (min:(20,4,-20),max:(24,32,20),material:2),
+        (min:(-24,32,-24),max:(24,36,24),material:2),
+    ]),
+    (id:"bridge", name:"Балка с двумя опорами", category:Structure, blocks:[
+        (min:(-4,0,-32),max:(4,24,-24),material:2),
+        (min:(-4,0,24),max:(4,24,32),material:2),
+        (min:(-4,24,-32),max:(4,32,32),material:3),
+    ]),
+    (id:"tree", name:"Дерево", category:Vegetation, blocks:[
+        (min:(-2,0,-2),max:(2,32,2),material:5),
+        (min:(-12,24,-12),max:(12,44,12),material:4),
+    ]),
+    (id:"shield",name:"Щит с генератором",category:Shield,blocks:[(min:(-5,0,-5),max:(5,12,5),material:3)],shields:[(at:(0,12,0),radius:32)]),
+    (id:"tank", name:"Танк T1", category:Unit, units:[(kind:Tank,at:(0,0,0))]),
+    (id:"walker", name:"Шагоход T2", category:Unit, units:[(kind:Strider,at:(0,0,0))]),
+    (id:"spider", name:"Паук T3", category:Unit, units:[(kind:Spider,at:(0,0,0))]),
+    (id:"base", name:"База", category:Structure, units:[(kind:Base,at:(0,0,0))]),
+    (id:"turret-t2", name:"Турель T2", category:Structure, units:[(kind:TurretT2,at:(0,0,0))]),
+    (id:"crawler-unit", name:"Краулер-добытчик", category:Unit, units:[(kind:Crawler,at:(0,0,0))]),
+])

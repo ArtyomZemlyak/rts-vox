@@ -99,7 +99,7 @@ pub fn emitters(
     let origin = Vec3::from(GUN.map(|v| v as f32));
     let radius = match scene.sim.gun.kind {
         RangeUnitKind::Strider => 2.35,
-        RangeUnitKind::Tank => 3.0,
+        RangeUnitKind::Tank | RangeUnitKind::Crawler => 3.0,
         RangeUnitKind::Spider => 12.0,
         RangeUnitKind::Artillery => 3.0,
         RangeUnitKind::ArtilleryT2 => 6.0,

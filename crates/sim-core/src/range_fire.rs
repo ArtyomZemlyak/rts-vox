@@ -101,8 +101,10 @@ impl Combustion {
             .map_or(0, |c| matter.economy.ledger.get(c).held)
     }
     pub fn sources(&self, units: &[RangeUnit], matter: &Matter) -> Vec<Source> {
-        let tail =
-            self.amount(matter, self.tuning.burn_ml_per_tick) * u64::from(self.tuning.fade_ticks);
+        let tail = self.amount(matter, self.tuning.burn_ml_per_tick)
+            * u64::from(self.tuning.fade_ticks)
+            * u64::from(modding::clock::STREAM_HZ)
+            / u64::from(modding::clock::HZ);
         self.stocks
             .iter()
             .enumerate()
@@ -325,11 +327,11 @@ impl BlastRange {
                 }
             }
             if stock.burning {
-                let spent = self
-                    .matter
-                    .economy
-                    .ledger
-                    .sink(held, burn, Sink::Combustion);
+                let spent = self.matter.economy.ledger.sink(
+                    held,
+                    burn * u64::from(modding::clock::stream_samples(self.tick)),
+                    Sink::Combustion,
+                );
                 let heat =
                     (spent * u64::from(tuning.burn_ml_per_tick) * u64::from(tuning.heat_per_ml)
                         / burn) as u32;
@@ -568,7 +570,7 @@ mod tests {
         let mut tail = Blob::new();
         r.save_after(&mut tail, 33);
         bytes.truncate(bytes.len() - tail.v.len());
-        bytes[..4].copy_from_slice(&33u32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&33u32.to_le_bytes());
         let restored = BlastRange::restore(r.config, &bytes).unwrap();
         assert_eq!(restored.combustion.remaining(0, &restored.matter), 0);
         assert_eq!(r.state_hash(), restored.state_hash());

@@ -35,19 +35,23 @@
     // After recovery_ticks refused, the hull runs a cycle of escape
     // manoeuvres (ADR-275): astern, ahead, then each turning both ways by
     // recovery_turn_deg, escape_ticks each at escape_speed_pct of full speed.
-    recovery_ticks: 36,
+    recovery_ticks: 24,
     // A newly arrived hull requests a replacement promptly. The old route
     // remains collision-checked and usable until that search answers.
     contact_replan_ticks: 2,
-    escape_ticks: 42,
+    escape_ticks: 32,
     escape_speed_pct: 30,
     recovery_turn_deg: 25,
     // The planner probes two units more contact than the hull: a plan never
     // leads into a grade the executor refuses between two search samples.
     plan_margin: 2,
-    // Reach checked turn centres before pivoting; the final order still uses
-    // the course arrival radius. Cutting corners skips the planner's clearance.
+    // Exact centers when a rounded corridor cannot be proven (including
+    // reversals). The final order still uses the course arrival radius.
     corner_arrival_mm: 50,
+    // Rounded steering only inside a freshly proven bare, level corridor.
+    // Bounds preview work; zero keeps exact stop-and-pivot movement.
+    corner_lookahead_units: 32,
+    moving_turn_alignment_pct: 10,
     // Weight of the planner's distance estimate, percent; 100 is plain A*.
     // Measured 17.09.2026 (ADR-301): the forest route from the gun took
     // 2509 nodes and 130 ms at 100, 1072 and 68 ms at 200, 27 and 10 ms at

@@ -5,10 +5,25 @@ use super::*;
 #[derive(Component)]
 pub enum Ghost {
     Unit(RangeUnitKind),
+    UnitCopy(RangeUnitKind, usize),
     Block(usize),
+    Shield(usize),
 }
 #[derive(Resource)]
 pub struct Colours([Handle<StandardMaterial>; 2]);
+#[derive(Resource, Default)]
+pub struct Templates(
+    pub Vec<(RangeUnitKind, std::sync::Arc<MeshBuf>)>,
+    Vec<(RangeUnitKind, Vec3, Vec3)>,
+);
+impl Templates {
+    pub fn bounds(&self, kind: RangeUnitKind) -> (Vec3, Vec3) {
+        self.1
+            .iter()
+            .find(|(k, _, _)| *k == kind)
+            .map_or((Vec3::ZERO, Vec3::ZERO), |(_, lo, hi)| (*lo, *hi))
+    }
+}
 
 fn template(body: &voxel::UnitBody) -> MeshBuf {
     let mut out = MeshBuf::default();
@@ -73,8 +88,10 @@ pub fn setup(
             })
         }),
     );
+    let mut templates = Templates::default();
     for (kind, body) in [
         (RangeUnitKind::Tank, voxel::unit::tank()),
+        (RangeUnitKind::Crawler, voxel::unit::crawler()),
         (RangeUnitKind::Strider, voxel::unit::strider()),
         (RangeUnitKind::Spider, voxel::unit::spider()),
         (RangeUnitKind::Artillery, voxel::unit::artillery()),
@@ -92,15 +109,32 @@ pub fn setup(
         (RangeUnitKind::TurretT2, voxel::unit::turret_t2()),
         (RangeUnitKind::Base, voxel::unit::command_base()),
     ] {
-        commands.spawn((
-            Mesh3d(meshes.add(mesh(&template(&body)))),
-            MeshMaterial3d(colours.0[0].clone()),
-            Transform::default(),
-            Visibility::Hidden,
-            RenderLayers::layer(1),
-            Ghost::Unit(kind),
-        ));
+        let geometry = std::sync::Arc::new(template(&body));
+        let handle = meshes.add(mesh(&geometry));
+        let mut lo = Vec3::splat(f32::INFINITY);
+        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        for p in &geometry.pos {
+            lo = lo.min(Vec3::from(*p));
+            hi = hi.max(Vec3::from(*p));
+        }
+        templates.1.push((kind, lo, hi));
+        templates.0.push((kind, geometry));
+        for slot in 0..4 {
+            commands.spawn((
+                Mesh3d(handle.clone()),
+                MeshMaterial3d(colours.0[0].clone()),
+                Transform::default(),
+                Visibility::Hidden,
+                RenderLayers::layer(1),
+                if slot == 0 {
+                    Ghost::Unit(kind)
+                } else {
+                    Ghost::UnitCopy(kind, slot)
+                },
+            ));
+        }
     }
+    commands.insert_resource(templates);
     let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     for i in 0..modding::range::MAX_RANGE_BLOCKS {
         commands.spawn((
@@ -112,11 +146,23 @@ pub fn setup(
             Ghost::Block(i),
         ));
     }
+    let sphere = meshes.add(Sphere::new(1.0));
+    for i in 0..4 {
+        commands.spawn((
+            Mesh3d(sphere.clone()),
+            MeshMaterial3d(colours.0[0].clone()),
+            Transform::default(),
+            Visibility::Hidden,
+            RenderLayers::layer(1),
+            Ghost::Shield(i),
+        ));
+    }
     commands.insert_resource(colours);
 }
 
 pub fn update(
     edit: Res<Workshop>,
+    laboratory: Option<Res<laboratory::Laboratory>>,
     colours: Option<Res<Colours>>,
     mut ghosts: Query<(
         &Ghost,
@@ -141,6 +187,23 @@ pub fn update(
         })
         .unwrap_or_default();
     for (ghost, mut transform, mut visible, mut material) in &mut ghosts {
+        if let Some(lab) = laboratory.as_ref().filter(|l| l.active()) {
+            if let Some((pose, invalid)) = lab.ghost_pose(ghost) {
+                if *transform != pose {
+                    *transform = pose;
+                }
+                let colour = &colours.0[usize::from(invalid)];
+                if material.0 != *colour {
+                    material.0 = colour.clone();
+                }
+                if *visible != Visibility::Visible {
+                    *visible = Visibility::Visible;
+                }
+            } else if *visible != Visibility::Hidden {
+                *visible = Visibility::Hidden;
+            }
+            continue;
+        }
         let Some(p) = preview else {
             if *visible != Visibility::Hidden {
                 *visible = Visibility::Hidden;
@@ -150,11 +213,9 @@ pub fn update(
         let pose = match (ghost, p.selected) {
             (Ghost::Unit(kind), Selection::Unit(i)) if *kind == p.next.units[i].kind => Some(
                 Transform::from_translation(Vec3::from(p.next.units[i].at.map(|v| v as f32)))
-                    .with_rotation(if p.next.battle && !p.next.units[i].allied {
-                        Quat::from_rotation_y(std::f32::consts::PI)
-                    } else {
-                        Quat::IDENTITY
-                    }),
+                    .with_rotation(Quat::from_rotation_y(
+                        -(p.next.unit_yaw(i) as f32) * std::f32::consts::FRAC_PI_2,
+                    )),
             ),
             (Ghost::Block(slot), Selection::Block(_)) => blocks.get(*slot).map(|i| {
                 let b = &p.next.blocks[*i];

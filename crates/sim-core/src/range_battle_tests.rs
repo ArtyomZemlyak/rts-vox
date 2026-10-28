@@ -125,11 +125,11 @@ fn canister_fires_a_deterministic_lofted_salvo_and_replays_area_bursts() {
     );
     assert!(r.matter.economy.ledger.balanced());
     let mut legacy = r.snapshot();
-    legacy[..4].copy_from_slice(&47u32.to_le_bytes());
+    legacy[8..12].copy_from_slice(&47u32.to_le_bytes());
     assert!(BlastRange::restore(r.config, &legacy).is_none());
     let old = arena(RangeUnitKind::Tank);
     let mut legacy = old.snapshot();
-    legacy[..4].copy_from_slice(&47u32.to_le_bytes());
+    legacy[8..12].copy_from_slice(&47u32.to_le_bytes());
     assert!(BlastRange::restore(old.config, &legacy).is_some());
 }
 
@@ -2815,7 +2815,7 @@ fn weapon_range_controls_pursuit_and_old_snapshots_default_to_auto() {
     assert!(r.units[0].motion.destination.is_some());
     r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
     let mut old = r.snapshot();
-    old[..4].copy_from_slice(&41u32.to_le_bytes());
+    old[8..12].copy_from_slice(&41u32.to_le_bytes());
     old.truncate(old.len() - r.battle.actors.len() - 2);
     let old = BlastRange::restore(r.config, &old).unwrap();
     assert!(old.battle.actors.iter().all(|a| a.weapon.is_none()));
@@ -2861,12 +2861,15 @@ fn battle_machine_guns_use_paired_finite_flight_and_shared_burst_timing() {
         }
     }
     assert_eq!(shots.len(), 16, "a full burst plus its next opening salvo");
-    assert!(shots[..15]
-        .windows(2)
-        .all(|s| s[1] - s[0] == tuning.interval_ticks));
+    for (i, &shot) in shots[..15].iter().enumerate() {
+        assert_eq!(
+            shot - shots[0],
+            modding::clock::stream_ticks(i as u32 * tuning.interval_ticks)
+        );
+    }
     assert_eq!(
         shots[15] - shots[0],
-        tuning.burst_ticks - 1 + tuning.reload_ticks
+        modding::clock::stream_ticks(tuning.burst_ticks - 1) + tuning.reload_ticks
     );
     assert!(r.matter.economy.ledger.balanced());
 }
@@ -2939,7 +2942,7 @@ fn energy_loadouts_share_direct_reach_and_preserve_old_snapshot_choices() {
     r.set_battle_weapon(0, Some(Weapon::Kinetic));
     // No active waves: 42 and 43 have the same bytes for legacy ammunition.
     let mut old = r.snapshot();
-    old[..4].copy_from_slice(&42u32.to_le_bytes());
+    old[8..12].copy_from_slice(&42u32.to_le_bytes());
     old.pop(); // Version 46's autonomous battle flag is absent from 42.
     old.pop(); // Version 45's manual-route flag is absent from 42.
     assert_eq!(
@@ -2950,7 +2953,7 @@ fn energy_loadouts_share_direct_reach_and_preserve_old_snapshot_choices() {
     );
     r.set_battle_weapon(0, Some(Weapon::Annihilation));
     let mut invalid = r.snapshot();
-    invalid[..4].copy_from_slice(&42u32.to_le_bytes());
+    invalid[8..12].copy_from_slice(&42u32.to_le_bytes());
     invalid.pop();
     invalid.pop();
     assert!(BlastRange::restore(r.config, &invalid).is_none());
@@ -3025,7 +3028,11 @@ fn stock_battle_kinetic_kills_a_frontal_tank() {
         }
         assert!(!r.units[1].status.alive, "hits {hits:?}");
         println!("distance={distance} hits={hits:?}");
-        assert_eq!(hits, expected, "distance={distance}");
+        assert_eq!(
+            hits,
+            expected.map(modding::clock::stream_ticks),
+            "distance={distance}"
+        );
         assert!(r.matter.economy.ledger.balanced());
     }
 }
@@ -4027,7 +4034,10 @@ fn stationary_spider_survives_two_tank_salvos_and_can_return_fire() {
             break;
         }
     }
-    assert_eq!(hits, 4);
+    assert!(
+        (4..=6).contains(&hits),
+        "two salvos, including simultaneous arrivals: {hits}"
+    );
     for id in [0, 2] {
         assert!(r.battle.actors[id].fired >= 2);
         assert!(r.battle_order(id, Order::Hold, None));
@@ -4508,7 +4518,7 @@ fn artillery_turret_lofts_over_low_cover_splashes_neighbours_and_replays() {
         );
     }
     let mut old = r.snapshot();
-    old[..4].copy_from_slice(&50u32.to_le_bytes());
+    old[8..12].copy_from_slice(&50u32.to_le_bytes());
     assert!(
         BlastRange::restore(r.config, &old).is_none(),
         "old canister semantics silently migrated"

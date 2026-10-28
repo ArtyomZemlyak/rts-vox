@@ -989,3 +989,62 @@ fn portable_restore_rejects_pending_mismatch_and_impossible_attempts() {
         );
     }
 }
+
+#[test]
+fn pilot_pending_portable_command_and_physical_continuation_match() {
+    let mut a = owner(RangeUnitKind::Tank);
+    a.submit(request(
+        0,
+        0,
+        order(
+            0,
+            Order::Pilot {
+                throttle: 1,
+                turn: 1,
+                aim: [410, 22, 336],
+                fire: false,
+            },
+            None,
+        ),
+    ))
+    .unwrap();
+    let mut b = restored(&a);
+    for tick in 0..60 {
+        a.step().unwrap();
+        b.step().unwrap();
+        same(a.world(), b.world());
+        if tick == 20 {
+            b = restored(&b);
+        }
+    }
+}
+
+#[test]
+fn pilot_rejected_axes_still_roundtrip_in_pending_commands_and_receipts() {
+    let mut a = owner(RangeUnitKind::Tank);
+    let receipt = a
+        .submit(request(
+            0,
+            0,
+            order(
+                0,
+                Order::Pilot {
+                    throttle: 127,
+                    turn: -128,
+                    aim: [410, 22, 336],
+                    fire: false,
+                },
+                None,
+            ),
+        ))
+        .unwrap();
+    let mut b = restored(&a);
+    a.step().unwrap();
+    b.step().unwrap();
+    same(a.world(), b.world());
+    assert_eq!(
+        a.receipt(receipt.id).unwrap().outcome,
+        Some(crate::blast::battle::commands::Outcome::Rejected)
+    );
+    let _ = restored(&a);
+}

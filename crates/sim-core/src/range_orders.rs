@@ -40,11 +40,32 @@ pub(super) fn validate(
     {
         return Admission::Rejected;
     }
+    if range.idle_enemy(id) && order != Order::Hold {
+        return Admission::Rejected;
+    }
     if range.units[id].kind == RangeUnitKind::NuclearSilo
         && (replacement == Replacement::Maintain
-            || !matches!(order, Order::Ground(_) | Order::Hold))
+            || !matches!(order, Order::Ground(_) | Order::Hold | Order::Pilot { .. }))
     {
         return Admission::Rejected;
+    }
+    if let Order::Pilot {
+        throttle,
+        turn,
+        aim,
+        ..
+    } = order
+    {
+        if !(-1..=1).contains(&throttle)
+            || !(-1..=1).contains(&turn)
+            || destination.is_some()
+            || (0..3).any(|a| aim[a] < 0 || aim[a] >= range.size[a] as i32)
+        {
+            return Admission::Rejected;
+        }
+        if actors[id].order == order {
+            return Admission::Unchanged;
+        }
     }
     if let Order::Attack(target) = order {
         if range.allied(target) == side || !range.units.get(target).is_some_and(|u| u.status.alive)
@@ -77,7 +98,9 @@ pub(super) fn validate(
         }
     }
     // The rules AI maintains orders; it never replaces a dig (ADR-672).
-    if replacement == Replacement::Maintain && matches!(actors[id].order, Order::Dig(_)) {
+    if replacement == Replacement::Maintain
+        && matches!(actors[id].order, Order::Dig(_) | Order::Pilot { .. })
+    {
         return Admission::Unchanged;
     }
     if replacement == Replacement::Maintain && actors[id].order == order && order != Order::Move {
@@ -123,6 +146,16 @@ impl Executor<'_> {
             destination,
         } = request;
         let digging = matches!(order, Order::Dig(_));
+        if matches!(order, Order::Pilot { .. })
+            && !matches!(self.actors[id].order, Order::Pilot { .. })
+        {
+            let u = &mut self.units[id];
+            u.motion.stop();
+            u.motion.route.clear();
+            if !u.kind.emplacement() {
+                u.motion.enabled = true;
+            }
+        }
         if order == Order::Move || digging && destination.is_some() {
             let others: Vec<_> = self
                 .units
@@ -179,7 +212,12 @@ impl Executor<'_> {
 /// Shared final commit for immediate and budgeted formation moves. An active
 /// siege pulse survives retargeting; Hold consumes it with the normal reload.
 pub(super) fn commit(actor: &mut Actor, kind: RangeUnitKind, order: Order, tick: u32) {
+    let continuing =
+        matches!(actor.order, Order::Pilot { .. }) && matches!(order, Order::Pilot { .. });
     actor.order = order;
+    if continuing {
+        return;
+    }
     actor.target = None;
     if !(kind == RangeUnitKind::Spider && actor.burst > 0 && order != Order::Hold) {
         stop_spider_beam(actor, kind, tick);

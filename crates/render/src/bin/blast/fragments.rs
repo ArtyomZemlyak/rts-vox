@@ -2,6 +2,8 @@
 use super::*;
 use bevy::platform::collections::HashMap;
 use std::collections::BTreeMap;
+#[path = "fragments/batches.rs"]
+pub(super) mod batches;
 #[path = "fragments/dense.rs"]
 mod dense;
 #[path = "fragments/history.rs"]
@@ -11,19 +13,24 @@ pub(super) mod history;
 mod lifecycle_tests;
 #[path = "fragments/slots.rs"]
 mod slots;
+#[path = "fragments/picking.rs"]
+pub(super) mod picking;
 #[derive(Component)]
 pub struct Piece(u64, u64, bool);
 #[derive(Default)]
 pub struct Cache {
-    meshes: BTreeMap<render::model::FragmentMeshKey, Handle<Mesh>>,
+    meshes: BTreeMap<(render::model::FragmentMeshKey, u8), Handle<Mesh>>,
     materials: BTreeMap<u16, Handle<StandardMaterial>>,
     chunks: BTreeMap<u64, Vec<Handle<Mesh>>>,
     slots: dense::Slots,
+    batches: batches::Batches,
 }
 /// The cube colour of a range material, shared with falling bodies.
 pub fn material_colour(material: u16) -> [f32; 4] {
     look::to_linear(match material {
         1 | 8 => [0.25, 0.20, 0.13],
+        10 => [0.64, 0.48, 0.27],
+        12 => [0.18, 0.38, 0.30],
         2 => [0.42, 0.40, 0.34],
         3 => [0.29, 0.32, 0.33],
         4 => [0.17, 0.22, 0.10],
@@ -38,6 +45,53 @@ pub fn pos(v: [fx::Fx; 3]) -> Vec3 {
 fn piece_mesh(shape: u64, side: u8, colour: [f32; 4]) -> Mesh {
     super::mesh(&render::model::fragment_to_mesh(shape, side, colour))
 }
+fn rubble_variant(f: &sim_core::burst::Fragment) -> u8 {
+    if f.chunk.is_some()
+        || f.paint.is_some()
+        || f.side != 4
+        || f.shape != u64::MAX
+        || !matches!(f.material, 1 | 2 | 6 | 7 | 8)
+    {
+        return 0;
+    }
+    // Stable per-piece variety, with just sixteen shared meshes per material.
+    let mut hash = f.id.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    hash = (hash ^ (hash >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    1 + ((hash ^ (hash >> 27)) & 15) as u8
+}
+fn piece_colour(f: &sim_core::burst::Fragment) -> [f32; 4] {
+    if let Some(p) = f.paint {
+        let part = match p[2] {
+            1 => voxel::Part::Core,
+            2 => voxel::Part::Engine,
+            3 => voxel::Part::Weapon,
+            4 => voxel::Part::Sensor,
+            _ => voxel::Part::Armour,
+        };
+        look::to_linear(look::finish_srgb(
+            look::finish_of(p[1], part),
+            [0.22, 0.32, 0.27],
+        ))
+    } else {
+        material_colour(f.material)
+    }
+}
+fn piece_material(
+    mat: u16,
+    cached: &mut BTreeMap<u16, Handle<StandardMaterial>>,
+    materials: &mut Assets<StandardMaterial>,
+) -> Handle<StandardMaterial> {
+    cached
+        .entry(mat)
+        .or_insert_with(|| {
+            materials.add(StandardMaterial {
+                metallic: if mat == 3 { 0.65 } else { 0.0 },
+                perceptual_roughness: if mat == 3 { 0.63 } else { 0.95 },
+                ..default()
+            })
+        })
+        .clone()
+}
 #[allow(clippy::too_many_arguments)]
 pub fn draw(
     mut commands: Commands,
@@ -48,10 +102,12 @@ pub fn draw(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut old: Query<(Entity, &Piece, &mut Transform)>,
+    batching: Option<Res<batches::Enabled>>,
+    batch_entities: Query<Entity, With<batches::RestingBatch>>,
 ) {
     let fragments = &scene.sim.matter.debris.fragments;
     let alpha = if scene.realtime && !scene.paused {
-        (scene.acc * 30.0).clamp(0.0, 1.0)
+        (scene.acc * sim_core::TICKS_PER_SECOND as f32).clamp(0.0, 1.0)
     } else {
         1.0
     };
@@ -59,6 +115,23 @@ pub fn draw(
     // cheap panels through one bounded frame instead of delaying their birth.
     const SECTION_WORK: usize = 1024;
     let mut section_work = 0;
+    {
+        let Cache {
+            batches,
+            materials: cached,
+            ..
+        } = &mut *cache;
+        batches.update(
+            batching.is_some(),
+            &scene,
+            &visual,
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            cached,
+            |e| batch_entities.contains(e),
+        );
+    }
     cache.slots.align(fragments);
     {
         let Cache { slots, chunks, .. } = &mut *cache;
@@ -69,11 +142,13 @@ pub fn draw(
             chunks.remove(&slot.id);
         }
     }
-    cache.slots.prepare(
+    let Cache { slots, batches, .. } = &mut *cache;
+    slots.prepare(
         fragments,
         &scene.sim.units,
         &visual.fragments,
         alpha,
+        &batches.flags,
         |entity| old.as_readonly().contains(entity),
         bevy::tasks::ComputeTaskPool::try_get().map(|pool| &**pool),
     );
@@ -98,9 +173,24 @@ pub fn draw(
                 }
                 continue;
             }
+            dense::Prepared::Batched => {
+                if let Some(slot) = entry.slot.take() {
+                    if old.contains(slot.entity) {
+                        commands.entity(slot.entity).despawn();
+                    }
+                    chunks.remove(&f.id);
+                }
+                continue;
+            }
             dense::Prepared::Replace(key, current) => (key, current),
         };
-        let transform = slots::interpolate(current, visual.fragments.get(&f.id).copied(), alpha);
+        // A resting exact join rebases the centre while retaining every world
+        // cell. Interpolating from the old owner's centre would move the whole
+        // new shape sideways for one tick after its donors disappeared.
+        let previous = (!f.resting)
+            .then(|| visual.fragments.get(&f.id).copied())
+            .flatten();
+        let transform = slots::interpolate(current, previous, alpha);
         let mesh_work = f.chunk.as_ref().map_or(0, |c| {
             if c.body.is_some() {
                 512
@@ -170,36 +260,20 @@ pub fn draw(
             chunks.insert(f.id, handles);
             continue;
         }
-        let colour = if let Some(p) = f.paint {
-            let part = match p[2] {
-                1 => voxel::Part::Core,
-                2 => voxel::Part::Engine,
-                3 => voxel::Part::Weapon,
-                4 => voxel::Part::Sensor,
-                _ => voxel::Part::Armour,
-            };
-            look::to_linear(look::finish_srgb(
-                look::finish_of(p[1], part),
-                [0.22, 0.32, 0.27],
-            ))
-        } else {
-            material_colour(f.material)
-        };
-        let key = (f.material, f.shape, f.side, f.paint);
+        let colour = piece_colour(f);
+        let variant = rubble_variant(f);
+        let key = ((f.material, f.shape, f.side, f.paint), variant);
         let mesh = cached_meshes
             .entry(key)
-            .or_insert_with(|| meshes.add(piece_mesh(f.shape, f.side, colour)))
-            .clone();
-        let material = cached_materials
-            .entry(f.material)
             .or_insert_with(|| {
-                materials.add(StandardMaterial {
-                    metallic: if f.material == 3 { 0.65 } else { 0.0 },
-                    perceptual_roughness: if f.material == 3 { 0.63 } else { 0.95 },
-                    ..default()
+                meshes.add(if variant == 0 {
+                    piece_mesh(f.shape, f.side, colour)
+                } else {
+                    super::mesh(&render::model::rubble_pile_to_mesh(variant - 1, colour))
                 })
             })
             .clone();
+        let material = piece_material(f.material, cached_materials, &mut materials);
         let entity = commands
             .spawn((
                 Piece(f.id, 0, false),
@@ -215,6 +289,84 @@ pub fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn irregular_rubble_has_closed_faces_fixed_bounds_and_the_same_triangle_budget() {
+        let mut variants = Vec::new();
+        for variant in 0..16 {
+            let buf = render::model::rubble_pile_to_mesh(variant, [0.3, 0.2, 0.1, 1.0]);
+            assert_eq!(buf.idx.len(), 44 * 3);
+            assert!(!variants.contains(&buf.pos), "duplicate rubble variant");
+            variants.push(buf.pos.clone());
+            let mut low = Vec3::splat(f32::INFINITY);
+            let mut high = Vec3::splat(f32::NEG_INFINITY);
+            let mut edges = BTreeMap::new();
+            for p in &buf.pos {
+                low = low.min(Vec3::from(*p));
+                high = high.max(Vec3::from(*p));
+            }
+            assert!((low - Vec3::splat(-1.99)).abs().max_element() < 0.0001);
+            assert!((high - Vec3::splat(1.99)).abs().max_element() < 0.0001);
+            for triangle in buf.idx.chunks_exact(3) {
+                let p = [triangle[0], triangle[1], triangle[2]]
+                    .map(|i| Vec3::from(buf.pos[i as usize]));
+                let cross = (p[1] - p[0]).cross(p[2] - p[0]);
+                assert!(cross.is_finite() && cross.length_squared() > 0.00001);
+                let normal = Vec3::from(buf.nrm[triangle[0] as usize]);
+                assert!(cross.normalize().dot(normal) > 0.999);
+                for [a, b] in [[0, 1], [1, 2], [2, 0]] {
+                    let a = p[a].to_array().map(f32::to_bits);
+                    let b = p[b].to_array().map(f32::to_bits);
+                    let (key, direction) = if a < b { ((a, b), 1) } else { ((b, a), -1) };
+                    let entry = edges.entry(key).or_insert((0, 0));
+                    entry.0 += 1;
+                    entry.1 += direction;
+                }
+            }
+            assert!(edges
+                .values()
+                .all(|&(count, direction)| count == 2 && direction == 0));
+        }
+    }
+    #[test]
+    fn rubble_variants_are_bounded_stable_and_leave_unit_fragments_intact() {
+        let mut f = sim_core::burst::Fragment {
+            id: 0,
+            position: phys_v3_zero(),
+            velocity: phys_v3_zero(),
+            material: 1,
+            paint: None,
+            mm: 100,
+            basis: [phys_v3(1, 0, 0), phys_v3(0, 1, 0), phys_v3(0, 0, 1)],
+            mass_g: 1,
+            count: 64,
+            shape: u64::MAX,
+            side: 4,
+            chunk: None,
+            held: 0,
+            resting: true,
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for id in 0..4096 {
+            f.id = id;
+            let variant = rubble_variant(&f);
+            assert!((1..=16).contains(&variant));
+            seen.insert(variant);
+            f.count = 4096;
+            assert_eq!(rubble_variant(&f), variant);
+            f.resting = false;
+            assert_eq!(rubble_variant(&f), variant);
+            f.resting = true;
+        }
+        assert_eq!(seen.len(), 16);
+        f.paint = Some([1, 0, 0]);
+        assert_eq!(rubble_variant(&f), 0);
+        f.paint = None;
+        f.material = 3;
+        assert_eq!(rubble_variant(&f), 0);
+        f.material = 1;
+        f.shape = 15;
+        assert_eq!(rubble_variant(&f), 0);
+    }
     #[test]
     fn solid_piles_have_one_closed_bevelled_surface() {
         let mesh = piece_mesh(u64::MAX, 4, [1.0; 4]);

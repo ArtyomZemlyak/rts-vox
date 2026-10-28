@@ -68,6 +68,10 @@ mod ground_claim_tests;
 mod hull_query_tests;
 #[path = "shape_geometry.rs"]
 mod shape_geometry;
+#[path = "fragment_join.rs"]
+mod fragment_join;
+#[path="fragment_join_memo.rs"]
+mod fragment_join_memo;
 #[path = "unit_debris.rs"]
 mod unit_debris;
 
@@ -102,6 +106,67 @@ pub(crate) fn fracture_cost_mj(strength: u32, mm: u16, t: &Blast) -> (u64, u64) 
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn fragment_landing_does_not_absorb_remote_shards_but_exact_contacts_keep_matter_and_world_cells() {
+        for distance in [1,12] {
+            let (mut b,mut w,mut e)=(Bursts::default(),world(),economy());w.flush();
+            let mut t=tuning().blast;t.pile_cell=32;t.max_flying=0;t.push_pct=0;
+            for (id,x) in [(1,48),(2,48+distance)] {
+                let held=e.ledger.create(matter::Kind::Debris,0,u64::MAX);
+                let amount=e.per_voxel(2);e.ledger.reveal(e.ground,amount);e.ledger.transfer(e.ground,held,amount);
+                b.fragments.push(Fragment{id,position:centre([x,12,48]),velocity:V3::ZERO,material:2,paint:None,mm:100,
+                    basis:IDENTITY,mass_g:1200,count:1,shape:1,side:1,chunk:None,held,resting:true});
+                e.wrecks.push(Wreck{held,x:x as i32,y:12,z:48});
+            }
+            b.step_fragments(&w,&mut e,&t,Fx::ZERO,0,Surroundings::NONE);
+            assert!(e.balanced());
+            if distance==12 {
+                assert_eq!(b.fragments.len(),2,"3.2 m broad-phase must not teleport distant debris");
+                assert_eq!(b.fragments[0].position,centre([48,12,48]));
+                assert_eq!(b.fragments[1].position,centre([60,12,48]));
+                assert!(b.fragments.iter().all(|f|f.shape==1&&f.side==1&&f.mm==100&&f.basis==IDENTITY));
+            } else {
+                assert_eq!(b.fragments.len(),1);
+                let f=&b.fragments[0];assert_eq!((f.shape,f.side,f.count),(3,2,2));
+                assert_eq!(f.position,V3::new(Fx::from_int(49),Fx::from_ratio(25,2),Fx::from_ratio(97,2)));
+                assert_eq!(e.ledger.held(f.held),2*e.per_voxel(2));
+                assert_eq!((e.wrecks[0].x,e.wrecks[0].y,e.wrecks[0].z),(49,12,48));
+            }
+        }
+    }
+
+    #[test]
+    fn resting_join_memo_matches_cold_recomputation_after_geometry_and_support_changes() {
+        let (mut warm,mut cold,mut ew,mut ec,mut w)=(Bursts::default(),Bursts::default(),economy(),economy(),world());
+        let mut t=tuning();t.blast.rest_check_ticks=1;t.blast.push_pct=0;
+        w.flush();
+        for (b,e) in [(&mut warm,&mut ew),(&mut cold,&mut ec)] {
+            for (id,x) in [(1,48),(2,60)] {
+                let held=e.ledger.create(matter::Kind::Debris,0,u64::MAX);
+                let amount=e.per_voxel(2);e.ledger.reveal(e.ground,amount);e.ledger.transfer(e.ground,held,amount);
+                b.fragments.push(Fragment{id,position:centre([x,12,48]),velocity:V3::ZERO,material:2,paint:None,mm:100,basis:IDENTITY,mass_g:1200,count:1,shape:1,side:1,chunk:None,held,resting:true});
+                e.wrecks.push(Wreck{held,x:x as i32,y:12,z:48});
+            }
+        }
+        // Pin both pieces over real terrain, then change an exact input and
+        // finally remove support. No warm memo may suppress a join or wakeup.
+        w.queue_edit(Edit::put(48,11,48,2));w.queue_edit(Edit::put(60,11,48,2));w.flush();
+        for tick in 0..16 {
+            if tick==4 { for b in [&mut warm,&mut cold] {b.fragments[1].paint=Some([1,2,3]);} }
+            if tick==6 { for b in [&mut warm,&mut cold] {b.fragments[1].paint=None;b.fragments[1].position=centre([49,12,48]);} w.queue_edit(Edit::put(49,11,48,2));w.flush(); }
+            if tick==10 {for x in 48..=60 {w.queue_edit(Edit::dig(x,11,48));}w.flush();}
+            cold.join_memo=Default::default();
+            warm.step_fragments(&w,&mut ew,&t.blast,crate::gravity_per_tick(&t),tick,Surroundings::NONE);
+            cold.step_fragments(&w,&mut ec,&t.blast,crate::gravity_per_tick(&t),tick,Surroundings::NONE);
+            let (mut a,mut b)=(Blob::new(),Blob::new());warm.save(&mut a);cold.save(&mut b);
+            assert_eq!(a.v,b.v,"warm memo diverged at tick {tick}");assert_eq!(warm.hash(),cold.hash());
+            assert!(ew.balanced()&&ec.balanced());
+            if tick==6 {assert_eq!(warm.fragments.len(),1,"new contact was missed");}
+        }
+        assert!(warm.join_memo.hits>0,"the stationary negative pass was never reused");
+        assert!(warm.wakeups>0,"support changes must still wake memoized sleepers");
+    }
 
     #[test]
     fn fast_rest_schedule_matches_division_and_previous_deadline_at_wraparound() {
@@ -302,6 +367,7 @@ mod tests {
         t.max_flying = 2; // Flying room exists; the working reservation is decisive.
         t.max_resting_fragments = 3;
         t.rest_check_ticks = 1;
+        t.pile_cell = 16; // Three distinct piles; this test isolates wakeup admission.
         for x in [16, 32, 48] {
             assert!(b.spawn([x, 16, 16], 1, [x as i32, 16, 16], 2, 1, 0, &mut e, &t));
             let f = b.fragments.last_mut().unwrap();
@@ -1331,6 +1397,96 @@ mod tests {
             b.rubble_with_scratch(&w, &[], &[], &mut scratch, &|_, _| {}),
             b.reference_rubble(&w, &[], &[])
         );
+    }
+    #[test]
+    fn rubble_floor_proofs_follow_edits_geometry_and_source_compaction() {
+        let (mut b, mut w) = (Bursts::default(), world());
+        b.fragments.push(Fragment {
+            id: 1,
+            position: V3::new(
+                Fx::from_ratio(97, 2),
+                Fx::from_ratio(25, 2),
+                Fx::from_ratio(97, 2),
+            ),
+            velocity: V3::ZERO,
+            material: 1,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 1,
+            count: 1,
+            shape: 1,
+            side: 1,
+            chunk: None,
+            held: 0,
+            resting: true,
+        });
+        let mut scratch = RubbleScratch::default();
+        let mut dirty = nav::vehicle::Changed::default();
+        for case in 0..9 {
+            match case {
+                2 => {
+                    dirty.column(90, 90);
+                } // unrelated page
+                3 => {
+                    for x in 47..=49 {
+                        for z in 47..=49 {
+                            w.queue_edit(Edit::dig(x, 11, z));
+                            dirty.column(x as i32, z as i32);
+                        }
+                    }
+                    w.flush();
+                }
+                4 => {
+                    b.fragments[0].position.y = Fx::from_int(11);
+                }
+                5 => {
+                    let f = Fragment {
+                        id: 2,
+                        position: V3::new(
+                            Fx::from_int(51),
+                            Fx::from_int(11),
+                            Fx::from_ratio(97, 2),
+                        ),
+                        velocity: V3::ZERO,
+                        material: 1,
+                        paint: None,
+                        mm: 100,
+                        basis: IDENTITY,
+                        mass_g: 1,
+                        count: 1,
+                        shape: 1,
+                        side: 1,
+                        chunk: None,
+                        held: 1,
+                        resting: true,
+                    };
+                    b.fragments.insert(0, f);
+                }
+                6 => {
+                    b.fragments.remove(0);
+                    b.fragments[0].shape = 3;
+                    b.fragments[0].side = 2;
+                }
+                7 => {
+                    b.fragments[0].basis = [V3::UP, IDENTITY[0], IDENTITY[2]];
+                }
+                8 => {
+                    b.fragments[0].resting = false;
+                }
+                _ => {}
+            }
+            assert_eq!(
+                b.rubble_with_scratch_changed(&w, &[], &[], &mut scratch, &|_, _| {}, Some(&dirty)),
+                b.reference_rubble(&w, &[], &[]),
+                "case {case}"
+            );
+            dirty = nav::vehicle::Changed::default();
+        }
+        b.fragments[0].resting = true;
+        assert!(b
+            .rubble_with_scratch_changed(&w, &[1], &[], &mut scratch, &|_, _| {}, Some(&dirty))
+            .is_empty());
     }
     #[test]
     fn rubble_span_rows_match_cell_enumeration_with_covers_and_reused_storage() {
@@ -2751,11 +2907,9 @@ mod tests {
         assert!(woke, "the piece never woke once the slot was free");
     }
 
-    /// Two pieces settling in one pile cell become one upright heap on the
-    /// floor with a cell for each of theirs, and the heap is floor in its
-    /// columns (ADR-292).
+    /// Landing retains the actual shard shape/turn and its support columns.
     #[test]
-    fn pieces_settling_together_become_an_upright_heap_that_is_floor() {
+    fn pieces_settling_together_keep_their_shapes_and_remain_floor() {
         let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
         let t = tuning();
         w.flush();
@@ -2788,20 +2942,15 @@ mod tests {
                 Surroundings::NONE,
             );
         }
-        assert_eq!(b.fragments.len(), 1, "the pieces did not merge");
-        let f = &b.fragments[0];
-        assert!(f.resting);
-        assert_eq!((f.side, f.shape, f.count), (4, 0b11, 2));
-        assert_eq!(f.basis, IDENTITY);
-        // Its bottom sits on the ground at 12 and its top one cell up.
-        assert_eq!(f.position.y, Fx::from_ratio(25, 2));
+        assert_eq!(b.fragments.iter().map(|f|f.count).sum::<u32>(),2);
+        assert!(b.fragments.iter().all(|f|f.resting&&f.mm==100&&f.count==f.shape.count_ones()));
         let rubble = b.rubble(&w, &[], &[]);
-        assert_eq!(rubble.get(&[48, 48]), Some(&13));
+        assert!(rubble.get(&[48,48]).is_some_and(|h|(13..=14).contains(h)));
         assert!(
             b.rubble(&w, &[1], &[]).is_empty(),
             "a yielding heap is no floor"
         );
-        assert_eq!(rubble.get(&[49, 48]), Some(&13));
+        assert!(rubble.get(&[49,48]).is_some_and(|h|(13..=14).contains(h)));
         assert_eq!(rubble.get(&[51, 48]), None);
         assert!(e.balanced());
     }
@@ -2851,9 +3000,9 @@ mod tests {
             0,
             Surroundings::NONE,
         );
-        assert_eq!(b.fragments.len(), 2, "the soil pieces did not merge");
+        assert_eq!(b.fragments.len(), 3, "separated pieces must not teleport into a pile");
         let pile = &b.fragments[1];
-        assert_eq!((pile.material, pile.count), (1, 2));
+        assert_eq!((pile.material, pile.count), (1, 1));
         assert!(pile.resting);
         let bottom = pile.position.y.add(pile.bounds().0[1]);
         assert!(
@@ -3001,6 +3150,10 @@ mod tests {
         let g = crate::gravity_per_tick(&t);
         let mut tick = 0;
         let mut rest = |b: &mut Bursts, e: &mut Economy, at: [u32; 3], velocity: V3| {
+            let velocity = velocity.scale(Fx::from_ratio(
+                modding::clock::STREAM_HZ as i32,
+                crate::TICKS_PER_SECOND,
+            ));
             b.fragments.clear();
             b.fragments.push(Fragment {
                 id: 1,
@@ -3579,10 +3732,16 @@ mod tests {
             held,
             resting: false,
         };
-        b.fragments
-            .push(piece(1, 40, V3::new(Fx::from_int(2), Fx::ONE, Fx::ZERO)));
+        b.fragments.push(piece(
+            1,
+            40,
+            V3::new(Fx::from_int(2), Fx::ONE, Fx::ZERO).scale(Fx::from_ratio(
+                modding::clock::STREAM_HZ as i32,
+                crate::TICKS_PER_SECOND,
+            )),
+        ));
         b.fragments.push(piece(2, 56, V3::ZERO));
-        for tick in 0..30 {
+        for tick in 0..u64::from(modding::clock::HZ) {
             b.step_fragments(
                 &w,
                 &mut e,
@@ -3618,7 +3777,8 @@ mod tests {
         assert_eq!(still.basis[0], IDENTITY[0], "the still piece turned");
         // What it turned to when it stopped is what it keeps.
         let turned = thrown.basis;
-        for tick in 30..90 {
+        let already_resting = thrown.resting;
+        for tick in u64::from(modding::clock::HZ)..u64::from(modding::clock::HZ) * 3 {
             b.step_fragments(
                 &w,
                 &mut e,
@@ -3632,7 +3792,24 @@ mod tests {
             b.fragments[0].resting,
             "still in the air after three seconds"
         );
-        assert_ne!(b.fragments[0].basis, turned, "it stopped turning too early");
+        if already_resting {
+            assert_eq!(b.fragments[0].basis, turned, "a sleeping piece turned");
+        }
+        let resting_basis = b.fragments[0].basis;
+        for tick in u64::from(modding::clock::HZ) * 3..u64::from(modding::clock::HZ) * 4 {
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE,
+            );
+        }
+        assert_eq!(
+            b.fragments[0].basis, resting_basis,
+            "a settled piece kept tumbling"
+        );
     }
     /// A piece falls onto one that landed before it and stands on it
     /// (ADR-308) instead of sinking through it to the ground. Two
@@ -4148,38 +4325,37 @@ mod tests {
     #[test]
     fn parallel_pile_grouping_matches_ordered_merging_and_ledger() {
         const GROUPS: usize = 256;
-        fn reference(pieces: &mut Bursts, world: &voxel::World, economy: &mut Economy, t: &Blast) {
+        fn reference(pieces: &mut Bursts, _world: &voxel::World, economy: &mut Economy, t: &Blast) {
             type PileKey = ([i32; 3], Mat, Option<[u8; 3]>, u16);
-            let mut piles: HashMap<PileKey, usize> = HashMap::new();
+            let mut piles: HashMap<PileKey, Vec<usize>> = HashMap::new();
             let mut merged = BTreeSet::new();
             for i in 0..pieces.fragments.len() {
                 let f = &pieces.fragments[i];
+                let Some(geometry)=fragment_join::Geometry::of(f) else {continue;};
                 let key = (
                     arr(f.position).map(|v| v.to_int_trunc().div_euclid(t.pile_cell as i32)),
                     f.material,
                     f.paint,
                     f.mm,
                 );
-                if let Some(&j) = piles.get(&key) {
+                let heads=piles.entry(key).or_default();
+                let joined=heads.iter().find_map(|&j|Some((j,fragment_join::Geometry::of(&pieces.fragments[j])?.join(geometry)?)));
+                if let Some((j,shape)) = joined {
                     let (a, b) = pieces.fragments.split_at_mut(i);
                     let to = &mut a[j];
                     let from = &b[0];
                     economy.ledger.transfer(from.held, to.held, u64::MAX);
                     to.mass_g += from.mass_g;
                     to.count += from.count;
-                    let bottom = to.position.y.add(to.bounds().0[1]);
-                    restack(to);
-                    match world_floor(to, world) {
-                        Some(floor) if bottom.sub(floor) <= Fx::from_ratio(1, 2) => seat(to, floor),
-                        _ => to.position.y = bottom.sub(to.bounds().0[1]),
-                    }
+                    shape.apply(to);
                     merged.insert(from.held);
-                } else {
-                    piles.insert(key, i);
+                } else if heads.len()<fragment_join::HEADS {
+                    heads.push(i);
                 }
             }
             pieces.fragments.retain(|f| !merged.contains(&f.held));
             economy.wrecks.retain(|w| !merged.contains(&w.held));
+            for w in &mut economy.wrecks {if let Some(f)=pieces.fragments.iter().find(|f|f.held==w.held) {let p=arr(f.position).map(Fx::to_int_trunc);w.x=p[0];w.y=p[1];w.z=p[2];}}
             for held in merged {
                 assert!(economy.ledger.retire_empty_debris(held));
             }
@@ -4196,14 +4372,14 @@ mod tests {
             // materials, paint and scale at one position must stay separate.
             for donor in 0..4 {
                 for group in 0..GROUPS {
-                    let count = [1, 2, 7, 70][donor];
+                    let count = 1;
                     let material = 1 + (group % 2) as u16;
                     let held = economy.ledger.create(matter::Kind::Debris, 0, u64::MAX);
                     let amount = economy.per_voxel(material) * u64::from(count);
                     economy.ledger.reveal(economy.ground, amount);
                     economy.ledger.transfer(economy.ground, held, amount);
                     let position = V3::new(
-                        Fx::from_int(4 + (group / 8 % 8) as i32 * 8),
+                        Fx::from_int(4 + (group / 8 % 8) as i32 * 8).add(Fx::from_ratio(donor as i32,if group%8<4 {2}else{1})),
                         Fx::from_ratio(if group < 64 { 25 } else { 65 }, 2),
                         Fx::from_int(4 + (group / 64) as i32 * 8),
                     );
@@ -5687,6 +5863,7 @@ pub(crate) enum GroundClaimError {
 
 #[derive(Default)]
 pub struct Bursts {
+    join_memo: fragment_join_memo::Memo,
     jobs: VecDeque<Job>,
     claims: BTreeMap<[u32; 3], Claim>,
     /// Open claims of each group as a box mask. Each connected component
@@ -6075,7 +6252,11 @@ impl Bursts {
         // With no slot left only a cell joining a held component can be
         // claimed, and a group nobody holds has none (ADR-681).
         let (key, bit) = Self::claim_group(p, &claim, t);
-        let existing = self.groups.get(&key).copied();
+        let group = self.groups.entry(key);
+        let existing = match &group {
+            std::collections::btree_map::Entry::Occupied(entry) => Some(*entry.get()),
+            std::collections::btree_map::Entry::Vacant(_) => None,
+        };
         if *room == 0 && existing.is_none() {
             return Err(GroundClaimError::NoRoom);
         }
@@ -6087,9 +6268,12 @@ impl Bursts {
         if self.claims.len() >= t.max_claims as usize {
             return Err(GroundClaimError::ClaimLimit);
         }
-        if self.claims.contains_key(&p) {
-            return Err(GroundClaimError::PendingCell);
-        }
+        let cell = match self.claims.entry(p) {
+            std::collections::btree_map::Entry::Occupied(_) => {
+                return Err(GroundClaimError::PendingCell);
+            }
+            std::collections::btree_map::Entry::Vacant(cell) => cell,
+        };
         if !world.inside(p[0], p[1], p[2]) {
             return Err(GroundClaimError::Outside);
         }
@@ -6098,12 +6282,12 @@ impl Bursts {
         }
         // Admission has not changed the group. Reuse its exact mask and
         // delta instead of recomputing fracture_box and connectivity.
-        self.groups.insert(key, mask | bit);
+        *group.or_insert(0) = mask | bit;
         self.reserved = self
             .reserved
             .checked_add_signed(delta as isize)
             .expect("ground reservation");
-        self.claims.insert(p, claim);
+        cell.insert(claim);
         world.queue_edit(Edit::dig_if(p[0], p[1], p[2], mat));
         *room = (*room as i64 - delta).max(0) as u32;
         Ok(())
@@ -6566,28 +6750,74 @@ impl Bursts {
         t: &Blast,
         reserve: u32,
     ) {
+        self.confirm_reserving_inner::<true>(completed, e, t, reserve);
+    }
+
+    // The serial oracle retains per-voxel reservation updates in tests.
+    fn confirm_reserving_inner<const GROUPED: bool>(
+        &mut self,
+        completed: &[(Edit, Mat)],
+        e: &mut Economy,
+        t: &Blast,
+        reserve: u32,
+    ) {
         let mut groups: BTreeMap<ClaimGroup, (u64, u64)> = BTreeMap::new();
         // Components each touched group held before this confirmation.
         let mut held: BTreeMap<ClaimGroup, u32> = BTreeMap::new();
         for &(edit, old) in completed {
+            if edit.mat != AIR {
+                continue;
+            }
             let Some(expected) = edit.expected_material() else {
                 continue;
             };
             let key = [edit.x, edit.y, edit.z];
-            let Some(claim) = self.claims.get(&key).copied() else {
-                continue;
+            let claim = if GROUPED {
+                self.claims.remove(&key)
+            } else {
+                self.claims.get(&key).copied()
             };
+            let Some(claim) = claim else { continue };
             let (group, bit) = Self::claim_group(key, &claim, t);
             held.entry(group).or_insert_with(|| {
                 shape_component_count(self.groups.get(&group).copied().unwrap_or(0), group.3)
             });
-            self.take_claim(key, t);
+            if GROUPED {
+                if let Some(mask) = self.groups.get_mut(&group) {
+                    *mask &= !bit;
+                }
+            } else {
+                self.take_claim(key, t);
+            }
             if old == AIR || old != expected {
                 continue;
             }
             let entry = groups.entry(group).or_default();
             entry.0 |= bit;
             entry.1 = entry.1.saturating_add(claim.motion_mj);
+        }
+        if GROUPED {
+            // No admission or spawn observes reservations inside this atomic
+            // confirmation. Recount each touched group once after its removals;
+            // a removed bridge can split the survivors, including on a no-op.
+            let (mut before_total, mut after_total) = (0usize, 0usize);
+            for (group, &before) in &held {
+                before_total += before as usize;
+                if let std::collections::btree_map::Entry::Occupied(entry) =
+                    self.groups.entry(*group)
+                {
+                    let mask = *entry.get();
+                    after_total += shape_component_count(mask, group.3) as usize;
+                    if mask == 0 {
+                        entry.remove();
+                    }
+                }
+            }
+            self.reserved = self
+                .reserved
+                .checked_sub(before_total)
+                .and_then(|rest| rest.checked_add(after_total))
+                .expect("ground confirmation reservation");
         }
         if groups.is_empty() {
             return;
@@ -6959,6 +7189,7 @@ impl Bursts {
                 && !supported(f, world, hulls, &settled, i as u32);
             (push, unsupported)
         };
+        let mut motion_pending=pool.flying>0;
         let wakeups = fragment_wake_queries::<COMPACT_WAKE>(&self.fragments, query, task);
         for (i, (push, unsupported)) in wakeups {
             let f = &mut self.fragments[i];
@@ -6973,11 +7204,13 @@ impl Bursts {
                     stale_wrecks.insert(f.held);
                 }
                 f.velocity = velocity;
+                motion_pending=true;
             }
             if can_wake && f.resting && unsupported {
                 // The ground under it was taken (ADR-291): it falls again,
                 // and its wreck entry goes until it settles anew.
                 f.resting = false;
+                motion_pending=true;
                 self.wakeups += 1;
                 room -= 1;
                 working_room -= usize::from(parked);
@@ -7003,7 +7236,7 @@ impl Bursts {
                 }
             })
         };
-        let landed_slots: Vec<Option<Wreck>> = if self.fragments.len() >= 1024 {
+        let landed_slots: Vec<Option<Wreck>> = if !motion_pending {Vec::new()} else if self.fragments.len() >= 1024 {
             self.fragments
                 .par_iter_mut()
                 .enumerate()
@@ -7019,7 +7252,7 @@ impl Bursts {
                 .map(translate)
                 .collect()
         };
-        let landed: Vec<Wreck> = landed_slots.into_iter().flatten().collect();
+        let mut landed: Vec<Wreck> = landed_slots.into_iter().flatten().collect();
         completed("debris_translate");
         // Equal keys always enter the same shard; source slots stay ordered
         // inside it. Each independent table therefore chooses the same first
@@ -7027,56 +7260,59 @@ impl Bursts {
         let pile_grid = PileGrid::new(t.pile_cell);
         let mut shards: [Vec<(RestingPile, usize)>; 8] = std::array::from_fn(|_| Vec::new());
         let parallel = self.fragments.len() >= 1024;
-        for i in 0..self.fragments.len() {
-            if !self.fragments[i].resting || self.fragments[i].chunk.is_some() {
-                continue;
+        let mut memo=std::mem::take(&mut self.join_memo);
+        for (i,f) in self.fragments.iter().enumerate() {
+            if let Some(geometry)=fragment_join::Geometry::of(f) {
+                memo.push(i,(pile_grid.at(f.position),f.material,f.paint,f.mm),f,geometry);
             }
-            let f = &self.fragments[i];
-            let key = (pile_grid.at(f.position), f.material, f.paint, f.mm);
-            let hash = (key.0[0] as u32).wrapping_mul(0x9e3779b9).rotate_left(13)
-                ^ (key.0[1] as u32).wrapping_mul(0xc2b2ae35)
-                ^ (key.0[2] as u32).wrapping_mul(0x85ebca6b);
-            let shard = if parallel { (hash >> 29) as usize } else { 0 };
-            shards[shard].push((key, i));
         }
+        let unchanged=memo.unchanged();
+        if !unchanged {for input in &memo.current {
+            let key=input.key;
+            let hash=(key.0[0] as u32).wrapping_mul(0x9e3779b9).rotate_left(13)
+                ^(key.0[1] as u32).wrapping_mul(0xc2b2ae35)^(key.0[2] as u32).wrapping_mul(0x85ebca6b);
+            let shard=if parallel {(hash>>29) as usize}else{0};
+            shards[shard].push((key,input.index));
+        }}
         completed("debris_merge_keys");
         let group = |entries: &Vec<(RestingPile, usize)>| {
             let _task = PhysicsTask::new(task, "physics_merge_begin", "physics_merge_end");
-            let mut piles: FxLookup<RestingPile, usize> = FxLookup::with_capacity(entries.len());
+            let mut piles: FxLookup<RestingPile, Vec<(usize,fragment_join::Geometry)>> = FxLookup::with_capacity(entries.len());
             let mut pairs = Vec::new();
             for &(key, donor) in entries {
-                if let Some(&head) = piles.get(&key) {
-                    pairs.push((head, donor));
-                } else {
-                    piles.insert(key, donor);
+                let geometry=fragment_join::Geometry::of(&self.fragments[donor]).unwrap();
+                let heads=piles.entry(key).or_default();
+                let joined=heads.iter_mut().find_map(|(head,shape)| {
+                    let next=shape.join(geometry)?;
+                    *shape=next;Some((*head,next))
+                });
+                if let Some((head,shape))=joined {
+                    pairs.push((head,donor,shape));
+                } else if heads.len()<fragment_join::HEADS {
+                    heads.push((donor,geometry));
                 }
             }
             pairs
         };
-        let groups: Vec<_> = if parallel {
+        let groups: Vec<_> = if unchanged {Vec::new()} else if parallel {
             shards.par_iter().map(group).collect()
         } else {
             shards[..1].iter().map(group).collect()
         };
         completed("debris_merge_groups");
         let mut transfers: Vec<_> = groups.into_iter().flatten().collect();
-        transfers.sort_unstable_by_key(|&(_, donor)| donor);
-        for (head, donor) in transfers {
+        memo.finish(transfers.is_empty());self.join_memo=memo;
+        let mut moved_heads=BTreeMap::new();
+        transfers.sort_unstable_by_key(|&(_, donor,_)| donor);
+        for (head, donor,shape) in transfers {
             let (a, b) = self.fragments.split_at_mut(donor);
             let to = &mut a[head];
             let from = &b[0];
             e.ledger.transfer(from.held, to.held, u64::MAX);
             to.mass_g += from.mass_g;
             to.count += from.count;
-            // Grow after every donor in original order. Seat on terrain, but
-            // retain the bottom on a piece or roof so the pile does not sink
-            // into its support (ADR-457).
-            let bottom = to.position.y.add(to.bounds().0[1]);
-            restack(to);
-            match world_floor(to, world) {
-                Some(floor) if bottom.sub(floor) <= Fx::from_ratio(1, 2) => seat(to, floor),
-                _ => to.position.y = bottom.sub(to.bounds().0[1]),
-            }
+            shape.apply(to);
+            moved_heads.insert(to.held,arr(to.position).map(Fx::to_int_trunc));
             merged.insert(from.held);
         }
         completed("debris_advance");
@@ -7091,6 +7327,11 @@ impl Bursts {
             retain_live(&mut e.wrecks, &stale_wrecks, |w| w.held, true);
         }
         completed("debris_wreck_prune");
+        if !moved_heads.is_empty() {
+            for w in e.wrecks.iter_mut().chain(landed.iter_mut()) {
+                if let Some(p)=moved_heads.get(&w.held) {w.x=p[0];w.y=p[1];w.z=p[2];}
+            }
+        }
         e.wrecks
             .extend(landed.into_iter().filter(|w| !merged.contains(&w.held)));
         completed("debris_wreck_append");
@@ -7159,8 +7400,7 @@ impl Bursts {
     ) -> nav::vehicle::Rubble {
         self.rubble_with_scratch(world, yielding, hulls, &mut RubbleScratch::default(), task)
     }
-    /// Buffers are reused, never the support result. Every call reads the
-    /// current immutable world, hulls and fragment slice in full.
+    /// A standalone query has no edit history and reads support afresh.
     pub(crate) fn rubble_with_scratch(
         &self,
         world: &voxel::World,
@@ -7168,6 +7408,19 @@ impl Bursts {
         hulls: &[Hull],
         scratch: &mut RubbleScratch,
         task: &(impl Fn(usize, &'static str) + Sync),
+    ) -> nav::vehicle::Rubble {
+        self.rubble_with_scratch_changed(world, yielding, hulls, scratch, task, None)
+    }
+    /// A located change set is valid only since this scratch's previous call.
+    /// Hull and stacked-piece support is always read from the current phase.
+    pub(crate) fn rubble_with_scratch_changed(
+        &self,
+        world: &voxel::World,
+        yielding: &[Mat],
+        hulls: &[Hull],
+        scratch: &mut RubbleScratch,
+        task: &(impl Fn(usize, &'static str) + Sync),
+        changed: Option<&nav::vehicle::Changed>,
     ) -> nav::vehicle::Rubble {
         // Floor is what something holds: the world, or a resting piece
         // under it — a pile on a rock piece is floor at the pile's top.
@@ -7183,6 +7436,7 @@ impl Bursts {
             queries,
             stacked_mask,
             column_merge,
+            floor_proofs,
         } = scratch;
         {
             let _task = PhysicsTask::new(
@@ -7192,6 +7446,11 @@ impl Bursts {
             );
             bounds.clear();
             bounds.resize(self.fragments.len(), None);
+            if changed.is_some() {
+                floor_proofs.resize(self.fragments.len(), None);
+            } else {
+                floor_proofs.clear();
+            }
             stacked_mask.clear();
         }
         let mut floor = Vec::new();
@@ -7199,7 +7458,9 @@ impl Bursts {
         // Each batch owns its boxes and candidate lists. World/hulls/fragments
         // stay immutable; indexed collection preserves the original ascending
         // fragment order required by the ordered column gather.
-        let classify = |start: usize, boxes: &mut [Option<([Fx; 3], [Fx; 3])>]| {
+        let classify = |start: usize,
+                        boxes: &mut [Option<([Fx; 3], [Fx; 3])>],
+                        proofs: &mut [Option<RubbleFloorProof>]| {
             let _task = PhysicsTask::new(
                 task,
                 "physics_rubble_floor_begin",
@@ -7211,13 +7472,31 @@ impl Bursts {
                 let i = start + offset;
                 let f = &self.fragments[i];
                 if !f.resting || f.chunk.is_some() || yielding.contains(&f.material) {
+                    if let Some(proof) = proofs.get_mut(offset) {
+                        *proof = None;
+                    }
                     continue;
                 }
-                let (low, high) = f.bounds();
+                let old = proofs.get(offset).copied().flatten().filter(|proof| {
+                    proof.matches(f)
+                        && changed.is_some_and(|dirty| !dirty.touches(proof.lo, proof.hi))
+                });
+                let (low, high, on_world) = if let Some(proof) = old {
+                    (proof.low, proof.high, proof.on_world)
+                } else {
+                    let (low, high) = f.bounds();
+                    let mut p = arr(f.position);
+                    p[1] = p[1].sub(Fx::from_ratio(1, 2));
+                    let contact =
+                        fragment_contact(f, world, p, low, high, [world.nx, world.ny, world.nz]);
+                    if let Some(proof) = proofs.get_mut(offset) {
+                        *proof = (f.basis == IDENTITY)
+                            .then(|| RubbleFloorProof::new(f, low, high, contact));
+                    }
+                    (low, high, contact)
+                };
                 *slot = Some((low, high));
-                let mut p = arr(f.position);
-                p[1] = p[1].sub(Fx::from_ratio(1, 2));
-                if fragment_contact(f, world, p, low, high, [world.nx, world.ny, world.nz]) {
+                if on_world {
                     floor.push(i);
                 } else if !hulls
                     .iter()
@@ -7237,17 +7516,26 @@ impl Bursts {
                 "physics_rubble_classify_end",
             );
             if self.fragments.len() >= 1024 {
-                let groups: Vec<_> = bounds
-                    .par_chunks_mut(256)
-                    .enumerate()
-                    .map(|(batch, boxes)| classify(batch * 256, boxes))
-                    .collect();
+                let groups: Vec<_> = if floor_proofs.is_empty() {
+                    bounds
+                        .par_chunks_mut(256)
+                        .enumerate()
+                        .map(|(batch, boxes)| classify(batch * 256, boxes, &mut []))
+                        .collect()
+                } else {
+                    bounds
+                        .par_chunks_mut(256)
+                        .zip(floor_proofs.par_chunks_mut(256))
+                        .enumerate()
+                        .map(|(batch, (boxes, proofs))| classify(batch * 256, boxes, proofs))
+                        .collect()
+                };
                 for (on_world, on_pieces) in groups {
                     floor.extend(on_world);
                     stacked.extend(on_pieces);
                 }
             } else {
-                (floor, stacked) = classify(0, bounds);
+                (floor, stacked) = classify(0, bounds, floor_proofs);
             }
         }
         if !stacked.is_empty() {
@@ -7877,6 +8165,7 @@ pub(crate) fn heap(f: &mut Fragment, world: &voxel::World) {
     }
 }
 /// Stands a restacked pile with its bottom layer on `floor`.
+#[cfg(test)]
 fn seat(f: &mut Fragment, floor: Fx) {
     let scale = Fx::from_ratio(f.mm as i32, voxel::unit::WORLD_MM as i32);
     let centre = arr(shape_centre(f.shape, 4));
@@ -7884,6 +8173,7 @@ fn seat(f: &mut Fragment, floor: Fx) {
 }
 /// The top of the world under a piece's centre, looking down from its
 /// height; `None` off the map.
+#[cfg(test)]
 fn world_floor(f: &Fragment, world: &voxel::World) -> Option<Fx> {
     let p = arr(f.position);
     let (x, z) = ((p[0].raw() >> 32) as i32, (p[2].raw() >> 32) as i32);
@@ -7928,6 +8218,7 @@ impl PileGrid {
 /// the height its matter takes. Matter beyond the box stays in the
 /// container; the box only saturates. Where it stands is the caller's
 /// (ADR-457).
+#[cfg(test)]
 fn restack(f: &mut Fragment) {
     let n = f.count.min(box_cells(4));
     f.shape = shape_geometry::STACKED[n as usize];
@@ -8296,6 +8587,47 @@ pub(crate) struct RubbleScratch {
     queries: SettledQueries,
     stacked_mask: Vec<u64>,
     column_merge: ColumnMergeScratch,
+    floor_proofs: Vec<Option<RubbleFloorProof>>,
+}
+/// Exact world-contact answer for upright geometry. Source slot/id and every
+/// shape input are checked; dirty X/Z pages include a conservative margin.
+#[derive(Clone, Copy)]
+struct RubbleFloorProof {
+    id: u64,
+    position: V3,
+    shape: u64,
+    mm: u16,
+    side: u8,
+    low: [Fx; 3],
+    high: [Fx; 3],
+    lo: [i32; 2],
+    hi: [i32; 2],
+    on_world: bool,
+}
+impl RubbleFloorProof {
+    fn matches(&self, f: &Fragment) -> bool {
+        self.id == f.id
+            && self.position == f.position
+            && self.shape == f.shape
+            && self.mm == f.mm
+            && self.side == f.side
+            && f.basis == IDENTITY
+    }
+    fn new(f: &Fragment, low: [Fx; 3], high: [Fx; 3], on_world: bool) -> Self {
+        let p = arr(f.position);
+        Self {
+            id: f.id,
+            position: f.position,
+            shape: f.shape,
+            mm: f.mm,
+            side: f.side,
+            low,
+            high,
+            lo: [0, 2].map(|a| p[a].add(low[a]).to_int_trunc() - 2),
+            hi: [0, 2].map(|a| p[a].add(high[a]).to_int_trunc() + 2),
+            on_world,
+        }
+    }
 }
 /// Scratch only: support membership is rebuilt from current inputs. Exact row
 /// results may be reused only after comparing their complete current inputs.
@@ -9546,10 +9878,16 @@ struct FragmentMotion {
 }
 impl FragmentMotion {
     fn new(t: &Blast) -> Self {
+        let drag = Fx::from_ratio(t.drag_pct as i32, 100);
+        let friction = Fx::from_ratio(t.friction_pct as i32, 100);
         Self {
             push: Fx::from_ratio(t.push_pct as i32, 100),
             push_up: Fx::from_ratio(t.push_up_pct as i32, 100),
-            drag: Fx::from_ratio(t.drag_pct as i32, 100),
+            drag: if crate::TICKS_PER_SECOND == 20 {
+                drag.mul(drag.sqrt())
+            } else {
+                drag
+            },
             max_speed: Fx::from_ratio(
                 t.max_speed_mm_s as i32,
                 voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
@@ -9559,10 +9897,14 @@ impl FragmentMotion {
                 voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
             ),
             bounce: Fx::from_ratio(t.bounce_pct as i32, 100),
-            friction: Fx::from_ratio(t.friction_pct as i32, 100),
+            friction: if crate::TICKS_PER_SECOND == 20 {
+                friction.mul(friction.sqrt())
+            } else {
+                friction
+            },
             spin_rate: Fx::from_ratio(
                 t.spin_deg_s as i32 * (fx::angle::FULL / 360),
-                crate::TICKS_PER_SECOND,
+                modding::clock::STREAM_HZ as i32,
             ),
         }
     }

@@ -16,6 +16,10 @@ pub mod commands;
 mod command_tests;
 
 #[cfg(test)]
+#[path = "range_pilot_tests.rs"]
+mod pilot_tests;
+
+#[cfg(test)]
 #[path = "range_order_handler_tests.rs"]
 mod order_handler_tests;
 
@@ -98,6 +102,21 @@ pub enum Order {
     /// Dig the ball around this face into the unit's tank (ADR-672). The
     /// unit holds its fire, and the rules AI leaves the order alone.
     Dig([i32; 3]),
+    /// Persistent direct control; axes are -1, 0, 1. Uses ordinary hull physics.
+    Pilot {
+        throttle: i8,
+        turn: i8,
+        aim: [i32; 3],
+        fire: bool,
+    },
+}
+impl Order {
+    pub fn point(self) -> Option<[i32; 3]> {
+        match self {
+            Self::Ground(p) | Self::Pilot { aim: p, .. } => Some(p),
+            _ => None,
+        }
+    }
 }
 /// Opt-in observations of actual fire gates, never input to simulation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -296,7 +315,7 @@ fn effective_weapon(
     if kind == RangeUnitKind::NuclearSilo {
         return Some(Weapon::Nuclear);
     }
-    if kind == RangeUnitKind::Base {
+    if matches!(kind, RangeUnitKind::Base | RangeUnitKind::Crawler) {
         return None;
     }
     if kind == RangeUnitKind::Spider {
@@ -555,6 +574,12 @@ impl Battle {
     pub(super) fn domains(&self) -> impl Iterator<Item = ([i32; 3], [i32; 3])> + '_ {
         self.waves.iter().map(|w| w.wave.domain())
     }
+    pub(super) fn nuclear_domains(&self) -> impl Iterator<Item = ([i32; 3], [i32; 3])> + '_ {
+        self.waves
+            .iter()
+            .filter(|w| w.weapon == Weapon::Nuclear)
+            .map(|w| w.wave.domain())
+    }
     pub(super) fn save_wave_contacts(&self, b: &mut Blob) {
         for burst in &self.waves {
             burst.wave.save_contacts(b);
@@ -665,6 +690,20 @@ impl Battle {
                         b.i32(v);
                     }
                 }
+                Order::Pilot {
+                    throttle,
+                    turn,
+                    aim,
+                    fire,
+                } => {
+                    b.u8(6);
+                    b.u8((throttle + 1) as u8);
+                    b.u8((turn + 1) as u8);
+                    for v in aim {
+                        b.i32(v);
+                    }
+                    b.bool(fire);
+                }
             }
             b.usize(a.target.unwrap_or(usize::MAX));
             b.u32(a.next);
@@ -736,6 +775,24 @@ impl Battle {
                         return None;
                     }
                     Order::Dig(p)
+                }
+                6 => {
+                    let throttle = s.u8();
+                    let turn = s.u8();
+                    let aim = std::array::from_fn(|_| s.i32());
+                    let fire = s.bool();
+                    if throttle > 2
+                        || turn > 2
+                        || (0..3).any(|k| aim[k] < 0 || aim[k] >= size[k] as i32)
+                    {
+                        return None;
+                    }
+                    Order::Pilot {
+                        throttle: throttle as i8 - 1,
+                        turn: turn as i8 - 1,
+                        aim,
+                        fire,
+                    }
                 }
                 _ => return None,
             };
@@ -816,10 +873,12 @@ impl Battle {
             if energy > self.material_energy_mj(weapon) {
                 return None;
             }
+            let mut wave = Explosion::load(s, units, authored, size, true)?;
+            wave.nuclear_ground = weapon == Weapon::Nuclear;
             self.waves.push(Burst {
                 weapon,
                 energy,
-                wave: Explosion::load(s, units, authored, size, true)?,
+                wave,
                 side: None,
             });
         }
@@ -994,6 +1053,10 @@ impl BlastRange {
     pub fn battle_mode(&self) -> bool {
         self.layout.as_ref().is_some_and(|l| l.battle)
     }
+    pub fn point_gun(&self) -> bool {
+        self.layout.as_ref().is_some_and(|l| l.gun_point)
+    }
+    pub fn physical_gun(&self) -> bool { !self.battle_mode() && !self.point_gun() }
     /// Setup accepts explicit movement without running combat or AI.
     pub fn battle_movement_active(&self) -> bool {
         matches!(self.battle.phase, Phase::Setup | Phase::Fighting)
@@ -1005,7 +1068,7 @@ impl BlastRange {
         effective_weapon(
             u.kind,
             a.weapon,
-            matches!(a.order, Order::Ground(_)),
+            a.order.point().is_some(),
             a.target.and_then(|id| self.units.get(id)).map(|u| u.kind),
             &self.battle.tuning,
         )
@@ -1066,6 +1129,9 @@ impl BlastRange {
         actor.weapon = weapon;
         actor.charge = None;
         commands::Outcome::Applied
+    }
+    pub(super) fn idle_enemy(&self, id: usize) -> bool {
+        self.layout.as_ref().is_some_and(|l| l.idle_enemies) && !self.allied(id)
     }
     pub fn enemy_ai_tuning(&self) -> &modding::battle_ai::Tuning {
         &self.battle.ai.tuning
@@ -1149,9 +1215,14 @@ impl BlastRange {
                     id,
                     allied: self.allied(id),
                     alive: unit.status.alive,
-                    armed: unit.status.weapon && unit.kind != RangeUnitKind::NuclearSilo,
-                    mobile: unit.status.engine && unit.motion.can_drive(unit.mobility),
-                    can_reposition: unit.status.engine
+                    armed: unit.status.weapon
+                        && unit.kind != RangeUnitKind::NuclearSilo
+                        && !self.idle_enemy(id),
+                    mobile: unit.status.engine
+                        && unit.motion.can_drive(unit.mobility)
+                        && !self.idle_enemy(id),
+                    can_reposition: !self.idle_enemy(id)
+                        && unit.status.engine
                         && !unit.kind.emplacement()
                         && unit.motion.can_reposition(unit.mobility),
                     kind: unit.kind,
@@ -1450,6 +1521,11 @@ impl BlastRange {
             u.motion.route.clear();
             u.motion.stop();
         }
+        for id in 0..self.units.len() {
+            if self.idle_enemy(id) {
+                self.battle.actors[id].order = Order::Hold;
+            }
+        }
         self.battle.phase = Phase::Fighting;
         self.battle.ai.next_tick = self.tick;
         self.battle.ai.pending = None;
@@ -1518,7 +1594,13 @@ impl BlastRange {
         if !self.battle_mode()
             || !(phase == Phase::Fighting
                 || phase == Phase::Setup
-                    && matches!(request.order, Order::Move | Order::Hold | Order::Dig(_)))
+                    && matches!(
+                        request.order,
+                        Order::Move
+                            | Order::Hold
+                            | Order::Dig(_)
+                            | Order::Pilot { fire: false, .. }
+                    ))
         {
             orders::Admission::Rejected
         } else {
@@ -1535,6 +1617,10 @@ impl BlastRange {
     /// own admission rules; external owners schedule this same operation.
     pub fn execute_command(&mut self, command: commands::Command) -> commands::Outcome {
         let (id, order, destination, fallback) = match command {
+            commands::Command::Sculpt{at,edge,material,erase}=> {
+                let outcome=self.sculpt(at,edge,material,erase);
+                self.record_player_command(command,outcome);return outcome;
+            }
             commands::Command::Gun(input) => {
                 let outcome = self.apply_gun_command(input);
                 self.record_player_command(command, outcome);
@@ -1981,6 +2067,14 @@ impl BlastRange {
         if battle.phase == Phase::Fighting {
             self.battle_ai_tick(&mut battle);
             completed("battle_ai");
+        }
+        if battle.phase == Phase::Fighting
+            || battle.phase == Phase::Setup
+                && battle
+                    .actors
+                    .iter()
+                    .any(|a| matches!(a.order, Order::Pilot { .. }))
+        {
             self.battle_orders(&mut battle, &mut completed, physics);
         }
         completed("battle_orders");
@@ -2033,7 +2127,7 @@ impl BlastRange {
                                 Some(battle.actors[id].weapon.unwrap_or(Weapon::Blast))
                             }
                             // An immobilized tank may still switch ammunition.
-                            RangeUnitKind::Tank => None,
+                            RangeUnitKind::Tank | RangeUnitKind::Crawler => None,
                         };
                         let range = weapon.map_or_else(
                             || {
@@ -2087,7 +2181,11 @@ impl BlastRange {
                         if battle.rounds.is_empty()
                             && battle.waves.is_empty()
                             && !mobile_gun
-                            && !stationary_target_in_range =>
+                            && !stationary_target_in_range
+                            && !battle.actors.iter().enumerate().any(|(id, a)| {
+                                self.units[id].status.alive
+                                    && matches!(a.order, Order::Pilot { .. })
+                            }) =>
                     {
                         Phase::Draw
                     }
@@ -2126,6 +2224,9 @@ impl BlastRange {
         }
         let mut bursts = Vec::new();
         for id in 0..self.units.len() {
+            if b.phase == Phase::Setup && !matches!(b.actors[id].order, Order::Pilot { .. }) {
+                continue;
+            }
             if !self.units[id].status.alive || !self.units[id].status.weapon {
                 record_gate(&mut b.fire_trace, id, FireGate::Disabled);
                 b.actors[id].charge = None;
@@ -2147,7 +2248,7 @@ impl BlastRange {
                     && self.allied(other) != self.allied(id)
             };
             let a = &mut b.actors[id];
-            if kind == RangeUnitKind::NuclearSilo && !matches!(a.order, Order::Ground(_)) {
+            if kind == RangeUnitKind::NuclearSilo && a.order.point().is_none() {
                 record_gate(&mut b.fire_trace, id, FireGate::Hold);
                 a.target = None;
                 a.charge = None;
@@ -2165,15 +2266,16 @@ impl BlastRange {
                 a.target = None;
                 continue;
             }
-            let target = if kind == RangeUnitKind::NuclearSilo {
-                None // A manual point cannot inherit moving automatic targets.
-            } else if let Order::Attack(i) = a.order {
-                hostile(i).then_some(i)
-            } else {
-                (0..self.units.len())
-                    .filter(|&i| hostile(i))
-                    .min_by_key(|&i| (distance(i), i))
-            };
+            let target =
+                if kind == RangeUnitKind::NuclearSilo || matches!(a.order, Order::Pilot { .. }) {
+                    None // A manual point cannot inherit moving automatic targets.
+                } else if let Order::Attack(i) = a.order {
+                    hostile(i).then_some(i)
+                } else {
+                    (0..self.units.len())
+                        .filter(|&i| hostile(i))
+                        .min_by_key(|&i| (distance(i), i))
+                };
             let target_distance = target.map(distance);
             let target_changed = a.target != target;
             if target_changed {
@@ -2187,7 +2289,7 @@ impl BlastRange {
             let weapon = effective_weapon(
                 kind,
                 a.weapon,
-                matches!(a.order, Order::Ground(_)),
+                a.order.point().is_some(),
                 target.map(|id| self.units[id].kind),
                 &b.tuning,
             )
@@ -2205,7 +2307,7 @@ impl BlastRange {
                 Weapon::MachineGun => &b.bullet_config,
                 Weapon::Laser => &b.laser_config,
             };
-            let mut p = if let Order::Ground(p) = a.order {
+            let mut p = if let Some(p) = a.order.point() {
                 p
             } else if let Some(other) = target {
                 aim_point(&self.units[other])
@@ -2215,7 +2317,7 @@ impl BlastRange {
             };
             let mut target_velocity = [Fx::ZERO; 3];
             if let Some(other) =
-                target.filter(|_| weapon != Weapon::Laser && !matches!(a.order, Order::Ground(_)))
+                target.filter(|_| weapon != Weapon::Laser && a.order.point().is_none())
             {
                 let u = &self.units[other];
                 target_velocity = [
@@ -2285,7 +2387,7 @@ impl BlastRange {
             completed("orders_pose");
             // Acquisition/AI/UI use horizontal actor-centre distance, not
             // a selected body cell or the projectile's predicted intercept.
-            let tactical_distance = if matches!(a.order, Order::Ground(_)) {
+            let tactical_distance = if a.order.point().is_some() {
                 dx.mul(dx).add(dz.mul(dz))
             } else {
                 target_distance.unwrap_or_else(|| dx.mul(dx).add(dz.mul(dz)))
@@ -2299,7 +2401,7 @@ impl BlastRange {
             let blocked_direct = in_range
                 && matches!(weapon, Weapon::MachineGun | Weapon::Kinetic | Weapon::Laser)
                 && !kind.emplacement()
-                && !matches!(a.order, Order::Ground(_))
+                && a.order.point().is_none()
                 && weapons::muzzles(&self.units[id], a.turret.angle)
                     .first()
                     .is_some_and(|muzzle| {
@@ -2332,7 +2434,7 @@ impl BlastRange {
                 }
                 // A move order owns its route. Track and fire at hostiles that
                 // enter range, but never turn the move into an attack pursuit.
-                if a.order == Order::Move {
+                if a.order == Order::Move || matches!(a.order, Order::Pilot { .. }) {
                     continue;
                 }
                 if self.tick >= a.pursuit {
@@ -2377,6 +2479,23 @@ impl BlastRange {
                         continue;
                     }
                     // Aim for a firing position before the target hull, never its occupied centre.
+                    // A live route to a still usable firing point owns its
+                    // destination. A brief blocked step asks navigation to
+                    // repair that route, not to alternate the flank again.
+                    let retained_point = self.units[id].motion.destination.filter(|old| {
+                        if target_changed || road_goal.is_some() {
+                            return false;
+                        }
+                        let x = i64::from(old[0]) - i64::from(p[0]);
+                        let z = i64::from(old[1]) - i64::from(p[2]);
+                        if x * x + z * z > i64::from(range) * i64::from(range) {
+                            return false;
+                        }
+                        let muzzle_y = weapons::muzzles(&self.units[id], a.turret.angle)
+                            .first()
+                            .map_or(from[1].to_int_trunc(), |m| m[1].to_int_trunc());
+                        self.firing_line_clear(id, p, *old, muzzle_y)
+                    });
                     let standoff = if blocked_direct && weapon != Weapon::Laser {
                         (range / 3).min(200)
                     } else {
@@ -2390,7 +2509,9 @@ impl BlastRange {
                     completed("orders_approach");
                     let dest = self.firing_point(id, [p[0], p[2]], dest, b.tuning.firing_spacing);
                     completed("orders_firing_point");
-                    let dest = if blocked_direct || needs_detour && road_goal.is_none() {
+                    let dest = if let Some(old) = retained_point {
+                        old
+                    } else if blocked_direct || needs_detour && road_goal.is_none() {
                         let muzzle_y = weapons::muzzles(&self.units[id], a.turret.angle)
                             .first()
                             .map_or(from[1].to_int_trunc(), |m| m[1].to_int_trunc());
@@ -2525,7 +2646,7 @@ impl BlastRange {
                     .first()
                     .copied()
                     .unwrap_or(from);
-                let desired = if matches!(a.order, Order::Ground(_)) {
+                let desired = if a.order.point().is_some() {
                     p
                 } else {
                     spider_laser_aim(&self.world, muzzle, p, a.burst, tuning)
@@ -2548,6 +2669,13 @@ impl BlastRange {
             } else {
                 p
             };
+            if matches!(a.order, Order::Pilot { fire: false, .. }) {
+                record_gate(&mut b.fire_trace, id, FireGate::Hold);
+                stop_spider_beam(a, kind, self.tick);
+                a.charge = None;
+                continue;
+            }
+
             if self.tick < a.next {
                 record_gate(&mut b.fire_trace, id, FireGate::Reload);
                 continue;
@@ -2592,24 +2720,44 @@ impl BlastRange {
                         laser_aim
                     };
                     completed("orders_laser_sweep");
-                    let trace = self.laser_ray(
-                        from,
-                        p,
-                        Some(id),
-                        &tuning.laser,
-                        config,
-                        (&mut completed, physics),
-                    );
+                    let samples = if tuning.laser.interval_ticks == 1 {
+                        modding::clock::stream_samples(self.tick)
+                    } else {
+                        1
+                    }
+                    .min(tuning.laser.burst_ticks.saturating_sub(a.burst).max(1));
+                    // Ablation is nonlinear: a second sample must see the
+                    // hole the first made, rather than waste double work on
+                    // the same surface. Publish only the last visual trace.
+                    let mut last = None;
+                    for _ in 0..samples {
+                        last = Some(self.laser_ray(
+                            from,
+                            p,
+                            Some(id),
+                            &tuning.laser,
+                            config,
+                            (&mut completed, physics),
+                        ));
+                    }
                     completed("orders_laser");
-                    b.lasers.push(trace);
-                    a.fired = a.fired.wrapping_add(1);
-                    a.burst += 1;
+                    b.lasers.push(last.expect("at least one laser sample"));
+                    a.fired = a.fired.wrapping_add(samples);
+                    a.burst += samples;
                     if a.burst >= tuning.laser.burst_ticks {
                         a.burst = 0;
                         a.charge = None;
                         a.next = self.tick + tuning.laser.reload_ticks;
                     } else {
-                        a.next = self.tick + tuning.laser.interval_ticks;
+                        let next = modding::clock::stream_ticks(
+                            a.burst.saturating_mul(tuning.laser.interval_ticks),
+                        );
+                        let previous = modding::clock::stream_ticks(
+                            a.burst
+                                .saturating_sub(1)
+                                .saturating_mul(tuning.laser.interval_ticks),
+                        );
+                        a.next = self.tick + next.saturating_sub(previous).max(1);
                     }
                 }
                 continue;
@@ -2897,13 +3045,16 @@ impl BlastRange {
                 };
         } else {
             let remaining = stream.burst_ticks.saturating_sub(a.burst);
+            let previous = a.burst;
             a.burst += stream.interval_ticks;
             a.next = tick
                 + if a.burst >= stream.burst_ticks {
                     a.burst = 0;
-                    remaining.saturating_sub(1) + stream.reload_ticks
+                    modding::clock::stream_ticks(remaining.saturating_sub(1)) + stream.reload_ticks
                 } else {
-                    stream.interval_ticks
+                    modding::clock::stream_ticks(a.burst)
+                        .saturating_sub(modding::clock::stream_ticks(previous))
+                        .max(1)
                 };
         }
     }
@@ -3026,19 +3177,24 @@ impl BlastRange {
                     }
                 } else if r.weapon.bursts() {
                     let old = self.matter.remaining_mj;
-                    let energy = b.material_energy_mj(r.weapon);
+                    let mut energy = b.material_energy_mj(r.weapon);
                     self.matter.begin_mj(energy, config.fragment_box);
                     self.matter.remaining_mj = old;
+                    let reserved=self.upheaval.reserve(&self.world,at,&config,energy);
+                    energy-=reserved;
+                    let mut wave_config=config;
+                    wave_config.material_energy_j=wave_config.material_energy_j.saturating_sub((reserved/1000) as u32);
                     let side = (r.owner < self.units.len()).then(|| self.allied(r.owner));
                     let mut wave = Explosion::begin_impact(
                         &self.world,
                         at,
                         prev,
-                        &config,
+                        &wave_config,
                         &self.units,
                         self.matter.tuning.body_energy_pct,
                     );
                     if r.weapon == Weapon::Nuclear {
+                        wave.nuclear_ground = true;
                         wave.material_budget(energy, b.tuning.nuclear.body_energy_pct);
                     }
                     b.waves.push(Burst {
@@ -3054,6 +3210,7 @@ impl BlastRange {
                         config.heat_units,
                         config.heat_per_cell,
                     );
+                    self.water.absorb_radial_heat(&self.world,at,config.heat_units,config.heat_per_cell);
                     b.impacts.push(Impact {
                         at,
                         from: prev,

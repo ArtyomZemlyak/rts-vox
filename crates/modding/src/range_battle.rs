@@ -30,7 +30,7 @@ impl Default for Canister {
             spread_milli: 45,
             footprint_radius: 60,
             range: crate::attack_ranges::stock().canister,
-            reload_ticks: 150,
+            reload_ticks: crate::clock::stream_ticks(150),
         }
     }
 }
@@ -170,7 +170,7 @@ impl Tuning {
             || !(100..=crate::attack_ranges::MAX_DISTANCE).contains(&t.nuclear.range)
             || !(1..=1800).contains(&t.nuclear.reload_ticks)
             || !(1000..=4000).contains(&t.nuclear.flight_time_milli)
-            || !(1..=1_000_000_000_000).contains(&t.nuclear.material_energy_j)
+            || !(1..=4_000_000_000_000).contains(&t.nuclear.material_energy_j)
             || t.nuclear.body_energy_pct > 100
             || !(100..=3000).contains(&t.kinetic_range)
             || !(100..=3000).contains(&t.energy_range)
@@ -207,7 +207,7 @@ mod tests {
     fn nuclear_payload_is_finite_and_rejects_invalid_budgets() {
         let source = include_str!("../../../data/range-battle.ron");
         let stock = Tuning::from_ron(source).unwrap();
-        assert!(stock.nuclear.material_energy_j > u64::from(u32::MAX));
+        assert_eq!(stock.nuclear.material_energy_j, 20_000_000_000 * 100);
         assert_eq!(stock.nuclear.range, crate::attack_ranges::stock().nuclear);
         let nuke = include_str!("../../../data/range-nuclear.ron");
         let explicit = nuke
@@ -222,10 +222,10 @@ mod tests {
         ))
         .unwrap();
         for bad in [
-            nuke.replace("20000000000", "0"),
-            nuke.replace("20000000000", "1000000000001"),
-            nuke.replace("body_energy_pct: 90", "body_energy_pct: 101"),
-            nuke.replace("reload_ticks: 1800", "reload_ticks: 1801"),
+            nuke.replace("2000000000000", "0"),
+            nuke.replace("2000000000000", "4000000000001"),
+            nuke.replace("body_energy_pct: 25", "body_energy_pct: 101"),
+            nuke.replace("reload_ticks: 1200", "reload_ticks: 1801"),
         ] {
             let plain = bad
                 .lines()
@@ -246,7 +246,7 @@ mod tests {
         let text = include_str!("../../../data/range-battle.ron");
         let t = Tuning::from_ron(text).unwrap();
         assert_eq!(t.siege.range, crate::attack_ranges::stock().siege);
-        assert_eq!(t.siege.reload_ticks, 210);
+        assert_eq!(t.siege.reload_ticks, crate::clock::HZ * 7);
         assert_eq!(t.siege.flight_time_milli, 1800);
         for fields in [
             "range: 0, reload_ticks: 210, flight_time_milli: 1800",
@@ -271,7 +271,7 @@ mod tests {
         for invalid in [
             shipped.replace("pellets: 6", "pellets: 0"),
             shipped.replace("spread_milli: 35", "spread_milli: 500"),
-            shipped.replace("reload_ticks: 150", "reload_ticks: 0"),
+            shipped.replace("reload_ticks: 100", "reload_ticks: 0"),
             shipped.replace("flight_time_milli: 2500", "flight_time_milli: 1499"),
             shipped.replace("flight_time_milli: 2500", "flight_time_milli: 4001"),
             shipped.replace("footprint_radius: 60", "footprint_radius: 0"),
@@ -325,11 +325,11 @@ mod tests {
         assert_eq!(Tuning::from_ron(&old).unwrap().turret_t2_reload_ticks, None);
         assert_eq!(
             Tuning::from_ron(shipped).unwrap().turret_t2_reload_ticks,
-            Some(60)
+            Some(crate::clock::HZ * 2)
         );
         for n in [0, 1801, u32::MAX] {
             let bad = shipped.replace(
-                "turret_t2_reload_ticks: Some(60)",
+                "turret_t2_reload_ticks: Some(40)",
                 &format!("turret_t2_reload_ticks: Some({n})"),
             );
             assert!(Tuning::from_ron(&bad).is_err());

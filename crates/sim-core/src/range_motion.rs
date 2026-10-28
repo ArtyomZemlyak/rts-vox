@@ -10,6 +10,9 @@ use fx::{
 use phys::{Chassis, V3};
 use voxel::{UnitBody, World};
 
+#[path = "range_steering.rs"]
+mod steering;
+
 #[derive(Clone, Copy)]
 pub struct Obstacle {
     pub pos: [Fx; 3],
@@ -71,6 +74,18 @@ pub(super) struct PreparedGround<'a> {
     current: nav::vehicle::Pose,
     probe: nav::vehicle::Probe<'a>,
 }
+
+/// At most four nominal support points, in their original reduction order.
+struct SupportSet {
+    support: [phys::Support; 4],
+    ground: [Fx; 4],
+    len: usize,
+}
+impl SupportSet {
+    fn slices(&self) -> (&[phys::Support], &[Fx]) {
+        (&self.support[..self.len], &self.ground[..self.len])
+    }
+}
 /// A whole-map search in flight (ADR-680) and the ticks it has waited
 /// for its answer: the range serves the oldest first, ties by slot.
 #[derive(Clone, Debug)]
@@ -97,6 +112,34 @@ struct FeetStep {
     linear: V3,
     angular: i32,
     cycles: Fx,
+}
+
+/// Derived terrain facts only. Suspension and contacts still advance every tick.
+#[derive(Clone, Copy, Debug)]
+struct GroundMemo {
+    position: [Fx; 2],
+    head: i32,
+    shape: nav::vehicle::Shape,
+    pose: Option<nav::vehicle::Pose>,
+    floors: Option<[Fx; 4]>,
+}
+impl GroundMemo {
+    fn matches(&self, position: [Fx; 2], head: i32, shape: nav::vehicle::Shape) -> bool {
+        self.position == position && self.head == head && self.shape == shape
+    }
+    fn touched(&self, changed: &nav::vehicle::Changed) -> bool {
+        // Sum is a conservative radius for every rotated footprint, contact
+        // span and grade probe; changes anywhere in a column invalidate it.
+        let r = self.shape.half[0].abs()
+            + self.shape.half[1].abs()
+            + self.shape.span.abs()
+            + self.shape.step.abs()
+            + 4;
+        changed.touches(
+            self.position.map(|p| p.to_int_trunc() - r),
+            self.position.map(|p| p.to_int_trunc() + r),
+        )
+    }
 }
 impl Obstacle {
     pub fn of(m: &Motion, b: &UnitBody) -> Self {
@@ -197,6 +240,8 @@ pub struct Motion {
     pub waypoint: usize,
     pub laps: u32,
     pub enabled: bool,
+    /// Derived from the authoritative actor order before each motion phase.
+    pub(crate) pilot: Option<[i8; 2]>,
     pub blocked: bool,
     pub chassis: modding::tuning::Chassis,
     pub speed: i32,
@@ -242,6 +287,9 @@ pub struct Motion {
     // Installed engine sizing is based on the pristine machine. Losing armour
     // must not silently resize the motor each movement tick.
     drive_scale: Fx,
+    /// Derived gait geometry; live chassis inputs are checked before reuse.
+    /// Not serialized and never an answer about terrain or body integrity.
+    step_cycle: drive::StepCycleCache,
     navigation: modding::navigation::Navigation,
     /// Maximum graph work per tick for this hull's footprint, derived from
     /// its kind and therefore restored with the body rather than serialized.
@@ -304,9 +352,13 @@ pub struct Motion {
     /// This tick's validated continuation was run before spatially ordered
     /// motion. Never serialized; the enclosing tick is atomic.
     prepared_hunt: bool,
+    /// Notification applied before shared admission in this atomic motion
+    /// phase. Consumed by the physical step, never saved or hashed.
+    prepared_terrain_change: bool,
     /// Pure terrain answers carried between ticks; changed pages are dropped
     /// before each use. Scratch only, never serialized.
     terrain_columns: nav::vehicle::Columns,
+    ground_memo: Option<GroundMemo>,
     /// Transient cap supplied by the range's fragment room before each tick.
     /// Standalone motion retains the complete cut list.
     pub(crate) cut_limit: usize,
@@ -368,6 +420,59 @@ fn stock_packs() -> &'static StockPacks {
     })
 }
 impl Motion {
+    fn invalidate_ground(&mut self, changed: Option<&nav::vehicle::Changed>) {
+        if self
+            .ground_memo
+            .as_ref()
+            .is_some_and(|m| changed.is_none_or(|c| m.touched(c)))
+        {
+            self.ground_memo = None;
+        }
+    }
+    fn ground_slot(
+        memo: &mut Option<GroundMemo>,
+        position: [Fx; 2],
+        head: i32,
+        shape: nav::vehicle::Shape,
+    ) -> &mut GroundMemo {
+        if memo
+            .as_ref()
+            .is_none_or(|m| !m.matches(position, head, shape))
+        {
+            *memo = Some(GroundMemo {
+                position,
+                head,
+                shape,
+                pose: None,
+                floors: None,
+            });
+        }
+        memo.as_mut().expect("prepared ground slot")
+    }
+    fn cached_pose(
+        memo: &mut Option<GroundMemo>,
+        probe: &mut nav::vehicle::Probe<'_>,
+        position: [Fx; 2],
+        head: i32,
+        shape: nav::vehicle::Shape,
+    ) -> nav::vehicle::Pose {
+        let slot = Self::ground_slot(memo, position, head, shape);
+        *slot
+            .pose
+            .get_or_insert_with(|| probe.pose(position, head, shape))
+    }
+    fn cached_floors(
+        memo: &mut Option<GroundMemo>,
+        probe: &mut nav::vehicle::Probe<'_>,
+        position: [Fx; 2],
+        head: i32,
+        shape: nav::vehicle::Shape,
+    ) -> [Fx; 4] {
+        let slot = Self::ground_slot(memo, position, head, shape);
+        *slot
+            .floors
+            .get_or_insert_with(|| probe.support_floors(position, head, shape))
+    }
     /// Cheap local traffic advice, without any terrain search or route edit.
     pub(super) fn traffic_hint(
         &self,
@@ -471,6 +576,7 @@ impl Motion {
         let t = &packs.sim;
         let chassis = match kind {
             modding::range::RangeUnitKind::Tank
+            | modding::range::RangeUnitKind::Crawler
             | modding::range::RangeUnitKind::Artillery
             | modding::range::RangeUnitKind::ArtilleryT2
             | modding::range::RangeUnitKind::ArtilleryTurretT2
@@ -495,6 +601,7 @@ impl Motion {
         let legs_buckled = vec![false; rigs.len()];
         Self {
             emplaced: kind.emplacement(),
+            step_cycle: Default::default(),
             pos: at.map(Fx::from_int),
             drive: Drive {
                 head: 0,
@@ -511,6 +618,7 @@ impl Motion {
             waypoint: 0,
             laps: 0,
             enabled: false,
+            pilot: None,
             blocked: false,
             chassis,
             speed: if kind.emplacement() {
@@ -520,6 +628,7 @@ impl Motion {
             } else if matches!(
                 kind,
                 modding::range::RangeUnitKind::Tank
+                    | modding::range::RangeUnitKind::Crawler
                     | modding::range::RangeUnitKind::Artillery
                     | modding::range::RangeUnitKind::ArtilleryT2
             ) {
@@ -534,6 +643,7 @@ impl Motion {
             } else if matches!(
                 kind,
                 modding::range::RangeUnitKind::Tank
+                    | modding::range::RangeUnitKind::Crawler
                     | modding::range::RangeUnitKind::Artillery
                     | modding::range::RangeUnitKind::ArtilleryT2
             ) {
@@ -544,6 +654,7 @@ impl Motion {
             terrain_tilt_pct: if matches!(
                 kind,
                 modding::range::RangeUnitKind::Tank
+                    | modding::range::RangeUnitKind::Crawler
                     | modding::range::RangeUnitKind::Artillery
                     | modding::range::RangeUnitKind::ArtilleryT2
             ) {
@@ -554,6 +665,7 @@ impl Motion {
             terrain_approach_pct: if matches!(
                 kind,
                 modding::range::RangeUnitKind::Tank
+                    | modding::range::RangeUnitKind::Crawler
                     | modding::range::RangeUnitKind::Artillery
                     | modding::range::RangeUnitKind::ArtilleryT2
             ) {
@@ -593,7 +705,9 @@ impl Motion {
             may_start: true,
             resume_budget: None,
             prepared_hunt: false,
+            prepared_terrain_change: false,
             terrain_columns: nav::vehicle::Columns::default(),
+            ground_memo: None,
             cut_limit: usize::MAX,
             defer_feet: false,
             pending_feet: None,
@@ -820,16 +934,13 @@ impl Motion {
     /// on crater and trench runs; the probe under the nominal point is
     /// what the planner accepted (ADR-272). `None` for a tracked hull and
     /// with fewer than two legs left.
-    fn foot_supports(
-        &self,
-        nominal: &[phys::Support; 4],
-        floors: &[Fx; 4],
-    ) -> Option<(Vec<phys::Support>, Vec<Fx>)> {
+    fn leg_supports(&self, nominal: &[phys::Support; 4], floors: &[Fx; 4]) -> Option<SupportSet> {
         if self.rigs.is_empty() {
             return None;
         }
-        let mut support = Vec::with_capacity(4);
-        let mut ground = Vec::with_capacity(4);
+        let mut support = *nominal;
+        let mut ground = *floors;
+        let mut len = 0;
         // A body with fewer legs than nominal points stands on long feet:
         // each leg carries heel and toe, every point on its own side
         // (ADR-288), so a two-legged body stands whole and falls onto a
@@ -847,11 +958,29 @@ impl Motion {
                     (s == i || (long_feet && s % 2 == i % 2)) && !*lost && !*buckled
                 });
             if carried {
-                support.push(nominal[i]);
-                ground.push(floors[i]);
+                support[len] = nominal[i];
+                ground[len] = floors[i];
+                len += 1;
             }
         }
-        (support.len() >= 2).then_some((support, ground))
+        (len >= 2).then_some(SupportSet {
+            support,
+            ground,
+            len,
+        })
+    }
+
+    /// Preserve the existing contact regression tests' owned inspection view.
+    #[cfg(test)]
+    fn foot_supports(
+        &self,
+        nominal: &[phys::Support; 4],
+        floors: &[Fx; 4],
+    ) -> Option<(Vec<phys::Support>, Vec<Fx>)> {
+        self.leg_supports(nominal, floors).map(|set| {
+            let (support, ground) = set.slices();
+            (support.to_vec(), ground.to_vec())
+        })
     }
     /// A parked hull's slide under a burst's shove (ADR-286): the same
     /// acceptance as a driven move. Terrain spends a refused shove; a hull
@@ -1000,18 +1129,26 @@ impl Motion {
             nav::vehicle::Probe::around(w, &self.yielding, [self.pos[0], self.pos[2]], 96)
                 .with_rubble(rubble);
         let shape = self.shape(b);
-        let f = ground.support_floors([self.pos[0], self.pos[2]], self.drive.head, shape);
+        let position = [self.pos[0], self.pos[2]];
+        let f = Self::cached_floors(
+            &mut self.ground_memo,
+            &mut ground,
+            position,
+            self.drive.head,
+            shape,
+        );
         let floors = [f[3], f[1], f[2], f[0]];
         self.floors = floors;
         let nominal = crate::ride::supports_of(&self.chassis);
-        let (support, ground) = self
-            .foot_supports(&nominal, &floors)
-            .unwrap_or_else(|| (nominal.to_vec(), floors.to_vec()));
+        let legs = self.leg_supports(&nominal, &floors);
+        let (support, ground) = legs
+            .as_ref()
+            .map_or((nominal.as_slice(), floors.as_slice()), SupportSet::slices);
         let r = self.ride_now(b, gravity, response);
         phys::step(
             &mut self.hull,
-            &support,
-            &ground,
+            support,
+            ground,
             (hc, hs),
             V3::ZERO,
             &r,
@@ -1074,6 +1211,7 @@ impl Motion {
         self.shove = V3::ZERO;
         true
     }
+    #[cfg(test)]
     pub(super) fn passive(
         &mut self,
         w: &World,
@@ -1083,6 +1221,20 @@ impl Motion {
         response: crate::mobility::Mobility,
         others: &[Obstacle],
     ) {
+        self.passive_changed(w, rubble, b, gravity, response, others, None);
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn passive_changed(
+        &mut self,
+        w: &World,
+        rubble: &nav::vehicle::Rubble,
+        b: &UnitBody,
+        gravity: i32,
+        response: crate::mobility::Mobility,
+        others: &[Obstacle],
+        changed: Option<&nav::vehicle::Changed>,
+    ) {
+        self.invalidate_ground(changed);
         self.cut.clear();
         self.contact = None;
         if self.hold_foundation(w, b) {
@@ -1468,10 +1620,20 @@ impl Motion {
             self.coarse = Some(pending);
             return CoarseAdvance::Pending;
         }
-        let (answer, spent) = pending.search.advance(w, rubble, left);
+        let (answer, prefix, spent) = if self.path.is_empty() {
+            pending.search.advance_with_prefix(w, rubble, left)
+        } else {
+            let (answer, spent) = pending.search.advance(w, rubble, left);
+            (answer, None, spent)
+        };
         self.coarse_spent = self.coarse_spent.saturating_add(spent);
         match answer {
             None => {
+                if self.path.is_empty() {
+                    if let Some(prefix) = prefix {
+                        self.take_prefix(prefix, pending.search.origin());
+                    }
+                }
                 self.coarse = Some(pending);
                 CoarseAdvance::Pending
             }
@@ -1497,6 +1659,12 @@ impl Motion {
         mut completed: impl FnMut(&'static str),
     ) -> bool {
         let from = [self.pos[0], self.pos[2]];
+        // Never turn a rejected off-map order into a valid local waypoint.
+        let to = if self.destination.is_some() {
+            self.local_goal(to)
+        } else {
+            to
+        };
         let shape = self.shape(b);
         if self.fine_unwalked {
             // Set up only: the goal ring, the direct sweep and the frontier
@@ -1631,6 +1799,29 @@ impl Motion {
         completed("plan_fine");
         !self.blocked
     }
+    /// A global refusal or a live contact needs a local maneuver, not an
+    /// exact oriented sweep across the entire map. Keep the real order and
+    /// lead toward it by one local horizon; mark_entry keeps this a prefix.
+    fn local_goal(&self, to: [i32; 2]) -> [i32; 2] {
+        // A moving hull already has a checked route to use while a pursuit
+        // replacement is searched. Preserve that full replacement.
+        if self.cursor < self.path.len() && !self.blocked {
+            return to;
+        }
+        let from = [self.pos[0], self.pos[2]];
+        let delta = [0, 1].map(|a| Fx::from_int(to[a]).sub(from[a]));
+        let distance = delta[0].abs().max(delta[1].abs());
+        let ring = 4 * self.navigation.cell_units;
+        let horizon = self.navigation.global_min_distance.max(2 * ring);
+        // The fine planner may move its target by a goal ring. Leave two
+        // rings between the prefix and the real order so mark_entry cannot
+        // mistake a snapped prefix for arrival at that order.
+        if distance <= Fx::from_int(horizon + 2 * ring) {
+            return to;
+        }
+        let fraction = Fx::from_int(horizon).div(distance);
+        [0, 1].map(|a| from[a].add(delta[a].mul(fraction)).to_int_trunc())
+    }
     /// The planner's budget and rules for this hull. Its bounds are the
     /// world's, less a margin at the edge (ADR-315).
     fn search(&self, w: &World) -> nav::vehicle::Search {
@@ -1689,6 +1880,22 @@ impl Motion {
             }
             self.cursor += 1;
         }
+    }
+    /// A preview never replaces a usable path or leads back to its already
+    /// traversed endpoint. The search stays alive and owns the real order.
+    fn take_prefix(&mut self, prefix: nav::vehicle::Route, from: [Fx; 2]) {
+        let Some(end) = prefix.path.last().copied() else {
+            return;
+        };
+        let end = end.map(Fx::from_int);
+        let here = [self.pos[0], self.pos[2]];
+        let ahead = [0, 1].map(|a| end[a].sub(here[a]));
+        let leg = [0, 1].map(|a| end[a].sub(from[a]));
+        if ahead[0].mul(leg[0]).add(ahead[1].mul(leg[1])) <= Fx::ZERO {
+            return;
+        }
+        self.take_plan(prefix);
+        self.take_up(from);
     }
     /// A new goal for a hull already under way (ADR-462): it keeps driving
     /// its route while the new search runs, and takes the new route up
@@ -2095,7 +2302,14 @@ impl Motion {
                 self.take_up(from);
                 self.next_plan = tick.saturating_add(self.replan_after_search());
             }
-            HuntAdvance::Pending(hunt) => self.hunt = Some(hunt),
+            HuntAdvance::Pending(hunt) => {
+                if self.path.is_empty() {
+                    if let Some(prefix) = hunt.prefix_route() {
+                        self.take_prefix(prefix, hunt.origin());
+                    }
+                }
+                self.hunt = Some(hunt);
+            }
             HuntAdvance::Restart => {
                 self.hunt = None;
                 self.next_plan = tick;
@@ -2260,6 +2474,48 @@ impl Motion {
     pub fn started_search(&self) -> bool {
         self.started
     }
+    /// Invalidate only the currently executed swept leg, before search shares
+    /// are assigned. No terrain samples or graph work are performed here.
+    pub(super) fn terrain_changed(
+        &mut self,
+        body: &UnitBody,
+        tick: u32,
+        changed: &nav::vehicle::Changed,
+    ) {
+        self.prepared_terrain_change = true;
+        if changed.is_empty() || !self.enabled || self.escape_left > 0 || self.destination.is_none()
+        {
+            return;
+        }
+        let Some(&to) = self.path.get(self.cursor) else {
+            return;
+        };
+        let from = [self.pos[0].to_int_trunc(), self.pos[2].to_int_trunc()];
+        let shape = self.shape(body);
+        // L1 encloses every heading of the hull and support footprint. One
+        // column accounts for truncating the fractional source position.
+        let radius = shape.half[0].max(shape.support[0])
+            + shape.half[1].max(shape.support[1])
+            + self.navigation.plan_margin
+            + 1;
+        if !changed.touches_segment(from, to, radius) {
+            return;
+        }
+        self.hunt = None;
+        self.coarse = None;
+        self.prepared_hunt = false;
+        self.path.clear();
+        self.cursor = 0;
+        self.partial_path = false;
+        self.blocked = false;
+        self.blocked_ticks = 0;
+        self.escape = 0;
+        self.needs_recovery = false;
+        self.dry = false;
+        self.next_plan = tick;
+        // Keep velocity: normal braking and fresh physical clearance still
+        // govern the hull while its replacement waits for shared admission.
+    }
     /// Whether this tick's step may begin a new route search, read before
     /// the step. A superset of the start conditions in `step_observed_ground`:
     /// the range only uses it to choose who is offered the shared start
@@ -2384,6 +2640,7 @@ impl Motion {
         rubble: &'a nav::vehicle::Rubble,
         changed: &nav::vehicle::Changed,
     ) -> Option<PreparedGround<'a>> {
+        self.invalidate_ground(Some(changed));
         if !self.enabled {
             return None;
         }
@@ -2396,7 +2653,13 @@ impl Motion {
         .with_rubble(rubble);
         let position = [self.pos[0], self.pos[2]];
         let shape = self.shape(b);
-        let current = probe.pose(position, self.drive.head, shape);
+        let current = Self::cached_pose(
+            &mut self.ground_memo,
+            &mut probe,
+            position,
+            self.drive.head,
+            shape,
+        );
         Some(PreparedGround {
             world: w,
             rubble,
@@ -2423,6 +2686,13 @@ impl Motion {
         prepared: Option<PreparedGround<'a>>,
         mut completed: impl FnMut(&'static str),
     ) {
+        self.invalidate_ground(Some(changed));
+        if !std::mem::take(&mut self.prepared_terrain_change) {
+            if alive && engine && self.can_drive(response) {
+                self.terrain_changed(b, tick, changed);
+            }
+            self.prepared_terrain_change = false;
+        }
         self.cut.clear();
         self.contact = None;
         let traffic_hint = self.traffic_hint.take();
@@ -2436,29 +2706,54 @@ impl Motion {
         if !self.enabled {
             // A parked hull that a burst pushed slides and rocks (ADR-286);
             // a parked walker still stands on its feet, and its hull on them.
-            self.passive(w, rubble, b, gravity, response, others);
+            self.passive_changed(w, rubble, b, gravity, response, others, Some(changed));
             return;
         }
         let engine = engine && self.can_drive(response);
-        // A search begun on an earlier tick walks on before anything asks
-        // for another (ADR-306).
-        if !std::mem::take(&mut self.prepared_hunt) {
-            self.hunt_step(w, b, others, rubble, tick, changed, |_| {}, |_, _| {});
-        }
-        completed("hunt");
-        // Finish a checked prefix before searching its continuation. Replacing
-        // it on the cadence from a moving source can lead back behind the hull
-        // into the pocket it just left. A block or a new pursuit goal still
-        // requests a replacement; real steps always check fresh geometry.
-        if !self.searching()
-            && self.escape_left == 0
-            && (self.blocked || self.path.is_empty())
-            && tick >= self.next_plan
-            && self.may_start
-        {
-            if let Some(goal) = self.destination {
+        if self.pilot.is_none() {
+            // A search begun on an earlier tick walks on before anything asks
+            // for another (ADR-306).
+            if !std::mem::take(&mut self.prepared_hunt) {
+                self.hunt_step(w, b, others, rubble, tick, changed, |_| {}, |_, _| {});
+            }
+            completed("hunt");
+            // Finish a checked prefix before searching its continuation. Replacing
+            // it on the cadence from a moving source can lead back behind the hull
+            // into the pocket it just left. A block or a new pursuit goal still
+            // requests a replacement; real steps always check fresh geometry.
+            if !self.searching()
+                && self.escape_left == 0
+                && (self.blocked || self.path.is_empty())
+                && tick >= self.next_plan
+                && self.may_start
+            {
+                if let Some(goal) = self.destination {
+                    self.started = true;
+                    self.plan_to_observed(
+                        w,
+                        goal,
+                        b,
+                        others,
+                        rubble,
+                        prepared.as_ref(),
+                        &mut completed,
+                    );
+                    self.next_plan = tick.saturating_add(self.replan_after_search());
+                }
+            }
+            if self.cursor == self.path.len()
+                && !self.searching()
+                && self.escape_left == 0
+                && !self.route.is_empty()
+                && !self.partial_path
+                && alive
+                && engine
+                && (!self.blocked || (tick.is_multiple_of(self.replan) && tick >= self.next_plan))
+                && self.may_start
+            {
+                let goal = self.route[self.waypoint];
                 self.started = true;
-                self.plan_to_observed(
+                self.move_to_observed(
                     w,
                     goal,
                     b,
@@ -2467,150 +2762,177 @@ impl Motion {
                     prepared.as_ref(),
                     &mut completed,
                 );
-                self.next_plan = tick.saturating_add(self.replan_after_search());
+                if self.dry {
+                    self.next_plan = tick.saturating_add(self.replan_after_search());
+                }
             }
+            completed("plan");
         }
-        if self.cursor == self.path.len()
-            && !self.searching()
-            && self.escape_left == 0
-            && !self.route.is_empty()
-            && !self.partial_path
-            && alive
-            && engine
-            && (!self.blocked || (tick.is_multiple_of(self.replan) && tick >= self.next_plan))
-            && self.may_start
-        {
-            let goal = self.route[self.waypoint];
-            self.started = true;
-            self.move_to_observed(
-                w,
-                goal,
-                b,
-                others,
-                rubble,
-                prepared.as_ref(),
-                &mut completed,
-            );
-            if self.dry {
-                self.next_plan = tick.saturating_add(self.replan_after_search());
-            }
-        }
-        completed("plan");
         let mut want = drive::NO_WAY;
         let mut speed = Fx::ZERO;
         let base_limits = Limits::of(&self.chassis, TICKS);
         let drive_factor = self.drive_scale.mul(self.hull.load);
         let brake = response.limits(&base_limits, false).brake.mul(drive_factor);
-        if alive && engine && self.escape_left == 0 && self.cursor < self.path.len() {
-            let goal = self.path[self.cursor];
-            let dx = Fx::from_int(goal[0]).sub(self.pos[0]);
-            let dz = Fx::from_int(goal[1]).sub(self.pos[2]);
-            let arrival = if self.partial_path || self.cursor + 1 < self.path.len() {
-                Fx::from_ratio(
-                    self.navigation.corner_arrival_mm,
-                    voxel::unit::WORLD_MM as i32,
-                )
-                .min(Fx::from_int(self.arrival))
-            } else {
-                Fx::from_int(self.arrival)
-            };
-            if dx.mul(dx).add(dz.mul(dz)) <= arrival.mul(arrival) {
-                self.cursor += 1;
-                self.escape = 0;
-                let reached_end = self.cursor == self.path.len();
-                if reached_end {
-                    // A pending replacement must not revive a completed
-                    // order or overwrite the next prefix/patrol request.
-                    self.hunt = None;
-                    self.coarse = None;
+        if self.pilot.is_none() {
+            if alive && engine && self.escape_left == 0 && self.cursor < self.path.len() {
+                let original = self.path[self.cursor].map(Fx::from_int);
+                let original_way = angle::atan2(
+                    original[1].sub(self.pos[2]).raw(),
+                    original[0].sub(self.pos[0]).raw(),
+                );
+                let original_alignment =
+                    angle::cos(angle::diff(original_way, self.drive.head)).max(Fx::ZERO);
+                let steering =
+                    self.moving_steering(w, b, others, rubble, original_way, original_alignment);
+                if steering.is_some_and(|s| s.passed) {
+                    self.cursor += 1;
+                    self.escape = 0;
                 }
-                if reached_end && self.partial_path {
-                    // Keep the player's goal and patrol waypoint. The next tick
-                    // requests a continuation under the normal start allowance.
-                    self.path.clear();
-                    self.cursor = 0;
-                    self.next_plan = tick.saturating_add(1);
-                } else if reached_end {
-                    self.destination = None;
-                }
-                if reached_end && !self.partial_path && !self.route.is_empty() {
-                    self.waypoint = (self.waypoint + 1) % self.route.len();
-                    if self.waypoint == 0 {
-                        self.laps += 1;
+                let goal = self.path[self.cursor];
+                let dx = Fx::from_int(goal[0]).sub(self.pos[0]);
+                let dz = Fx::from_int(goal[1]).sub(self.pos[2]);
+                let arrival = if self.partial_path || self.cursor + 1 < self.path.len() {
+                    Fx::from_ratio(
+                        self.navigation.corner_arrival_mm,
+                        voxel::unit::WORLD_MM as i32,
+                    )
+                    .min(Fx::from_int(self.arrival))
+                } else {
+                    Fx::from_int(self.arrival)
+                };
+                if dx.mul(dx).add(dz.mul(dz)) <= arrival.mul(arrival) {
+                    self.cursor += 1;
+                    self.escape = 0;
+                    let reached_end = self.cursor == self.path.len();
+                    if reached_end && !self.partial_path {
+                        // A pending replacement must not revive a completed
+                        // order or overwrite the next prefix/patrol request.
+                        self.hunt = None;
+                        self.coarse = None;
+                    }
+                    if reached_end && self.partial_path {
+                        // Keep the player's goal and patrol waypoint. The next tick
+                        // requests a continuation under the normal start allowance.
+                        self.path.clear();
+                        self.cursor = 0;
+                        self.next_plan = tick.saturating_add(1);
+                    } else if reached_end {
+                        self.destination = None;
+                    }
+                    if reached_end && !self.partial_path && !self.route.is_empty() {
+                        self.waypoint = (self.waypoint + 1) % self.route.len();
+                        if self.waypoint == 0 {
+                            self.laps += 1;
+                        }
+                    }
+                } else {
+                    let aim = steering.map_or([dx, dz], |s| s.delta);
+                    want = steering.map_or(original_way, |s| s.way);
+                    speed = Fx::from_int(self.speed)
+                        .mul(response.engine)
+                        .mul(response.traction);
+                    if let Some(hint) = traffic_hint {
+                        speed = speed.min(hint.speed);
+                    }
+                    let alignment = steering.map_or(original_alignment, |s| s.alignment);
+                    // Keep the existing conservative axis-distance bound on
+                    // diagonals. Braking includes this tick and the full tail.
+                    let distance = if steering.is_some_and(|s| s.rounded) {
+                        aim[0].abs().max(aim[1].abs())
+                    } else {
+                        dx.abs().max(dz.abs())
+                    };
+                    speed = drive::stopping_speed(distance, brake, crate::TICKS_PER_SECOND, speed);
+                    if steering.is_some() {
+                        speed = drive::corner_speed(
+                            aim,
+                            angle::diff(want, self.drive.head),
+                            base_limits.turn,
+                            TICKS,
+                            speed,
+                        );
+                    }
+                    let threshold = if steering.is_some() {
+                        self.navigation.moving_turn_alignment_pct
+                    } else {
+                        self.alignment
+                    };
+                    if alignment > Fx::from_ratio(threshold, 100)
+                        && (self.drive.vel > Fx::ZERO
+                            || steering.is_some()
+                            || angle::diff(want, self.drive.head).abs() <= base_limits.turn)
+                    {
+                        speed = speed.mul(alignment);
+                    } else {
+                        speed = Fx::ZERO;
+                        // The planner reserves a pivot, not a moving curve. Finish
+                        // braking along the checked segment before rotating.
+                        if self.drive.vel.abs() > brake {
+                            want = self.drive.head;
+                        }
                     }
                 }
-            } else {
-                want = angle::atan2(dz.raw(), dx.raw());
+            }
+            // Repeat recovery only after a net move of at least half a navigation
+            // cell. Returning to the same spot cannot renew the cycle forever.
+            if self.escape >= ESCAPES && self.escape_left == 0 {
+                let dx = self.pos[0].sub(self.recovery_origin[0]);
+                let dz = self.pos[2].sub(self.recovery_origin[1]);
+                let cell = Fx::from_ratio(self.navigation.cell_units, 2);
+                if dx.mul(dx).add(dz.mul(dz)) >= cell.mul(cell) {
+                    self.escape = 0;
+                }
+            }
+            if alive
+                && engine
+                && self.blocked_ticks >= self.navigation.recovery_ticks
+                && self.escape_left == 0
+                && !self.searching()
+                && self.escape < ESCAPES
+            {
+                if self.escape == 0 {
+                    self.recovery_origin = [self.pos[0], self.pos[2]];
+                }
+                self.escape_left = self.navigation.escape_ticks;
+                self.recovery_head = self.drive.head;
+                self.blocked_ticks = 0;
+                self.escape = self.escape.wrapping_add(1);
+            }
+            if self.escape_left > 0 && alive && engine {
+                // Astern, ahead, then astern and ahead turning each way, the
+                // turn from the first tick: a hull wedged on one side leaves by
+                // the other, and one whose every turn is refused where it
+                // stands turns while it moves.
+                let attempt = self.escape.wrapping_sub(1) % ESCAPES;
+                let astern = attempt.is_multiple_of(2);
+                let sign = match attempt {
+                    0 | 1 => 0,
+                    2 | 5 => 1,
+                    _ => -1,
+                };
+                let turn = sign * self.navigation.recovery_turn_deg * angle::FULL / 360;
+                want = angle::norm(self.recovery_head + turn);
+                let pct = self.navigation.escape_speed_pct * if astern { -1 } else { 1 };
                 speed = Fx::from_int(self.speed)
                     .mul(response.engine)
-                    .mul(response.traction);
-                if let Some(hint) = traffic_hint {
-                    speed = speed.min(hint.speed);
-                }
-                let alignment = angle::cos(angle::diff(want, self.drive.head)).max(Fx::ZERO);
-                // Keep the existing conservative axis-distance bound on
-                // diagonals. Braking includes this tick and the full tail.
-                let distance = dx.abs().max(dz.abs());
-                speed = drive::stopping_speed(distance, brake, crate::TICKS_PER_SECOND, speed);
-                if alignment > Fx::from_ratio(self.alignment, 100)
-                    && (self.drive.vel > Fx::ZERO
-                        || angle::diff(want, self.drive.head).abs() <= base_limits.turn)
-                {
-                    speed = speed.mul(alignment);
-                } else {
-                    speed = Fx::ZERO;
-                    // The planner reserves a pivot, not a moving curve. Finish
-                    // braking along the checked segment before rotating.
-                    if self.drive.vel.abs() > brake {
-                        want = self.drive.head;
-                    }
-                }
+                    .mul(response.traction)
+                    .mul(Fx::from_ratio(pct, 100));
             }
-        }
-        // Repeat recovery only after a net move of at least half a navigation
-        // cell. Returning to the same spot cannot renew the cycle forever.
-        if self.escape >= ESCAPES && self.escape_left == 0 {
-            let dx = self.pos[0].sub(self.recovery_origin[0]);
-            let dz = self.pos[2].sub(self.recovery_origin[1]);
-            let cell = Fx::from_ratio(self.navigation.cell_units, 2);
-            if dx.mul(dx).add(dz.mul(dz)) >= cell.mul(cell) {
-                self.escape = 0;
-            }
-        }
-        if alive
-            && engine
-            && self.blocked_ticks >= self.navigation.recovery_ticks
-            && self.escape_left == 0
-            && !self.searching()
-            && self.escape < ESCAPES
-        {
-            if self.escape == 0 {
-                self.recovery_origin = [self.pos[0], self.pos[2]];
-            }
-            self.escape_left = self.navigation.escape_ticks;
-            self.recovery_head = self.drive.head;
-            self.blocked_ticks = 0;
-            self.escape = self.escape.wrapping_add(1);
-        }
-        if self.escape_left > 0 && alive && engine {
-            // Astern, ahead, then astern and ahead turning each way, the
-            // turn from the first tick: a hull wedged on one side leaves by
-            // the other, and one whose every turn is refused where it
-            // stands turns while it moves.
-            let attempt = self.escape.wrapping_sub(1) % ESCAPES;
-            let astern = attempt.is_multiple_of(2);
-            let sign = match attempt {
-                0 | 1 => 0,
-                2 | 5 => 1,
-                _ => -1,
-            };
-            let turn = sign * self.navigation.recovery_turn_deg * angle::FULL / 360;
-            want = angle::norm(self.recovery_head + turn);
-            let pct = self.navigation.escape_speed_pct * if astern { -1 } else { 1 };
+        } else if let Some([throttle, turn]) = self.pilot.filter(|_| alive && engine) {
             speed = Fx::from_int(self.speed)
                 .mul(response.engine)
                 .mul(response.traction)
-                .mul(Fx::from_ratio(pct, 100));
+                .mul(Fx::from_int(i32::from(throttle)));
+            if throttle != 0 {
+                want = self.drive.head;
+            }
+            if turn != 0 {
+                // A rolling heading target requests sustained steering; advance
+                // still applies the installed turn rate and angular acceleration.
+                want = angle::norm(
+                    self.drive.head + i32::from(turn) * base_limits.pivot.max(base_limits.turn),
+                );
+            }
         }
         let lim = response.limits(&base_limits, want == drive::NO_WAY);
         let old = self.drive;
@@ -2650,7 +2972,13 @@ impl Motion {
                 let mut ground =
                     nav::vehicle::Probe::for_local(w, &self.yielding, columns, changed)
                         .with_rubble(rubble);
-                let current = ground.pose([self.pos[0], self.pos[2]], old.head, shape);
+                let current = Self::cached_pose(
+                    &mut self.ground_memo,
+                    &mut ground,
+                    [self.pos[0], self.pos[2]],
+                    old.head,
+                    shape,
+                );
                 (ground, current)
             }
         };
@@ -2791,21 +3119,28 @@ impl Motion {
         }
         completed("terrain");
         let mut advanced = 0;
-        if let Some(c) = drive::StepCycle::of(&self.chassis) {
+        if let Some(c) = self.step_cycle.get(&self.chassis) {
             advanced = c.advance(path, angle::diff(self.drive.head, old.head));
             self.phase = angle::norm(self.phase.wrapping_add(advanced));
         }
         let nominal = crate::ride::supports_of(&self.chassis);
         let (hc, hs) = crate::ride::heading_of(self.drive.head);
-        let f = ground.support_floors([self.pos[0], self.pos[2]], self.drive.head, shape);
+        let f = Self::cached_floors(
+            &mut self.ground_memo,
+            &mut ground,
+            [self.pos[0], self.pos[2]],
+            self.drive.head,
+            shape,
+        );
         self.terrain_columns = ground.take_columns();
         let floors = [f[3], f[1], f[2], f[0]];
         self.floors = floors;
         // A walker stands on the legs it still has (ADR-280); a tracked
         // hull on all four nominal points over the probe's floors.
-        let (support, ground) = self
-            .foot_supports(&nominal, &floors)
-            .unwrap_or_else(|| (nominal.to_vec(), floors.to_vec()));
+        let legs = self.leg_supports(&nominal, &floors);
+        let (support, ground) = legs
+            .as_ref()
+            .map_or((nominal.as_slice(), floors.as_slice()), SupportSet::slices);
         let r = self.ride_now(b, gravity, response);
         let sway = crate::ride::sway_of(
             self.drive.vel.sub(old.vel).mul(Fx::from_int(TICKS)),
@@ -2815,8 +3150,8 @@ impl Motion {
         );
         phys::step(
             &mut self.hull,
-            &support,
-            &ground,
+            support,
+            ground,
             (hc, hs),
             sway,
             &r,
@@ -2915,9 +3250,12 @@ impl Motion {
         self.load_version(s, true)
     }
     pub(crate) fn load_version(&mut self, s: &mut Scan, continuation: bool) -> bool {
+        self.ground_memo = None;
         self.contact = None;
+        self.pilot = None;
         self.dry = false;
         self.prepared_hunt = false;
+        self.prepared_terrain_change = false;
         // A whole-map search in flight is the range's own snapshot section
         // (ADR-680), read after every hull.
         self.coarse = None;
@@ -3050,6 +3388,84 @@ mod coarse_obstacle_tests;
 mod tests {
     use super::*;
     use modding::range::RangeUnitKind;
+    #[test]
+    fn parked_ground_memo_matches_fresh_physics_after_edits_rubble_and_shoves() {
+        struct Level;
+        impl voxel::Generator for Level {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 {
+                u16::from(y < 16)
+            }
+        }
+        let mut w = World::new(256, 64, 256, 65536, Box::new(Level));
+        for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
+            let body = if kind == RangeUnitKind::Tank {
+                voxel::unit::tank()
+            } else {
+                voxel::unit::strider()
+            };
+            let mut cached = Motion::new([128, 16, 128], kind, &body);
+            let mut fresh = cached.clone();
+            let mut rubble = nav::vehicle::Rubble::new();
+            for tick in 0..120 {
+                let mut changed = nav::vehicle::Changed::default();
+                if tick == 40 {
+                    for x in 90..160 {
+                        for z in 90..160 {
+                            w.queue_edit(voxel::Edit::dig(x, 15, z));
+                            changed.column(x as i32, z as i32);
+                        }
+                    }
+                    w.flush();
+                }
+                if tick == 60 {
+                    rubble.insert([128, 128], 20);
+                    changed.column(128, 128);
+                }
+                if tick == 80 {
+                    for m in [&mut cached, &mut fresh] {
+                        m.receive_contact(V3::new(Fx::from_int(20), Fx::ZERO, Fx::ZERO));
+                    }
+                }
+                cached.passive_changed(
+                    &w,
+                    &rubble,
+                    &body,
+                    98,
+                    crate::mobility::Mobility::intact(true),
+                    &[],
+                    Some(&changed),
+                );
+                fresh.passive(
+                    &w,
+                    &rubble,
+                    &body,
+                    98,
+                    crate::mobility::Mobility::intact(true),
+                    &[],
+                );
+                assert_eq!(
+                    motion_bytes(&cached),
+                    motion_bytes(&fresh),
+                    "kind {kind:?}, tick {tick}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn fixed_clock_preserves_full_speed_distance_over_five_seconds() {
+        let w = World::new(640, 64, 640, 65536, Box::new(Ground { depth: 0 }));
+        let body = voxel::unit::tank();
+        let mut m = Motion::new([128, 16, 128], RangeUnitKind::Tank, &body);
+        m.enabled = true;
+        m.pilot = Some([1, 0]);
+        m.drive.vel = Fx::from_int(m.speed);
+        let start = m.pos[0];
+        for tick in 0..modding::clock::HZ * 5 {
+            step(&mut m, &w, &body, &[], tick);
+        }
+        let expected = Fx::from_int(m.speed * 5);
+        assert!(m.pos[0].sub(start).sub(expected).abs() < Fx::from_ratio(1, 1000));
+    }
     #[test]
     fn command_base_is_anchored_under_contact_and_blast_impulse() {
         let body = voxel::unit::command_base();
@@ -4352,6 +4768,7 @@ mod tests {
             let mut w = ground(0);
             let body = match kind {
                 RangeUnitKind::Tank => voxel::unit::tank(),
+                RangeUnitKind::Crawler => voxel::unit::crawler(),
                 RangeUnitKind::Strider => voxel::unit::strider(),
                 RangeUnitKind::Spider => voxel::unit::spider(),
                 RangeUnitKind::Artillery => voxel::unit::artillery(),
@@ -4443,8 +4860,10 @@ mod tests {
         let mut changed = nav::vehicle::Changed::default();
         changed.columns((80..192).flat_map(|x| (80..192).map(move |z| [x, z])));
         let rubble = nav::vehicle::Rubble::new();
-        // Keep a straight movement order inside the cleared area so that
-        // routing around the crater cannot make this test pass accidentally.
+        // Process the edit, then deliberately accept a fixed route inside
+        // the cleared area. This fixture tests track support and falling;
+        // automatic avoidance is covered by crater_route_tests.
+        m.terrain_changed(&body, 10, &changed);
         m.path = vec![[160, 160]];
         m.destination = Some([160, 160]);
         let start = m.pos;
@@ -4621,6 +5040,7 @@ mod tests {
         for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
             let body = match kind {
                 RangeUnitKind::Tank => voxel::unit::tank(),
+                RangeUnitKind::Crawler => voxel::unit::crawler(),
                 RangeUnitKind::Strider => voxel::unit::strider(),
                 RangeUnitKind::Spider => voxel::unit::spider(),
                 RangeUnitKind::Artillery => voxel::unit::artillery(),
@@ -4956,7 +5376,11 @@ mod tests {
         let gap = neighbour.pos[0]
             .sub(m.pos[0])
             .sub(half[0].mul(Fx::from_int(2)));
-        assert!(gap >= Fx::ZERO && gap < Fx::ONE, "missed contact: {gap:?}");
+        let step = Fx::from_ratio(m.speed, crate::TICKS_PER_SECOND);
+        assert!(
+            gap >= Fx::ZERO && gap < step,
+            "missed contact by more than one motion step: {gap:?}"
+        );
         assert!(peak > origin[1], "no hop: {peak:?}");
         assert!(m.pos[1] < origin[1].sub(Fx::ONE), "missed crater slope");
         assert!(m.hull.load > Fx::ZERO, "no landing: {:?}", m.hull);
@@ -5491,6 +5915,7 @@ mod tests {
                     let w = ground(depth);
                     let body = match kind {
                         RangeUnitKind::Tank => voxel::unit::tank(),
+                        RangeUnitKind::Crawler => voxel::unit::crawler(),
                         RangeUnitKind::Strider => voxel::unit::strider(),
                         RangeUnitKind::Spider => voxel::unit::spider(),
                         RangeUnitKind::Artillery => voxel::unit::artillery(),
@@ -5569,3 +5994,11 @@ pub(super) fn sweep_event(batch: usize, begin: bool) -> &'static str {
         END[batch]
     }
 }
+
+#[cfg(test)]
+#[path = "range_crater_route_tests.rs"]
+mod crater_route_tests;
+
+#[cfg(test)]
+#[path = "range_local_navigation_tests.rs"]
+mod local_navigation_tests;

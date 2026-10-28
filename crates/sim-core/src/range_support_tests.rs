@@ -254,8 +254,12 @@ fn head_on_driving_contact_is_slot_independent() {
         }
         let (left, right) = if reverse { (1, 0) } else { (0, 1) };
         let mut a = BlastRange::with_layout(c, layout.clone()).unwrap();
+        // Isolate transfer from the range gun, automatic refire and seeded
+        // crash fragments (covered separately by material/worker tests).
+        a.control();
+        a.matter.tuning.contact_deform_pct = 0;
         a.patrols_running = true;
-        for _ in 0..20 {
+        for _ in 0..modding::clock::stream_ticks(20) {
             a.step();
         }
         let mover = &mut a.units[left].motion;
@@ -276,7 +280,7 @@ fn head_on_driving_contact_is_slot_independent() {
         assert!(a.units[left].motion.shove.x < Fx::ZERO);
         assert!(a.units[right].motion.shove.x > Fx::ZERO);
         let mut replay = BlastRange::restore(c, &a.snapshot()).unwrap();
-        for _ in 0..60 {
+        for _ in 0..modding::clock::stream_ticks(60) {
             a.step();
             replay.step();
             assert_eq!(a.state_hash(), replay.state_hash());
@@ -610,7 +614,7 @@ fn version_34_loads_and_new_structure_jobs_reject_truncated_data() {
     let mut tail = fx::blob::Blob::new();
     r.save_after(&mut tail, 34);
     let mut old = bytes[..bytes.len() - tail.v.len()].to_vec();
-    old[..4].copy_from_slice(&34u32.to_le_bytes());
+    old[8..12].copy_from_slice(&34u32.to_le_bytes());
     let copy = BlastRange::restore(r.config, &old).unwrap();
     assert_eq!(copy.state_hash(), r.state_hash());
     assert!(BlastRange::restore(r.config, &bytes[..bytes.len() - 1]).is_none());

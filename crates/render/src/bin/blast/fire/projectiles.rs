@@ -12,6 +12,9 @@ pub(super) struct View {
     far: f32,
 }
 impl View {
+    pub(super) fn world_per_pixel(self) -> f32 {
+        self.pixel
+    }
     pub fn camera(transform: &Transform, camera: &Camera, projection: &Projection) -> Option<Self> {
         let Projection::Orthographic(p) = projection else {
             return None;
@@ -109,7 +112,7 @@ pub(super) fn append(
         for round in &sim.streams.rounds {
             let head = point(round.pos);
             // Straight bullet interpolation stays behind the surviving head.
-            let tail = head - point(round.velocity) / 30.0;
+            let tail = head - point(round.velocity) / sim_core::TICKS_PER_SECOND as f32;
             view.dot(mesh, tail.lerp(head, fraction), 0.7);
         }
     } else if matches!(sim.config.delivery, Delivery::Blast | Delivery::Kinetic) {

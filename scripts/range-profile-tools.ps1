@@ -47,14 +47,26 @@ function Get-RangeCompetingProcesses {
 }
 
 function Get-RangeInputHashes {
-    param([string]$Repo, [switch]$SavedTuning)
-    @(Get-ChildItem -LiteralPath (Join-Path $Repo 'data') -Recurse -File -Filter '*.ron' |
-        Sort-Object FullName | ForEach-Object {
-            [pscustomobject]@{
-                Path = $_.FullName.Substring($Repo.Length + 1).Replace('\', '/')
-                Sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
-            }
-        })
+    param([string]$Repo, [switch]$SavedTuning, [string]$SnapshotPath)
+    # Ordinal ordering is identical in Windows PowerShell5 and PowerShell7,
+    # regardless of current culture or punctuation collation rules.
+    $paths = [string[]]@(Get-ChildItem -LiteralPath (Join-Path $Repo 'data') -Recurse -File -Filter '*.ron' | ForEach-Object { $_.FullName })
+    [Array]::Sort($paths, [StringComparer]::Ordinal)
+    @($paths | ForEach-Object {
+        [pscustomobject]@{
+            Path = $_.Substring($Repo.Length + 1).Replace('\', '/')
+            Sha256 = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash
+        }
+    })
+    if ($SnapshotPath) {
+        $snapshotFile = (Resolve-Path -LiteralPath $SnapshotPath).Path
+        [pscustomobject]@{
+            Path = 'profile-snapshot'
+            SourcePath = $snapshotFile
+            Sha256 = (Get-FileHash -LiteralPath $snapshotFile -Algorithm SHA256).Hash
+        }
+    }
+
     if ($SavedTuning) {
         $path = Join-Path $Repo 'out/range-tuning.txt'
         $exists = Test-Path -LiteralPath $path -PathType Leaf
@@ -69,6 +81,19 @@ function Get-RangeInputHashes {
 function Save-RangeManifest {
     param([object]$Manifest, [string]$Path)
     $Manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Path -Encoding UTF8
+}
+
+function Get-RangeShaderOverride {
+    param([string]$Directory)
+    if (-not $Directory) { return $null }
+    $path = (Resolve-Path -LiteralPath $Directory -ErrorAction Stop).Path
+    [pscustomobject]@{
+        Directory = $path
+        Files = @(Get-ChildItem -LiteralPath $path -File -Filter '*.wgsl' |
+            Sort-Object Name | ForEach-Object {
+                [pscustomobject]@{ Name = $_.Name; Sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
+            })
+    }
 }
 
 function Get-RangeFrameTimes {
@@ -113,7 +138,7 @@ function Get-RangeTaskLogFilter {
 
 function Get-RangeValidity {
     param([object[]]$Rows, [string[]]$Reasons = @(), [string]$Scenario, [string]$Log,
-        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0, [switch]$RenderTasks, [int]$ComputeWorkers = 0, [int]$PhysicsWorkers = 0, [int]$NavigationWorkers = 0, [switch]$CameraTour, [switch]$OsPressure, [switch]$Maximized, [switch]$Gpu)
+        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0, [switch]$RenderTasks, [int]$ComputeWorkers = 0, [int]$PhysicsWorkers = 0, [int]$NavigationWorkers = 0, [switch]$CameraTour, [switch]$OsPressure, [switch]$Maximized, [switch]$Gpu, [switch]$ShaderOverride)
     $issues = [System.Collections.Generic.List[string]]::new()
     foreach ($reason in $Reasons) { $issues.Add($reason) }
     $timing = Get-RangeFrameTimes -Rows $Rows
@@ -240,13 +265,13 @@ function Get-RangeValidity {
     $meetsRate = $Scenario -eq 'actions' -or $ticks -ge ([long][Math]::Floor($seconds * $rate) - 1)
     [pscustomobject]@{
         ValidForComparison = $valid
-        AcceptanceEligible = $valid -and -not $Gpu -and -not $CorePhases -and -not $TriggerPhases -and -not $RenderTimeline -and -not $taskBuild -and -not $RenderTasks -and -not $OsPressure -and $meetsRate
+        AcceptanceEligible = $valid -and -not $Gpu -and -not $CorePhases -and -not $TriggerPhases -and -not $RenderTimeline -and -not $taskBuild -and -not $RenderTasks -and -not $OsPressure -and -not $ShaderOverride -and $meetsRate
         Reasons = @($issues | Select-Object -Unique)
         SimulationTicks = $ticks
         ObservedSeconds = $seconds
         SimulationRealtimeRatio = if ($seconds -gt 0) { $ticks / ($seconds * $rate) } else { 0.0 }
         MeetsSimulationRate = $meetsRate
-        Mode = if ($RenderTasks) { 'render_task_diagnostic' } elseif ($RenderTimeline) { 'render_diagnostic' } elseif ($CorePhases) { 'diagnostic' } elseif ($TriggerPhases) { 'trigger_diagnostic' } elseif ($OsPressure) { 'os_pressure_diagnostic' } elseif ($Gpu) { 'gpu_diagnostic' } else { 'timing' }
+        Mode = if ($RenderTasks) { 'render_task_diagnostic' } elseif ($RenderTimeline) { 'render_diagnostic' } elseif ($CorePhases) { 'diagnostic' } elseif ($TriggerPhases) { 'trigger_diagnostic' } elseif ($OsPressure) { 'os_pressure_diagnostic' } elseif ($Gpu) { 'gpu_diagnostic' } elseif ($ShaderOverride) { 'shader_diagnostic' } else { 'timing' }
         FrameTimingMetric = $timing.Metric
     }
 }

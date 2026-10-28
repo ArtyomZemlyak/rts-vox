@@ -1,17 +1,17 @@
-// 30 Hz, world units = 0.1 m. Same kilometre map, one additional clear sector.
+// 20 Hz, world units = 0.1 m. Same kilometre map, one additional clear sector.
 (
     tank_power_milli: 1000,
     // Reinforced emplacement capacitor: twice the ordinary energy round.
     turret_t2_power_milli: 2000,
-    turret_t2_reload_ticks: Some(60),
-    tank_reload_ticks: 90,
+    turret_t2_reload_ticks: Some(40),
+    tank_reload_ticks: 60,
     tank_range: "tank_blast",
     artillery_range: "artillery",
-    canister: (pellets: 6, spread_milli: 35, range: "canister", reload_ticks: 150, flight_time_milli: 2500, footprint_radius: 60),
+    canister: (pellets: 6, spread_milli: 35, range: "canister", reload_ticks: 100, flight_time_milli: 2500, footprint_radius: 60),
     kinetic_range: "kinetic",
     energy_range: "energy",
     anni_range: "energy",
-    pursuit_ticks: 60,
+    pursuit_ticks: 40,
     standoff_milli: 750,
     // Pursuers attacking one target take firing positions a tank's length
     // and a margin apart (ADR-467): allies lined up with the target would

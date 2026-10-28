@@ -9,6 +9,8 @@ pub struct Skirmish {
     pub units: Vec<RangeUnitDef>,
     pub blocks: Vec<RangeBlock>,
     #[serde(default)]
+    pub idle_enemies: bool,
+    #[serde(default)]
     pub mission: Option<Mission>,
 }
 impl Skirmish {
@@ -46,7 +48,9 @@ impl Skirmish {
             });
         }
         layout.battle = true;
+        layout.idle_enemies = self.idle_enemies;
         layout.units = self.units.clone();
+        layout.unit_yaws.clear();
         layout.gun = self.zone.spawn;
         layout.target = self.zone.target;
         layout.zones[zone] = self.zone.clone();
@@ -231,7 +235,7 @@ mod tests {
                         let dz = i64::from(own.at[2]) - i64::from(enemy.at[2]);
                         let ranges = crate::attack_ranges::stock();
                         let reach = |u: &RangeUnitDef| match u.kind {
-                            RangeUnitKind::Base => 0,
+                            RangeUnitKind::Base | RangeUnitKind::Crawler => 0,
                             RangeUnitKind::Tank
                             | RangeUnitKind::TurretT1
                             | RangeUnitKind::TurretT2 => ranges.energy,
@@ -244,7 +248,8 @@ mod tests {
                             RangeUnitKind::ArtilleryTurretT3 => ranges.siege,
                             RangeUnitKind::NuclearSilo => 0, // Manual strategic launch never opens a mission automatically.
                         };
-                        let max = reach(own).max(reach(enemy));
+                        let enemy_reach = if preset.idle_enemies { 0 } else { reach(enemy) };
+                        let max = reach(own).max(enemy_reach);
                         assert!(
                             dx * dx + dz * dz > i64::from(max) * i64::from(max),
                             "unsafe deployment {id}"
@@ -254,7 +259,7 @@ mod tests {
             }
         }
         assert_eq!(focus.len(), 13);
-        assert!(RangeUnitKind::ALL.iter().all(|kind| focus.contains(kind)));
+        assert!(RangeUnitKind::ALL.iter().filter(|kind| **kind != RangeUnitKind::Crawler).all(|kind| focus.contains(kind)));
         assert!(stock(STOCK.len()).is_err());
     }
     #[test]
@@ -303,7 +308,7 @@ mod tests {
             assert_eq!(army.len(), 31);
             for kind in RangeUnitKind::ALL
                 .into_iter()
-                .filter(|k| *k != RangeUnitKind::NuclearSilo)
+                .filter(|k| !matches!(k, RangeUnitKind::NuclearSilo | RangeUnitKind::Crawler))
             {
                 assert!(
                     army.iter().any(|u| u.kind == kind),

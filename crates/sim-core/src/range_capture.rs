@@ -1,8 +1,88 @@
 //! Read-only resistance capture; ordered slice budgets precede worker jobs.
-use super::{material_cached, material_work, Explosion, HitFrames, RangeUnit, SurfaceWork};
+use super::{
+    material_cached, terrain_candidates, terrain_work, Explosion, HitFrames, RangeUnit, SurfaceWork,
+};
 use modding::explosion::ExplosionConfig;
 use rayon::prelude::*;
 use voxel::World;
+
+/// Refine only regions whose conservative material bound can beat the best
+/// live witness. Large wave cells stay coarse over homogeneous terrain; thin
+/// walls, edited material and cavities still reach the exact column reader.
+fn terrain_peak(
+    w: &World,
+    lo: [u32; 3],
+    hi: [u32; 3],
+    plane: i32,
+    c: &ExplosionConfig,
+    best: &mut u32,
+    cursor: &mut voxel::world::MatCursor,
+) {
+    let top = hi[1].min(w.column_box_ceiling([lo[0], lo[2]], [hi[0], hi[2]]));
+    if top <= lo[1] {
+        return;
+    }
+    let hi = [hi[0], top, hi[2]];
+    let bound = w.material_candidates(lo, hi).map(|ids| {
+        ids.into_iter()
+            .map(|m| terrain_work(m, lo[1] as i32, plane, c))
+            .max()
+            .unwrap_or(0)
+    });
+    if bound.is_some_and(|v| v <= *best) {
+        return;
+    }
+    if let Some(mat) = w.uniform_box(lo, hi) {
+        *best = (*best).max(terrain_work(mat, lo[1] as i32, plane, c));
+        return;
+    }
+    // Both the deepest layer and the visible surface can attain the bound.
+    for z in [lo[2], (lo[2] + hi[2] - 1) / 2, hi[2] - 1] {
+        for x in [lo[0], (lo[0] + hi[0] - 1) / 2, hi[0] - 1] {
+            let end = top.min(w.column_ceiling(x, z));
+            if end <= lo[1] {
+                continue;
+            }
+            for y in [lo[1], end - 1] {
+                let mat = w.material_cached(cursor, x, y, z);
+                *best = (*best).max(terrain_work(mat, y as i32, plane, c));
+            }
+            if bound.is_some_and(|v| v <= *best) {
+                return;
+            }
+        }
+    }
+    let axis = if hi[0] - lo[0] >= hi[2] - lo[2] { 0 } else { 2 };
+    if hi[axis] - lo[axis] > 8 {
+        let mid = (lo[axis] + hi[axis]) / 2;
+        let mut end = hi;
+        end[axis] = mid;
+        terrain_peak(w, lo, end, plane, c, best, cursor);
+        if !bound.is_some_and(|v| v <= *best) {
+            let mut start = lo;
+            start[axis] = mid;
+            terrain_peak(w, start, hi, plane, c, best, cursor);
+        }
+        return;
+    }
+    let mut column = [0; 64];
+    for z in lo[2]..hi[2] {
+        for x in lo[0]..hi[0] {
+            let end = top.min(w.column_ceiling(x, z));
+            if end <= lo[1] {
+                continue;
+            }
+            let count = (end - lo[1]) as usize;
+            w.column(x, z, lo[1], &mut column[..count]);
+            for (dy, &mat) in column[..count].iter().enumerate() {
+                *best = (*best).max(terrain_work(mat, lo[1] as i32 + dy as i32, plane, c));
+                if bound.is_some_and(|v| v <= *best) {
+                    return;
+                }
+            }
+        }
+    }
+}
 
 /// The cell index a capture slice of `budget` ends at: cells outside the
 /// inscribed sphere are free, but even those wait once the quota is spent.
@@ -53,6 +133,7 @@ fn capture_inner<const COLUMNS: bool>(
     if budget == 0 {
         return false;
     }
+    e.prepare_soil_plane(w, c);
     // Fix the logical slice before building its immutable geometry cache.
     let (next, spent) = slice_end(e, budget);
     let half = n / 2;
@@ -101,17 +182,20 @@ fn capture_inner<const COLUMNS: bool>(
             dented[(cell[2] as usize * n + cell[1] as usize) * n + cell[0] as usize] = true;
         }
     }
-    let maximum = c
-        .soil_resistance
-        .max(c.concrete_resistance)
-        .max(c.steel_resistance);
     // Every body role uses this same monotone, clamped formula in
     // unit_work. Dents can only lower resistance. Once the reduction
     // reaches this bound, no remaining body sample can change it.
-    let unit_maximum = (u64::from(c.unit_ablation_resistance)
-        * u64::from(*c.unit_role_resistance_milli.iter().max().unwrap())
-        / 1000)
-        .clamp(1, 1_000_000) as u32;
+    let unit_maximum = queries
+        .iter()
+        .map(|(u, ..)| {
+            std::iter::once(&u.body)
+                .chain(u.body.segments.iter().map(|s| &s.body))
+                .map(|body| super::maximum_unit_work(body, c))
+                .max()
+                .unwrap()
+        })
+        .max()
+        .unwrap_or(1);
     // Determine exactly the old slice boundary before dispatch. Outside
     // cells are free, but even those wait once the logical quota is spent.
     // The serial test oracle keeps the original per-cell path, so comparing
@@ -119,7 +203,7 @@ fn capture_inner<const COLUMNS: bool>(
     // Production capture always enables these exact row reductions.
     let batch_rows = !cfg!(test) || parallel;
     let batch_ground =
-        COLUMNS && batch_rows && (5..=16).contains(&e.cell) && w.batches_material_columns();
+        COLUMNS && batch_rows && (5..=64).contains(&e.cell) && w.batches_material_columns();
     let fill = |start: usize, output: &mut [u32]| {
         // A parallel chunk visits at most two Z planes. Share column
         // ceilings across heights locally; no cache crosses a worker.
@@ -133,19 +217,15 @@ fn capture_inner<const COLUMNS: bool>(
                 *cached = 0;
                 let wx = origin[0] + x as i32 * e.cell;
                 let wz = origin[2] + z as i32 * e.cell;
-                for dz in 0..e.cell {
-                    for dx in 0..e.cell {
-                        let (x, z) = (wx + dx, wz + dz);
-                        if x >= 0 && z >= 0 && x < w.nx as i32 && z < w.nz as i32 {
-                            *cached = (*cached).max(w.column_ceiling(x as u32, z as u32));
-                        }
-                    }
-                }
+                *cached = w.column_box_ceiling(
+                    [wx.max(0) as u32, wz.max(0) as u32],
+                    [(wx + e.cell).max(0) as u32, (wz + e.cell).max(0) as u32],
+                );
             }
             *cached
         };
         let mut cursor = World::mat_cursor();
-        let mut column = [0u16; 16];
+        let mut column = [0u16; 64];
         let mut parts = Vec::new();
         let mut offset = 0;
         while offset < output.len() {
@@ -153,6 +233,20 @@ fn capture_inner<const COLUMNS: bool>(
             let (x, y, z) = (index % n, index / n % n, index / (n * n));
             let len = (n - x).min(output.len() - offset);
             let wy = origin[1] + y as i32 * e.cell;
+            // The deepest included voxel bounds this row's confinement.
+            // Uniform soil can still prove its maximum with one sample.
+            let maximum = if c.material_resistance.is_some() {
+                (0..9)
+                    .map(|mat| terrain_work(mat, wy.max(0), e.soil_y(), c))
+                    .max()
+                    .unwrap_or(0)
+                    .max(c.steel_resistance)
+            } else {
+                terrain_work(1, wy.max(0), e.soil_y(), c)
+                    .max(c.soil_resistance)
+                    .max(c.concrete_resistance)
+                    .max(c.steel_resistance)
+            };
             let (cy, cz) = (y as i32 - half as i32, z as i32 - half as i32);
             let transverse = cy * cy + cz * cz;
             // Exact constant rows: bedrock/outside the sphere, or verified
@@ -224,6 +318,21 @@ fn capture_inner<const COLUMNS: bool>(
                         let z0 = p[2].max(0);
                         let z1 = (end[2] + 1).min(w.nz as i32);
                         if batch_ground && x0 < x1 && z0 < z1 {
+                            let maximum = if !look {
+                                terrain_candidates(
+                                    w,
+                                    [x0, y0, z0],
+                                    [x1, (end[1] + 1).min(w.ny as i32), z1],
+                                )
+                                .map_or(maximum, |ids| {
+                                    ids.into_iter()
+                                        .map(|m| terrain_work(m, y0, e.soil_y(), c))
+                                        .max()
+                                        .unwrap_or(0)
+                                })
+                            } else {
+                                maximum
+                            };
                             // A saturated first sample already proves the
                             // terrain maximum, without preparing a column.
                             // Otherwise exact max is independent of traversal
@@ -234,9 +343,51 @@ fn capture_inner<const COLUMNS: bool>(
                             } else {
                                 0
                             };
-                            r = material_work(material_cached(w, &mut cursor, q), c)
-                                .saturating_sub(dent);
-                            if r < maximum {
+                            r = terrain_work(
+                                material_cached(w, &mut cursor, q),
+                                q[1],
+                                e.soil_y(),
+                                c,
+                            )
+                            .saturating_sub(dent);
+                            // Tall solid surfaces often supply the exact max
+                            // (rock, walls). A bounded set of live witnesses can
+                            // prove it before preparing every ground column.
+                            if r < maximum && !look {
+                                'witnesses: for iz in 0..4 {
+                                    for ix in 0..4 {
+                                        let wx = x0 + (x1 - x0 - 1) * ix / 3;
+                                        let wz = z0 + (z1 - z0 - 1) * iz / 3;
+                                        let top = (end[1] + 1)
+                                            .min(w.ny as i32)
+                                            .min(w.column_ceiling(wx as u32, wz as u32) as i32);
+                                        if top <= y0 {
+                                            continue;
+                                        }
+                                        let q = [wx, top - 1, wz];
+                                        r = r.max(terrain_work(
+                                            material_cached(w, &mut cursor, q),
+                                            q[1],
+                                            e.soil_y(),
+                                            c,
+                                        ));
+                                        if r == maximum {
+                                            break 'witnesses;
+                                        }
+                                    }
+                                }
+                            }
+                            if r < maximum && !look && e.cell >= 16 {
+                                terrain_peak(
+                                    w,
+                                    [x0 as u32, y0 as u32, z0 as u32],
+                                    [x1 as u32, (end[1] + 1).min(w.ny as i32) as u32, z1 as u32],
+                                    e.soil_y(),
+                                    c,
+                                    &mut r,
+                                    &mut cursor,
+                                );
+                            } else if r < maximum {
                                 'columns: for wz in z0..z1 {
                                     for wx in x0..x1 {
                                         let y1 = (end[1] + 1)
@@ -263,7 +414,10 @@ fn capture_inner<const COLUMNS: bool>(
                                             } else {
                                                 0
                                             };
-                                            r = r.max(material_work(mat, c).saturating_sub(dent));
+                                            r = r.max(
+                                                terrain_work(mat, q[1], e.soil_y(), c)
+                                                    .saturating_sub(dent),
+                                            );
                                             if r == maximum {
                                                 break 'columns;
                                             }
@@ -286,8 +440,12 @@ fn capture_inner<const COLUMNS: bool>(
                                     while bits != 0 {
                                         let q = [x0 + bits.trailing_zeros() as i32, wy, wz];
                                         bits &= bits - 1;
-                                        let work =
-                                            material_work(material_cached(w, &mut cursor, q), c);
+                                        let work = terrain_work(
+                                            material_cached(w, &mut cursor, q),
+                                            q[1],
+                                            e.soil_y(),
+                                            c,
+                                        );
                                         let dent = if look {
                                             dents.get(&q).copied().unwrap_or(0)
                                         } else {
@@ -390,6 +548,146 @@ mod tests {
     use modding::range::RangeUnitKind;
     use voxel::{Edit, Generator};
 
+    #[test]
+    fn explicit_material_work_above_legacy_bounds_matches_scalar_capture() {
+        struct Terrain(bool);
+        impl Generator for Terrain {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < 40 {
+                    if (x + z) % 7 == 0 {
+                        4
+                    } else {
+                        3
+                    }
+                } else {
+                    0
+                }
+            }
+            fn batches_columns(&self) -> bool {
+                true
+            }
+            fn material_candidates(&self, _: [u32; 3], _: [u32; 3]) -> Option<Vec<u16>> {
+                self.0.then(|| vec![0, 3, 4])
+            }
+        }
+        let mut c =
+            ExplosionConfig::from_ron(include_str!("../../../data/nuclear-warhead.ron")).unwrap();
+        c.half_cells = 2;
+        c.energy = 100;
+        c.soil_depth_cost = 0;
+        c.material_resistance.as_mut().unwrap()[4] = 5000;
+        for (edge, bounded) in [(16, false), (64, false), (16, true), (64, true)] {
+            let w = World::new(160, 96, 160, 100, Box::new(Terrain(bounded)));
+            c.cell_units = edge;
+            let mut serial = Explosion::begin([80, 40, 80], &c, &[]);
+            let mut actual = Explosion::begin([80, 40, 80], &c, &[]);
+            for budget in [1, 7, 29, usize::MAX] {
+                capture(&mut serial, &w, &c, &[], &SurfaceWork::new(), budget, false);
+                capture(&mut actual, &w, &c, &[], &SurfaceWork::new(), budget, true);
+                let mut a = Blob::new();
+                let mut b = Blob::new();
+                serial.save(&mut a);
+                actual.save(&mut b);
+                assert_eq!(a.v, b.v, "edge={edge} budget={budget}");
+            }
+            // Independent known maximum: every occupied row contains rare
+            // foliage5000 among steel900. An old900 bound must not stop at
+            // the first steel voxel, even when generator IDs are unknown.
+            assert_eq!(actual.wave.resistance_at([2, 1, 2]), 5000);
+        }
+    }
+
+    #[test]
+    fn regional_peak_matches_dense_voxels_with_thin_walls_holes_and_live_edits() {
+        struct Terrain;
+        impl Generator for Terrain {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < 12 {
+                    1
+                } else if x == 51 && (17..35).contains(&y) && (33..83).contains(&z) {
+                    3
+                } else if y == 36 && (32..91).contains(&x) && (21..71).contains(&z) {
+                    2
+                } else if (x + z) % 11 == 0 && y < 29 {
+                    5
+                } else {
+                    0
+                }
+            }
+            fn material_candidates(&self, min: [u32; 3], max: [u32; 3]) -> Option<Vec<u16>> {
+                let mut ids = vec![0, 1, 5];
+                if min[0] <= 51
+                    && max[0] > 51
+                    && min[1] < 35
+                    && max[1] > 17
+                    && min[2] < 83
+                    && max[2] > 33
+                {
+                    ids.push(3);
+                }
+                if min[1] <= 36
+                    && max[1] > 36
+                    && min[0] < 91
+                    && max[0] > 32
+                    && min[2] < 71
+                    && max[2] > 21
+                {
+                    ids.push(2);
+                }
+                Some(ids)
+            }
+            fn uniform_box(&self, _: [u32; 3], max: [u32; 3]) -> Option<u16> {
+                (max[1] <= 12).then_some(1)
+            }
+        }
+        let mut w = World::new(128, 64, 128, 100, Box::new(Terrain));
+        let mut c =
+            ExplosionConfig::from_ron(include_str!("../../../data/nuclear-warhead.ron")).unwrap();
+        for edited in [false, true] {
+            if edited {
+                for (p, mat) in [
+                    ([51, 23, 45], 0),
+                    ([40, 9, 60], 0),
+                    ([17, 46, 27], 65535),
+                    ([80, 4, 50], 2),
+                ] {
+                    w.queue_edit(Edit::put(p[0], p[1], p[2], mat));
+                }
+                w.flush();
+            }
+            for depth in [0, 40, 400] {
+                c.soil_depth_cost = depth;
+                for k in 0..80u32 {
+                    let lo = [(k * 13) % 64, (k * 7) % 48, (k * 19) % 64];
+                    let hi = [
+                        (lo[0] + 8 + k % 57).min(w.nx),
+                        (lo[1] + 1 + k % 64).min(w.ny),
+                        (lo[2] + 8 + k % 57).min(w.nz),
+                    ];
+                    let mut expected = 0;
+                    for z in lo[2]..hi[2] {
+                        for y in lo[1]..hi[1] {
+                            for x in lo[0]..hi[0] {
+                                expected = expected.max(terrain_work(
+                                    w.material(x, y, z),
+                                    y as i32,
+                                    32,
+                                    &c,
+                                ));
+                            }
+                        }
+                    }
+                    let mut actual = 0;
+                    terrain_peak(&w, lo, hi, 32, &c, &mut actual, &mut World::mat_cursor());
+                    assert_eq!(
+                        actual, expected,
+                        "edited={edited} depth={depth} lo={lo:?} hi={hi:?}"
+                    );
+                }
+            }
+        }
+    }
+
     struct Ground;
     impl Generator for Ground {
         fn batches_columns(&self) -> bool {
@@ -408,7 +706,7 @@ mod tests {
 
     #[test]
     fn contact_rows_match_voxel_oracle_at_edges_and_after_edits() {
-        use super::super::{material, read_cell_into, subcell_offsets};
+        use super::super::{material, read_cell_into, read_occupancy, subcell_offsets};
         let mut w = World::new(192, 64, 192, 100, Box::new(Ground));
         for edited in [false, true] {
             if edited {
@@ -418,7 +716,7 @@ mod tests {
                 }
                 w.flush();
             }
-            for edge in [1, 2, 3, 4, 5, 8, 9, 12, 16] {
+            for edge in [1, 2, 3, 4, 5, 8, 9, 12, 16, 64] {
                 let offsets = subcell_offsets(edge);
                 for x in [-3, -1, 0, 15, 31, 62, 63, 103, 190, 192] {
                     for y in [-3, -1, 0, 14, 15, 16, 38, 41, 63, 64] {
@@ -432,6 +730,12 @@ mod tests {
                                     want.1.push(mat);
                                 }
                             }
+                            assert_eq!(
+                                read_occupancy(&w, p, edge, [0; 3])
+                                    .indices_from(0)
+                                    .collect::<Vec<_>>(),
+                                want.0
+                            );
                             let mut mats = vec![99];
                             let mask = read_cell_into(&w, p, edge, [0; 3], &offsets, &mut mats);
                             assert_eq!(
@@ -464,6 +768,7 @@ mod tests {
                 ([0, 4, 0], 5),
                 ([100, 28, 96], 9),
                 ([191, 62, 191], 16),
+                ([100, 28, 96], 64),
             ] {
                 c.cell_units = edge;
                 let mut w = World::new(192, 64, 192, 100, Box::new(Ground));

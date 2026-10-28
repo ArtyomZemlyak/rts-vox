@@ -7,11 +7,19 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use modding::range::{RangeBlock, RangeShieldDef, RangeUnitDef};
 
-fn world_battle_blocks() -> Result<Vec<RangeBlock>, String> {
-    Ok(modding::range_skirmish::WorldBattle::from_ron(include_str!(
+fn world_battle_blocks(level: i32) -> Result<Vec<RangeBlock>, String> {
+    let blocks = modding::range_skirmish::WorldBattle::from_ron(include_str!(
         "../../../../../data/battle-world.ron"
     ))?
-    .blocks)
+    .blocks;
+    Ok(blocks
+        .into_iter()
+        .map(|mut b| {
+            b.min[1] += level - sim_core::blast::FLOOR;
+            b.max[1] += level - sim_core::blast::FLOOR;
+            b
+        })
+        .collect())
 }
 
 fn remove_world_battle_blocks(layout: &mut RangeLayout, blocks: &[RangeBlock]) {
@@ -126,6 +134,7 @@ pub struct Workshop {
     pub tool: Tool,
     pub selected: Option<Selection>,
     pub pan: Vec2,
+    pan_frame: Option<PanFrame>,
     pub zoom: f32,
     pub zone: usize,
     pub orbit: f32,
@@ -141,6 +150,13 @@ pub struct Workshop {
     pub drag_start: Option<Vec2>,
     pub drag_current: Option<Vec2>,
     pub pending: Option<(ExplosionConfig, RangeLayout)>,
+}
+#[derive(Clone, Copy)]
+struct PanFrame {
+    generation: u64,
+    view: u8,
+    base: Vec2,
+    pan: Vec2,
 }
 impl Workshop {
     pub fn new(layout: Option<RangeLayout>, editing: bool) -> Self {
@@ -169,6 +185,7 @@ impl Workshop {
             tool: Tool::Select,
             selected,
             pan: Vec2::ZERO,
+            pan_frame: None,
             zoom: 1.0,
             rotate: false,
             history: Vec::new(),
@@ -232,13 +249,27 @@ impl Workshop {
         }
     }
     pub fn battle_preset(&mut self, config: ExplosionConfig) -> Result<(), String> {
-        let tuning = modding::range_battle::Tuning::from_ron(include_str!(
+        let mut tuning = modding::range_battle::Tuning::from_ron(include_str!(
             "../../../../../data/range-battle.ron"
         ))?;
         let mut layout = self.layout.clone().ok_or("No range layout")?;
-        remove_world_battle_blocks(&mut layout, &world_battle_blocks()?);
+        let dy = layout.ground_level - sim_core::blast::FLOOR;
+        for u in &mut tuning.units {
+            u.at[1] += dy;
+        }
+        tuning.zone.spawn[1] += dy;
+        tuning.zone.target[1] += dy;
+        if let Some(s) = &mut tuning.zone.scenario {
+            for p in &mut s.shots {
+                p[1] += dy;
+            }
+        }
+        let blocks = world_battle_blocks(layout.ground_level)?;
+        remove_world_battle_blocks(&mut layout, &blocks);
         layout.battle = true;
+        layout.idle_enemies = false;
         layout.units = tuning.units;
+        layout.unit_yaws.clear();
         layout.gun = tuning.zone.spawn;
         layout.target = tuning.zone.target;
         if let Some(c) = &mut layout.course {
@@ -329,13 +360,23 @@ impl Workshop {
         Ok(preset.briefing)
     }
     pub fn battle_world(&mut self, config: ExplosionConfig) -> Result<String, String> {
-        let preset = modding::range_skirmish::WorldBattle::from_ron(include_str!(
+        let mut preset = modding::range_skirmish::WorldBattle::from_ron(include_str!(
             "../../../../../data/battle-world.ron"
         ))?;
         let mut layout = self.layout.clone().ok_or("No range layout")?;
+        let dy = layout.ground_level - sim_core::blast::FLOOR;
+        for u in &mut preset.units {
+            u.at[1] += dy;
+        }
+        for b in &mut preset.blocks {
+            b.min[1] += dy;
+            b.max[1] += dy;
+        }
         remove_world_battle_blocks(&mut layout, &preset.blocks);
         layout.battle = true;
+        layout.idle_enemies = false;
         layout.units = preset.units;
+        layout.unit_yaws.clear();
         layout.blocks.extend(preset.blocks);
         if let Some(course) = &mut layout.course {
             course.patrols.clear();
@@ -401,6 +442,7 @@ impl Workshop {
             current.clone()
         };
         layout.battle = false;
+        layout.idle_enemies = false;
         let zone = layout
             .zones
             .iter()
@@ -478,19 +520,39 @@ impl Workshop {
             })
     }
     pub fn pan_by(&mut self, delta: Vec2) {
-        let Some(layout) = &self.layout else { return };
-        let centre =
-            self.sector()
-                .map_or(Vec2::new(layout.gun[0] as f32, layout.gun[2] as f32), |z| {
-                    Vec2::new(
-                        (z.min[0] + z.max[0]) as f32 * 0.5,
-                        (z.min[1] + z.max[1]) as f32 * 0.5,
-                    )
-                });
-        self.pan = (centre + self.pan + delta).clamp(
-            Vec2::ZERO,
-            Vec2::new(layout.size[0] as f32, layout.size[2] as f32),
-        ) - centre;
+        if self.layout.is_some() {
+            // Framing constrains the final focus after view/zoom fitting.
+            // A sector centre is not the origin of every camera view.
+            self.pan += delta;
+        }
+    }
+    /// Manual map browsing keeps the chosen world point when zoom/orbit
+    /// changes the fitted base. Explicit new pan/sector/view inputs retain
+    /// their own destinations; a new scene never inherits the old base.
+    pub(super) fn frame_pan(
+        &mut self,
+        generation: u64,
+        view: u8,
+        base: Vec3,
+        size: [u32; 3],
+    ) -> Vec3 {
+        let origin = Vec2::new(base.x, base.z);
+        if matches!(view, 1 | 6) && self.pan != Vec2::ZERO {
+            if let Some(was) = self
+                .pan_frame
+                .filter(|p| p.generation == generation && p.view == view && p.pan == self.pan)
+            {
+                self.pan += was.base - origin;
+            }
+        }
+        let focus = map_pan(base, &mut self.pan, size);
+        self.pan_frame = Some(PanFrame {
+            generation,
+            view,
+            base: origin,
+            pan: self.pan,
+        });
+        focus
     }
     /// Starting a new experiment is explicit: restore the world and use the
     /// selected sector's authored shooter and target. Browsing never mutates it.
@@ -513,6 +575,11 @@ impl Workshop {
         next: RangeLayout,
         config: ExplosionConfig,
     ) -> Result<(), String> {
+        let level = self
+            .layout
+            .as_ref()
+            .map_or(next.ground_level, |l| l.ground_level);
+        let next = next.with_ground_level(level)?;
         self.validator.validate(&next).map_err(|e| e.to_string())?;
         if next.battle && self.layout.as_ref().is_some_and(|old| !old.battle) {
             self.range_before_battle = self.layout.clone();
@@ -710,7 +777,8 @@ fn snap(v: f32) -> i32 {
 /// Undamaged authored relief for editor clearings and distance guides. The
 /// authoritative edited floor still comes from the world's material queries.
 fn natural_ground(layout: Option<&RangeLayout>, x: i32, z: i32) -> i32 {
-    let base = sim_core::blast::range_height(x as u32, z as u32) as i32;
+    let base = sim_core::blast::range_height(x as u32, z as u32) as i32
+        + layout.map_or(0, |l| l.ground_level - sim_core::blast::FLOOR);
     layout.map_or(base, |l| {
         l.mounds
             .iter()
@@ -819,6 +887,7 @@ fn remove(layout: &mut RangeLayout, selected: Selection) {
     match selected {
         Selection::Unit(i) => {
             layout.units.remove(i);
+            if i < layout.unit_yaws.len() {layout.unit_yaws.remove(i);}
             if let Some(c) = &mut layout.course {
                 c.patrols.retain(|p| p.unit != i);
                 for p in &mut c.patrols {
@@ -844,7 +913,7 @@ fn remove(layout: &mut RangeLayout, selected: Selection) {
 /// Clip the presentation ray to the actual world, then visit each crossed voxel
 /// once. Camera distance costs no work, and there is no small-map distance cap.
 /// The authoritative shot uses its separate swept integer collision.
-fn visit_pick_ray<T>(
+pub(super) fn visit_pick_ray<T>(
     size: [u32; 3],
     ray: Ray3d,
     mut visit: impl FnMut([i32; 3]) -> Option<T>,
@@ -910,7 +979,7 @@ fn visit_pick_ray<T>(
     }
 }
 
-fn pick(sim: &BlastRange, ray: Ray3d) -> Option<([i32; 3], Option<Selection>)> {
+pub(super) fn pick(sim: &BlastRange, ray: Ray3d) -> Option<([i32; 3], Option<Selection>)> {
     visit_pick_ray(sim.size(), ray, |p| {
         if let Some(i) = sim.units.iter().position(|u| u.solid(p)) {
             return Some((p, Some(Selection::Unit(i))));
@@ -993,6 +1062,7 @@ fn battle_units_in_screen_rect(
 // Bevy injects each resource independently into this system.
 #[allow(clippy::too_many_arguments)]
 pub fn input(
+    pilot: Option<Res<pilot::Pilot>>,
     mut scene: ResMut<Scene>,
     mut edit: ResMut<Workshop>,
     mut panel: Option<ResMut<panel::Panel>>,
@@ -1003,7 +1073,15 @@ pub fn input(
     cameras: Query<(&Camera, &GlobalTransform), With<GasCamera>>,
     overrides: Option<Res<knobs::Overrides>>,
     streaming: Option<Res<streaming::Streaming>>,
+    laboratory: Option<Res<laboratory::Laboratory>>,
 ) {
+    if pilot.as_ref().is_some_and(|p| p.active()) {
+        edit.drag_start = None;
+        edit.drag_current = None;
+        wheel.clear();
+        return;
+    }
+    if laboratory.as_ref().is_some_and(|l|l.flying()) {wheel.clear();return;}
     // A release outside the window can miss `just_released`. Do not keep an
     // old drag alive when the mouse button is no longer held.
     if !mouse.pressed(MouseButton::Left) && !mouse.just_released(MouseButton::Left) {
@@ -1013,6 +1091,19 @@ pub fn input(
     if edit.layout.is_none() {
         edit.drag_start = None;
         edit.drag_current = None;
+        wheel.clear();
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        edit.drag_start = None;
+        edit.drag_current = None;
+        wheel.clear();
+        return;
+    };
+    if !window.focused {
+        edit.drag_start = None;
+        edit.drag_current = None;
+        edit.previous_cursor = None;
         wheel.clear();
         return;
     }
@@ -1050,17 +1141,6 @@ pub fn input(
             };
         edit.zoom = (edit.zoom * (-y * 0.08).exp()).clamp(0.3, 32.0);
     }
-    let Ok(window) = windows.single() else {
-        edit.drag_start = None;
-        edit.drag_current = None;
-        return;
-    };
-    if !window.focused {
-        edit.drag_start = None;
-        edit.drag_current = None;
-        edit.previous_cursor = None;
-        return;
-    }
     let cursor = window.cursor_position();
     if cursor.is_none() {
         edit.drag_start = None;
@@ -1086,6 +1166,13 @@ pub fn input(
         }
     }
     edit.previous_cursor = cursor;
+    if laboratory.as_ref().is_some_and(|l| l.active()) {
+        edit.hover = None;
+        edit.preview = None;
+        edit.drag_start = None;
+        edit.drag_current = None;
+        return;
+    }
     // Camera controls remain responsive, but picking the old displayed map
     // during a staged replacement must not place/fire into another scene.
     if streaming.as_ref().is_some_and(|s| s.loading()) {
@@ -1341,7 +1428,7 @@ pub fn input(
             return;
         };
         // Placement uses the existing flat test pad, not the top of a wall.
-        let t = (sim_core::blast::FLOOR as f32 - ray.origin.y) / ray.direction.y;
+        let t = (scene.sim.ground_level() as f32 - ray.origin.y) / ray.direction.y;
         let p = ray.origin + *ray.direction * t;
         let point = pick(&scene.sim, ray).map_or(p, |(hit, _)| Vec3::from(hit.map(|v| v as f32)));
         let x = snap(point.x);
@@ -1587,7 +1674,7 @@ pub fn overlay(
                 Color::srgba(0.48, 0.9, 1.0, 0.38),
             );
         }
-    } else if scene.sim.gun.status.alive && scene.sim.gun.status.weapon && panel.ranges {
+    } else if scene.sim.physical_gun() && scene.sim.gun.status.alive && scene.sim.gun.status.weapon && panel.ranges {
         // Unit-target admission uses this same SIM-owned tactical radius.
         ground_range(
             &mut giz,
@@ -1675,7 +1762,7 @@ pub fn overlay(
     flashes.live.retain(|flash| {
         scene.sim.tick.saturating_sub(flash.tick) < if flash.collapsed { 18 } else { 12 }
     });
-    if !edit.editing && !scene.sim.battle_mode() {
+    if !edit.editing && scene.sim.physical_gun() {
         let p = Vec3::from(scene.sim.gun.motion.pos.map(|v| v.to_f64_lossy() as f32));
         giz.circle(
             Isometry3d::new(p + Vec3::Y * 0.5, flat),
@@ -1755,8 +1842,8 @@ pub fn overlay(
         let a = corners[i];
         let b = corners[(i + 1) % 4];
         giz.line(
-            Vec3::new(a[0] as f32, 16.1, a[1] as f32),
-            Vec3::new(b[0] as f32, 16.1, b[1] as f32),
+            Vec3::new(a[0] as f32, layout.ground_level as f32 + 0.1, a[1] as f32),
+            Vec3::new(b[0] as f32, layout.ground_level as f32 + 0.1, b[1] as f32),
             Color::srgba(0.3, 0.65, 0.7, 0.35),
         );
     }
@@ -2203,7 +2290,10 @@ mod tests {
         assert!(w.pending.is_none());
         assert_eq!(w.pan, Vec2::ZERO);
         w.pan_by(Vec2::splat(20000.0));
-        assert!(w.pan.x <= 640.0 && w.pan.y <= 640.0);
+        let centre = Vec3::new(350.0, 34.0, 442.5);
+        let focus = map_pan(centre, &mut w.pan, w.layout.as_ref().unwrap().size);
+        assert_eq!(focus.x, 640.0);
+        assert_eq!(focus.z, 640.0);
         w.restart_here(config).unwrap();
         assert_eq!(w.pending.as_ref().unwrap().1.gun, [200, 16, 336]);
         assert_eq!(w.layout.as_ref().unwrap().gun, [200, 16, 336]);
@@ -2888,10 +2978,14 @@ mod tests {
             let mut q = world.query::<&mut Window>();
             q.single_mut(world).unwrap().focused = false;
         }
+        let zoom=app.world().resource::<Workshop>().zoom;
+        let window_entity={let world=app.world_mut();world.query_filtered::<Entity,With<Window>>().single(world).unwrap()};
+        app.world_mut().write_message(MouseWheel{unit:MouseScrollUnit::Line,x:0.0,y:3.0,window:window_entity,phase:bevy::input::touch::TouchPhase::Moved});
         app.update();
         assert!(app.world().resource::<Workshop>().drag_start.is_none());
         assert!(app.world().resource::<Workshop>().drag_current.is_none());
         assert_eq!(app.world().resource::<Workshop>().selected_units, [0, 1]);
+        assert_eq!(app.world().resource::<Workshop>().zoom,zoom,"unfocused wheel must not change the camera");
         app.world_mut()
             .resource_mut::<ButtonInput<MouseButton>>()
             .clear();
@@ -2950,5 +3044,69 @@ mod tests {
         assert!(app.world().resource::<Scene>().sim.battle.actors[..2]
             .iter()
             .all(|actor| actor.order == sim_core::blast::battle::Order::Attack(2)));
+    }
+}
+
+#[cfg(test)]
+mod subsoil_tests {
+    use super::*;
+    fn workshop() -> Workshop {
+        Workshop::new(
+            Some(
+                RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"))
+                    .unwrap()
+                    .with_ground_level(80)
+                    .unwrap(),
+            ),
+            false,
+        )
+    }
+    #[test]
+    fn battle_and_every_mission_keep_the_deep_ground_and_valid_spawn_heights() {
+        let config = super::super::config(false, false);
+        let mut w = workshop();
+        w.battle_preset(config).unwrap();
+        assert_eq!(w.layout.as_ref().unwrap().ground_level, 80);
+        assert!(w
+            .layout
+            .as_ref()
+            .unwrap()
+            .units
+            .iter()
+            .all(|u| u.at[1] >= 80));
+        w.range_mode(config).unwrap();
+        assert_eq!(w.layout.as_ref().unwrap().ground_level, 80);
+        for id in 0..modding::range_skirmish::STOCK.len() {
+            w.skirmish(id as u8, config).unwrap();
+            let l = w.layout.as_ref().unwrap();
+            assert_eq!(l.ground_level, 80, "mission {id}");
+            assert!(l.units.iter().all(|u| u.at[1] >= 80), "mission {id}");
+        }
+        let mut w = workshop();
+        w.battle_world(config).unwrap();
+        assert_eq!(w.layout.as_ref().unwrap().ground_level, 80);
+        assert!(w
+            .layout
+            .as_ref()
+            .unwrap()
+            .units
+            .iter()
+            .all(|u| u.at[1] >= 80));
+    }
+    #[test]
+    fn raised_camera_frames_have_identical_magnification() {
+        let a = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
+        let b = a.clone().with_ground_level(80).unwrap();
+        let offset = Vec3::new(-155.0, 420.0, 320.0);
+        for (a, b) in a.zones.iter().zip(&b.zones) {
+            let (p, h) = sector_frame(a, offset, 16.0 / 9.0);
+            let (q, k) = sector_frame(b, offset, 16.0 / 9.0);
+            assert!((h - k).abs() < 0.001);
+            assert!((q - p - Vec3::Y * 64.0).length() < 0.001);
+        }
+        let (p, h) = whole_map_frame(a.size, 16, offset, 16.0 / 9.0);
+        let (q, k) = whole_map_frame(b.size, 80, offset, 16.0 / 9.0);
+        assert!((h - k).abs() < 0.001);
+        assert!((q - p - Vec3::Y * 64.0).length() < 0.001);
     }
 }

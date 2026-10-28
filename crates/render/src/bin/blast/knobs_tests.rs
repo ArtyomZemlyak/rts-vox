@@ -58,7 +58,7 @@ fn weapon_knobs_send_all_thirteen_rows_through_commands_and_reset() {
 fn weapon_typed_bounds_and_paused_rebuild_remain_restorable() {
     let mut app = command_app();
     for (slot, expected) in [
-        (1, 1_000_000_000.0),
+        (1, ExplosionConfig::MAX_MATERIAL_ENERGY_J as f64),
         (6, 10_000.0),
         (8, 32.0),
         (11, WAVE_WORK_MAX as f64),

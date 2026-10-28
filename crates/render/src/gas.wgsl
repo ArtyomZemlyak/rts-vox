@@ -8,7 +8,7 @@ struct Params {
     source: vec4<f32>, // xyz world impact, w injection radius
     control: vec4<f32>, // dt, step, opacity, additive injection
     chemistry: vec4<f32>, // reaction, cooling, buoyancy, temperature/1000
-    charge: vec4<f32>, // fuel, pressure, display voxel size, unused
+    charge: vec4<f32>, // fuel, pressure, display voxel size, surface-fire marker
     terrain: vec4<f32>,
     terrain_origin: vec4<f32>,
     clip_from_world: mat4x4<f32>, sun: vec4<f32>, sky: vec4<f32>,

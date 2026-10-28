@@ -263,7 +263,7 @@ fn a_restore_mid_haul_continues_bit_for_bit() {
     }
     assert!(a.hauling(0) && a.units[0].motion.destination.is_some());
     let bytes = a.snapshot();
-    assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 63);
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 63);
     let mut b = BlastRange::restore(config(), &bytes).expect("restore mid-haul");
     assert_eq!(b.snapshot(), bytes);
     // A haul to a unit that is no dock is refused.

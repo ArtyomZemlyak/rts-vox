@@ -13,6 +13,7 @@ pub(super) struct Input<'a> {
     pub poses: &'a Poses,
     pub markers: Option<projectiles::View>,
     pub single: (Option<Vec3>, f32),
+    pub first_person_origin: Option<Vec3>,
 }
 pub(super) struct Prepared {
     pub hot: Option<Mesh>,
@@ -21,23 +22,38 @@ pub(super) struct Prepared {
 fn ready(buffer: MeshBuf) -> Option<Mesh> {
     (!buffer.is_empty()).then(|| fire_mesh(buffer))
 }
-// Preserve the former compact publication on small/serial workloads. The
-// ownership-only microbenchmark does not establish their native frame cost.
+// Keep compact publication for small layers. Large serial smoke/flash meshes
+// move their arrays, just like worker-built layers, avoiding a second copy.
 fn compact(buffer: MeshBuf) -> Option<Mesh> {
     if buffer.is_empty() {
         return None;
+    }
+    if buffer.pos.len() >= 4096 {
+        return ready(buffer);
     }
     let mut mesh = mesh(&buffer);
     mesh.asset_usage = RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD;
     Some(mesh)
 }
 pub(super) fn prepare(input: Input<'_>, pool: Option<&bevy::tasks::TaskPool>) -> Prepared {
-    let smoke_count = input.particles.iter().filter(|(p, _, _)| p.smoke).count();
-    let hot_count = input.particles.len() - smoke_count
+    let particle_smoke = input.particles.iter().filter(|(p, _, _)| p.smoke).count();
+    let mut smoke_count = particle_smoke;
+    let mut hot_count = input.particles.len() - particle_smoke
         + input.effects.tracers.len() * 2
         + input.sim.battle.lasers.len() * 4
         + input.sim.battle.rounds.len()
         + input.effects.heat_spots.len();
+    // A strategic cloud costs far more than a single particle. Include its
+    // active layers in the scheduling estimate, without changing geometry.
+    for &(_, born) in &input.effects.nuclear {
+        let age = (input.now - born).max(0.0);
+        if age < nuclear::LIFE {
+            smoke_count += 512;
+            if age < 11.0 {
+                hot_count += 128;
+            }
+        }
+    }
     if let Some(pool) = pool.filter(|p| {
         p.thread_num() >= 2
             && smoke_count >= 32
@@ -50,11 +66,11 @@ pub(super) fn prepare(input: Input<'_>, pool: Option<&bevy::tasks::TaskPool>) ->
         let (mut hot_mesh, mut smoke_mesh) = (None, None);
         let mut results = pool.scope(|scope| {
             if caller_hot {
-                scope.spawn(async move { ready(smoke(input)) });
+                scope.spawn(async move { ready(smoke_with_pool(input, Some(pool))) });
                 hot_mesh = ready(hot(input));
             } else {
                 scope.spawn(async move { ready(hot(input)) });
-                smoke_mesh = ready(smoke(input));
+                smoke_mesh = ready(smoke_with_pool(input, Some(pool)));
             }
         });
         let other = results.pop().unwrap();
@@ -70,7 +86,7 @@ pub(super) fn prepare(input: Input<'_>, pool: Option<&bevy::tasks::TaskPool>) ->
     } else {
         Prepared {
             hot: compact(hot(input)),
-            smoke: compact(smoke(input)),
+            smoke: compact(smoke_with_pool(input, pool)),
         }
     }
 }
@@ -84,8 +100,10 @@ fn hot(input: Input<'_>) -> MeshBuf {
         poses,
         markers,
         single,
+        first_person_origin,
     } = input;
     let mut hot = MeshBuf::default();
+    nuclear::append(&mut hot, fx, now, false);
     for trace in &sim.battle.lasers {
         let from = point(trace.from);
         let to = point(trace.to);
@@ -98,14 +116,16 @@ fn hot(input: Input<'_>) -> MeshBuf {
     }
     if sim.config.delivery == Delivery::Laser && !sim.battle_mode() {
         for trace in &sim.streams.traces {
-            let from = point(trace.from);
+            // Retain the authoritative hit; only attach the visible near end
+            // to the current camera-local nozzle between fixed ticks.
+            let from = first_person_origin.unwrap_or_else(||point(trace.from));
             let to = point(trace.to);
-            let size = if sim.gun.kind == RangeUnitKind::Spider {
+            let size = if first_person_origin.is_some() {0.35} else if sim.gun.kind == RangeUnitKind::Spider {
                 3.0
             } else {
                 1.0
             };
-            let heat_width = sim.streams.tuning.laser.heat_radius as f32 * 2.0;
+            let heat_width = (sim.streams.tuning.laser.heat_radius as f32 * 2.0).min(if first_person_origin.is_some(){1.2}else{f32::INFINITY});
             if heat_width > 0.0 {
                 beam(&mut hot, from, to, heat_width, [1.6, 0.035, 0.012, 0.055]);
             }
@@ -191,6 +211,10 @@ fn hot(input: Input<'_>) -> MeshBuf {
         }
     }
     for &(p, at, t) in particles.iter().filter(|(p, _, _)| !p.smoke) {
+        if p.burst_flash {
+            blast_flash(&mut hot, at, p.edge, t);
+            continue;
+        }
         if let Some(kind) = p.contact {
             let col = contact_colour(kind, t);
             match kind {
@@ -293,17 +317,47 @@ fn hot(input: Input<'_>) -> MeshBuf {
     }
     hot
 }
+
+fn blast_flash(buf: &mut MeshBuf, at: Vec3, edge: f32, t: f32) {
+    let fade = 1.0 - smooth01(t);
+    let spread = 0.75 + smooth01(t / 0.25) * 1.5;
+    let core = Vec3::new(16.0, 10.0, 3.0).lerp(Vec3::new(4.0, 0.65, 0.025), smooth01(t));
+    block(
+        buf,
+        at,
+        Vec3::splat(edge * (1.0 - t * 0.35)),
+        core.extend(fade * 0.96).to_array(),
+    );
+    // Two short, low cubic lobes open out from the white centre. Their
+    // lifetime belongs to the original flash particle; no extra emitters.
+    for size in [
+        Vec3::new(spread, 0.23, 0.46),
+        Vec3::new(0.38, 0.28, spread * 0.87),
+    ] {
+        block(buf, at, size * edge, [6.0, 1.8, 0.08, fade * 0.42]);
+    }
+}
+#[cfg(test)]
 fn smoke(input: Input<'_>) -> MeshBuf {
+    smoke_with_pool(input, None)
+}
+fn smoke_with_pool(input: Input<'_>, pool: Option<&bevy::tasks::TaskPool>) -> MeshBuf {
     let mut smoke = MeshBuf::default();
+    nuclear::append_smoke(&mut smoke, input.effects, input.now, pool);
     for &(p, at, t) in input.particles.iter().filter(|(p, _, _)| p.smoke) {
-        if p.contact == Some(ContactKind::Dust) {
+        if p.steam {
+            let fade=(t*10.0).min(1.0)*(1.0-t).powi(2);
+            puff(&mut smoke,at,p.edge*(0.75+t*0.9),[0.74,0.79,0.82,fade*0.26],p,t);
+        } else if p.contact == Some(ContactKind::Dust) {
             let fade = (t * 12.0).min(1.0) * (1.0 - t).powi(2);
             let shade = 0.43 + noise(p.seed) * 0.08;
-            cube(
+            puff(
                 &mut smoke,
                 at,
                 p.edge * (0.75 + t * 0.65),
                 [shade, shade * 0.96, shade * 0.90, fade * 0.32],
+                p,
+                t,
             );
         } else if p.dust_material != 0 {
             let rgb = match p.dust_material {
@@ -314,38 +368,66 @@ fn smoke(input: Input<'_>) -> MeshBuf {
                 _ => [0.38, 0.36, 0.33],
             };
             let fade = (t * 9.0).min(1.0) * (1.0 - t).powi(2);
-            cube(
+            puff(
                 &mut smoke,
                 at,
                 p.edge * (0.75 + t * 0.9),
                 [rgb[0], rgb[1], rgb[2], fade * 0.34],
+                p,
+                t,
             );
         } else if p.burst_dust {
             let fade = (t * 10.0).min(1.0) * (1.0 - t).powi(2);
             let shade = 0.26 + noise(p.seed) * 0.09;
-            cube(
+            puff(
                 &mut smoke,
                 at,
                 p.edge * (0.7 + t * 0.8),
                 [shade, shade * 0.88, shade * 0.72, fade * 0.18],
+                p,
+                t,
             );
         } else {
             let fade = (t * 8.0).min(1.0) * (1.0 - t).powi(2);
             let shade = 0.14 + t * 0.11 + noise(p.seed) * 0.05;
-            cube(
+            let warm = 1.0 - smooth01(t * 2.0);
+            puff(
                 &mut smoke,
                 at,
                 p.edge * (0.65 + t * 1.35),
                 [
-                    shade * 0.98,
+                    shade * (0.98 + warm * 0.10),
                     shade * 0.96,
-                    shade,
+                    shade * (1.0 - warm * 0.22),
                     fade * (0.14 + 0.07 * (1.0 - t)),
                 ],
+                p,
+                t,
             );
         }
     }
     smoke
+}
+
+fn puff(buf: &mut MeshBuf, at: Vec3, edge: f32, col: [f32; 4], p: &Particle, t: f32) {
+    let dust = p.burst_dust || p.dust_material != 0 || p.contact == Some(ContactKind::Dust);
+    // Stable proportions spread as smoke ages. Dust stays low; rising soot
+    // stretches vertically. Six cubic faces, no extra particles or sorting.
+    let spread = smooth01(t);
+    block(
+        buf,
+        at,
+        Vec3::new(
+            0.80 + noise(p.seed.wrapping_add(119)) * 0.35 + spread * 0.15,
+            if dust {
+                0.48 + spread * 0.28
+            } else {
+                1.18 - spread * 0.22
+            },
+            0.80 + noise(p.seed.wrapping_add(157)) * 0.35 + spread * 0.15,
+        ) * edge,
+        col,
+    );
 }
 
 #[cfg(test)]
@@ -402,6 +484,7 @@ mod tests {
             if let Some(kind) = p.contact {
                 p.smoke = kind == ContactKind::Dust;
             }
+            p.burst_flash = i % 19 == 0 && !p.smoke && p.contact.is_none();
         }
         for i in 0..32 {
             effects.tracers.push(Tracer {
@@ -499,6 +582,7 @@ mod tests {
                         fraction: 0.3,
                         poses: &poses,
                         markers: None,
+                        first_person_origin: None,
                         single: (None, 2.0),
                     };
                     let reference = Prepared {
@@ -530,6 +614,7 @@ mod tests {
                 fraction: 1.0,
                 poses: &poses,
                 markers: None,
+                first_person_origin: None,
                 single: (None, 2.0),
             };
             let expected = prepare(input, None);
@@ -554,6 +639,7 @@ mod tests {
                 fraction: 0.0,
                 poses: &poses,
                 markers: None,
+                first_person_origin: None,
                 single: (None, 2.0),
             },
             None,
@@ -592,6 +678,110 @@ mod tests {
             smoke: legacy(smoke(input)),
         }
     }
+    fn nuclear_fixture(count: usize) -> (BlastRange, Effects, Poses) {
+        let (mut sim, mut effects, poses) = fixture(0);
+        sim.layout.as_mut().unwrap().battle = false;
+        sim.config.delivery = Delivery::Kinetic;
+        sim.battle.lasers.clear();
+        effects.tracers.clear();
+        effects.heat_spots.clear();
+        for i in 0..count {
+            let at = Vec3::new(i as f32 * 1200.0, 16.0, -30.0);
+            effects.nuclear_cloud(at, 0.0, 2048.0);
+            for sector in 0..8 {
+                let a = sector as f32 * std::f32::consts::TAU / 8.0;
+                effects
+                    .nuclear_fronts
+                    .last_mut()
+                    .unwrap()
+                    .observe(at + Vec3::new(a.cos(), 0.0, a.sin()) * 800.0, 0.5);
+            }
+        }
+        (sim, effects, poses)
+    }
+    #[test]
+    fn strategic_layers_match_serial_on_small_pools_through_cooling_and_expiry() {
+        let pools: Vec<_> = [1, 2, 4]
+            .into_iter()
+            .map(|n| bevy::tasks::TaskPoolBuilder::new().num_threads(n).build())
+            .collect();
+        for count in [1, nuclear::CAP] {
+            let (sim, effects, poses) = nuclear_fixture(count);
+            for now in [0.0, 0.5, 0.75, 3.0, 6.0, 12.0, nuclear::LIFE] {
+                let input = Input {
+                    sim: &sim,
+                    effects: &effects,
+                    particles: &[],
+                    now,
+                    fraction: 1.0,
+                    poses: &poses,
+                    markers: None,
+                    first_person_origin: None,
+                    single: (None, 2.0),
+                };
+                let expected = prepare(input, None);
+                for pool in &pools {
+                    let result = prepare(input, Some(pool));
+                    same(&expected.hot, &result.hot);
+                    same(&expected.smoke, &result.smoke);
+                }
+                if now >= 12.0 {
+                    assert!(expected.hot.is_none());
+                }
+                if now >= nuclear::LIFE {
+                    assert!(expected.smoke.is_none());
+                }
+            }
+        }
+    }
+    #[test]
+    #[ignore = "manual strategic-layer timing without competing workloads"]
+    fn bench_nuclear_layers() {
+        let pools: Vec<_> = [1, 2, 4]
+            .into_iter()
+            .map(|n| bevy::tasks::TaskPoolBuilder::new().num_threads(n).build())
+            .collect();
+        println!("NUCLEAR events,age,workers,median_us,p95_us");
+        for count in [1, nuclear::CAP] {
+            let (sim, effects, poses) = nuclear_fixture(count);
+            for now in [1.0, 6.0, 18.0] {
+                let input = Input {
+                    sim: &sim,
+                    effects: &effects,
+                    particles: &[],
+                    now,
+                    fraction: 1.0,
+                    poses: &poses,
+                    markers: None,
+                    first_person_origin: None,
+                    single: (None, 2.0),
+                };
+                let mut times = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+                for round in 0..64usize {
+                    for offset in 0..4 {
+                        let case = (round + offset) % 4;
+                        let pool = case.checked_sub(1).map(|i| &pools[i]);
+                        let begin = std::time::Instant::now();
+                        let result = prepare(std::hint::black_box(input), pool);
+                        std::hint::black_box(&result);
+                        let elapsed = begin.elapsed().as_nanos();
+                        if round >= 4 {
+                            times[case].push(elapsed);
+                        }
+                    }
+                }
+                for (case, values) in times.iter_mut().enumerate() {
+                    values.sort_unstable();
+                    let workers = [0, 1, 2, 4][case];
+                    println!(
+                        "NUCLEAR {count},{now},{workers},{:.2},{:.2}",
+                        values[30] as f64 / 1000.0,
+                        values[57] as f64 / 1000.0
+                    );
+                }
+            }
+        }
+    }
     #[inline(never)]
     fn owned_reference(input: Input<'_>) -> Prepared {
         Prepared {
@@ -612,6 +802,7 @@ mod tests {
             fraction: 0.3,
             poses: &poses,
             markers: None,
+            first_person_origin: None,
             single: (None, 2.0),
         };
         let workers = [0, 1, 2, 4, 8];

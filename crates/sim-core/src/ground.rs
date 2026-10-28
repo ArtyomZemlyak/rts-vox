@@ -346,8 +346,11 @@ mod tests {
         let vw = voxel::World::new(320, 320, 320, 4096, Box::new(Wall));
         let mut w = World::new(1, 4, test_tuning());
         w.attach_ground(Ground::new(vw, &test_tuning()));
-        let id = w.units.spawn(140, 160, 0, 30, 300) as usize;
+        let id = w.spawn_ground(140, 160, 0, 30, 300) as usize;
         w.fill_flow_towards(0, 300, 160);
+        // This fixture checks the completed field. Incremental startup can
+        // briefly publish a provisional direction before all sectors converge.
+        w.solve_flow();
         w.units.refresh_live();
         for _ in 0..200 {
             w.tick();

@@ -377,7 +377,7 @@ fn portable_frames_replay_both_sides_manual_queue_and_retained_plan_receipts() {
     r.world.start_battle_command_capture(256).unwrap();
     replay.world.start_battle_command_capture(256).unwrap();
     let mut phases = 0;
-    for _ in 0..31 {
+    for _ in 0..r.world().battle.ai.tuning.decision_ticks * 2 + 1 {
         let frame = r.step_record_ai().unwrap();
         let frame = frame.map(|f| {
             phases += 1;

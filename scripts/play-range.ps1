@@ -4,6 +4,7 @@ param(
     [switch]$Build,
     [switch]$Settings,
     [switch]$Battle,
+    [switch]$Laboratory,
     [ValidateRange(1, 16)][int]$Zone = 1,
     [ValidateSet('energy', 'shell', 'kinetic', 'anni', 'laser', 'flame', 'machine-gun')][string]$Weapon = 'energy',
     [ValidateSet('tank', 'walker', 'spider')][string]$Chassis = 'tank'
@@ -21,12 +22,24 @@ if ($Build -or !(Test-Path -LiteralPath $binary)) {
         exit 1
     }
 }
+# An in-use Windows executable cannot always be replaced. A separately built
+# release can be used by the same launcher until the normal build is newer.
+if (!$Build) {
+    foreach ($candidate in @('target/release/blast-staged.exe', 'target/release/blast-section.exe', 'target/release/blast-hot.exe', 'target/release/blast-crawler.exe', 'target/release/blast-dune.exe', 'target/release/blast-thermal.exe', 'target/release/blast-melt.exe', 'target/release/blast-vapor.exe', 'target/release/blast-water.exe', 'target/release/blast-waterflow.exe')) {
+        $stagedBinary = Join-Path $repoRoot $candidate
+        if ((Test-Path -LiteralPath $stagedBinary) -and
+            (Get-Item -LiteralPath $stagedBinary).LastWriteTimeUtc -gt (Get-Item -LiteralPath $binary).LastWriteTimeUtc) {
+            $binary = $stagedBinary
+        }
+    }
+}
 if (!$LayoutPath) {
     $LayoutPath = 'data/range-km.ron'
 }
 $rangeArgs = @('--weapon', $Weapon, '--chassis', $Chassis, '--range', ('"{0}"' -f $LayoutPath))
 if (!$AutoFire) { $rangeArgs += '--drive' }
 if ($Settings) { $rangeArgs += '--settings' }
+if ($Laboratory) { $rangeArgs += '--laboratory' }
 if ($Battle) { $rangeArgs += @('--battle', '--edit') }
 if ($Zone -gt 1) { $rangeArgs += @('--zone', $Zone.ToString()) }
 $env:WGPU_BACKEND = 'vulkan'

@@ -47,3 +47,21 @@ fn pending_dig_counts_match_an_ordered_reference() {
     assert!(digs.totals.iter().all(|&n| n == 0));
     assert!(digs.chunks.iter().all(Option::is_none));
 }
+
+#[test]
+fn conditional_replacement_cannot_restore_a_removed_or_changed_voxel() {
+    struct Sand;
+    impl Generator for Sand {
+        fn material(&self, _: u32, _: u32, _: u32) -> Mat { 10 }
+    }
+    let mut world = World::new(32, 32, 32, 128, Box::new(Sand));
+    world.queue_transfer(Edit::dig(4, 4, 4));
+    world.queue_transfer(Edit::replace_if(4, 4, 4, 10, 12));
+    world.queue_transfer(Edit::put(5, 4, 4, 3));
+    world.queue_transfer(Edit::replace_if(5, 4, 4, 10, 12));
+    world.queue_transfer(Edit::replace_if(6, 4, 4, 10, 12));
+    world.flush_transfers();
+    assert_eq!(world.material(4, 4, 4), AIR);
+    assert_eq!(world.material(5, 4, 4), 3);
+    assert_eq!(world.material(6, 4, 4), 12);
+}

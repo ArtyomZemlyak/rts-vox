@@ -57,6 +57,10 @@ use voxel::unit::{Attach, UnitBody, TURN};
 
 use crate::geom::MeshBuf;
 
+#[path = "model/rubble.rs"]
+mod rubble;
+pub use rubble::rubble_pile_to_mesh;
+
 /// Шесть направлений: смещение соседа, ось и сторона.
 const SIDES: [([i32; 3], usize, bool); 6] = [
     ([1, 0, 0], 0, true),
@@ -182,6 +186,16 @@ pub fn body_to_mesh(
         ),
         |x, y, z| b.vol.get(x, y, z),
     );
+}
+
+/// Small surface excerpt for a presentation-only voxel inspector. Two cells
+/// of padding keep the clipping box away from artificial region boundaries.
+pub fn inspection_cell_mesh(b: &UnitBody, cell: [usize;3]) -> Vec<MeshBuf> {
+    let mut buffers=std::array::from_fn(|_|MeshBuf::default());
+    let lo=cell.map(|v|v.saturating_sub(2));
+    let hi=cell.map(|v|v.saturating_add(3));
+    body_to_mesh_region(b,[1.0;3],1.0,(0,usize::MAX),0.35,[0.0;3],&mut buffers,(lo,hi),|x,y,z|b.vol.get(x,y,z));
+    buffers.into_iter().filter(|b|!b.is_empty()).collect()
 }
 
 #[allow(clippy::too_many_arguments)]

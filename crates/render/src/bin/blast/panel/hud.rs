@@ -60,6 +60,7 @@ pub fn section(editor: bool, a: Action) -> u8 {
         Action::Overview
         | Action::WholeMap
         | Action::Own
+        | Action::FirstPerson
         | Action::Target
         | Action::Zoom(_)
         | Action::Pan(..)
@@ -181,6 +182,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 for (name, action) in [
                     ("Сражения", Action::Drawer(1)),
                     ("Испытания", Action::Drawer(2)),
+                    ("Лаборатория", Action::Laboratory),
                     ("Редактор", Action::Drawer(4)),
                     ("Камера", Action::Drawer(3)),
                     ("Настройки", Action::Settings),
@@ -228,6 +230,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 p.spawn(row()).with_children(|p| {
                     button(p, font, "Следующий свой", Action::NextOwn);
                     button(p, font, "К юниту", Action::Own);
+                    button(p, font, "1-е лицо [V]", Action::FirstPerson);
                 });
             });
             p.spawn(Node {
@@ -644,7 +647,12 @@ pub fn refresh(
                 .filter(|t| *t > view.tick)
                 .map_or_else(
                     || "Запустить ядерную ракету".into(),
-                    |t| format!("Перезарядка: {} с", (t - view.tick).div_ceil(30)),
+                    |t| {
+                        format!(
+                            "Перезарядка: {} с",
+                            (t - view.tick).div_ceil(sim_core::TICKS_PER_SECOND as u32)
+                        )
+                    },
                 ),
             n if n >= 100 => view
                 .units
@@ -699,6 +707,11 @@ pub fn refresh(
                     let phase = match view.phase {
                         sim_core::blast::battle::Phase::Setup if !edit.editing => "БЕЗ БОЯ",
                         sim_core::blast::battle::Phase::Setup => "РАССТАНОВКА",
+                        sim_core::blast::battle::Phase::Fighting
+                            if edit.layout.as_ref().is_some_and(|l| l.idle_enemies) =>
+                        {
+                            "НЕПОДВИЖНЫЕ МИШЕНИ"
+                        }
                         sim_core::blast::battle::Phase::Fighting => "ИИ АКТИВЕН",
                         sim_core::blast::battle::Phase::Victory => "ПОБЕДА",
                         sim_core::blast::battle::Phase::Defeat => "ПОРАЖЕНИЕ",
@@ -738,7 +751,10 @@ pub fn refresh(
                             "ПУСКОВАЯ ПОВРЕЖДЕНА".into()
                         } else if let Some(t) = u.charge_until {
                             if t > view.tick {
-                                format!("ПОДГОТОВКА: {} с", (t - view.tick).div_ceil(30))
+                                format!(
+                                    "ПОДГОТОВКА: {} с",
+                                    (t - view.tick).div_ceil(sim_core::TICKS_PER_SECOND as u32)
+                                )
                             } else {
                                 "ПУСК ПОДГОТОВЛЕН".into()
                             }
@@ -748,7 +764,7 @@ pub fn refresh(
                                 u.reload_until
                                     .unwrap()
                                     .saturating_sub(view.tick)
-                                    .div_ceil(30)
+                                    .div_ceil(sim_core::TICKS_PER_SECOND as u32)
                             )
                         } else {
                             "ГОТОВА К РУЧНОМУ ЗАПУСКУ".into()
@@ -1138,7 +1154,7 @@ pub(crate) mod tests {
             at: [160, 32, 320],
             radius: 40,
             charge: 0,
-            down: 30,
+            down: sim_core::TICKS_PER_SECOND as u32,
             hits: 0,
         });
         let snapshot = UiSnapshot {
@@ -1282,6 +1298,9 @@ pub(crate) mod tests {
         workshop.battle_preset(config(false, false)).unwrap();
         let (c, layout) = workshop.pending.take().unwrap();
         let sim = BlastRange::with_layout(c, layout).unwrap();
+        app_with_scene(sim,workshop)
+    }
+    pub(crate) fn app_with_scene(sim: BlastRange, workshop: Workshop) -> App {
         let scene = Scene {
             generation: 0,
             sim,

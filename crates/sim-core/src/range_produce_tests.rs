@@ -10,8 +10,8 @@ use modding::range_economy::{Producer, RangeEconomy};
 /// Slots of the fixture's three allied tanks, then the bases this file adds.
 const BASE: usize = 3;
 const SECOND_BASE: usize = 4;
-/// One game second at 30 ticks: the stock build time of the tests.
-const BUILD: u32 = 30;
+/// One game second at the fixed clock: the stock build time of the tests.
+const BUILD: u32 = crate::TICKS_PER_SECOND as u32;
 /// A buried slab of rock beside the fixture's tanks, as in the dig tests.
 const FACE: [i32; 3] = [280, 8, 330];
 
@@ -120,7 +120,7 @@ fn run(
 }
 
 fn version(bytes: &[u8]) -> u32 {
-    u32::from_le_bytes(bytes[..4].try_into().unwrap())
+    u32::from_le_bytes(bytes[8..12].try_into().unwrap())
 }
 
 #[test]

@@ -95,7 +95,7 @@ fn a_corridor_larger_than_a_full_tick_falls_back_without_stalling_or_losing_the_
         "fine planner owns the order"
     );
     let bytes = a.snapshot();
-    assert_ne!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 66);
+    assert_ne!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 66);
     let mut b = BlastRange::restore(a.config, &bytes).unwrap();
     install_budget(&mut b);
     assert_eq!(b.snapshot(), bytes);

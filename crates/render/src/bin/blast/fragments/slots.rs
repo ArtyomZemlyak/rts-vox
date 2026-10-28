@@ -65,6 +65,9 @@ impl Slot {
             self.current = make();
             self.stamp = stamp;
         }
+        if self.shown == self.current && previous.is_none_or(|p| p == self.current.translation) {
+            return None;
+        }
         let next = interpolate(self.current, previous, alpha);
         if next == self.shown {
             None

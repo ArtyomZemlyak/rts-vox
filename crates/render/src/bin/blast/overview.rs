@@ -1,7 +1,7 @@
 //! Distant terrain reads the same world and uses the same shader as the local
 //! voxel window. No alternate mesh, palette, sky or zoom-triggered replacement.
 use super::*;
-use render::gas::distant::{self, SPANS};
+use render::gas::distant;
 use std::sync::{atomic::AtomicBool, mpsc, Mutex};
 use voxel::world::columns::Columns;
 
@@ -25,7 +25,8 @@ impl Drop for Job {
 
 fn build(source: Columns, size: [u32; 3], cancel: &AtomicBool) -> Vec<u32> {
     let [nx, nz, step] = distant::grid(size);
-    let mut words = vec![0; nx as usize * nz as usize * SPANS];
+    let stride = distant::column_words(size[1]);
+    let mut words = vec![0; nx as usize * nz as usize * stride];
     let mut column = vec![0; size[1] as usize];
     for z in 0..nz {
         if cancel.load(Ordering::Relaxed) {
@@ -37,8 +38,8 @@ fn build(source: Columns, size: [u32; 3], cancel: &AtomicBool) -> Vec<u32> {
                 (z * step + step / 2).min(size[2] - 1),
                 &mut column,
             );
-            let i = (x + nx * z) as usize * SPANS;
-            words[i..i + SPANS].copy_from_slice(&distant::encode(&column));
+            let i = (x + nx * z) as usize * stride;
+            words[i..i + stride].copy_from_slice(&distant::encode(&column)[..stride]);
         }
     }
     words
@@ -56,7 +57,7 @@ pub fn sync(scene: Res<Scene>, mut far: ResMut<Distant>, mut gas: ResMut<GasInpu
         };
         gas.params.distant = Vec4::ZERO;
         gas.distant_edits.clear();
-        if (size[0] <= TERRAIN_WINDOW[0] && size[2] <= TERRAIN_WINDOW[2]) || size[1] > 255 {
+        if size[0] <= TERRAIN_WINDOW[0] && size[2] <= TERRAIN_WINDOW[2] {
             return;
         }
         let [nx, nz, step] = distant::grid(size);
@@ -84,7 +85,7 @@ pub fn sync(scene: Res<Scene>, mut far: ResMut<Distant>, mut gas: ResMut<GasInpu
                 if !worker_cancel.load(Ordering::Relaxed) {
                     println!(
                         "DISTANT built {} columns in {:.2}s",
-                        words.len() / SPANS,
+                        words.len() / distant::column_words(size[1]),
                         started.elapsed().as_secs_f32()
                     );
                     let _ = sender.send(words);
@@ -109,6 +110,7 @@ pub fn sync(scene: Res<Scene>, mut far: ResMut<Distant>, mut gas: ResMut<GasInpu
         return;
     }
     let [nx, nz, step] = distant::grid(size);
+    let stride = distant::column_words(size[1]);
     // Incremental crater/building edits also reach the far picture. A worker
     // snapshot may be older than these edits, so apply them before publication.
     let mut column = vec![0; size[1] as usize];
@@ -126,12 +128,12 @@ pub fn sync(scene: Res<Scene>, mut far: ResMut<Distant>, mut gas: ResMut<GasInpu
         for (y, m) in column.iter_mut().enumerate() {
             *m = surface_material(&scene.sim, [x as i32, y as i32, z as i32], *m) as u16;
         }
-        let i = (q[0] + nx * q[1]) as usize * SPANS;
+        let i = (q[0] + nx * q[1]) as usize * stride;
         let next = distant::encode(&column);
-        if far.words[i..i + SPANS] != next {
-            far.words[i..i + SPANS].copy_from_slice(&next);
+        if far.words[i..i + stride] != next[..stride] {
+            far.words[i..i + stride].copy_from_slice(&next[..stride]);
             if i < far.upload {
-                changed.push(i..i + SPANS);
+                changed.push(i..i + stride);
             }
         }
     }
@@ -165,13 +167,14 @@ pub fn sync(scene: Res<Scene>, mut far: ResMut<Distant>, mut gas: ResMut<GasInpu
 /// authored near-view atmosphere and continuously rescale its optical distance
 /// as the camera backs away. Never remove/reinsert the sky/IBL components.
 pub fn atmosphere(
+    scene: Res<Scene>,
     camera: Query<&Transform, With<GasCamera>>,
     mut atmospheres: Query<&mut GlobalTransform, With<bevy::light::Atmosphere>>,
 ) {
     let Ok(camera) = camera.single() else {
         return;
     };
-    let ground = sim_core::blast::FLOOR as f32;
+    let ground = scene.sim.ground_level() as f32;
     let zoom = ((camera.translation.y - ground) / 420.0).max(1.0);
     let k = zoom / look::scene().haze_metres_per_voxel;
     for mut transform in &mut atmospheres {
@@ -188,6 +191,32 @@ pub fn atmosphere(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn material(words: &[u32], height: u32, y: u32) -> u32 {
+        for chunk in words.chunks_exact(if height > 255 { 2 } else { 1 }) {
+            let (bottom, top, body, cap, boundary) = if height > 255 {
+                (
+                    chunk[0] & 65535,
+                    chunk[0] >> 16,
+                    chunk[1] & 15,
+                    (chunk[1] >> 4) & 15,
+                    chunk[1] >> 8,
+                )
+            } else {
+                let w = chunk[0];
+                (
+                    w & 255,
+                    (w >> 8) & 255,
+                    (w >> 16) & 15,
+                    (w >> 20) & 15,
+                    w >> 24,
+                )
+            };
+            if y >= bottom && y < top {
+                return if y >= boundary { cap } else { body };
+            }
+        }
+        0
+    }
     #[test]
     fn distant_columns_read_authored_materials_and_actual_destruction() {
         use voxel::world::{Edit, Generator, World};
@@ -217,24 +246,57 @@ mod tests {
         world.flush();
         let words = build(Columns::capture(&world), size, &AtomicBool::new(false));
         let [nx, nz, step] = distant::grid(size);
+        let stride = distant::column_words(size[1]);
         for z in 0..nz {
             for x in 0..nx {
-                let i = (x + nx * z) as usize * SPANS;
+                let i = (x + nx * z) as usize * stride;
                 for y in 0..64 {
-                    let actual = words[i..i + SPANS]
-                        .iter()
-                        .find(|w| y >= (**w & 255) && y < ((**w >> 8) & 255))
-                        .map_or(0, |w| {
-                            if y >= (*w >> 24) {
-                                (*w >> 20) & 15
-                            } else {
-                                (*w >> 16) & 15
-                            }
-                        });
+                    let actual = material(&words[i..i + stride], size[1], y);
                     assert_eq!(
                         actual,
                         u32::from(world.material(x * step + step / 2, y, z * step + step / 2))
                     );
+                }
+            }
+        }
+    }
+    #[test]
+    fn distant_columns_preserve_deep_ground_and_destruction_above_255() {
+        use voxel::world::{Edit, Generator, World};
+        struct Deep(u32);
+        impl Generator for Deep {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 {
+                if y + 1 < self.0 {
+                    1
+                } else if y + 1 == self.0 {
+                    7
+                } else if (self.0 + 8..self.0 + 12).contains(&y) {
+                    3
+                } else if (self.0 + 20..self.0 + 28).contains(&y) {
+                    4
+                } else {
+                    0
+                }
+            }
+        }
+        for (height, level) in [(256, 80), (448, 272)] {
+            let size = [64, height, 64];
+            let mut world = World::new(64, height, 64, 10000, Box::new(Deep(level)));
+            world.queue_edit(Edit::dig(22, level + 9, 22));
+            world.flush();
+            let words = build(Columns::capture(&world), size, &AtomicBool::new(false));
+            let [nx, nz, step] = distant::grid(size);
+            let stride = distant::column_words(height);
+            for z in 0..nz {
+                for x in 0..nx {
+                    let i = (x + nx * z) as usize * stride;
+                    for y in 0..height {
+                        assert_eq!(
+                            material(&words[i..i + stride], height, y),
+                            u32::from(world.material(x * step + step / 2, y, z * step + step / 2)),
+                            "height={height}, y={y}"
+                        );
+                    }
                 }
             }
         }
@@ -246,7 +308,7 @@ mod tests {
         for yaw in [0.0, 0.8, 2.1, 4.3] {
             for pitch in [-0.5, 0.0, 0.5] {
                 let offset = orbit_offset(Vec3::new(-155.0, 420.0, 320.0), yaw, pitch);
-                let (aim, height) = whole_map_frame(size, offset, aspect);
+                let (aim, height) = whole_map_frame(size, 16, offset, aspect);
                 let rotation = Transform::from_translation(offset)
                     .looking_at(Vec3::ZERO, Vec3::Y)
                     .rotation;

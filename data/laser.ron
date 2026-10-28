@@ -20,7 +20,7 @@
     edits_per_tick: 8192,
     fragment_box: 2,
     hull_impulse_milli: 0,
-    fire_tick: 75,
+    fire_tick: 50,
     shell_speed: 360,
     heat_units: 0,
     heat_per_cell: 0,

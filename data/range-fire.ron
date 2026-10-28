@@ -5,12 +5,13 @@
     tank: (at: (12,10,15), fuel_ml: 80000),
     walker: (at: (12,32,20), fuel_ml: 50000),
     spider: (at: (24,32,40), fuel_ml: 200000),
+    // Fuel quantum per authored 30 Hz sample; integrated at the fixed clock.
     burn_ml_per_tick: 50,
     heat_per_ml: 4,
     ignition: 120,
     ignition_radius: 2,
     reach: 8,
-    fade_ticks: 120,
+    fade_ticks: 80,
     gravity: 98,
     max_speed: 120,
 )

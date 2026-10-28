@@ -8,6 +8,7 @@
 //! it and the planner can price the detour.
 pub mod coarse;
 mod connection;
+mod profile;
 mod rubble_index;
 use connection::Connection;
 use fx::{angle, Fx};
@@ -24,7 +25,7 @@ use voxel::{
 /// A footprint and its swept sample poses, prepared independently.
 pub type SweepSamples = (Shape, Vec<([Fx; 2], i32)>);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shape {
     pub half: [i32; 2],
     pub support: [i32; 2],
@@ -280,6 +281,47 @@ impl Changed {
         self.pages
             .range([a[0], i32::MIN]..=[b[0], i32::MAX])
             .any(|p| (a[1]..=b[1]).contains(&p[1]))
+    }
+    /// Changed pages intersecting a swept route leg, including its footprint.
+    /// The segment/rectangle separating axes reject distant edits inside a
+    /// diagonal leg's large bounding box without probing any terrain.
+    pub fn touches_segment(&self, from: [i32; 2], to: [i32; 2], radius: i32) -> bool {
+        if self.all {
+            return true;
+        }
+        if self.pages.is_empty() {
+            return false;
+        }
+        let radius = i64::from(radius.max(0));
+        let lo = [0, 1].map(|a| {
+            (i64::from(from[a].min(to[a])) - radius).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+        });
+        let hi = [0, 1].map(|a| {
+            (i64::from(from[a].max(to[a])) + radius).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+        });
+        let a = page_of(lo[0], lo[1]);
+        let b = page_of(hi[0], hi[1]);
+        let d = [0, 1].map(|a| i128::from(to[a]) - i128::from(from[a]));
+        self.pages
+            .range([a[0], i32::MIN]..=[b[0], i32::MAX])
+            .any(|p| {
+                if !(a[1]..=b[1]).contains(&p[1]) {
+                    return false;
+                }
+                let low = p.map(|q| i128::from(q) * PAGE_SIDE as i128 - i128::from(radius));
+                let high = p.map(|q| (i128::from(q) + 1) * PAGE_SIDE as i128 + i128::from(radius));
+                if (0..2).any(|a| {
+                    i128::from(from[a].max(to[a])) < low[a]
+                        || i128::from(from[a].min(to[a])) > high[a]
+                }) {
+                    return false;
+                }
+                let cross =
+                    d[0] * (low[1] - i128::from(from[1])) - d[1] * (low[0] - i128::from(from[0]));
+                let x = -d[1] * (high[0] - low[0]);
+                let z = d[0] * (high[1] - low[1]);
+                cross + x.min(0) + z.min(0) <= 0 && cross + x.max(0) + z.max(0) >= 0
+            })
     }
     pub fn save(&self, b: &mut fx::blob::Blob) {
         b.bool(self.all);
@@ -662,7 +704,7 @@ pub struct Probe<'a> {
     /// Grade depends on the hull's tilt limit, not its pose or the terrain.
     grade_cache: Option<(Fx, Fx)>,
     prepared_routes: BTreeMap<(Fx, Fx, i32), Pose>,
-    yielding: Vec<Mat>,
+    yielding: profile::Yielding,
     rubble: Option<&'a Rubble>,
     /// Columns scanned, columns answered and surface samples taken since
     /// this probe was made: the price of a search, for benches (P-29).
@@ -712,7 +754,7 @@ impl<'a> Probe<'a> {
             hump_key: (0, 0),
             grade_cache: None,
             prepared_routes: BTreeMap::new(),
-            yielding: yielding.to_vec(),
+            yielding: profile::Yielding::new(yielding),
             rubble: None,
             scans: 0,
             columns: 0,
@@ -769,7 +811,7 @@ impl<'a> Probe<'a> {
     }
     /// Whether cached column answers use this exact yielding-material set.
     pub fn matches_yielding(&self, materials: &[Mat]) -> bool {
-        self.yielding == materials
+        self.yielding.as_slice() == materials
     }
     fn scan(&self, x: i32, z: i32) -> (u16, [u16; 2]) {
         let mut floor = 0;
@@ -2188,7 +2230,7 @@ impl Hunt {
             from,
             head,
             to,
-            yielding: ground.yielding.clone(),
+            yielding: ground.yielding.to_vec(),
             columns: Columns::default(),
             n,
             rows,
@@ -2239,21 +2281,9 @@ impl Hunt {
     ) -> Option<Route> {
         let mut pending = self.prelude.take()?;
         if pending.straight.is_none() {
-            let mut candidates = Vec::with_capacity(81);
-            for r in 0..=4i32 {
-                for dz in -r..=r {
-                    for dx in -r..=r {
-                        if dx.abs() == r || dz.abs() == r {
-                            candidates.push([
-                                self.to[0] + dx * self.cfg.cell,
-                                self.to[1] + dz * self.cfg.cell,
-                            ]);
-                        }
-                    }
-                }
-            }
-            while pending.goal_cursor < candidates.len() * 8 && *allowance > 0 {
-                let p = candidates[pending.goal_cursor / 8];
+            while pending.goal_cursor < profile::GOAL_OFFSETS.len() * 8 && *allowance > 0 {
+                let offset = profile::GOAL_OFFSETS[pending.goal_cursor / 8];
+                let p = [0, 1].map(|a| self.to[a] + offset[a] * self.cfg.cell);
                 let yaw = (pending.goal_cursor % 8) as i32 * angle::FULL / 8;
                 pending.goal_cursor += 1;
                 if (0..2).any(|a| p[a] < self.cfg.min[a] || p[a] >= self.cfg.max[a]) {
@@ -2276,7 +2306,8 @@ impl Hunt {
                 }
             }
             completed("plan_target");
-            if pending.straight.is_none() && pending.goal_cursor == candidates.len() * 8 {
+            if pending.straight.is_none() && pending.goal_cursor == profile::GOAL_OFFSETS.len() * 8
+            {
                 return Some(self.empty(false, true));
             }
         }
@@ -2354,6 +2385,35 @@ impl Hunt {
     /// Frontier still open and nodes expanded so far.
     pub fn nodes(&self) -> u32 {
         self.nodes
+    }
+    /// Checked grid progress without ending the search. Inspect at most two
+    /// active frontier sources and a 64-node chain; never scan the open set.
+    pub fn prefix_route(&self) -> Option<Route> {
+        if self.prelude.is_some() {
+            return None;
+        }
+        let candidate = self
+            .open
+            .peek()
+            .map(|Reverse((_, cost, node))| (*node, *cost));
+        let node = candidate
+            .into_iter()
+            .chain(self.expansion.iter().map(|e| (e.node, e.cost)))
+            .filter(|&(node, cost)| node / 8 != self.initial / 8 && cost == self.cost(node))
+            .filter(|&(node, _)| {
+                let p = self.point(node / 8);
+                (0..2).any(|a| p[a].sub(self.from[a]).abs() >= Fx::from_int(2 * self.cfg.cell))
+            })
+            .min_by_key(|&(node, cost)| self.progress(node, cost))?
+            .0;
+        let mut cursor = node;
+        for _ in 0..64 {
+            if cursor == self.initial {
+                return Some(self.route_through(node, true));
+            }
+            cursor = *self.previous.get(&cursor)?;
+        }
+        None
     }
     /// Whether the search is still in its start: the goal ring or the
     /// direct sweep, before the frontier (ADR-691). Saved with the search.
@@ -4628,6 +4688,27 @@ mod tests {
     /// A resting heap of debris raises the probe's floor in its columns
     /// only, and a hull whose step is lower than the heap is refused over
     /// it while a hull that steps higher is not (ADR-292).
+    #[test]
+    fn changed_segment_rejects_diagonal_box_false_positives_and_keeps_footprint_edges() {
+        let mut remote = Changed::default();
+        remote.column(32, 320);
+        assert!(remote.touches([0, 0], [400, 400]));
+        assert!(!remote.touches_segment([0, 0], [400, 400], 4));
+        assert!(!remote.touches_segment([400, 400], [0, 0], 4));
+        let mut on = Changed::default();
+        on.column(192, 192);
+        assert!(on.touches_segment([0, 0], [400, 400], 0));
+        assert!(on.touches_segment([400, 400], [0, 0], 0));
+        let mut edge = Changed::default();
+        edge.column(224, 32);
+        assert!(!edge.touches_segment([64, 0], [200, 0], 0));
+        assert!(edge.touches_segment([64, 0], [200, 0], 32));
+        assert!(on.touches_segment([200, 200], [200, 200], 0));
+        assert!(!Changed::default().touches_segment([0, 0], [400, 400], 0));
+        assert!(Changed::everywhere().touches_segment([0, 0], [400, 400], 0));
+        assert!(on.touches_segment([i32::MIN, i32::MIN], [i32::MAX, i32::MAX], 0));
+    }
+
     /// Changes are found by cache page, and both the pages and the
     /// rubble's prints survive a save; a page off the map is refused
     /// (ADR-427).

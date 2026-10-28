@@ -510,8 +510,18 @@ impl CollapseLayer {
         w: &mut World,
         edits: impl Iterator<Item = Edit>,
         bodies: &mut Bodies,
-        mut completed: impl FnMut(&'static str),
+        completed: impl FnMut(&'static str),
         held: &dyn Fn([u32; 3]) -> bool,
+    ) -> CollapseStats {
+        self.apply_iter_held_filtered(w, edits, bodies, completed, held, &|_| true)
+    }
+
+    /// Materials with their own conservative flow stay in the world. The
+    /// support graph still includes them; cohesive neighbours may fall off.
+    pub fn apply_iter_held_filtered(
+        &mut self, w: &mut World, edits: impl Iterator<Item = Edit>,
+        bodies: &mut Bodies, mut completed: impl FnMut(&'static str),
+        held: &dyn Fn([u32; 3]) -> bool, detach_material: &dyn Fn(u16) -> bool,
     ) -> CollapseStats {
         let cs = CS as u32;
         let mut st = CollapseStats::default();
@@ -650,7 +660,7 @@ impl CollapseLayer {
             st.rounds = round + 1;
             self.resolve(&mut st);
             completed("collapse_resolve");
-            let torn = self.detach_unanchored(w, bodies, &mut st, held);
+            let torn = self.detach_unanchored(w, bodies, &mut st, held, detach_material);
             completed("collapse_detach");
             if round > 0 {
                 st.torn_after_first += torn;
@@ -1445,6 +1455,7 @@ impl CollapseLayer {
         bodies: &mut Bodies,
         st: &mut CollapseStats,
         held: &dyn Fn([u32; 3]) -> bool,
+        detach_material: &dyn Fn(u16) -> bool,
     ) -> usize {
         st.probed += self.reached.len();
         if self.unsupported_chunks.is_empty() {
@@ -1553,7 +1564,8 @@ impl CollapseLayer {
                 continue;
             }
             self.cells.clear();
-            self.cells.extend_from_slice(cells);
+            self.cells.extend(cells.iter().copied().filter(|&(x, y, z)| detach_material(w.material(x, y, z))));
+            if self.cells.is_empty() { continue; }
             if !bodies.detach(w, &self.cells) {
                 continue;
             }

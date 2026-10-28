@@ -99,7 +99,7 @@ fn all_fields_match_legacy_group_edits_and_roundtrip_without_changing_stock_byte
                 .state_hash()
         );
         let bytes = r.snapshot();
-        assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 54);
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 54);
         let restored = BlastRange::restore(r.config, &bytes).unwrap();
         assert_eq!(bytes, restored.snapshot());
         assert_eq!(

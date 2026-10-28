@@ -3,6 +3,8 @@
 use super::*;
 #[path = "fire/geometry.rs"]
 mod geometry;
+#[path = "fire/nuclear.rs"]
+mod nuclear;
 #[path = "fire/projectiles.rs"]
 mod projectiles;
 use sim_core::blast::battle::Weapon as BattleWeapon;
@@ -34,8 +36,10 @@ struct Particle {
     edge: f32,
     seed: u32,
     smoke: bool,
+    steam: bool,
     burst_dust: bool,
     burst_flame: bool,
+    burst_flash: bool,
     stream: bool,
     dust_material: u16,
     contact: Option<ContactKind>,
@@ -53,6 +57,11 @@ pub struct Effects {
     deaths: Vec<(Vec3, f32)>,
     particles: Vec<Particle>,
     tracers: Vec<Tracer>,
+    nuclear: Vec<(Vec3, f32)>,
+    nuclear_fronts: Vec<nuclear::ShockFront>,
+    /// Presentation resolution; zero keeps the closest view's full detail.
+    nuclear_pixel: f32,
+    last_shock_tick: Option<u32>,
     energy_impacts: Vec<(sim_core::blast::battle::Impact, u32)>,
     kinetic_paths: Vec<(Vec3, Vec3)>,
     last_kinetic_shell: Option<Vec3>,
@@ -148,6 +157,15 @@ fn destruction_origin(u: &sim_core::blast::RangeUnit) -> Vec3 {
     Vec3::from(u.world_pos(cell).map(|v| v as f32)) + Vec3::Y
 }
 impl Effects {
+    pub(super) fn nuclear_focus(&self, now: f32) -> Option<(Vec3, f32)> {
+        self.nuclear.last().and_then(|&(at, born)| {
+            let age = (now - born).max(0.0);
+            (age < nuclear::LIFE).then_some((
+                at,
+                smooth01(age / 1.0) * (1.0 - smooth01((age - 22.0) / 4.0)),
+            ))
+        })
+    }
     pub fn clear(&mut self) {
         self.alive.clear();
         self.shell_fired.clear();
@@ -155,6 +173,9 @@ impl Effects {
         self.particles.clear();
         self.tracers.clear();
         self.energy_impacts.clear();
+        self.nuclear.clear();
+        self.nuclear_fronts.clear();
+        self.last_shock_tick = None;
         self.kinetic_paths.clear();
         self.last_kinetic_shell = None;
         self.sources.clear();
@@ -246,8 +267,10 @@ impl Effects {
             edge,
             seed,
             smoke,
+            steam: false,
             burst_dust: false,
             burst_flame: false,
+            burst_flash: false,
             stream: false,
             dust_material: 0,
             contact: None,
@@ -330,6 +353,7 @@ impl Effects {
         let scale = (energy as f32 / 2300.0).sqrt().clamp(0.55, 1.8)
             * (source_radius.clamp(1, 128) as f32 / 32.0).max(1.0);
         self.add(at, Vec3::ZERO, now, 0.16, 9.0 * scale, false);
+        self.particles.last_mut().unwrap().burst_flash = true;
         // A ragged flash: a few broad tongues, many sharp sparks and unequal
         // radial speeds. The transported gas, rather than these cubes, owns
         // the sustained fireball.
@@ -339,6 +363,19 @@ impl Effects {
             let outward = Vec3::new(angle.cos(), 0.0, angle.sin());
             let broad = i.is_multiple_of(6);
             let speed = (22.0 + noise(seed.wrapping_add(3)) * 53.0) * scale;
+            if i % 3 == 1 {
+                self.add(
+                    at + outward * 2.0,
+                    outward * speed * 1.25
+                        + Vec3::Y * (18.0 + noise(seed.wrapping_add(7)) * 38.0) * scale,
+                    now,
+                    0.32 + noise(seed.wrapping_add(11)) * 0.30,
+                    (0.35 + noise(seed.wrapping_add(17)) * 0.45) * scale,
+                    false,
+                );
+                self.particles.last_mut().unwrap().contact = Some(ContactKind::Spark);
+                continue;
+            }
             self.add_burst_flame(
                 at + outward * (1.0 + noise(seed.wrapping_add(5)) * 4.0),
                 outward * speed + Vec3::Y * (5.0 + noise(seed.wrapping_add(7)) * 39.0),
@@ -380,56 +417,56 @@ impl Effects {
             self.add_burst_dust(
                 at + outward * (2.0 + noise(seed.wrapping_add(3)) * 4.0),
                 outward * (24.0 + noise(seed.wrapping_add(5)) * 37.0) * scale
-                    + Vec3::Y * (2.0 + noise(seed.wrapping_add(7)) * 11.0),
+                    + Vec3::Y * (0.8 + noise(seed.wrapping_add(7)) * 4.0),
                 now,
                 0.45 + noise(seed.wrapping_add(9)) * 0.65,
                 (2.0 + noise(seed.wrapping_add(11)) * 6.0) * scale,
             );
         }
     }
-    /// A bounded rising stem and broad cap; these clouds never issue damage.
-    fn nuclear_cloud(&mut self, at: Vec3, now: f32) {
-        const CLOUD: usize = 84;
-        let needed = self
-            .particles
-            .len()
-            .saturating_add(CLOUD)
-            .saturating_sub(CAP);
-        self.particles.drain(..needed);
-        for i in 0..CLOUD {
-            let n = i as u32;
-            let seed = self.serial;
-            let a = n as f32 * 2.399963;
-            let radial = Vec3::new(a.cos(), 0.0, a.sin());
-            let cap = i >= 28;
-            let radius = if cap {
-                9.0 + noise(seed) * 28.0
-            } else {
-                3.0 + noise(seed) * 9.0
-            };
-            let speed = if cap {
-                16.0 + noise(seed + 1) * 18.0
-            } else {
-                1.5 + noise(seed + 1) * 4.0
-            };
-            self.add(
-                at + radial * radius + Vec3::Y * if cap { 12.0 } else { 2.0 },
-                radial * speed
-                    + Vec3::Y
-                        * if cap {
-                            34.0 + noise(seed + 2) * 11.0
-                        } else {
-                            3.0 + (i % 7) as f32 * 6.0
-                        },
-                now,
-                7.0 + noise(seed + 3) * 4.0,
-                if cap {
-                    18.0 + noise(seed + 4) * 22.0
-                } else {
-                    12.0 + noise(seed + 4) * 9.0
-                },
-                true,
-            );
+    /// Bounded presentation events; the simulation owns all damage.
+    fn nuclear_cloud(&mut self, at: Vec3, now: f32, reach: f32) {
+        if self.nuclear.len() == nuclear::CAP {
+            self.nuclear.remove(0);
+        }
+        self.nuclear.push((at, now));
+        if self.nuclear_fronts.len() == nuclear::CAP {
+            self.nuclear_fronts.remove(0);
+        }
+        self.nuclear_fronts
+            .push(nuclear::ShockFront::new(at, now, reach));
+    }
+    fn shock_contact(&mut self, at: Vec3, now: f32) {
+        // Attribute only nearby, recent damage. This is a visual observation,
+        // never a collision query or an additional damage calculation.
+        let nearest = self
+            .nuclear_fronts
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.accepts(at, now))
+            .min_by(|(_, a), (_, b)| {
+                a.at.distance_squared(at)
+                    .total_cmp(&b.at.distance_squared(at))
+            })
+            .map(|(i, _)| i);
+        if let Some(i) = nearest {
+            self.nuclear_fronts[i].observe(at, now);
+        }
+    }
+    fn capture_shock_edits(&mut self, sim: &BlastRange, now: f32) {
+        if self.last_shock_tick == Some(sim.tick) || self.nuclear_fronts.is_empty() {
+            return;
+        }
+        self.last_shock_tick = Some(sim.tick);
+        // Stratified sampling of an existing applied-edit list: at most64
+        // direct reads even when the blast removes millions of voxels.
+        let edits = sim.world.edits();
+        let samples = edits.len().min(64);
+        for sample in 0..samples {
+            let edit = edits[sample * edits.len() / samples];
+            if edit.mat == 0 {
+                self.shock_contact(Vec3::new(edit.x as f32, edit.y as f32, edit.z as f32), now);
+            }
         }
     }
     /// Presentation-only contact: a hot pinch, sparks and cold cubic spall.
@@ -502,12 +539,21 @@ impl Effects {
             .map_or(Vec3::Y, |(_, normal)| normal)
     }
     pub fn capture(&mut self, sim: &BlastRange) {
-        let now = sim.tick as f32 / 30.0;
+        let now = sim.tick as f32 / sim_core::TICKS_PER_SECOND as f32;
         self.particles.retain(|p| now - p.born < p.life);
+        self.nuclear.retain(|(_, born)| now - born < nuclear::LIFE);
+        self.nuclear_fronts.retain(|f| now - f.born < nuclear::LIFE);
         self.deaths.retain(|(_, born)| now - born < 0.45);
         self.tracers.retain(|p| now - p.born < TRACER_LIFE);
-        self.energy_impacts
-            .retain(|(_, tick)| sim.tick.saturating_sub(*tick) <= 30);
+        for &(p, amount) in sim.water.vapor_events.iter().take(8) {
+            let before=self.particles.len();
+            let edge=0.9+(amount as f32/64.0).sqrt().min(1.6);
+            self.add(Vec3::from(p.map(|v|v as f32))+Vec3::splat(0.5),Vec3::new(0.0,3.0,0.0),now,0.9,edge,true);
+            if self.particles.len()>before {self.particles[before].steam=true;}
+        }
+        self.energy_impacts.retain(|(_, tick)| {
+            sim.tick.saturating_sub(*tick) <= sim_core::TICKS_PER_SECOND as u32
+        });
         for i in &sim.battle.impacts {
             if i.weapon.energetic() {
                 if self.energy_impacts.len() == 8 {
@@ -526,7 +572,7 @@ impl Effects {
                 let c = sim.battle.config(i.weapon);
                 self.shell_burst(at, now, c.energy, c.gas_source_radius);
                 if i.weapon == BattleWeapon::Nuclear {
-                    self.nuclear_cloud(at, now);
+                    self.nuclear_cloud(at, now, (c.half_cells as i32 * c.cell_units) as f32);
                 }
             } else if i.weapon == BattleWeapon::Kinetic {
                 self.kinetic_contact(at, self.kinetic_normal(at), now);
@@ -556,6 +602,7 @@ impl Effects {
             }
         }
         let tuning = &sim.streams.tuning;
+        self.capture_shock_edits(sim, now);
         self.sources.resize(sim.units.len() + 1, (u64::MAX, None));
         for (id, u) in sim
             .units
@@ -565,7 +612,9 @@ impl Effects {
         {
             let dead = !u.status.alive;
             if dead && self.alive.get(id) == Some(&true) {
-                self.destruction(destruction_origin(u), now);
+                let at = destruction_origin(u);
+                self.shock_contact(at, now);
+                self.destruction(at, now);
             }
             if id >= self.alive.len() {
                 self.alive.push(u.status.alive);
@@ -842,18 +891,33 @@ impl Effects {
                 beam,
                 control,
                 weapon: Vec4::new(
-                    if weapon == BattleWeapon::Annihilation {
+                    if weapon == BattleWeapon::Nuclear {
+                        3.0
+                    } else if weapon == BattleWeapon::Annihilation {
                         2.0
                     } else {
                         1.0
                     },
-                    now / 30.0,
+                    now / sim_core::TICKS_PER_SECOND as f32,
                     0.0,
                     0.0,
                 ),
             };
             count += 1;
         };
+        for &(at, born) in self.nuclear.iter().rev() {
+            let age = (now / sim_core::TICKS_PER_SECOND as f32 - born).max(0.0);
+            let sample = nuclear::illumination(age);
+            if sample.intensity > 0.0 {
+                let centre = at + Vec3::Y * sample.height;
+                push(
+                    BattleWeapon::Nuclear,
+                    centre.extend(32000.0 * (sample.intensity / 80_000_000_000.0)),
+                    Vec4::ZERO,
+                    Vec3::from(sample.colour).extend(1.0),
+                );
+            }
+        }
         for r in sim.battle.rounds.iter().filter(|r| r.weapon.energetic()) {
             let at = point(r.previous).lerp(point(r.pos), fraction);
             let direction = (point(r.pos) - point(r.previous)).normalize_or_zero();
@@ -882,7 +946,7 @@ impl Effects {
             push(weapon, Vec4::ZERO, point(muzzle).extend(charge), Vec4::ZERO);
         }
         for (impact, tick) in self.energy_impacts.iter().rev() {
-            let age = (now - *tick as f32).max(0.0) / 30.0;
+            let age = (now - *tick as f32).max(0.0) / sim_core::TICKS_PER_SECOND as f32;
             if age >= 1.0 {
                 continue;
             }
@@ -988,33 +1052,37 @@ fn dust_strength(mat: u16) -> f32 {
     }
 }
 fn cube(buf: &mut MeshBuf, at: Vec3, edge: f32, col: [f32; 4]) {
+    block(buf, at, Vec3::splat(edge), col);
+}
+fn block(buf: &mut MeshBuf, at: Vec3, size: Vec3, col: [f32; 4]) {
     for axis in 0..3 {
         for positive in [false, true] {
             let k = if positive { 1.0 } else { -1.0 };
             let mut normal = Vec3::ZERO;
             normal[axis] = k;
             let mut a = Vec3::ZERO;
-            a[(axis + 1) % 3] = edge * k;
+            a[(axis + 1) % 3] = size[(axis + 1) % 3] * k;
             let mut b = Vec3::ZERO;
-            b[(axis + 2) % 3] = edge;
-            let centre = at + normal * edge * 0.5;
+            b[(axis + 2) % 3] = size[(axis + 2) % 3];
+            let centre = at + normal * size[axis] * 0.5;
             let start = buf.pos.len() as u32;
-            for q in [
-                centre - a * 0.5 - b * 0.5,
-                centre + a * 0.5 - b * 0.5,
-                centre + a * 0.5 + b * 0.5,
-                centre - a * 0.5 + b * 0.5,
-            ] {
-                buf.pos.push(q.to_array());
-                buf.nrm.push(normal.to_array());
-                let shade = match axis {
-                    1 if positive => 1.0,
-                    0 => 0.82,
-                    _ => 0.64,
-                };
-                buf.col
-                    .push([col[0] * shade, col[1] * shade, col[2] * shade, col[3]]);
-            }
+            buf.pos.extend(
+                [
+                    centre - a * 0.5 - b * 0.5,
+                    centre + a * 0.5 - b * 0.5,
+                    centre + a * 0.5 + b * 0.5,
+                    centre - a * 0.5 + b * 0.5,
+                ]
+                .map(|q| q.to_array()),
+            );
+            buf.nrm.extend([normal.to_array(); 4]);
+            let shade = match axis {
+                1 if positive => 1.0,
+                0 => 0.82,
+                _ => 0.64,
+            };
+            let tint = [col[0] * shade, col[1] * shade, col[2] * shade, col[3]];
+            buf.col.extend([tint; 4]);
             buf.idx
                 .extend([start, start + 1, start + 2, start, start + 2, start + 3]);
         }
@@ -1035,14 +1103,24 @@ fn beam(buf: &mut MeshBuf, from: Vec3, to: Vec3, width: f32, col: [f32; 4]) {
         *p = (centre + rotation * Vec3::new(local.x * width, local.y * length, local.z * width))
             .to_array();
     }
-    for n in &mut buf.nrm[start..] {
-        *n = (rotation * Vec3::from(*n)).to_array();
+    for face in buf.nrm[start..].chunks_exact_mut(4) {
+        let normal = (rotation * Vec3::from(face[0])).to_array();
+        face.fill(normal);
     }
 }
 fn tracer_tail(from: Vec3, to: Vec3) -> Option<Vec3> {
     let path = to - from;
     let length = path.length();
     (length >= 0.01).then(|| to - path / length * length.min(12.0))
+}
+fn sort_particles(particles: &mut [(&Particle, Vec3, f32)], eye: Vec3) {
+    particles.sort_by_cached_key(|(_, at, _)| {
+        let bits = eye.distance_squared(*at).to_bits();
+        // Monotonic integer encoding of f32::total_cmp, including signed
+        // zero/NaN. Cached-key sorting keeps original order at equal depths.
+        let ordered = bits ^ (((bits as i32 >> 31) as u32) | 0x8000_0000);
+        std::cmp::Reverse(ordered)
+    });
 }
 #[allow(clippy::too_many_arguments)] // Independent Bevy resources and read-only pose queries.
 pub fn draw(
@@ -1053,6 +1131,7 @@ pub fn draw(
     mut materials: ResMut<Assets<StandardMaterial>>,
     camera: Query<(&Transform, &Camera, &Projection), With<Camera3d>>,
     panel: Option<Res<panel::Panel>>,
+    lab: Option<Res<laboratory::Laboratory>>,
     bodies: Query<(&Witness, &Transform)>,
     mut layers: Query<(&Layer, &mut Visibility)>,
     mut death_lights: Query<
@@ -1105,11 +1184,27 @@ pub fn draw(
         + if scene.paused {
             0.0
         } else {
-            (scene.acc * 30.0).clamp(0.0, 1.0)
+            (scene.acc * sim_core::TICKS_PER_SECOND as f32).clamp(0.0, 1.0)
         })
-        / 30.0;
+        / sim_core::TICKS_PER_SECOND as f32;
     for (slot, mut light, mut transform) in &mut death_lights {
-        if let Some(&(at, born)) = fx.deaths.get(slot.0) {
+        if let Some(&(at, born)) = fx
+            .nuclear
+            .last()
+            .filter(|(_, born)| now - born < 12.0)
+            .filter(|_| slot.0 == DEATH_LIGHTS - 1)
+        {
+            let age = (now - born).max(0.0);
+            let sample = nuclear::illumination(age);
+            light.color = Color::srgb(sample.colour[0], sample.colour[1], sample.colour[2]);
+            light.range = 3600.0;
+            light.radius = 180.0;
+            light.intensity = sample.intensity;
+            transform.translation = at + Vec3::Y * sample.height;
+        } else if let Some(&(at, born)) = fx.deaths.get(slot.0) {
+            light.color = Color::srgb(1.0, 0.43, 0.10);
+            light.range = 95.0;
+            light.radius = 4.0;
             let t = ((now - born) / 0.45).clamp(0.0, 1.0);
             light.intensity = 14_000_000.0 * (1.0 - smooth01(t));
             transform.translation = at;
@@ -1127,6 +1222,7 @@ pub fn draw(
         return;
     }
     fx.last_frame = Some(frame);
+    fx.nuclear_pixel = view.map_or(0.0, |v| v.world_per_pixel());
     let eye = camera
         .iter()
         .next()
@@ -1153,10 +1249,7 @@ pub fn draw(
             };
         particles.push((p, at, t));
     }
-    particles.sort_by(|a, b| {
-        eye.distance_squared(b.1)
-            .total_cmp(&eye.distance_squared(a.1))
-    });
+    sort_particles(&mut particles, eye);
     // Use exactly the interpolated transforms already applied to visible meshes,
     // including solved legs. Current simulation poses can lead the picture by a tick.
     let mut poses = std::collections::BTreeMap::new();
@@ -1172,12 +1265,13 @@ pub fn draw(
             particles: &particles,
             now,
             fraction: if scene.realtime {
-                (scene.acc * 30.0).clamp(0.0, 1.0)
+                (scene.acc * sim_core::TICKS_PER_SECOND as f32).clamp(0.0, 1.0)
             } else {
                 1.0
             },
             poses: &poses,
             markers: view.filter(|_| enabled),
+            first_person_origin: lab.as_ref().and_then(|l|laboratory::first_person::beam_origin(l,&scene)),
             single: (
                 scene.previous_shell,
                 if scene.anni {
@@ -1239,17 +1333,98 @@ fn fire_mesh(mut buf: MeshBuf) -> Mesh {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn nuclear_cloud_recycles_old_smoke_and_keeps_the_pool_bounded() {
-        let mut fx = Effects::default();
+    fn vapor_contacts_emit_a_bounded_light_steam_layer() {
+        let mut sim=BlastRange::new(config(false,false));
+        for x in 0..20 {sim.water.vapor_events.push(([x,20,20],64));}
+        let mut effects=Effects::default();
+        effects.capture(&sim);
+        let steam:Vec<_>=effects.particles.iter().filter(|p|p.steam).collect();
+        assert_eq!(steam.len(),8);
+        assert!(steam.iter().all(|p|p.smoke && p.velocity.y>0.0));
+    }
+    #[test]
+    fn cached_depth_sort_preserves_transparency_order_and_equal_depth_ties() {
+        let mut effects = Effects::default();
         for _ in 0..CAP {
-            fx.add(Vec3::ZERO, Vec3::ZERO, 0.0, 12.0, 1.0, true);
+            effects.add(Vec3::ZERO, Vec3::ZERO, 0.0, 1.0, 1.0, true);
         }
-        fx.nuclear_cloud(Vec3::new(100.0, 20.0, 100.0), 1.0);
-        assert_eq!(fx.particles.len(), CAP);
-        let cloud: Vec<_> = fx.particles.iter().filter(|p| p.born == 1.0).collect();
-        assert_eq!(cloud.len(), 84);
-        assert!(cloud.iter().all(|p| p.smoke && p.life <= 11.0));
-        assert!(cloud.iter().any(|p| p.edge > 30.0));
+        for count in [0, 1, 32, 57, 256, CAP] {
+            let mut particles: Vec<_> = effects.particles[..count]
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let at = match i % 13 {
+                        0 => Vec3::X,
+                        1 => -Vec3::X,
+                        2 => Vec3::new(f32::NAN, 0.0, 0.0),
+                        3 => Vec3::new(f32::INFINITY, 0.0, 0.0),
+                        _ => Vec3::new((i * 37 % 89) as f32, 3.0, (i * 19 % 73) as f32),
+                    };
+                    (p, at, 0.3)
+                })
+                .collect();
+            let eye = Vec3::new(0.0, 7.0, 0.0);
+            let mut reference = particles.clone();
+            reference.sort_by(|a, b| {
+                eye.distance_squared(b.1)
+                    .total_cmp(&eye.distance_squared(a.1))
+            });
+            sort_particles(&mut particles, eye);
+            assert_eq!(
+                particles.iter().map(|p| p.0.seed).collect::<Vec<_>>(),
+                reference.iter().map(|p| p.0.seed).collect::<Vec<_>>()
+            );
+        }
+    }
+    #[test]
+    fn nuclear_cloud_events_are_bounded_and_reset_with_the_scene() {
+        let mut fx = Effects::default();
+        for i in 0..12 {
+            fx.nuclear_cloud(Vec3::splat(i as f32), i as f32, 2048.0);
+        }
+        assert_eq!(fx.nuclear.len(), nuclear::CAP);
+        assert_eq!(fx.nuclear.last().unwrap().1, 11.0);
+        assert_eq!(fx.nuclear_fronts.len(), nuclear::CAP);
+        fx.clear();
+        assert!(fx.nuclear.is_empty());
+        assert!(fx.nuclear_fronts.is_empty());
+    }
+
+    #[test]
+    fn shock_observes_applied_digs_once_per_tick_without_changing_the_simulation() {
+        let mut sim = BlastRange::new(config(false, false));
+        let mut effects = Effects::default();
+        effects.nuclear_cloud(Vec3::new(100.0, 16.0, 100.0), 0.0, 2048.0);
+        sim.world.queue_edit(voxel::Edit::put(140, 17, 100, 3));
+        sim.world.flush();
+        sim.tick = 1;
+        effects.capture_shock_edits(&sim, 1.0 / sim_core::TICKS_PER_SECOND as f32);
+        let mut empty = MeshBuf::default();
+        nuclear::append(&mut empty, &effects, 0.08, true);
+        assert!(empty.is_empty(), "a put created a pressure front");
+        let mat = sim.world.material(128, 15, 100);
+        sim.world.queue_edit(voxel::Edit::dig_if(128, 15, 100, mat));
+        sim.world.flush();
+        sim.tick = 2;
+        let hash = sim.state_hash();
+        effects.capture_shock_edits(&sim, 2.0 / sim_core::TICKS_PER_SECOND as f32);
+        assert_eq!(sim.state_hash(), hash);
+        let mut first = MeshBuf::default();
+        nuclear::append(&mut first, &effects, 0.11, true);
+        assert!(!first.is_empty(), "an applied removal was not observed");
+        let mat = sim.world.material(220, 15, 100);
+        sim.world.queue_edit(voxel::Edit::dig_if(220, 15, 100, mat));
+        sim.world.flush();
+        effects.capture_shock_edits(&sim, 0.09);
+        let mut repeated = MeshBuf::default();
+        nuclear::append(&mut repeated, &effects, 0.11, true);
+        assert_eq!(first.pos, repeated.pos, "the same tick was sampled twice");
+        sim.tick = 3;
+        effects.capture_shock_edits(&sim, 0.10);
+        let mut next = MeshBuf::default();
+        nuclear::append(&mut next, &effects, 0.15, true);
+        let xmax = |b: &MeshBuf| b.pos.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max);
+        assert!(xmax(&next) > xmax(&first), "the next tick did not advance");
     }
 
     use super::*;
@@ -1382,7 +1557,7 @@ mod tests {
             }
         }
         assert!(r.impact.is_some(), "the shell did not land");
-        let now = r.tick as f32 / 30.0;
+        let now = r.tick as f32 / sim_core::TICKS_PER_SECOND as f32;
         let hot = effects
             .particles
             .iter()
@@ -1398,7 +1573,9 @@ mod tests {
             effects
                 .particles
                 .iter()
-                .filter(|p| p.born == now && p.burst_flame)
+                .filter(|p| {
+                    p.born == now && (p.burst_flame || p.contact == Some(ContactKind::Spark))
+                })
                 .count(),
             24
         );
@@ -1436,7 +1613,7 @@ mod tests {
             }
         }
         assert!(r.impact.is_some(), "solid shell never landed");
-        let now = r.tick as f32 / 30.0;
+        let now = r.tick as f32 / sim_core::TICKS_PER_SECOND as f32;
         let sparks = effects
             .particles
             .iter()
@@ -1634,7 +1811,7 @@ mod tests {
         );
         for trace in &sim.battle.traces {
             let mut reference = Effects::default();
-            reference.capture_bullet(trace, sim.tick as f32 / 30.0);
+            reference.capture_bullet(trace, sim.tick as f32 / sim_core::TICKS_PER_SECOND as f32);
             let expected = reference.tracers.first().unwrap();
             assert!(effects
                 .tracers
@@ -1714,6 +1891,39 @@ mod tests {
     }
 
     #[test]
+    fn nuclear_surface_lighting_follows_the_same_fireball_and_retires_when_cold() {
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        layout.battle = true;
+        let mut sim = range_sim(config(false, false), Some(&layout), false, None).unwrap();
+        let mut effects = Effects::default();
+        let at = Vec3::new(100.0, 80.0, 200.0);
+        effects.nuclear_cloud(at, 0.0, 2048.0);
+        for tick in [1, 2, 6, 40, 110, 120] {
+            sim.tick = tick;
+            let age = tick as f32 / sim_core::TICKS_PER_SECOND as f32;
+            let expected = nuclear::illumination(age);
+            let mut params = render::gas::GasParams::default();
+            effects.battle_energy(&sim, 1.0, &mut params);
+            if expected.intensity == 0.0 {
+                assert_eq!(
+                    params.energy_count.x, 0.0,
+                    "cold cloud retained a terrain light"
+                );
+            } else {
+                assert_eq!(params.energy_count.x, 1.0);
+                let source = params.energy_sources[0];
+                assert_eq!(source.weapon.x, 3.0);
+                assert_eq!(source.energy.truncate(), at + Vec3::Y * expected.height);
+                assert_eq!(source.control, Vec3::from(expected.colour).extend(1.0));
+                assert_eq!(
+                    source.energy.w,
+                    32000.0 * (expected.intensity / 80_000_000_000.0)
+                );
+            }
+        }
+    }
+    #[test]
     fn mixed_energy_impacts_keep_independent_visual_kinds_and_lifetimes() {
         use sim_core::blast::battle::Impact;
         let mut layout =
@@ -1787,7 +1997,7 @@ mod tests {
         let (a, b) = (point(trace.from), point(trace.to));
         let direction = (b - a).normalize();
         let length = a.distance(b);
-        let now = r.tick as f32 / 30.0;
+        let now = r.tick as f32 / sim_core::TICKS_PER_SECOND as f32;
         let along: Vec<_> = effects
             .particles
             .iter()

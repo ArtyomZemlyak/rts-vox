@@ -1,14 +1,14 @@
 //! Parameters of the blast range and its reusable explosion systems.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ProjectileMotion {
     #[default]
     Ballistic,
     Direct,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub enum Delivery {
     #[default]
     Blast,
@@ -20,7 +20,7 @@ pub enum Delivery {
 
 /// Optional material-specific deflection for a solid projectile. All
 /// percentages are thousandths, matching other weapon tuning values.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Ricochet {
     pub material: u16,
     pub min_speed: i32,
@@ -31,13 +31,41 @@ pub struct Ricochet {
 }
 
 /// Finite lateral work carried by fragments behind a penetrated surface.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Spall {
     pub radius: u8,
     pub work_milli: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SoilCrater {
+    pub spread: u32,
+    pub step: u32,
+    pub layer: u32,
+    pub deep_half_width: u32,
+    pub middle_half_width: u32,
+    pub middle_depth: u32,
+    pub outer_depth: u32,
+    pub taper_units: u32,
+}
+
+impl SoilCrater {
+    pub fn valid(&self) -> bool {
+        (1..=32).contains(&self.spread)
+            && (1..=64).contains(&self.step)
+            && (1..=64).contains(&self.layer)
+            && self.deep_half_width >= self.step
+            && self.middle_half_width >= self.deep_half_width
+            && self.middle_half_width <= 4096
+            && (1..=1_000_000).contains(&self.middle_depth)
+            && (1..=self.middle_depth).contains(&self.outer_depth)
+            && self.middle_depth % self.layer == 0
+            && self.outer_depth % self.layer == 0
+            && (1..=4096).contains(&self.taper_units)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ExplosionConfig {
     #[serde(default)]
     pub delivery: Delivery,
@@ -54,8 +82,23 @@ pub struct ExplosionConfig {
     pub material_energy_j: u32,
     pub air_cost: u32,
     pub soil_resistance: u32,
+    /// Extra soil work per world unit below the soil surface or buried impact.
+    /// Zero retains the isotropic legacy preset; vegetation and body work
+    /// are independent.
+    #[serde(default)]
+    pub soil_depth_cost: u32,
+    /// Optional square terraces; absence retains the legacy nuclear bowl.
+    #[serde(default)]
+    pub soil_crater: Option<SoilCrater>,
+    /// Soil fracture price for this weapon only; 1000 keeps material work.
+    #[serde(default = "normal_soil_fracture")]
+    pub soil_fracture_milli: u32,
     pub concrete_resistance: u32,
     pub steel_resistance: u32,
+    /// Optional explicit work for terrain material IDs0..8. Absent retains
+    /// the legacy soil/concrete/steel groups; other IDs retain steel work.
+    #[serde(default)]
+    pub material_resistance: Option<[u32; 9]>,
     /// Anti-matter ablation of the range unit; zero disables the witness unit.
     #[serde(default)]
     pub unit_ablation_resistance: u32,
@@ -167,11 +210,17 @@ impl ExplosionConfig {
         let c = self;
         if !(1..=32).contains(&c.half_cells)
             || c.charge_ticks > c.fire_tick
-            || !(1..=16).contains(&c.cell_units)
+            || !(1..=64).contains(&c.cell_units)
             || !(1..=1_000_000).contains(&c.energy)
             || c.material_energy_j > Self::MAX_MATERIAL_ENERGY_J
             || c.air_cost != 100
+            || c.soil_depth_cost > 1_000_000
+            || c.soil_crater.is_some_and(|shape| !shape.valid())
+            || !(1000..=100_000).contains(&c.soil_fracture_milli)
             || c.unit_ablation_resistance > 1_000_000
+            || c.material_resistance.is_some_and(|work| {
+                work[0] != 0 || work[1..].iter().any(|v| !(1..=1_000_000).contains(v))
+            })
             || [c.soil_resistance, c.concrete_resistance, c.steel_resistance]
                 .iter()
                 .any(|v| !(1..=1_000_000).contains(v))
@@ -224,10 +273,34 @@ impl ExplosionConfig {
 fn display_cell() -> u32 {
     320
 }
+fn normal_soil_fracture() -> u32 {
+    1000
+}
 
 #[cfg(test)]
 mod display_tests {
     use super::*;
+    #[test]
+    fn square_crater_is_optional_and_shape_is_bounded() {
+        let text = include_str!("../../../data/nuclear-warhead.ron");
+        let stock = ExplosionConfig::from_ron(text).unwrap();
+        assert!(stock.soil_crater.is_some());
+        let old = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+        assert!(old.soil_crater.is_none());
+        for (from, to) in [
+            ("spread: 7", "spread: 0"),
+            ("step: 32", "step: 65"),
+            ("layer: 4", "layer: 0"),
+            ("middle_depth: 32", "middle_depth: 3"),
+            ("outer_depth: 4", "outer_depth: 36"),
+            ("taper_units: 256", "taper_units: 0"),
+        ] {
+            assert!(
+                ExplosionConfig::from_ron(&text.replace(from, to)).is_err(),
+                "{to}"
+            );
+        }
+    }
     #[test]
     fn display_scale_is_optional_bounded_and_independent_of_solver_grid() {
         let text = include_str!("../../../data/explosion.ron");

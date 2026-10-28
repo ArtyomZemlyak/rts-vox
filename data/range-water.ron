@@ -1,0 +1,17 @@
+// Exact conserved sub-voxel volume. Small compressibility transmits pressure.
+(
+ motion:(checks_per_tick:32768,column_cells:256,max_steps:32),
+ units_per_voxel:4096, compression:32, surface_tension:8, viscosity_milli:40,
+ max_flow:4096, max_cell_units:65536, max_cells:262144,
+ checks_per_tick:2048, transfers_per_tick:1024, displacement_reach:8, obstacle_checks:1024,
+ pressure_checks:2048, pressure_fill_milli:750, pressure_packets:64, pressure_interval:4,
+ body_samples:8, body_depth:32, buoyancy_cells:8192, drag_milli:180,
+ moisture_checks:256, drying_units:1, capillary_units:32, evaporation_heat:8,
+ porous:[
+  (material:1,capacity:1024,rate:64,repose_bonus:-1),
+  (material:7,capacity:1024,rate:64,repose_bonus:-1),
+  (material:8,capacity:512,rate:32,repose_bonus:-1),
+  (material:10,capacity:768,rate:64,repose_bonus:2),
+  (material:5,capacity:512,rate:16,repose_bonus:0),
+ ],
+)

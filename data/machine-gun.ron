@@ -19,7 +19,7 @@
     edits_per_tick: 8192,
     fragment_box: 2,
     hull_impulse_milli: 0,
-    fire_tick: 75,
+    fire_tick: 50,
     // 240 m/s: finite, readable flight in both battle and weapon trials.
     shell_speed: 2400,
     heat_units: 0,

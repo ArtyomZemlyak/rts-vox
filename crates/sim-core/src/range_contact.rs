@@ -88,7 +88,6 @@ impl BlastRange {
             }
         }
         face.sort_unstable_by(|p, q| q.0.cmp(&p.0).then((p.1, p.2).cmp(&(q.1, q.2))));
-        let price = self.matter.crush_price().max(1);
         let before = (u.removed.len(), u.seg_removed.len());
         let Self {
             matter,
@@ -114,6 +113,13 @@ impl BlastRange {
                 if u.section_holds(part, cell.map(|v| v as u8)) {
                     continue;
                 }
+                let body = if part == 0 {
+                    &u.body
+                } else {
+                    &u.body.segments[part - 1].body
+                };
+                let (cost, motion) = m.body_price(body, cell);
+                let price = (cost - motion).max(1);
                 let need = u.hit_resistance(Some((part, cell)), config).max(1);
                 let frame = if part == 0 {
                     u.root_frame(cell[1])

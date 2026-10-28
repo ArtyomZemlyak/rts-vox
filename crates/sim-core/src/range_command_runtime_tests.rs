@@ -177,10 +177,11 @@ fn owned_commands_match_direct_kernel_in_real_combat_and_pending_checkpoint_repl
         let mut replay = None;
         let mut fired = false;
         let mut damaged = false;
+        let mut direct_outcomes = Vec::new();
         for tick in 0..240 {
             for &(when, command) in &schedule {
                 if tick == when {
-                    direct.execute_battle_command(command);
+                    direct_outcomes.push(direct.execute_battle_command(command));
                 }
             }
             direct.step();
@@ -206,8 +207,8 @@ fn owned_commands_match_direct_kernel_in_real_combat_and_pending_checkpoint_repl
             }
         }
         assert!(fired && damaged, "empty combat fixture {kind:?}");
-        for receipt in accepted {
-            assert!(r.receipt(receipt.id).unwrap().outcome.unwrap().accepted());
+        for (receipt, outcome) in accepted.into_iter().zip(direct_outcomes) {
+            assert_eq!(r.receipt(receipt.id).unwrap().outcome, Some(outcome));
         }
         let replica = replay.as_mut().unwrap();
         assert_eq!(

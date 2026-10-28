@@ -545,7 +545,7 @@ fn an_unfinished_separation_and_its_whole_section_resume_from_a_game_save() {
     assert_eq!(bytes, save(&back));
     r.world.tuning.impact.detach_work_per_tick = 8192;
     back.world.tuning.impact.detach_work_per_tick = 8192;
-    for tick in 0..60 {
+    for tick in 0..modding::clock::stream_ticks(60) {
         assert_eq!(
             r.world.tick(),
             back.world.tick_par(4),
@@ -561,7 +561,13 @@ fn an_unfinished_separation_and_its_whole_section_resume_from_a_game_save() {
         .bursts
         .fragments
         .iter()
-        .filter(|f| f.chunk.is_some())
+        // The cut itself may now form exact panels too. Only whole sections
+        // above the severed plane belong in addition to the cut cells.
+        .filter(|f| {
+            f.chunk
+                .as_ref()
+                .is_some_and(|c| c.cells.iter().any(|cell| cell[1] > plane))
+        })
         .collect();
     assert!(!chunks.is_empty());
     assert!(chunks.iter().any(|f| f.count > 8));
@@ -909,8 +915,13 @@ fn a_hole_between_supports_does_not_create_a_fall_but_losing_them_does() {
     dig(&mut r, 80, 112);
     r.world.tick();
     let first_drop = initial.sub(r.world.units.body_y(i));
+    // Semi-implicit gravity over the bounded spring substeps. The expected
+    // distance depends on elapsed seconds, not the former 30 Hz tick.
+    let hz = sim_core::TICKS_PER_SECOND;
+    let steps = 30u32.div_ceil(hz as u32) as i32;
+    let expected = Fx::from_ratio(t.gravity, hz * hz).mul(Fx::from_ratio(steps + 1, 2 * steps));
     assert!(
-        first_drop > Fx::from_ratio(1, 10) && first_drop < Fx::from_ratio(12, 100),
+        first_drop.sub(expected).abs() < expected.mul(Fx::from_ratio(5, 100)),
         "gravity was integrated twice or the body teleported: {first_drop:?}"
     );
     assert_ne!(r.world.units.fall_from[i], sim_core::NOT_FALLING);
@@ -940,7 +951,7 @@ fn a_hole_between_supports_does_not_create_a_fall_but_losing_them_does() {
 }
 
 #[test]
-fn version_nine_flight_migrates_position_and_velocity_without_a_jump() {
+fn unmarked_legacy_flight_is_refused_and_current_flight_resumes_without_a_jump() {
     use fx::Fx;
     let t = tuning();
     let mut r = Reference::new(SEED, 0, t, weapons());
@@ -953,13 +964,20 @@ fn version_nine_flight_migrates_position_and_velocity_without_a_jump() {
     r.world.units.fall_v[id] = Fx::from_ratio(1, 2);
     r.world.units.heave_v[id] = Fx::ZERO;
     let body = r.world.units.body_y(id);
-    let mut bytes = save(&r);
-    bytes[8..12].copy_from_slice(&9u32.to_le_bytes());
-    // v9 and v10 arrays have the same layout; only ownership of flight changes.
+    let bytes = save(&r);
+    let mut old = bytes.clone();
+    old[8..12].copy_from_slice(&9u32.to_le_bytes());
+    assert!(matches!(
+        load(&old, t, weapons()),
+        Err(LoadError::Version { found: 9, .. })
+    ));
+    let mut wrong_clock = bytes.clone();
+    wrong_clock[12..16].copy_from_slice(&30u32.to_le_bytes());
+    assert!(load(&wrong_clock, t, weapons()).is_err());
     let mut back = load(&bytes, t, weapons()).unwrap();
     assert_eq!(back.world.units.body_y(id), body);
-    assert_eq!(back.world.units.body_vy(id), Fx::from_int(-15));
-    assert_eq!(back.world.units.fall_f[id], Fx::ZERO);
+    assert_eq!(back.world.units.body_vy(id), r.world.units.body_vy(id));
+    assert_eq!(back.world.units.fall_f[id], r.world.units.fall_f[id]);
     let current = save(&back);
     let mut again = load(&current, t, weapons()).unwrap();
     assert_eq!(current, save(&again));

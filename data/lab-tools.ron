@@ -1,0 +1,10 @@
+(
+ brush_edge:8, brush_cells:512,
+ devices:16, device_edge:3, device_work:600,
+ device_checks:256, movement_ticks:4,
+ collector_capacity:900000, collector_depot:2000000, collector_radius:128,
+ collector_reach:14, collector_half:6, collector_height:7, collector_step:2,
+ collector_work:4800, collector_scans:128, collector_plans:1, collector_nodes:1024,
+ collector_move_ticks:1, collector_retry_ticks:40, collector_unload:12000,
+ collector_refine_num:7, collector_refine_den:10,
+)

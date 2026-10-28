@@ -266,11 +266,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stock_economy_lists_every_kind_once_and_none_digs() {
+    fn stock_economy_lists_every_kind_and_the_crawler_digs() {
         let e = RangeEconomy::stock();
         for kind in RangeUnitKind::ALL {
             assert!(e.kind(kind).is_some(), "{kind:?}");
-            assert!(!e.digs(kind), "the owner has not chosen the digger");
+            assert_eq!(e.digs(kind), kind == RangeUnitKind::Crawler);
         }
         // The base is the stock dock (ADR-673).
         assert!(e.bank.is_some());

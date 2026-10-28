@@ -115,7 +115,7 @@ fn feet_of(u: &RangeUnit) -> Vec<Option<Contact>> {
 /// Share of the tick elapsed on this frame; a whole tick outside realtime.
 fn fraction(scene: &Scene) -> f32 {
     if scene.realtime && !scene.paused {
-        (scene.acc * 30.0).clamp(0.0, 1.0)
+        (scene.acc * sim_core::TICKS_PER_SECOND as f32).clamp(0.0, 1.0)
     } else {
         1.0
     }
@@ -711,6 +711,7 @@ pub fn animate(
             voxel::unit::artillery_turret_t2(),
             voxel::unit::artillery_turret_t3(),
             voxel::unit::nuclear_silo(),
+            voxel::unit::crawler(),
         ]
         .iter()
         .map(|b| gait::rigs_of(b, 0.01, &render::model::segment_frames(b, 0.01)))
@@ -762,6 +763,7 @@ pub fn animate(
         if !matches!(
             u.kind,
             RangeUnitKind::Tank
+                | RangeUnitKind::Crawler
                 | RangeUnitKind::Artillery
                 | RangeUnitKind::ArtilleryT2
                 | RangeUnitKind::TurretT1

@@ -23,6 +23,7 @@ type Bounds = ([i32; 3], [i32; 3]);
 enum Site {
     World([u32; 3]),
     Body(Cell),
+    Water([u32; 3]),
 }
 
 /// Six probes have at most six distinct receivers. Sorted array traversal
@@ -99,12 +100,14 @@ impl Site {
         match self {
             Self::World(p) => r.heat.cell(p).heat,
             Self::Body(p) => r.thermals.heat(p),
+            Self::Water(_) => 0,
         }
     }
     fn mm(self, r: &BlastRange) -> u16 {
         match self {
             Self::World(_) => WORLD_MM,
             Self::Body(p) => p.body(&r.units).map_or(WORLD_MM, |b| b.mm),
+            Self::Water(_) => WORLD_MM,
         }
     }
     fn centre(self, r: &BlastRange) -> Option<[Fx; 3]> {
@@ -118,11 +121,14 @@ impl Site {
                 }
                 p.world(&r.units)
             }
+            Self::Water(p) => (r.water.amount(p) > 0)
+                .then_some(p.map(|n| Fx::from_int(n as i32).add(Fx::from_ratio(1, 2)))),
         }
     }
     fn accepts(self, r: &BlastRange) -> bool {
         match self {
             Self::Body(_) => self.centre(r).is_some(),
+            Self::Water(p) => r.water.amount(p) > 0,
             Self::World(p) => {
                 !r.matter.debris.claimed(p)
                     && r.matter
@@ -270,24 +276,62 @@ impl BlastRange {
             let mut to = from;
             let sign = if i.is_multiple_of(2) { -1 } else { 1 };
             to[i / 2] = to[i / 2].add(Fx::from_int(sign * i32::from(reach)));
-            self.first_contact(None, from, to, bounds)
+            self.first_heat_contact(None, from, to, bounds)
                 .and_then(|(_, site)| site)
                 .filter(|site| site.accepts(self))
         });
         sites.sort_unstable();
         FireContacts { sites }
     }
+    fn first_heat_contact(
+        &self,
+        source: Option<Site>,
+        from: [Fx; 3],
+        to: [Fx; 3],
+        bounds: &[Bounds],
+    ) -> Option<(Fx, Option<Site>)> {
+        let solid = self.first_contact(source, from, to, bounds);
+        if !self.water.has_water_in_x_span(from[0].min(to[0]).to_int_trunc(),from[0].max(to[0]).to_int_trunc()) {
+            return solid;
+        }
+        let origin = std::array::from_fn::<_, 3, _>(|a| from[a].min(to[a]).to_int_trunc());
+        let size =
+            std::array::from_fn(|a| (from[a].max(to[a]).to_int_trunc() - origin[a] + 1) as u8);
+        let local = |p: [Fx; 3]| std::array::from_fn(|a| p[a].sub(Fx::from_int(origin[a])));
+        let (a, b) = (local(from), local(to));
+        for p in ray_cells(size, a, b) {
+            let q = std::array::from_fn::<_, 3, _>(|axis| origin[axis] + i32::from(p[axis]));
+            if (0..3).any(|axis| q[axis] < 0 || q[axis] >= self.size[axis] as i32) {
+                continue;
+            }
+            let q = q.map(|v| v as u32);
+            if self.water.amount(q) > 0 {
+                let water = (entry(a, b, p), Some(Site::Water(q)));
+                return if solid.is_some_and(|s| s <= water) {
+                    solid
+                } else {
+                    Some(water)
+                };
+            }
+        }
+        solid
+    }
     fn deposit_fire_contacts(&mut self, contacts: &FireContacts, heat: u32) -> u32 {
         let mut accepted = 0;
         let count = contacts.iter().count() as u32;
         for (i, site) in contacts.iter().enumerate() {
             let share = heat / count + u32::from((i as u32) < heat % count);
-            let before = site.heat(self);
-            match site {
-                Site::World(p) => self.heat.add(&self.world, p, share),
-                Site::Body(p) => self.thermals.deposit(p, share, &self.thermal_tuning),
+            if let Site::Water(p) = site {
+                accepted += self.water.absorb_heat(p, share, self.size);
+            } else {
+                let before = site.heat(self);
+                match site {
+                    Site::World(p) => self.heat.add(&self.world, p, share),
+                    Site::Body(p) => self.thermals.deposit(p, share, &self.thermal_tuning),
+                    Site::Water(_) => unreachable!(),
+                }
+                accepted += site.heat(self) - before;
             }
-            accepted += site.heat(self) - before;
         }
         accepted
     }
@@ -329,7 +373,7 @@ impl BlastRange {
             for sign in [-1, 1] {
                 let mut to = from;
                 to[a] = to[a].add(Fx::from_int(sign * i32::from(reach)));
-                if let Some((_, Some(site))) = self.first_contact(None, from, to, &bounds) {
+                if let Some((_, Some(site))) = self.first_heat_contact(None, from, to, &bounds) {
                     if site.accepts(self) {
                         contacts.insert(site);
                     }
@@ -340,12 +384,17 @@ impl BlastRange {
         let count = contacts.len() as u32;
         for (i, site) in contacts.into_iter().enumerate() {
             let share = heat / count + u32::from((i as u32) < heat % count);
-            let before = site.heat(self);
-            match site {
-                Site::World(p) => self.heat.add(&self.world, p, share),
-                Site::Body(p) => self.thermals.deposit(p, share, &self.thermal_tuning),
+            if let Site::Water(p) = site {
+                accepted += self.water.absorb_heat(p, share, self.size);
+            } else {
+                let before = site.heat(self);
+                match site {
+                    Site::World(p) => self.heat.add(&self.world, p, share),
+                    Site::Body(p) => self.thermals.deposit(p, share, &self.thermal_tuning),
+                    Site::Water(_) => unreachable!(),
+                }
+                accepted += site.heat(self) - before;
             }
-            accepted += site.heat(self) - before;
         }
         accepted
     }
@@ -370,7 +419,7 @@ impl BlastRange {
             to[i / 2] = to[i / 2].add(Fx::from_int(
                 sign * i32::from(self.thermal_tuning.exchange_reach),
             ));
-            self.first_contact(Some(source), from, to, bounds)
+            self.first_heat_contact(Some(source), from, to, bounds)
                 .and_then(|(_, p)| p)
                 .filter(|dest| source.separate(*dest) && dest.accepts(self))
         })
@@ -458,7 +507,15 @@ impl BlastRange {
                 let room = CAP
                     .saturating_sub(dest.heat(self))
                     .saturating_sub(incoming.get(&dest).copied().unwrap_or(0));
-                let share = share.min(available).min(room);
+                let water_room = if let Site::Water(p) = dest {
+                    self.water
+                        .remaining_absorption(p)
+                        .saturating_sub(u64::from(incoming.get(&dest).copied().unwrap_or(0)))
+                        .min(u64::from(u32::MAX)) as u32
+                } else {
+                    u32::MAX
+                };
+                let share = share.min(available).min(room).min(water_room);
                 if share == 0 {
                     continue;
                 }
@@ -479,6 +536,7 @@ impl BlastRange {
             match p {
                 Site::World(p) => self.heat.take_heat(p, h),
                 Site::Body(p) => self.thermals.take_heat(p, h),
+                Site::Water(_) => unreachable!("water is not an exchange source"),
             }
             self.heat_exchange.transferred += u64::from(h);
         }
@@ -486,6 +544,9 @@ impl BlastRange {
             match p {
                 Site::World(p) => self.heat.add(&self.world, p, h),
                 Site::Body(p) => self.thermals.deposit(p, h, &self.thermal_tuning),
+                Site::Water(p) => {
+                    self.water.absorb_heat(p, h, self.size);
+                }
             }
         }
     }
@@ -537,6 +598,9 @@ mod tests {
             })
             .collect();
         let mut r = BlastRange::with_layout(c, layout).unwrap();
+        // Single-phase transfer examples use a known fraction, independent
+        // of the stock clock's per-second thermal tuning.
+        r.thermal_tuning.exchange_milli = 40;
         r.control();
         r.units = cubes.iter().map(|p| cube(*p)).collect();
         r
@@ -555,6 +619,24 @@ mod tests {
                 .into_iter()
                 .map(|p| u64::from(r.heat.cell(p).heat))
                 .sum::<u64>()
+    }
+    #[test]
+    fn hot_unit_transfers_heat_to_exposed_water_without_crossing_a_wall() {
+        for blocked in [false, true] {
+            let blocks = if blocked {
+                vec![([101, 32, 100], 3)]
+            } else {
+                vec![]
+            };
+            let mut r = fixture(&[[100, 32, 100]], &blocks);
+            let p = [102, 32, 100];
+            assert!(r.water.edit_volume(p, true));
+            let volume = r.water.stats().units;
+            r.thermals.deposit(cell(0), 10000, &r.thermal_tuning);
+            r.exchange_heat();
+            assert_eq!(r.water.stats().vapor_units > 0, !blocked);
+            assert_eq!(r.water.stats().units, volume);
+        }
     }
     #[test]
     fn pooled_fire_batch_matches_sequential_deposits_with_caps_and_changing_geometry() {
@@ -960,7 +1042,7 @@ mod tests {
         let mut tail = Blob::new();
         a.save_after(&mut tail, 32);
         data.truncate(data.len() - tail.v.len());
-        data[..4].copy_from_slice(&32u32.to_le_bytes());
+        data[8..12].copy_from_slice(&32u32.to_le_bytes());
         let b = BlastRange::restore(a.config, &data).unwrap();
         assert_eq!(
             b.thermals.cells().collect::<Vec<_>>(),

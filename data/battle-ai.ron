@@ -1,6 +1,6 @@
 // One decision per half-second. Scores are world units, with stable slot-ID ties.
 (
-    decision_ticks: 15,
+    decision_ticks: 20,
     focus_fire: true,
     armed_bonus: 110,
     mobile_bonus: 45,

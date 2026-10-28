@@ -2,6 +2,62 @@
 //! Float fields are not compared bit-for-bit across vendors. Readback here is
 //! test instrumentation; the game's gas renderer never reads its fields back.
 mod common;
+#[test]
+fn visible_gas_bounds_reset_and_cover_sparse_boundary_cells() {
+    let Some(g) = gpu::Gpu::new(wgpu::Backends::VULKAN) else {
+        return;
+    };
+    let pipeline = g.pipeline(
+        include_str!("../../render/src/gas_bounds.wgsl"),
+        "build",
+        "gas bounds test",
+    );
+    let field = g.storage(48 * 48 * 48 * 32, "field");
+    let bounds = g.storage(24, "bounds");
+    let group = g.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: field.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 12,
+                resource: bounds.as_entire_binding(),
+            },
+        ],
+    });
+    // Include fields just below the conservative cutoff, a cell below the
+    // actual visual cutoff, disjoint extrema, and a cleared field after them.
+    for (cells, expected) in [
+        (vec![], vec![0; 6]),
+        (vec![([5, 8, 9], 0.03_f32)], vec![0; 6]),
+        (vec![([5, 8, 9], 0.04)], vec![43, 40, 39, 6, 9, 10]),
+        (
+            vec![([0, 47, 6], 1.0), ([47, 0, 41], 1.0)],
+            vec![48, 48, 42, 48, 48, 42],
+        ),
+        (vec![([23, 19, 11], 1.0)], vec![25, 29, 37, 24, 20, 12]),
+        (vec![], vec![0; 6]),
+    ] {
+        let mut words = vec![0u32; 48 * 48 * 48 * 8];
+        for (q, soot) in cells {
+            words[(q[0] + 48 * (q[1] + 48 * q[2])) * 8 + 7] = soot.to_bits();
+        }
+        g.queue.write_buffer(&field, 0, gpu::as_bytes(&words));
+        let mut encoder = g.device.create_command_encoder(&Default::default());
+        encoder.clear_buffer(&bounds, 0, None);
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups((48u32 * 48 * 48).div_ceil(64), 1, 1);
+        }
+        g.queue.submit([encoder.finish()]);
+        assert_eq!(g.read_u32(&bounds, 6), expected);
+    }
+}
 /// The solver and every terrain and smoke pass read one uniform buffer, filled
 /// from one Rust struct, so the two WGSL declarations of `Params` must agree
 /// field for field. Checked on the CPU, without a device.
@@ -31,6 +87,13 @@ fn check_field(energy: bool, wide: bool) {
     };
     const N: usize = 48;
     const CELLS: usize = N * N * N;
+    // Gas field tests validate the fragment module but never bind/render mesh
+    // shadows. Include the real helper with minimal test-only light arrays;
+    // omitting it leaves mesh_sun_visibility undefined before solver tests run.
+    let mesh_shadows = include_str!("../../render/src/mesh_shadows.wgsl")
+        .replace("$CASCADES", "1")
+        .replace("$DIRECTIONAL", "1")
+        .replace("$RECT", "1");
     // Validate all field-rendering entry points too, before a window can hang
     // waiting for a shader that will never compile.
     for body in [
@@ -38,10 +101,11 @@ fn check_field(energy: bool, wide: bool) {
         include_str!("../../render/src/terrain_prepass.wgsl"),
     ] {
         let full = format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}",
             include_str!("../../render/src/terrain_common.wgsl"),
             include_str!("../../render/src/gas_sampling.wgsl"),
             include_str!("../../render/src/energy.wgsl"),
+            mesh_shadows,
             body
         );
         let _ = g.device.create_shader_module(wgpu::ShaderModuleDescriptor {

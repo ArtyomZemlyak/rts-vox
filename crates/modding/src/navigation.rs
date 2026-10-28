@@ -44,6 +44,10 @@ pub struct Navigation {
     /// Precision at a checked turn centre or intermediate route endpoint.
     /// Final order arrival keeps the course's ordinary arrival radius.
     pub corner_arrival_mm: i32,
+    /// Bounded preview of a moving turn; zero retains exact pivot centers.
+    pub corner_lookahead_units: i32,
+    /// Minimum heading alignment for a moving turn in proven open ground.
+    pub moving_turn_alignment_pct: i32,
     /// Weight of the planner's distance estimate, percent; 100 is plain A*.
     pub heuristic_pct: u32,
     /// How far a hull may get from where its search began, driving on or
@@ -93,6 +97,8 @@ impl Navigation {
             || !(0..=60).contains(&n.recovery_turn_deg)
             || !(0..=16).contains(&n.plan_margin)
             || !(1..=500).contains(&n.corner_arrival_mm)
+            || !(0..=64).contains(&n.corner_lookahead_units)
+            || !(1..=100).contains(&n.moving_turn_alignment_pct)
             || !(0..=256).contains(&n.retarget_units)
             || n.fell.materials.contains(&0)
             || !(1..=32).contains(&n.fell.radius)
@@ -129,6 +135,8 @@ mod tests {
             "searches_started_per_tick: 1,",
             "contact_replan_ticks: 2,",
             "corner_arrival_mm: 50,",
+            "corner_lookahead_units: 32,",
+            "moving_turn_alignment_pct: 10,",
             "heuristic_pct: 200,",
             "retarget_units: 160,",
         ] {

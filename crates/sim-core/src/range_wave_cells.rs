@@ -303,6 +303,19 @@ pub(super) struct Grid {
 type OwnerBox = ([i32; 3], [i32; 3], [i32; 3], bool);
 
 impl Grid {
+    /// Inclusive cell coordinates whose half-open world cubes meet an
+    /// inclusive body box. Transform the query once, not every grid cell.
+    pub(super) fn overlapping_cells(&self, lo: [i32; 3], hi: [i32; 3]) -> ([i32; 3], [i32; 3]) {
+        let convert = |p: [i32; 3]| {
+            std::array::from_fn(|a| {
+                (i64::from(p[a]) - i64::from(self.origin[a]))
+                    .div_euclid(i64::from(self.edge))
+                    .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+            })
+        };
+        (convert(lo), convert(hi))
+    }
+
     pub(super) fn index(&self, cell: [i32; 3]) -> u32 {
         ((cell[2] as usize * self.n + cell[1] as usize) * self.n + cell[0] as usize) as u32
     }
@@ -355,6 +368,36 @@ fn order_entries(entries: &mut Vec<u64>) {
     *entries = ordered;
 }
 
+/// Exact signed division for fixed-point coordinates by a positive integer
+/// cell edge. floor(delta / (edge * 2^32)) equals floor((delta >> 32) / edge).
+/// A ceiling reciprocal gives an unsigned quotient at most one too large;
+/// one product comparison corrects it before restoring Euclidean sign.
+struct CellDivisor {
+    edge: u64,
+    reciprocal: u64,
+}
+impl CellDivisor {
+    fn new(edge: i32) -> Self {
+        debug_assert!(edge > 0);
+        let edge = edge as u64;
+        Self {
+            edge,
+            reciprocal: (1u64 << 32).div_ceil(edge),
+        }
+    }
+    fn cell(&self, delta: i64) -> i32 {
+        let whole = (delta >> 32) as i32;
+        let magnitude = u64::from(whole.unsigned_abs());
+        let estimate = (magnitude * self.reciprocal) >> 32;
+        let quotient = estimate - u64::from(estimate * self.edge > magnitude);
+        if whole < 0 {
+            (-(quotient as i64) - i64::from(quotient * self.edge != magnitude)) as i32
+        } else {
+            quotient as i32
+        }
+    }
+}
+
 /// Append the cells of one layer of one part, each under the wave cell
 /// owning it, if that cell's conservative box reaches it (as `cells`
 /// requires) and `reaches` admits the cell.
@@ -375,6 +418,7 @@ fn bucket(
     }
     let term = |a: usize| axis_terms(frame, a, min[a], max[a]);
     let (tx, ty, tz) = (term(0), term(1), term(2));
+    let divisor = CellDivisor::new(grid.edge);
     let span = i64::from(grid.edge) << 32;
     // Signed arithmetic shift is Euclidean division by a positive power
     // of two, including negative positions and exact cell boundaries.
@@ -383,6 +427,7 @@ fn bucket(
     let origin = grid.origin.map(|v| i64::from(v) << 32);
     // The box of the last owning cell asked: neighbours share it.
     let mut last: Option<OwnerBox> = None;
+    let mut last_low = [0i64; 3];
     for (z, dz) in (min[2]..max[2]).zip(&tz) {
         let plane = frame.base.add(*dz);
         for (y, dy) in (min[1]..max[1]).zip(&ty) {
@@ -390,26 +435,40 @@ fn bucket(
             for (x, dx) in (min[0]..max[0]).zip(&tx) {
                 let w = row.add(*dx);
                 let w = [w.x.raw(), w.y.raw(), w.z.raw()];
-                let cell: [i32; 3] = std::array::from_fn(|a| {
-                    let delta = w[a] - origin[a];
-                    match shift {
-                        Some(shift) => (delta >> shift) as i32,
-                        None => delta.div_euclid(span) as i32,
+                // A run of neighbouring hull voxels often shares its owning
+                // wave cell. Check the exact half-open fixed-point box before
+                // repeating division; binary edges keep the cheaper old shifts.
+                let (cell, lo, hi, admitted) = if shift.is_none()
+                    && last.is_some()
+                    && (0..3).all(|a| (w[a].wrapping_sub(last_low[a]) as u64) < span as u64)
+                {
+                    last.unwrap()
+                } else {
+                    let cell: [i32; 3] = std::array::from_fn(|a| {
+                        let delta = w[a] - origin[a];
+                        match shift {
+                            Some(shift) => (delta >> shift) as i32,
+                            None => divisor.cell(delta),
+                        }
+                    });
+                    if cell.iter().any(|&c| c < 0 || c as usize >= grid.n) {
+                        continue;
                     }
-                });
-                if cell.iter().any(|&c| c < 0 || c as usize >= grid.n) {
-                    continue;
-                }
-                let (lo, hi, admitted) = match last {
-                    Some((c, lo, hi, admitted)) if c == cell => (lo, hi, admitted),
-                    _ => {
-                        let low: [i32; 3] =
-                            std::array::from_fn(|a| grid.origin[a] + cell[a] * grid.edge);
-                        let (lo, hi) = candidate_box(body, frame, layers, low, grid.edge);
-                        let admitted = reaches(low);
-                        last = Some((cell, lo, hi, admitted));
-                        (lo, hi, admitted)
-                    }
+                    let (lo, hi, admitted) = match last {
+                        Some((c, lo, hi, admitted)) if c == cell => (lo, hi, admitted),
+                        _ => {
+                            let low: [i32; 3] =
+                                std::array::from_fn(|a| grid.origin[a] + cell[a] * grid.edge);
+                            let (lo, hi) = candidate_box(body, frame, layers, low, grid.edge);
+                            let admitted = reaches(low);
+                            last = Some((cell, lo, hi, admitted));
+                            if shift.is_none() {
+                                last_low = low.map(|v| i64::from(v) << 32);
+                            }
+                            (lo, hi, admitted)
+                        }
+                    };
+                    (cell, lo, hi, admitted)
                 };
                 let p = [x, y, z];
                 if admitted && (0..3).all(|a| p[a] >= lo[a] && p[a] < hi[a]) {
@@ -468,7 +527,124 @@ impl HitFrames {
 
 #[cfg(test)]
 mod tests {
-    use super::order_entries;
+    use super::{order_entries, CellDivisor, Grid};
+
+    #[test]
+    fn reciprocal_cell_ownership_matches_signed_fixed_point_division() {
+        let mut edges: Vec<_> = (1..=64).collect();
+        edges.extend([65, 127, 128, 255, 256, 1023, 65535, 65536, i32::MAX]);
+        let mut seed = 0x18b321954ea737d1u64;
+        for edge in edges {
+            let d = CellDivisor::new(edge);
+            let span = i64::from(edge) << 32;
+            for q in [i32::MIN, -10000, -65, -1, 0, 1, 65, 10000, i32::MAX] {
+                let boundary = i128::from(q) * i128::from(span);
+                for offset in [-(1i128 << 32), -1, 0, 1, (1i128 << 32) - 1] {
+                    let delta = (boundary + offset)
+                        .clamp(i128::from(i64::MIN), i128::from(i64::MAX))
+                        as i64;
+                    assert_eq!(
+                        i64::from(d.cell(delta)),
+                        delta.div_euclid(span),
+                        "edge={edge} delta={delta}"
+                    );
+                }
+            }
+            for _ in 0..8192 {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let delta = seed as i64;
+                assert_eq!(
+                    i64::from(d.cell(delta)),
+                    delta.div_euclid(span),
+                    "edge={edge} delta={delta}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual exact cell-ownership arithmetic probe; run alone in release"]
+    fn measure_cell_ownership_division() {
+        use std::{hint::black_box, time::Instant};
+        for edge in [3, 9, 64] {
+            let edge = black_box(edge);
+            let divisor = CellDivisor::new(edge);
+            let span = i64::from(edge) << 32;
+            let values: Vec<_> = (0..262144i64)
+                .map(|i| (((i * 173) % 4096) - 128) * (1i64 << 30) + i * 7919)
+                .collect();
+            let mut samples = [Vec::new(), Vec::new()];
+            let mut checksum = None;
+            for round in 0..15 {
+                for fast in if round % 2 == 0 {
+                    [false, true]
+                } else {
+                    [true, false]
+                } {
+                    let mut sum = 0i64;
+                    let start = Instant::now();
+                    for &delta in black_box(&values) {
+                        let result = if fast {
+                            i64::from(divisor.cell(delta))
+                        } else {
+                            delta.div_euclid(span)
+                        };
+                        sum = sum.wrapping_add(result);
+                    }
+                    let elapsed = start.elapsed().as_nanos();
+                    if round > 1 {
+                        samples[usize::from(fast)].push(elapsed);
+                    }
+                    if let Some(expected) = checksum {
+                        assert_eq!(sum, expected);
+                    } else {
+                        checksum = Some(sum);
+                    }
+                    black_box(sum);
+                }
+            }
+            for (fast, times) in samples.iter_mut().enumerate() {
+                times.sort_unstable();
+                println!(
+                    "OWNER_DIV edge={edge} fast={fast} count={} median_ns={} max_ns={}",
+                    values.len(),
+                    times[times.len() / 2],
+                    times[times.len() - 1]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn overlapping_cells_match_world_space_at_negative_and_exact_boundaries() {
+        for edge in [1, 2, 3, 4, 9] {
+            for origin in [-17, 0, 13, i32::MIN, i32::MAX - 128] {
+                let grid = Grid {
+                    origin: [origin; 3],
+                    edge,
+                    n: 8,
+                };
+                for lo in [-20, -9, -1, 0, 1, 9, 20, i32::MIN, i32::MAX] {
+                    for width in [0, 1, 2, 9, 31] {
+                        let hi = lo.saturating_add(width);
+                        let (first, last) = grid.overlapping_cells([lo; 3], [hi; 3]);
+                        for cell in -16..16 {
+                            let low = i64::from(origin) + i64::from(cell) * i64::from(edge);
+                            let expected =
+                                low <= i64::from(hi) && low + i64::from(edge) > i64::from(lo);
+                            for a in 0..3 {
+                                assert_eq!(
+                                    cell >= first[a] && cell <= last[a],
+                                    expected,
+                                    "origin={origin} edge={edge} box={lo}..={hi} cell={cell}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn contact_order_matches_full_sort_for_dense_sparse_and_unusual_inputs() {

@@ -15,7 +15,7 @@ pub mod minimap;
 #[path = "panel/theme.rs"]
 pub mod theme;
 
-const SCENARIO_GAP_TICKS: u32 = 30;
+const SCENARIO_GAP_TICKS: u32 = sim_core::TICKS_PER_SECOND as u32;
 
 #[derive(Clone, PartialEq, Eq)]
 struct ShotResult {
@@ -362,6 +362,11 @@ pub struct Panel {
     pending: Option<(u8, u32)>,
 }
 impl Panel {
+    pub(super) fn rebind_generation(&mut self, before: u64, after: u64) {
+        if let Some(mission) = &mut self.mission {
+            if mission.generation == Some(before) { mission.generation = Some(after); }
+        }
+    }
     pub fn new(drive: bool, demo: bool) -> Self {
         Self {
             drive,
@@ -389,6 +394,7 @@ impl Panel {
 }
 #[derive(Component, Clone, Copy, PartialEq)]
 pub enum Action {
+    Laboratory,
     Drawer(u8),
     Ranges,
     ProjectileMarkers,
@@ -439,6 +445,7 @@ pub enum Action {
     Orbit(f32),
     Pitch(f32),
     Own,
+    FirstPerson,
     Target,
     MissionTarget,
     MissionParticipants,
@@ -519,7 +526,9 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
     };
     knobs::build(&mut commands, camera, &text_font);
     hud::build(&mut commands, camera, &text_font);
+    pilot::build(&mut commands, camera, &text_font);
     minimap::build(&mut commands, camera, &text_font);
+    laboratory::build(&mut commands, camera, &text_font);
     let mut root = commands.spawn((
         PanelRoot,
         hud::Drawer,
@@ -567,6 +576,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             SectorLabel,
         ));
         let mut rows: Vec<(bool, Vec<(&str, Action)>)> = vec![
+            (false, vec![("Лаборатория материалов", Action::Laboratory)]),
             (
                 false,
                 vec![("Прорыв укреплений · 3 на 3", Action::Skirmish(0))],
@@ -729,6 +739,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                     ("Обзор", Action::Overview),
                     ("Карта", Action::WholeMap),
                     ("Юнит", Action::Own),
+                    ("От первого лица [V]", Action::FirstPerson),
                     ("Цель", Action::Target),
                 ],
             ),
@@ -854,13 +865,18 @@ pub fn actions(
     snapshot: Res<super::ui_snapshot::UiSnapshot>,
     interactions: Query<(&Action, &Interaction), Changed<Interaction>>,
     windows: Query<&Window>,
-    roots: Query<&bevy::ui::RelativeCursorPosition, With<PanelRoot>>,
+    roots: Query<&bevy::ui::RelativeCursorPosition, Or<(With<PanelRoot>,With<laboratory::Root>)>>,
     mut scrolls: Query<&mut ScrollPosition, With<ScrollPanel>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut gas: ResMut<GasInput>,
     scale: Option<ResMut<UiScale>>,
     overrides: Option<Res<knobs::Overrides>>,
+    laboratory: Option<Res<laboratory::Laboratory>>,
 ) {
+    if laboratory.as_ref().is_some_and(|l| l.active()) {
+        panel.blocked=roots.iter().any(|r|r.cursor_over());
+        return;
+    }
     let stock = knobs::Overrides::default();
     let overrides = overrides.as_deref().unwrap_or(&stock);
     let factor = windows
@@ -917,6 +933,8 @@ pub fn actions(
                 | Action::Overview
                 | Action::WholeMap
                 | Action::Own
+                | Action::FirstPerson
+                | Action::Laboratory
                 | Action::Target
                 | Action::MissionTarget
                 | Action::MissionParticipants
@@ -954,6 +972,7 @@ pub fn actions(
             panel.free_launch = false;
         }
         match action {
+            Action::Laboratory => {},
             Action::Drawer(id) => {
                 panel.drawer = if panel.drawer == id { 0 } else { id };
                 if panel.drawer != 0 {
@@ -1322,7 +1341,7 @@ pub fn actions(
                         | RangeUnitKind::NuclearSilo => 0,
                         RangeUnitKind::TurretT1 => 5,
                         RangeUnitKind::TurretT2 => 1,
-                        RangeUnitKind::Base => 0,
+                        RangeUnitKind::Base | RangeUnitKind::Crawler => 0,
                     };
                     let delivery = match w {
                         3 => Delivery::Flame,
@@ -1466,7 +1485,14 @@ pub fn actions(
             }
             Action::ScenarioMenu => panel.scenarios_open = !panel.scenarios_open,
             Action::Scenario(id) => {
-                let stock = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"));
+                let stock = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"))
+                    .and_then(|l| {
+                        let level = edit
+                            .layout
+                            .as_ref()
+                            .map_or(l.ground_level, |r| r.ground_level);
+                        l.with_ground_level(level)
+                    });
                 match stock.and_then(|mut layout| {
                     let zone = layout
                         .zones
@@ -1540,6 +1566,7 @@ pub fn actions(
                 edit.pan = Vec2::ZERO;
                 edit.zoom = 1.0;
             }
+            Action::FirstPerson => key(KeyCode::KeyV, &mut panel),
             Action::Own => {
                 scene.view = if scene.sim.battle_mode() {
                     edit.selected = edit.controlled.map(Selection::Unit);
@@ -2029,7 +2056,10 @@ Shift+ЛКМ — добавить / убрать
             .iter()
             .map(|s| {
                 if s.down > 0 {
-                    format!("перегружен {:.1} с", s.down as f32 / 30.0)
+                    format!(
+                        "перегружен {:.1} с",
+                        s.down as f32 / sim_core::TICKS_PER_SECOND as f32
+                    )
                 } else {
                     format!("{}%", s.charge * 100 / capacity)
                 }
@@ -2139,7 +2169,8 @@ pub fn scroll(
         if cursor.cursor_over() {
             let max =
                 ((node.content_size().y - node.size().y) * node.inverse_scale_factor()).max(0.0);
-            pos.y = (pos.y + delta).clamp(0.0, max);
+            let value = (pos.y + delta).clamp(0.0, max);
+            if pos.y != value { pos.y = value; }
         }
     }
 }
@@ -2217,22 +2248,40 @@ mod scenario_tests {
                 sim.battle.actors.iter().all(|a| a.fired == 0),
                 "instant fire in mission {id}"
             );
-            let modding::range_skirmish::MissionGoal::Reach { actors, point, .. } =
-                &run.definition.steps[0].goal
-            else {
-                panic!("deployment first")
-            };
-            for &actor in actors {
-                assert!(sim.battle_order(
-                    actor,
-                    sim_core::blast::battle::Order::Move,
-                    Some(*point)
-                ));
+            match &run.definition.steps[0].goal {
+                modding::range_skirmish::MissionGoal::Reach { actors, point, .. } => {
+                    for &actor in actors {
+                        assert!(sim.battle_order(
+                            actor,
+                            sim_core::blast::battle::Order::Move,
+                            Some(*point)
+                        ));
+                    }
+                    sim.step();
+                    assert!(actors
+                        .iter()
+                        .any(|&id| sim.units[id].motion.destination.is_some()));
+                }
+                modding::range_skirmish::MissionGoal::Destroy { actors } => {
+                    // A stationary strategic launcher starts with a manual
+                    // strike, rather than receiving an impossible move order.
+                    let shooter = sim
+                        .units
+                        .iter()
+                        .enumerate()
+                        .position(|(id, u)| sim.allied(id) && u.kind == run.definition.focus)
+                        .unwrap();
+                    let target = actors[0];
+                    let order = if sim.units[shooter].kind == RangeUnitKind::NuclearSilo {
+                        sim_core::blast::battle::Order::Ground(sim.units[target].at)
+                    } else {
+                        sim_core::blast::battle::Order::Attack(target)
+                    };
+                    assert!(sim.battle_order(shooter, order, None));
+                    sim.step();
+                    assert_eq!(sim.battle.actors[shooter].order, order);
+                }
             }
-            sim.step();
-            assert!(actors
-                .iter()
-                .any(|&id| sim.units[id].motion.destination.is_some()));
             assert!(sim.matter.economy.ledger.balanced());
         }
     }

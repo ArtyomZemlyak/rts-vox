@@ -79,7 +79,10 @@ fn siege_single_shell_digs_soil_and_replays_flight_and_live_wave() {
         "T3 must not produce a canister fan"
     );
     assert_eq!(r.battle.rounds[0].weapon, Weapon::Siege);
-    assert_eq!(r.battle.actors[0].next, r.tick - 1 + 210);
+    assert_eq!(
+        r.battle.actors[0].next,
+        r.tick - 1 + r.battle.tuning.siege.reload_ticks
+    );
     assert!(r.battle_order(0, Order::Hold, None));
     let mut replay = BlastRange::restore(r.config, &r.snapshot()).expect("T3 flight snapshot");
     let mut wave_replay = None;

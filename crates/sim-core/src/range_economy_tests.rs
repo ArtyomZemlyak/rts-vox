@@ -163,7 +163,7 @@ fn a_restore_mid_dig_continues_bit_for_bit() {
         "digs wait in the queue"
     );
     let bytes = a.snapshot();
-    assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 62);
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 62);
     let mut b = BlastRange::restore(config(), &bytes).expect("restore mid-dig");
     prepare(&mut b);
     assert_eq!(b.snapshot(), bytes);
@@ -276,7 +276,7 @@ fn a_dig_order_needs_a_tank_a_face_in_the_map_and_no_destination() {
     assert!(p.mining().is_none() && p.tank_held(0).is_none());
     assert!(!p.battle_order(0, Order::Dig(FACE), None));
     assert_ne!(
-        u32::from_le_bytes(p.snapshot()[..4].try_into().unwrap()),
+        u32::from_le_bytes(p.snapshot()[8..12].try_into().unwrap()),
         62
     );
     r.step();

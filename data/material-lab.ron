@@ -1,0 +1,29 @@
+// Small independent stand; dimensions use the unchanged world grid.
+(
+    layout: (
+        size: (640, 192, 640),
+        gun: (128, 16, 336),
+        target: (384, 32, 336),
+        airburst_on_target: true,
+        clear_min: (1, 1), clear_max: (639, 639),
+        units: [], blocks: [],
+        power_milli: [500, 1000, 2000, 4000], unit_resistance: 180,
+    ),
+    materials: [
+        (id: 1, name: "Грунт"), (id: 2, name: "Бетон"),
+        (id: 3, name: "Сталь"), (id: 4, name: "Листва"),
+        (id: 5, name: "Древесина"), (id: 6, name: "Порода"),
+        (id: 8, name: "Плотный грунт"), (id: 10, name: "Песок"), (id: 11, name: "Вода"),
+        (id: 12, name: "Стекло (оплавленный песок)"),
+    ],
+    forms: [
+        (name: "Плита", size: (4, 32, 32), lift: 0, supports: false),
+        (name: "Куб", size: (16, 16, 16), lift: 0, supports: false),
+        (name: "Балка на опорах", size: (8, 8, 64), lift: 24, supports: true),
+    ],
+    thickness: [2, 4, 8, 16],
+    strength_milli: [500, 1000, 2000, 4000],
+    support_material: 6, support_width: 8,
+    observation_ticks: 300, measurement_ticks: 15,
+    editor_step: 4,
+)

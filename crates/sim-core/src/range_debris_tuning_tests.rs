@@ -104,7 +104,7 @@ fn all_debris_configuration_fields_affect_hash_and_restore_with_legacy_motion_fo
         r.matter.tuning = from_values(changed);
         assert_ne!(r.state_hash(), stock_hash, "field {index}");
         let bytes = r.snapshot();
-        assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 55);
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 55);
         let restored = BlastRange::restore(r.config, &bytes).unwrap();
         assert_eq!(r.matter.tuning, restored.matter.tuning, "field {index}");
         assert_eq!(bytes, restored.snapshot());
@@ -118,7 +118,10 @@ fn all_debris_configuration_fields_affect_hash_and_restore_with_legacy_motion_fo
         value: 19,
     });
     let motion_only = r.snapshot();
-    assert_eq!(u32::from_le_bytes(motion_only[..4].try_into().unwrap()), 54);
+    assert_eq!(
+        u32::from_le_bytes(motion_only[8..12].try_into().unwrap()),
+        54
+    );
     r.execute_command(Command::TuneDebris {
         field: DebrisField::DragPct,
         value: 17,
@@ -132,7 +135,7 @@ fn all_debris_configuration_fields_affect_hash_and_restore_with_legacy_motion_fo
 
 #[cfg(test)]
 fn prefix(bytes: &[u8]) -> usize {
-    let mut s = Scan::new(bytes);
+    let mut s = Scan::new(&bytes[8..]);
     s.u32();
     s.bool();
     s.bool();
@@ -248,6 +251,6 @@ fn debris_storage_ceiling_loads_before_fragment_validation_and_lower_flying_cap_
     let end = at + 4 + 2 * 4 + 1; // two tuning fields and the false motion flag
     let mut legacy = bytes.clone();
     legacy.drain(at..end);
-    legacy[..4].copy_from_slice(&53u32.to_le_bytes());
+    legacy[8..12].copy_from_slice(&53u32.to_le_bytes());
     assert!(BlastRange::restore(r.config, &legacy).is_none());
 }

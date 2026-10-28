@@ -55,11 +55,17 @@ fn packed_material(q: vec3<i32>) -> vec2<u32> {
 fn local_contains(pos:vec3<f32>)->bool {
     return all(pos>=p.terrain_origin.xyz) && all(pos<p.terrain_origin.xyz+p.terrain.xyz);
 }
-fn distant_word(q:vec2<u32>,span:u32)->u32 {
-    return terrain[u32(p.distant_bounds.w)+(q.x+u32(p.distant.x)*q.y)*4u+span];
+fn distant_word(q:vec2<u32>,span:u32)->vec2<u32> {
+    let wide=p.distant_bounds.y>255.0;
+    let stride=select(4u,8u,wide);
+    let i=u32(p.distant_bounds.w)+(q.x+u32(p.distant.x)*q.y)*stride+span*select(1u,2u,wide);
+    let word=terrain[i];
+    if wide {return vec2(word,terrain[i+1u]);}
+    return vec2((word&255u)|(((word>>8u)&255u)<<16u),
+        ((word>>16u)&15u)|(((word>>20u)&15u)<<4u)|((word>>24u)<<8u));
 }
-fn span_material(word:u32,y:f32)->u32 {
-    return select((word>>16u)&15u,(word>>20u)&15u,y>=f32(word>>24u));
+fn span_material(word:vec2<u32>,y:f32)->u32 {
+    return select(word.y&15u,(word.y>>4u)&15u,y>=f32(word.y>>8u));
 }
 fn raw_material(q:vec3<i32>)->u32 {
     if local_contains(vec3<f32>(q)) {return packed_material(q).y;}
@@ -67,7 +73,7 @@ fn raw_material(q:vec3<i32>)->u32 {
     let cell=vec2<u32>(vec2<f32>(q.xz)/p.distant.z);
     for(var i=0u;i<4u;i++) {
         let word=distant_word(cell,i);
-        if q.y>=i32(word&255u) && q.y<i32((word>>8u)&255u) {return span_material(word,f32(q.y));}
+        if q.y>=i32(word.x&65535u) && q.y<i32(word.x>>16u) {return span_material(word,f32(q.y));}
     }
     return 0u;
 }
@@ -105,10 +111,14 @@ fn trace_local(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool,actors:bool)->Ter
         let m=packed.y;
         // 15 is the render-only occupancy of a PBR unit, used just for shadows.
         if m>0u && (m!=15u || actors) {
+            // A camera section can begin inside solid terrain. Its exposed
+            // face is the near plane, so sample the material behind that
+            // plane rather than the unrelated voxel below the old top normal.
+            if j==0 && t<0.001 && !shadow {normal=-rd;}
             // Persisted work selects an eroded subcell surface. Collision and
             // shadows retain the authoritative solid voxel until it fractures.
             var inset=0.0;
-            if m>=9u && m<=11u && !shadow {
+            if m>=9u && m<=10u && !shadow {
                 let grain=fract(sin(dot(vec3<f32>(q),vec3(17.1,7.7,23.3)))*437.1);
                 inset=(0.06+0.065*f32(m-8u))*(0.65+abs(grain)*0.35);
             }
@@ -162,8 +172,8 @@ fn trace_distant(ro:vec3<f32>,rd:vec3<f32>,limit:f32)->TerrainHit {
         var best=miss;
         for(var k=0u;k<4u;k++) {
             let word=distant_word(vec2<u32>(q),k);
-            if word==0u {continue;}
-            let ys=(vec2(f32(word&255u),f32((word>>8u)&255u))-vec2(ro.y))*inv.y;
+            if word.x==0u {continue;}
+            let ys=(vec2(f32(word.x&65535u),f32(word.x>>16u))-vec2(ro.y))*inv.y;
             let begin=max(near.x,max(near.y,min(ys.x,ys.y)));
             let finish=min(column_end,max(ys.x,ys.y));
             let hit=max(t,begin);

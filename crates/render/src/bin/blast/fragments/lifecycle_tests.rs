@@ -87,6 +87,27 @@ fn pieces(app: &mut App) -> BTreeMap<u64, Entity> {
         .map(|(e, p)| (p.0, e))
         .collect()
 }
+#[test]
+fn fragment_landing_exact_join_preserves_visible_world_bounds_without_owner_centre_interpolation() {
+    let mut app=app();
+    let mut a=piece(7);a.material=2;
+    a.position=sim_core::damage::V3::new(fx::Fx::from_ratio(97,2),fx::Fx::from_ratio(25,2),fx::Fx::from_ratio(97,2));
+    let mut b=piece(8);b.material=2;b.position=a.position;b.position.x=b.position.x.add(fx::Fx::ONE);
+    app.world_mut().resource_mut::<Scene>().sim.matter.debris.fragments=vec![a,b];
+    app.update();
+    app.world_mut().resource_mut::<moving::Visual>().fragments.capture([(7,Vec3::new(48.5,12.5,48.5)),(8,Vec3::new(49.5,12.5,48.5))]);
+    {
+        let mut scene=app.world_mut().resource_mut::<Scene>();scene.paused=false;scene.acc=0.0125;
+        scene.sim.matter.debris.fragments.truncate(1);
+        let f=&mut scene.sim.matter.debris.fragments[0];
+        f.shape=3;f.side=2;f.count=2;f.mass_g=2;f.position.x=fx::Fx::from_int(49);
+    }
+    app.update();
+    let shown=pieces(&mut app);assert_eq!(shown.len(),1);
+    let f=&app.world().resource::<Scene>().sim.matter.debris.fragments[0];
+    assert_drawn_bounds(&app,shown[&7],f);
+    assert_eq!(app.world().entity(shown[&7]).get::<Transform>().unwrap().translation,Vec3::new(49.0,12.5,48.5));
+}
 /// Read the actual draw-system mesh and transform, not a second scale formula.
 fn assert_drawn_bounds(app: &App, entity: Entity, f: &sim_core::burst::Fragment) {
     let e = app.world().entity(entity);
@@ -500,3 +521,6 @@ fn dense_parallel_draw_preserves_reordered_and_compacted_pieces() {
         0
     );
 }
+
+#[path = "batches_tests.rs"]
+mod batches_tests;

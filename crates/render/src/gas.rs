@@ -1,6 +1,7 @@
 //! Bounded GPU atmosphere regions. Nearby compatible sources share a field;
 //! distant impacts retain independent fields and clocks. No field readback.
 
+mod bounds;
 mod bricks;
 mod display;
 pub mod distant;
@@ -59,6 +60,7 @@ pub struct GasParams {
     pub source: Vec4,
     pub control: Vec4,
     pub chemistry: Vec4,
+    /// Fuel, pressure, display edge, continuous surface-fire marker (ADR-801).
     pub charge: Vec4,
     pub terrain: Vec4,
     /// Where the window of terrain sits in the world, `xyz` (ADR-318).
@@ -666,6 +668,7 @@ mod window_tests {
 }
 #[derive(Resource)]
 struct Shaders {
+    bounds: Handle<Shader>,
     bricks: Handle<Shader>,
     display: Handle<Shader>,
     mask: Handle<Shader>,
@@ -688,6 +691,10 @@ impl Plugin for GasPlugin {
         };
         let common = source("terrain_common.wgsl", include_str!("terrain_common.wgsl"));
         let mut assets = app.world_mut().resource_mut::<Assets<Shader>>();
+        let bounds = assets.add(Shader::from_wgsl(
+            include_str!("gas_bounds.wgsl"),
+            "render/src/gas_bounds.wgsl",
+        ));
         let mask = assets.add(Shader::from_wgsl(
             include_str!("gas_mask.wgsl"),
             "render/src/gas_mask.wgsl",
@@ -748,6 +755,7 @@ impl Plugin for GasPlugin {
             return;
         };
         r.insert_resource(Shaders {
+            bounds,
             bricks,
             display,
             mask,
@@ -808,11 +816,13 @@ struct Pipeline {
     distant_revision: u64,
     bricks: bricks::Bricks,
     display: display::DisplayPipeline,
+    bounds: bounds::BoundsPipeline,
     ready_frames: u32,
     terrain_layout: BindGroupLayoutDescriptor,
     terrain_prepass: CachedRenderPipelineId,
 }
 struct GpuRegion {
+    bounds: bounds::Bounds,
     id: u64,
     display: Option<display::Display>,
     buffers: [Buffer; 2],
@@ -967,18 +977,19 @@ fn init(
     });
     let draw_layout = BindGroupLayoutDescriptor::new(
         "gas composite",
-        &BindGroupLayoutEntries::sequential(
+        &BindGroupLayoutEntries::with_indices(
             ShaderStages::FRAGMENT,
             (
-                texture_2d(TextureSampleType::Float { filterable: true }),
-                sampler(SamplerBindingType::Filtering),
-                texture_depth_2d(),
-                uniform_buffer::<GasParams>(false),
-                storage_buffer_read_only::<Vec<GpuCell>>(false),
-                storage_buffer_read_only::<Vec<u32>>(false),
-                texture_2d(TextureSampleType::Float { filterable: true }),
-                storage_buffer_read_only::<Vec<u32>>(false),
-                storage_buffer_read_only::<Vec<GpuCell>>(false),
+                (0, texture_2d(TextureSampleType::Float { filterable: true })),
+                (1, sampler(SamplerBindingType::Filtering)),
+                (2, texture_depth_2d()),
+                (3, uniform_buffer::<GasParams>(false)),
+                (4, storage_buffer_read_only::<Vec<GpuCell>>(false)),
+                (5, storage_buffer_read_only::<Vec<u32>>(false)),
+                (6, texture_2d(TextureSampleType::Float { filterable: true })),
+                (7, storage_buffer_read_only::<Vec<u32>>(false)),
+                (8, storage_buffer_read_only::<Vec<GpuCell>>(false)),
+                (12, storage_buffer_read_only::<Vec<u32>>(false)),
             ),
         ),
     );
@@ -1079,6 +1090,7 @@ fn init(
         regions: std::array::from_fn(|_| None),
         bricks: bricks::Bricks::new(&device, &cache, shaders.bricks.clone()),
         display: display::DisplayPipeline::new(&cache, shaders.display.clone()),
+        bounds: bounds::BoundsPipeline::new(&cache, shaders.bounds.clone()),
         terrain,
         terrain_revision: 0,
         distant_revision: 0,
@@ -1286,7 +1298,10 @@ fn prepare(
     let layout = cache.get_bind_group_layout(&pipeline.compute_layout);
     let mask_layout = cache.get_bind_group_layout(&pipeline.mask_layout);
     let Pipeline {
-        regions, display, ..
+        regions,
+        display,
+        bounds,
+        ..
     } = &mut *pipeline;
     for (slot, source) in regions.iter_mut().zip(&input.atmosphere.regions) {
         let Some(source) = source else {
@@ -1341,6 +1356,7 @@ fn prepare(
             uniform.write_buffer(&device, &queue);
             let groups = compute_groups(&device, &layout, &uniform, &buffers, &mask);
             *slot = Some(GpuRegion {
+                bounds: bounds::Bounds::new(&buffers, bounds, &device, &cache),
                 id: source.id,
                 display: None,
                 buffers,
@@ -1527,6 +1543,7 @@ fn draw_gas(
         Some(init),
         Some(step),
         Some(display_build),
+        Some(bounds_build),
         Some(mask_build),
         Some(_depth),
         Some(_normals),
@@ -1535,6 +1552,7 @@ fn draw_gas(
         cache.get_compute_pipeline(pipeline.init),
         cache.get_compute_pipeline(pipeline.step),
         cache.get_compute_pipeline(pipeline.display.build),
+        cache.get_compute_pipeline(pipeline.bounds.build),
         cache.get_compute_pipeline(pipeline.mask_build),
         prepass.depth_view(),
         prepass.normal_view(),
@@ -1612,6 +1630,17 @@ fn draw_gas(
         source.applied.store(r.applied, Ordering::Relaxed);
     }
     simulation_span.end(ctx.command_encoder());
+    let bounds_span = diagnostics.time_span(ctx.command_encoder(), "gas-bounds");
+    for r in pipeline.regions.iter_mut().flatten() {
+        r.bounds.encode(
+            r.simulated,
+            r.applied,
+            r.read,
+            bounds_build,
+            ctx.command_encoder(),
+        );
+    }
+    bounds_span.end(ctx.command_encoder());
     let display_span = diagnostics.time_span(ctx.command_encoder(), "gas-display-samples");
     for r in pipeline.regions.iter_mut().flatten() {
         if let Some(display) = &mut r.display {
@@ -1729,15 +1758,21 @@ fn composite(
     };
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
-    let (uniform, buffer, display) = if let Some(i) = slot {
+    let (uniform, buffer, display, bounds) = if let Some(i) = slot {
         let r = pipeline.regions[i].as_ref().unwrap();
         (
             &r.uniform,
             &r.buffers[r.read],
             r.display.as_ref().map_or(&pipeline.empty, |d| &d.buffer),
+            &r.bounds.buffer,
         )
     } else {
-        (&pipeline.uniform, &pipeline.empty, &pipeline.empty)
+        (
+            &pipeline.uniform,
+            &pipeline.empty,
+            &pipeline.empty,
+            &pipeline.empty,
+        )
     };
     let span = diagnostics.time_span(
         ctx.command_encoder(),
@@ -1747,16 +1782,17 @@ fn composite(
     let group = ctx.render_device().create_bind_group(
         "gas draw",
         &cache.get_bind_group_layout(&pipeline.draw_layout),
-        &BindGroupEntries::sequential((
-            post.source,
-            &pipeline.sampler,
-            depth,
-            uniform.binding().unwrap(),
-            buffer.as_entire_binding(),
-            pipeline.terrain.as_entire_binding(),
-            normals,
-            pipeline.bricks.buffer.as_entire_binding(),
-            display.as_entire_binding(),
+        &BindGroupEntries::with_indices((
+            (0, post.source),
+            (1, &pipeline.sampler),
+            (2, depth),
+            (3, uniform.binding().unwrap()),
+            (4, buffer.as_entire_binding()),
+            (5, pipeline.terrain.as_entire_binding()),
+            (6, normals),
+            (7, pipeline.bricks.buffer.as_entire_binding()),
+            (8, display.as_entire_binding()),
+            (12, bounds.as_entire_binding()),
         )),
     );
     let mut pass = ctx

@@ -446,7 +446,7 @@ fn body_map_lists_what_wave_cells_lists() {
             let frames = HitFrames::new(u, pose, &segs, delta, pitch);
             let terms = frames.wave_terms(u, &pose, &segs);
             let (lo, hi) = u.bounds_aimed(Some(&pose), &segs, delta, pitch);
-            for edge in [1, 2, 3, 4] {
+            for edge in [1, 2, 3, 4, 9, 64] {
                 let n = ((0..3).map(|a| hi[a] - lo[a]).max().unwrap() / edge + 4) as usize;
                 let origin = lo.map(|v| v - edge * 2 + k as i32 % edge);
                 let grid = Grid { origin, edge, n };
@@ -711,5 +711,248 @@ fn probe_salvo_timeline() {
         for (p, ms) in sums.iter().take(14) {
             println!("{name} phase {p} {ms:.1}");
         }
+    }
+}
+
+fn previous_ground_strength(r: &mut BlastRange) {
+    for (material, value) in [(1, 120), (7, 120), (8, 160)] {
+        r.tune_material(
+            material,
+            super::super::material_tuning::MaterialField::Strength,
+            value,
+        );
+    }
+}
+
+fn deep_soil_trial(config: ExplosionConfig, level: i32) -> BlastRange {
+    let mut layout = salvo_range().layout.take().unwrap();
+    layout.battle = false;
+    layout.airburst_on_target = false;
+    layout.units.clear();
+    layout.target = [420, 15, 330];
+    let layout = layout.with_ground_level(level).unwrap();
+    let target = layout.target;
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.set_physics_workers(4);
+    r.control();
+    r.aim = Some(target);
+    assert!(r.refire());
+    r
+}
+
+fn soil_shape(r: &BlastRange) -> (usize, u32) {
+    let level = r.ground_level() as u32;
+    let mut depth = 0;
+    for z in 190..470 {
+        for x in 280..560 {
+            let mut y = level;
+            while y > 0 && !r.world.solid(x, y - 1, z) {
+                y -= 1;
+            }
+            depth = depth.max(level - y);
+        }
+    }
+    (soil_removed(r), depth)
+}
+
+#[test]
+fn shallow_soil_profiles_reduce_depth_and_volume_on_deep_ground_and_replay() {
+    for text in [
+        include_str!("../../../data/explosion.ron"),
+        include_str!("../../../data/canister-shell.ron"),
+        include_str!("../../../data/energy-cannon.ron"),
+        include_str!("../../../data/siege-shell.ron"),
+    ] {
+        let config = ExplosionConfig::from_ron(text).unwrap();
+        assert!(config.soil_depth_cost > 0);
+        let mut legacy = config;
+        legacy.soil_depth_cost = 0;
+        legacy.soil_fracture_milli = 1000;
+        let mut now = deep_soil_trial(config, 80);
+        let mut before = deep_soil_trial(legacy, 80);
+        previous_ground_strength(&mut before);
+        let mut replay = None;
+        for _ in 0..100 {
+            now.step();
+            before.step();
+            assert!(now.matter.economy.ledger.balanced());
+            if let Some(copy) = replay.as_mut() {
+                BlastRange::step(copy);
+                assert_eq!(now.state_hash(), copy.state_hash());
+            } else if now.impact.is_some() {
+                replay = Some(BlastRange::restore(config, &now.snapshot()).unwrap());
+            }
+            if now.impact.is_some()
+                && now.explosion.as_ref().is_some_and(|e| !e.working())
+                && before.explosion.as_ref().is_some_and(|e| !e.working())
+                && now.world.queued() == 0
+                && before.world.queued() == 0
+            {
+                break;
+            }
+        }
+        let old = soil_shape(&before);
+        let new = soil_shape(&now);
+        eprintln!(
+            "soil profile energy={} old={old:?} new={new:?}",
+            config.energy
+        );
+        assert!(replay.is_some());
+        assert!(new.0 > 0 && new.0 < old.0, "soil volume did not shrink");
+        assert!(
+            new.1 > 0 && new.1 < old.1,
+            "crater did not become shallower"
+        );
+        assert!(new.1 * 2 <= old.1, "crater depth reduction is too small");
+    }
+}
+
+#[test]
+#[ignore = "manual isolated before/after depth and CPU comparison"]
+fn probe_deep_soil_profiles() {
+    for (name, text) in [
+        ("shell", include_str!("../../../data/explosion.ron")),
+        ("canister", include_str!("../../../data/canister-shell.ron")),
+        ("energy", include_str!("../../../data/energy-cannon.ron")),
+        ("siege", include_str!("../../../data/siege-shell.ron")),
+    ] {
+        for level in [16, 80] {
+            for profile in [false, true] {
+                let mut c = ExplosionConfig::from_ron(text).unwrap();
+                if !profile {
+                    c.soil_depth_cost = 0;
+                    c.soil_fracture_milli = 1000;
+                }
+                let mut r = deep_soil_trial(c, level);
+                if !profile {
+                    previous_ground_strength(&mut r);
+                }
+                let mut peak = 0.0f64;
+                let mut total = 0.0;
+                let mut impact_ticks = 0;
+                for _ in 0..120 {
+                    let start = std::time::Instant::now();
+                    let mut phases = Vec::new();
+                    let mut last = start;
+                    let jobs = std::sync::Mutex::new(Vec::new());
+                    r.step_observed_all_tasks(
+                        |p| {
+                            let t = std::time::Instant::now();
+                            phases.push((p, (t - last).as_secs_f64() * 1000.0));
+                            last = t;
+                        },
+                        |_| {},
+                        |_, _| {},
+                        |_, _| {},
+                        |stage, event| {
+                            if stage == 6 {
+                                jobs.lock()
+                                    .unwrap()
+                                    .push((event, std::time::Instant::now()));
+                            }
+                        },
+                    );
+                    let ms = start.elapsed().as_secs_f64() * 1000.0;
+                    if ms > 40.0 {
+                        let mut open = std::collections::BTreeMap::new();
+                        let mut scopes = Vec::new();
+                        for (event, t) in jobs.into_inner().unwrap() {
+                            if let Some(name) = event.strip_suffix("_begin") {
+                                open.insert(name, t);
+                            }
+                            if let Some(name) = event.strip_suffix("_end") {
+                                if let Some(start) = open.remove(name) {
+                                    scopes.push((name, (t - start).as_secs_f64() * 1000.0));
+                                }
+                            }
+                        }
+                        scopes.sort_by(|a, b| b.1.total_cmp(&a.1));
+                        println!(
+                            "SCOPES {name} level={level} profile={profile} {:?}",
+                            &scopes[..scopes.len().min(8)]
+                        );
+                        phases.sort_by(|a, b| b.1.total_cmp(&a.1));
+                        println!(
+                            "SLOW {name} level={level} profile={profile} tick={} phases={:?}",
+                            r.tick,
+                            &phases[..phases.len().min(5)]
+                        );
+                    }
+                    total += ms;
+                    peak = peak.max(ms);
+                    if r.impact.is_some() {
+                        impact_ticks += 1;
+                        if r.explosion.as_ref().is_some_and(|e| !e.working())
+                            && r.world.queued() == 0
+                        {
+                            break;
+                        }
+                    }
+                }
+                println!("GROUND {name} level={level} profile={profile} shape={:?} impact_ticks={impact_ticks} peak_ms={peak:.3} total_ms={total:.3}",soil_shape(&r));
+            }
+        }
+    }
+}
+
+#[test]
+fn soil_work_profile_preserves_other_materials_hulls_and_ground_properties() {
+    let mut c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let body = voxel::unit::tank();
+    let mut old = c;
+    old.soil_depth_cost = 0;
+    old.soil_fracture_milli = 1000;
+    for mat in [0, 2, 3, 4, 5, 6] {
+        assert_eq!(
+            super::super::terrain_work(mat, 0, 16, &c),
+            super::super::terrain_work(mat, 0, 16, &old)
+        );
+        assert_eq!(super::super::soil_price_milli(mat, &c), 1000);
+    }
+    assert_eq!(
+        super::super::unit_work(&body, [10, 10, 10], &c),
+        super::super::unit_work(&body, [10, 10, 10], &old)
+    );
+    let m = super::super::matter::Matter::new(&[]);
+    for mat in [1, 7, 8] {
+        assert_eq!(
+            super::super::blast_ground_price(&m, &c, mat),
+            4 * m.ground_price(mat)
+        );
+    }
+    c.soil_depth_cost = u32::MAX;
+    assert!(c.validate().is_err());
+}
+
+#[test]
+fn confined_soil_cell_skip_matches_contacts_without_hiding_other_materials() {
+    let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut w = World::new(64, 128, 64, 100, Box::new(FlatSoil));
+    let mut e = Explosion::begin([32, 79, 32], &c, &[]);
+    e.soil_plane_y = Some(79);
+    let mut dents = SurfaceWork::new();
+    let mut changed = Vec::new();
+    assert!(super::super::silent_soil(&c, 100, &[1, 7, 8], 60, 79));
+    assert!(!super::super::silent_soil(&c, 100, &[1, 2, 8], 60, 79));
+    for y in 58..=60 {
+        for mat in [1, 7, 8] {
+            assert!(e.ground_contact_known(
+                &mut w,
+                [32, y, 32],
+                mat,
+                100,
+                &mut dents,
+                &mut changed,
+                &c,
+                None
+            ));
+        }
+    }
+    assert!(dents.is_empty() && changed.is_empty() && w.queued() == 0);
+}
+struct FlatSoil;
+impl voxel::Generator for FlatSoil {
+    fn material(&self, _: u32, y: u32, _: u32) -> u16 {
+        u16::from(y < 80)
     }
 }

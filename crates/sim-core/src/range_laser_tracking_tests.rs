@@ -183,7 +183,14 @@ fn spider_laser_tracking_live_retarget_burns_an_unselected_unit_between_targets(
     assert!(fx::angle::diff(r.battle.actors[0].turret.angle, yaw).abs() < fx::angle::FULL / 360);
     let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     let mut collateral = false;
-    for _ in 0..210 {
+    // A swept grazing hit can need a second thermal pulse at a different
+    // fixed-step phase. Bound the trial by two authored pulses and cooldown.
+    let tuning = motion::spider_tuning();
+    let limit =
+        modding::clock::stream_ticks(tuning.laser.burst_ticks * tuning.laser.interval_ticks * 2)
+            + tuning.laser.reload_ticks
+            + tuning.charge_ticks;
+    for _ in 0..limit {
         let active = r.battle.actors[0].burst;
         step(&mut r);
         step(&mut replay);
@@ -204,7 +211,7 @@ fn spider_laser_tracking_live_retarget_burns_an_unselected_unit_between_targets(
         r.units[3].status.alive, r.tick
     );
     assert!(collateral, "unselected intermediate tank took no damage");
-    assert!(!r.units[3].status.alive, "sweep did not reach final victim");
+    assert!(!r.units[3].status.alive, "sweep did not reach final victim: removed={} heat_cells={} burst={} target={:?} yaw={} pitch={} pos={:?}", r.units[3].removed.len(), r.thermals.cells().count(), r.battle.actors[0].burst, r.battle.actors[0].target, r.battle.actors[0].turret.angle, r.units[0].turret_pitch, r.units[3].motion.pos);
     assert!(!r.thermals.cells().any(|(c, _)| c.unit == 0));
     assert!(r.matter.economy.ledger.balanced());
 }
@@ -306,11 +313,15 @@ fn spider_live_beam_keeps_melting_armour_while_a_hot_crater_competes_for_slots()
         }],
     );
     r.matter.tuning.max_flying = 512;
+    r.matter.legacy_melt_for_test();
+    r.heat_tuning.melt_flow = [None; 3];
     assert!(r.battle_order(0, Order::Attack(1), None));
     beam(&mut r);
     let first = r.tick;
     let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     replay.matter.tuning.max_flying = 512; // authored tuning is not stored in saves
+    replay.matter.legacy_melt_for_test();
+    replay.heat_tuning.melt_flow = [None; 3];
     for _ in 0..120 {
         for sim in [&mut r, &mut replay] {
             for x in 40..72 {
@@ -344,6 +355,60 @@ fn spider_live_beam_keeps_melting_armour_while_a_hot_crater_competes_for_slots()
 }
 
 #[test]
+fn spider_direct_beam_damages_new_target_when_heat_field_is_full_of_cold_cells() {
+    let mut r = trial(
+        &[
+            (RangeUnitKind::Tank, [450, 16, 336]),
+            (RangeUnitKind::Tank, [540, 16, 540]),
+        ],
+        vec![],
+    );
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    r.thermal_tuning.max_cells = 64;
+    r.thermal_tuning.cells_per_tick = 64;
+    r.thermal_tuning.cooling_milli = 0;
+    r.thermal_tuning.conduction_milli = 0;
+    let body = &r.units[2].body;
+    let mut old = Vec::new();
+    'outer: for x in 0..body.vol.nx {
+        for y in 0..body.vol.ny {
+            for z in 0..body.vol.nz {
+                if body.vol.get(x as usize, y as usize, z as usize) {
+                    old.push(thermal::Cell {
+                        unit: 2,
+                        part: 0,
+                        at: [x, y, z],
+                    });
+                    if old.len() == 64 {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(old.len(), 64);
+    for p in old {
+        r.thermals.deposit(p, 1, &r.thermal_tuning);
+    }
+    assert_eq!(r.thermals.hot(), 64);
+    for u in &mut r.units {
+        u.motion.enabled = false;
+    }
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    beam(&mut r);
+    for _ in 0..40 {
+        step(&mut r);
+    }
+    assert!(
+        r.thermals.melted > 0,
+        "direct laser heat was rejected by a full field of cold cells"
+    );
+    assert!(r.thermals.hot() <= 64);
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
 fn laser_heated_steel_cover_reserves_capacity_before_unrelated_wave_damage() {
     let mut r = trial(
         &[(RangeUnitKind::Tank, [450, 16, 336])],
@@ -354,6 +419,8 @@ fn laser_heated_steel_cover_reserves_capacity_before_unrelated_wave_damage() {
         }],
     );
     r.matter.tuning.max_flying = 1;
+    r.matter.legacy_melt_for_test();
+    r.heat_tuning.melt_flow = [None; 3];
     r.matter.tuning.max_fragments = 1;
     let p = [41, 23, 41];
     r.heat.add(&r.world, p, 16_000);
@@ -417,7 +484,7 @@ fn spider_laser_tracking_frozen_wave_pose_survives_aim_changes_and_snapshot_corr
         step(&mut r);
     }
     let bytes = r.snapshot();
-    assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 52);
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 52);
     let mut replay = BlastRange::restore(r.config, &bytes).unwrap();
     assert_eq!(r.state_hash(), replay.state_hash());
     if let Some(e) = &replay.explosion {

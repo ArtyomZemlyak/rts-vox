@@ -204,14 +204,14 @@ fn a_range_restored_mid_search_steps_as_the_continuing_one() {
     let mut r = walled();
     starve(&mut r);
     let plain = r.snapshot();
-    assert_ne!(u32::from_le_bytes(plain[..4].try_into().unwrap()), 66);
+    assert_ne!(u32::from_le_bytes(plain[8..12].try_into().unwrap()), 66);
     order_all(&mut r);
     for _ in 0..3 {
         step(&mut r);
     }
     assert!((0..5).any(|k| r.units[k].motion.coarse_waited().is_some()));
     let bytes = r.snapshot();
-    assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 66);
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 66);
     let mut back = BlastRange::restore(r.config, &bytes).expect("mid-search snapshot");
     assert_eq!(back.snapshot(), bytes);
     // The allowance and the reach are data: the restored range is given
@@ -232,7 +232,7 @@ fn a_range_restored_mid_search_steps_as_the_continuing_one() {
         if searching && !now {
             // The last answer: the snapshot falls back to its plain version.
             assert_ne!(
-                u32::from_le_bytes(r.snapshot()[..4].try_into().unwrap()),
+                u32::from_le_bytes(r.snapshot()[8..12].try_into().unwrap()),
                 66
             );
         }
@@ -245,7 +245,7 @@ fn a_range_restored_mid_search_steps_as_the_continuing_one() {
     );
     // A version-66 header with no search in it is not a snapshot.
     let mut forged = plain.clone();
-    forged.splice(0..0, 66u32.to_le_bytes());
+    forged.splice(8..8, 66u32.to_le_bytes());
     forged.extend(0u32.to_le_bytes());
     assert!(BlastRange::restore(r.config, &forged).is_none());
 }

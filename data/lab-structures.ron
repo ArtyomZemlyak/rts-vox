@@ -1,0 +1,33 @@
+// Reference pieces for loss of support, bridges and impact experiments.
+(elements: [
+ (id:"glass-block",name:"Стекло · оплавленный песок",category:Block,blocks:[(min:(-4,0,-4),max:(4,8,4),material:12)]),
+ (id:"collapse-slab",name:"Перекрытие на дереве",category:Structure,blocks:[
+  (min:(-4,0,-32),max:(4,24,-24),material:5),
+  (min:(-4,0,24),max:(4,24,32),material:5),
+  (min:(-4,24,-32),max:(4,32,32),material:2)]),
+ (id:"collapse-tower",name:"Башня на узкой опоре",category:Structure,blocks:[
+  (min:(-3,0,-3),max:(3,24,3),material:5),
+  (min:(-16,24,-16),max:(16,48,16),material:2)]),
+ (id:"layered-wall",name:"Сталь · бетон · дерево",category:Structure,blocks:[
+  (min:(-6,0,-24),max:(-2,32,24),material:3),
+  (min:(-2,0,-24),max:(4,32,24),material:2),
+  (min:(4,0,-24),max:(8,32,24),material:5)]),
+ (id:"sand-column",name:"Песчаная колонна",category:Block,blocks:[
+  (min:(-8,0,-8),max:(8,24,8),material:10)]),
+ (id:"soil-on-sand",name:"Грунт на песчаном основании",category:Structure,blocks:[
+  (min:(-12,0,-12),max:(12,12,12),material:10),
+  (min:(-8,12,-8),max:(8,24,8),material:1)]),
+ (id:"rock-on-sand",name:"Камень на песке",category:Structure,blocks:[
+  (min:(-16,0,-16),max:(16,4,16),material:10),
+  (min:(-1,4,-1),max:(1,28,1),material:10),
+  (min:(-2,28,-2),max:(2,32,2),material:6)]),
+ (id:"water-block",name:"Вода · объём 8³",category:Block,blocks:[
+  (min:(-4,0,-4),max:(4,8,4),material:11)]),
+ (id:"water-basin",name:"Бассейн с водой",category:Structure,blocks:[
+  (min:(-18,0,-18),max:(18,2,18),material:2),
+  (min:(-18,2,-18),max:(-16,20,18),material:2),
+  (min:(16,2,-18),max:(18,20,18),material:2),
+  (min:(-16,2,-18),max:(16,20,-16),material:2),
+  (min:(-16,2,16),max:(16,20,18),material:2),
+  (min:(-16,2,-16),max:(16,12,16),material:11)]),
+])

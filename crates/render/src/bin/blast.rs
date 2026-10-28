@@ -23,6 +23,13 @@ use render::{look, presentation};
 use sim_core::blast::{BlastRange, GUN};
 #[path = "blast/bodies.rs"]
 mod bodies;
+#[path = "blast/surround.rs"]
+mod surround;
+#[path = "blast/water.rs"]
+mod water;
+#[cfg(test)]
+#[path = "blast/camera_edges_tests.rs"]
+mod camera_edges_tests;
 #[path = "blast/compute.rs"]
 mod compute;
 #[path = "blast/damage_art.rs"]
@@ -38,16 +45,33 @@ mod gun_art;
 mod interaction_tests;
 #[path = "blast/knobs.rs"]
 mod knobs;
+#[path = "blast/laboratory.rs"]
+mod laboratory;
 #[path = "blast/moving.rs"]
 mod moving;
 #[path = "blast/overview.rs"]
 mod overview;
 #[path = "blast/panel.rs"]
 mod panel;
+#[path = "blast/pilot.rs"]
+mod pilot;
 #[path = "blast/profile.rs"]
 mod profile;
+#[path = "blast/status_log.rs"]
+mod status_log;
+#[path = "blast/frame_limit.rs"]
+mod frame_limit;
 #[path = "blast/streaming.rs"]
 mod streaming;
+#[path = "blast/terrain_columns.rs"]
+mod terrain_columns;
+#[path = "blast/terrain_positions.rs"]
+mod terrain_positions;
+#[cfg(test)]
+#[path = "blast/terrain_publication_tests.rs"]
+mod terrain_publication_tests;
+#[path = "blast/terrain_units.rs"]
+mod terrain_units;
 #[path = "blast/ui_snapshot.rs"]
 mod ui_snapshot;
 #[path = "blast/witness.rs"]
@@ -60,6 +84,16 @@ use damage_art::SkinBindings;
 use std::collections::BTreeSet;
 use std::sync::{atomic::Ordering, Arc};
 use workbench::Workshop;
+
+#[derive(Resource, Default)]
+struct RuntimeLog(status_log::Log);
+
+#[derive(Resource)]
+struct FrameLimit(frame_limit::Limiter);
+
+fn limit_frames(mut limit: ResMut<FrameLimit>) {
+    limit.0.wait();
+}
 
 #[derive(Resource)]
 struct Scene {
@@ -192,7 +226,15 @@ fn weapon_code(energy: bool, anni: bool) -> f32 {
 }
 fn read_layout(file: Option<&str>) -> Result<Option<RangeLayout>, String> {
     file.map(|file| {
-        RangeLayout::from_ron(&std::fs::read_to_string(file).map_err(|e| e.to_string())?)
+        let layout =
+            RangeLayout::from_ron(&std::fs::read_to_string(file).map_err(|e| e.to_string())?)?;
+        let editor = modding::range::RangeEditor::from_ron(include_str!(
+            "../../../../data/range-editor.ron"
+        ))?;
+        let level = layout
+            .ground_level
+            .max(sim_core::blast::FLOOR + editor.subsoil_units);
+        layout.with_ground_level(level)
     })
     .transpose()
 }
@@ -266,7 +308,7 @@ fn gun_rotation(sim: &BlastRange) -> Quat {
 fn visible_gun_yaw(scene: &Scene, visual: &moving::Visual) -> f32 {
     let old = visual.turret.unwrap_or(scene.sim.turret.angle);
     let fraction = if scene.realtime && !scene.paused {
-        (scene.acc * 30.0).clamp(0.0, 1.0)
+        (scene.acc * sim_core::TICKS_PER_SECOND as f32).clamp(0.0, 1.0)
     } else {
         1.0
     };
@@ -280,6 +322,7 @@ fn muzzle_vec(sim: &BlastRange) -> Vec3 {
     Vec3::from(sim.muzzle().map(|v| v.to_f64_lossy() as f32))
 }
 fn visible_muzzle(scene: &Scene, visual: &moving::Visual) -> Vec3 {
+    if scene.sim.point_gun() { return muzzle_vec(&scene.sim); }
     let current = moving::pose(&scene.sim.gun);
     let visible = moving::visible(&scene.sim.gun, visual.previous.last(), scene);
     let current_yaw =
@@ -339,6 +382,10 @@ fn configure_gas(sim: &BlastRange, energy: bool, anni: bool, gas: &mut GasInput)
     gas.params.look.x = look::scene().ground_glow;
 }
 fn main() {
+    let mut fps_limit = 200u32;
+    let mut surround_enabled = true;
+    let mut start_laboratory = false;
+    let mut profile_background = false;
     let mut out = None;
     let mut all_frames = false;
     let mut finish = None;
@@ -400,6 +447,7 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--laboratory" => start_laboratory = true,
             "--profile" => {
                 i += 1;
                 profile_output = Some(args[i].clone());
@@ -477,6 +525,13 @@ fn main() {
                 i += 1;
                 profile_seconds = args[i].parse().expect("profile seconds");
             }
+            "--profile-background" => profile_background = true,
+            "--fps-limit" => {
+                i += 1;
+                fps_limit = args.get(i).expect("--fps-limit 0..=1000")
+                    .parse().expect("--fps-limit 0..=1000");
+                assert!(fps_limit <= 1000, "--fps-limit 0..=1000");
+            }
             "--maximized" => maximized = true,
             "--window" => {
                 i += 1;
@@ -499,6 +554,7 @@ fn main() {
                 i += 1;
                 skirmish = Some(args[i].parse::<u8>().expect("skirmish catalog ID"));
             }
+            "--no-surround" => surround_enabled = false,
             "--no-projectile-markers" => projectile_markers = false,
             "--zoom" => {
                 i += 1;
@@ -583,8 +639,9 @@ fn main() {
                     Some("gun") => 4,
                     Some("target") => 5,
                     Some("map") => 6,
+                    Some("first-person") => 7,
                     _ => panic!(
-                        "--view expects auto, overview, exposed, sheltered, gun, target or map"
+                        "--view expects auto, overview, exposed, sheltered, gun, target, map or first-person"
                     ),
                 });
             }
@@ -673,6 +730,9 @@ fn main() {
         !(realtime && all_frames),
         "--realtime supports --shots; use offline capture for a gap-free movie"
     );
+    if start_laboratory && layout_file.is_none() {
+        layout_file = Some("data/range-km.ron".into());
+    }
     let mut layout = read_layout(layout_file.as_deref()).expect("range file");
     // The save carries its own layout and state. It starts running; R
     // restarts its layout from scratch.
@@ -951,10 +1011,24 @@ fn main() {
         custom_layer: render::timeline::tasks::layer,
         ..log_plugin
     };
+    assert!(!profile_background || profile_output.is_some(), "--profile-background requires --profile");
+    // Winit's native maximize path uses SW_MAXIMIZE on Windows, which can
+    // activate even a window created with with_active(false). Background
+    // captures use an explicit client resolution instead.
+    assert!(!profile_background || !maximized, "background profiling uses --window width,height instead of --maximized");
+    if profile_background {
+        app.insert_resource(bevy::winit::WinitSettings::continuous());
+    }
     let mut primary_window = Window {
         title: "RTS VOX / BLAST RANGE — Space: pause · R: replay".into(),
         resolution: bevy::window::WindowResolution::new(window_size[0], window_size[1])
             .with_scale_factor_override(1.0),
+        focused: !profile_background,
+        window_level: if profile_background {
+            bevy::window::WindowLevel::AlwaysOnBottom
+        } else {
+            bevy::window::WindowLevel::Normal
+        },
         present_mode: if realtime && profile_output.is_none() {
             PresentMode::AutoVsync
         } else {
@@ -967,6 +1041,8 @@ fn main() {
     }
     if profile_output.is_some() {
         println!("PROFILE window_maximize_requested={maximized}");
+        println!("PROFILE fps_limit={fps_limit}");
+        println!("PROFILE background={profile_background}");
     }
     app.add_plugins(
         DefaultPlugins
@@ -1028,14 +1104,21 @@ fn main() {
             skip_delta: true,
             notice: String::new(),
         })
+        .insert_resource(surround::Enabled(surround_enabled))
         .insert_resource(hud)
+        .insert_resource(laboratory::Laboratory::new(start_laboratory))
         .insert_resource(knobs::Overrides::new(settings, stock_tuning))
+        .insert_resource(pilot::Pilot::requested(view == 7))
         .init_resource::<moving::Visual>()
+        .init_resource::<fragments::batches::Enabled>()
         .init_resource::<fire::Effects>()
         .init_resource::<workbench::ShieldFlashes>()
         .insert_resource(workshop)
         .insert_resource(recording)
         .insert_resource(profiler)
+        .init_resource::<RuntimeLog>()
+        .insert_resource(FrameLimit(frame_limit::Limiter::new(fps_limit)))
+        .add_systems(First, limit_frames.before(bevy::time::TimeSystems))
         .insert_resource(gas)
         .init_resource::<streaming::Streaming>()
         .init_resource::<overview::Distant>()
@@ -1048,13 +1131,14 @@ fn main() {
                 profile::begin,
                 profile::actions,
                 (
-                    panel::actions,
+                    (laboratory::first_person_input,laboratory::tools_input,panel::actions, laboratory::actions).chain(),
                     panel::minimap::input,
                     panel::scroll,
                     knobs::actions,
-                    workbench::input,
+                    pilot::input,
+                    (workbench::input, laboratory::pointer, laboratory::flush_live).chain(),
                     advance,
-                    panel::scenario_progress,
+                    (panel::scenario_progress, laboratory::measure).chain(),
                     panel::minimap::update_terrain,
                     profile::stamp,
                     gun_art::refresh,
@@ -1064,11 +1148,13 @@ fn main() {
                     moving::animate,
                     fragments::draw,
                     bodies::draw,
+                    water::draw,
+                    laboratory::highlight,
                     profile::stamp,
                 )
                     .chain(),
                 (
-                    framing,
+                    (framing, laboratory::section_camera).chain(),
                     fire::draw,
                     weapon_art,
                     animate_energy,
@@ -1076,6 +1162,9 @@ fn main() {
                     overview::atmosphere,
                     streaming::camera,
                     workbench::camera,
+                    surround::update,
+                    laboratory::first_person_draw,
+                    laboratory::collectors_draw,
                     workbench::ghost::update,
                     workbench::overlay,
                     (
@@ -1085,6 +1174,8 @@ fn main() {
                         panel::minimap::update_view,
                         panel::hud::refresh,
                         knobs::refresh,
+                        pilot::hud,
+                        (laboratory::refresh, laboratory::sync_ui, laboratory::sync_parameters, laboratory::sync_scenario, laboratory::scroll_ui).chain(),
                     )
                         .chain(),
                     panel::hud::refresh_selection_box,
@@ -1101,6 +1192,14 @@ fn main() {
         .run();
 }
 fn surface_material(sim: &BlastRange, p: [i32; 3], m: u16) -> u32 {
+    // Only these materials have a damaged presentation palette. Air, soil,
+    // vegetation and other materials cannot be tinted by SurfaceWork.
+    if m == 10 { return 8; }
+    if m == 12 { return 11; }
+    if m == 16 { return 13; }
+    if !matches!(m, 2 | 3 | 6) {
+        return u32::from(m);
+    }
     let work = sim.surface_work.get(&p).copied().unwrap_or(0);
     if work == 0 {
         return u32::from(m);
@@ -1109,14 +1208,17 @@ fn surface_material(sim: &BlastRange, p: [i32; 3], m: u16) -> u32 {
     surface_tint(m, work, cost)
 }
 fn surface_tint(m: u16, work: u32, cost: u32) -> u32 {
+    if m == 10 { return 8; }
+    if m == 12 { return 11; }
+    if m == 16 { return 13; }
     if work == 0 {
         return m as u32;
     }
     let level = (u64::from(work) * 3 / u64::from(cost.max(1))).min(2) as u32;
     if m == 3 {
-        9 + level
+        9 + level.min(1)
     } else if m == 2 || m == 6 {
-        12 + level
+        12
     } else {
         m as u32
     }
@@ -1131,6 +1233,7 @@ const WINDOW_STEP: i32 = 8;
 
 /// Initial terrain window before the first camera update.
 fn focus(sim: &BlastRange) -> [i32; 3] {
+    if sim.point_gun() { return sim.layout.as_ref().expect("point layout").gun; }
     let p = sim.gun.motion.pos;
     [p[0], p[1], p[2]].map(|v| v.to_int_trunc())
 }
@@ -1295,11 +1398,7 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
         .units
         .iter()
         .enumerate()
-        .flat_map(|(id, u)| {
-            u.removed[unit_start[id]..]
-                .iter()
-                .map(|p| u.world_pos(p.map(usize::from)))
-        })
+        .flat_map(|(id, u)| terrain_positions::removed(u, unit_start.get(id).copied().unwrap_or(0)))
         .collect();
     if sim.world.edits().is_empty() && unit_edits.is_empty() && sim.surface_changed.is_empty() {
         return;
@@ -1307,13 +1406,18 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
     // Distant columns must also receive edits outside the detailed window.
     if gas.params.distant.z > 0.0 {
         let step = gas.params.distant.z as u32;
+        let mut columns = terrain_columns::Columns::default();
+        let mut mark = |p| {
+            if columns.visit(p) {
+                gas.distant_edits.insert(p);
+            }
+        };
         for e in sim.world.edits() {
-            gas.distant_edits.insert([e.x / step, e.z / step]);
+            mark([e.x / step, e.z / step]);
         }
         for p in &sim.surface_changed {
             if p[0] >= 0 && p[2] >= 0 {
-                gas.distant_edits
-                    .insert([p[0] as u32 / step, p[2] as u32 / step]);
+                mark([p[0] as u32 / step, p[2] as u32 / step]);
             }
         }
     }
@@ -1321,6 +1425,7 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
     // includes the turned turret and articulated segments, so rejecting here
     // preserves every actual voxel hit without transforming empty space.
     let unit_boxes: Vec<_> = sim.units.iter().map(|u| u.bounds()).collect();
+    let mut unit_candidates = terrain_units::Candidates::new(&unit_boxes);
     let window = gas.window;
     let words = Arc::make_mut(&mut gas.terrain_words);
     let mut dirty = Vec::new();
@@ -1328,30 +1433,25 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
         .world
         .edits()
         .iter()
-        .map(|e| ([e.x as i32, e.y as i32, e.z as i32], e.mat))
-        .chain(
-            sim.surface_changed
-                .iter()
-                .map(|p| (*p, sim_core::blast::material(&sim.world, *p))),
-        )
-        .chain(unit_edits.iter().map(|p| {
-            let q = *p;
-            (q, sim_core::blast::material(&sim.world, q))
-        }));
+        .map(|e| ([e.x as i32, e.y as i32, e.z as i32], Some(e.mat)))
+        .chain(sim.surface_changed.iter().map(|p| (*p, None)))
+        .chain(unit_edits.iter().map(|p| (*p, None)));
     for (p, mat) in edits {
         let Some(i) = window.index(p) else {
             continue;
         };
         let shift = (i % 8) * 4;
-        let m = if sim
-            .units
-            .iter()
-            .zip(&unit_boxes)
-            .any(|(u, (lo, hi))| (0..3).all(|a| p[a] >= lo[a] && p[a] <= hi[a]) && u.solid(p))
-        {
+        let m = if unit_candidates.at(p).iter().any(|&id| {
+            let (lo, hi) = unit_boxes[id];
+            (0..3).all(|a| p[a] >= lo[a] && p[a] <= hi[a]) && sim.units[id].solid(p)
+        }) {
             15
         } else {
-            surface_material(sim, p, mat)
+            surface_material(
+                sim,
+                p,
+                mat.unwrap_or_else(|| sim_core::blast::material(&sim.world, p)),
+            )
         };
         if m != 0 {
             gas.params.terrain_origin.w = gas.params.terrain_origin.w.max((p[1] + 1) as f32);
@@ -1359,7 +1459,12 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
                 + window.dims[0] * (p[2] as u32 % window.dims[2])) as usize;
             gas.terrain_column_top[slot] = gas.terrain_column_top[slot].max((p[1] + 1) as u16);
         }
-        words[i / 8] = (words[i / 8] & !(15 << shift)) | (m << shift);
+        let word = &mut words[i / 8];
+        let next = (*word & !(15 << shift)) | (m << shift);
+        if *word == next {
+            continue;
+        }
+        *word = next;
         dirty.push(i / 8);
     }
     // Craters touch the same packed word repeatedly; batch ordering avoids
@@ -1418,6 +1523,7 @@ fn setup(
             SkinBindings::new(&voxel::unit::artillery_turret_t2()),
             SkinBindings::new(&voxel::unit::artillery_turret_t3()),
             SkinBindings::new(&voxel::unit::nuclear_silo()),
+            SkinBindings::new(&voxel::unit::crawler()),
         ]),
         pristine: Arc::new([
             voxel::unit::tank(),
@@ -1431,6 +1537,7 @@ fn setup(
             voxel::unit::artillery_turret_t2(),
             voxel::unit::artillery_turret_t3(),
             voxel::unit::nuclear_silo(),
+            voxel::unit::crawler(),
         ]),
         seen: Vec::new(),
         pending: Vec::new(),
@@ -1488,7 +1595,7 @@ fn setup(
         ember,
         coil,
     });
-    presentation::daylight(&mut commands, &mut mediums, sim_core::blast::FLOOR as f32);
+    presentation::daylight(&mut commands, &mut mediums, scene.sim.ground_level() as f32);
     commands.spawn((
         PointLight {
             color: if scene.energy {
@@ -1548,15 +1655,18 @@ fn advance(
     mut workshop: ResMut<Workshop>,
     mut visual: ResMut<moving::Visual>,
     panel: Res<panel::Panel>,
-    (recording, mut profile, mut fire_fx, mut streaming, _main_thread): (
+    (recording, pilot, mut profile, mut fire_fx, mut streaming, mut runtime_log, _main_thread, mut laboratory): (
         Res<Recording>,
+        Res<pilot::Pilot>,
         ResMut<profile::Profile>,
         ResMut<fire::Effects>,
         ResMut<streaming::Streaming>,
+        ResMut<RuntimeLog>,
         // Keep the synchronous tick coordinator out of the shared compute
         // executor used by pipelined render preparation. Physics/navigation
         // still fan out into their own persistent pools before ordered join.
         bevy::ecs::system::NonSendMarker,
+        Option<ResMut<laboratory::Laboratory>>,
     ),
     mut gas: ResMut<GasInput>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -1598,10 +1708,14 @@ fn advance(
     mut exit: MessageWriter<AppExit>,
 ) {
     gas.begin_frame();
-    if keys.just_pressed(KeyCode::Escape) {
+    if keys.just_pressed(KeyCode::Escape) && !pilot.consumed_escape {
         exit.write(AppExit::Success);
     }
-    if !workshop.editing && keys.just_pressed(KeyCode::KeyF) && scene.sim.refire() {
+    if !pilot.active()
+        && !workshop.editing
+        && keys.just_pressed(KeyCode::KeyF)
+        && scene.sim.refire()
+    {
         scene.paused = false;
         scene.notice.clear();
         println!(
@@ -1786,33 +1900,46 @@ fn advance(
         scene.skip_delta = false;
         return;
     }
-    if scene.paused || (scene.out.is_some() && scene.frame >= scene.finish) {
+    let single_step = laboratory.as_ref().is_some_and(|l| l.active() && l.step_requested);
+    if (scene.paused && !single_step) || (scene.out.is_some() && scene.frame >= scene.finish) {
         return;
     }
-    if scene.skip_delta {
+    if scene.skip_delta && !single_step {
         scene.skip_delta = false;
         return;
     }
-    let steps = if scene.realtime {
+    if single_step {
+        laboratory.as_mut().unwrap().step_requested = false;
+        scene.skip_delta = false;
+    }
+    let steps = if single_step {
+        1
+    } else if scene.realtime {
         // Retain the fractional remainder and run every elapsed fixed tick.
         // At low FPS the old single-step path silently slowed the whole scene.
         scene.acc += time.delta_secs();
         profile.record_dropped_ticks(
-            (scene.acc - render::realtime::MAX_DEBT_TICKS as f32 / 30.0).max(0.0) * 30.0,
+            (scene.acc
+                - render::realtime::MAX_DEBT_TICKS as f32 / sim_core::TICKS_PER_SECOND as f32)
+                .max(0.0)
+                * sim_core::TICKS_PER_SECOND as f32,
         );
         // Bounded debt (analysis 240, B5): a long overload slows the scene
         // rather than replaying the backlog as a later fast-forward.
         scene.acc = scene
             .acc
-            .min(render::realtime::MAX_DEBT_TICKS as f32 / 30.0);
+            .min(render::realtime::MAX_DEBT_TICKS as f32 / sim_core::TICKS_PER_SECOND as f32);
         scene.live_elapsed += time.delta_secs();
-        if scene.acc < 1.0 / 30.0 {
+        if scene.acc * sim_core::TICKS_PER_SECOND as f32 + f32::EPSILON * 8.0 < 1.0 {
             return;
         }
-        (scene.acc * 30.0).floor().min(8.0) as u32
+        (scene.acc * sim_core::TICKS_PER_SECOND as f32 + f32::EPSILON * 8.0)
+            .floor()
+            .min(8.0) as u32
     } else {
         1
     };
+    let steps = laboratory.as_ref().map_or(steps, |l| l.limit_steps(scene.sim.tick, steps));
     // A long tick must not be multiplied by an eight-tick catch-up burst.
     // Debt is subtracted only for completed work and stays for later frames.
     let batch_started = std::time::Instant::now();
@@ -1825,9 +1952,16 @@ fn advance(
             break;
         }
         if scene.realtime {
-            scene.acc -= 1.0 / 30.0;
+            scene.acc = (scene.acc - 1.0 / sim_core::TICKS_PER_SECOND as f32).max(0.0);
         }
-        let before = scene.sim.impact;
+        let before=(scene.sim.impact,scene.sim.impact_tick);
+        let weapon_before=(scene.sim.config,scene.energy,scene.anni);
+        if let Some(lab)=laboratory.as_mut() {
+            laboratory::tick_live(lab,&mut scene);
+        }
+        if weapon_before!=(scene.sim.config,scene.energy,scene.anni) {
+            configure_gas(&scene.sim,scene.energy,scene.anni,&mut gas);
+        }
         let unit_start: Vec<_> = scene.sim.units.iter().map(|u| u.removed.len()).collect();
         scene.previous_shell = scene
             .sim
@@ -1846,6 +1980,7 @@ fn advance(
                 scene.sim.order_attack(2);
             }
         }
+        pilot.tick(&mut scene);
         let started = std::time::Instant::now();
         let generation = scene.generation;
         profile.step(&mut scene.sim, generation);
@@ -1917,7 +2052,7 @@ fn advance(
             profile.measure_camera(0, start.elapsed());
         }
         profile.measure(1, terrain_started.elapsed());
-        if before.is_none() {
+        if (scene.sim.impact,scene.sim.impact_tick)!=before {
             if let Some(at) = scene.sim.impact {
                 // Solid shot contacts use their own bounded spark/spall layer.
                 // An empty cold gas field still adds explosion lighting/soot,
@@ -1932,7 +2067,10 @@ fn advance(
                     let params = gas.params;
                     gas.atmosphere.emit_at(params, scene.sim.impact_tick * 2);
                 }
-                println!("IMPACT tick={} at={at:?}", scene.sim.impact_tick);
+                runtime_log.0.emit(status_log::Status::Impact {
+                    tick: scene.sim.impact_tick,
+                    at,
+                });
             }
         }
         if scene.sim.impact.is_some() {
@@ -1951,6 +2089,7 @@ fn advance(
             params.chemistry.w = 2.7;
             params.charge.x = 0.6;
             params.charge.y = 0.06;
+            params.charge.w = 1.0; // Continuous surface fire, not an impact flash.
             params.source = gas
                 .surface_source(Vec3::from(p.map(|v| v as f32)), Vec3::Y)
                 .extend(3.0);
@@ -1969,7 +2108,7 @@ fn advance(
                     gas.params.charge.x * 0.5,
                     gas.params.charge.y * 0.2,
                     gas.params.charge.z * 0.5,
-                    0.0,
+                    1.0,
                 );
                 params.source = gas
                     .surface_source(Vec3::from(p.map(|v| v as f32)), Vec3::Y)
@@ -1978,10 +2117,10 @@ fn advance(
             }
         }
         let gas_started = std::time::Instant::now();
-        gas.advance(scene.sim.tick * 2);
+        gas.advance((u64::from(scene.sim.tick) * 60 / sim_core::TICKS_PER_SECOND as u64) as u32);
         profile.measure(2, gas_started.elapsed());
         let age = if scene.sim.impact.is_some() {
-            (scene.sim.tick - scene.sim.impact_tick) as f32 / 30.0
+            (scene.sim.tick - scene.sim.impact_tick) as f32 / sim_core::TICKS_PER_SECOND as f32
         } else {
             100.0
         };
@@ -1996,7 +2135,7 @@ fn advance(
         } else {
             0.0
         };
-        gas.params.weapon.y = scene.sim.tick as f32 / 30.0;
+        gas.params.weapon.y = scene.sim.tick as f32 / sim_core::TICKS_PER_SECOND as f32;
         gas.params.beam.w = charging;
         gas.params.energy.w = 0.0;
         if let Some(v) = scene.sim.shell {
@@ -2059,7 +2198,8 @@ fn advance(
                     .unwrap_or(Vec3::new(0.0, -1000.0, 0.0))
             };
         }
-        let recoil_age = (i64::from(scene.sim.tick) - i64::from(scene.sim.fire_tick)) as f32 / 30.0;
+        let recoil_age = (i64::from(scene.sim.tick) - i64::from(scene.sim.fire_tick)) as f32
+            / sim_core::TICKS_PER_SECOND as f32;
         let recoil = if (0.0..0.6).contains(&recoil_age) {
             (recoil_age * 14.0).sin() * (-recoil_age * 8.0).exp() * 3.0
         } else {
@@ -2141,14 +2281,14 @@ fn advance(
             }
         }
         for (e, mut t, mut b) in &mut debris {
-            b.life -= 1.0 / 30.0;
+            b.life -= 1.0 / sim_core::TICKS_PER_SECOND as f32;
             if b.life <= 0.0 {
                 commands.entity(e).despawn();
                 continue;
             }
-            b.velocity.y -= scene.sim.config.gravity as f32 / 30.0;
+            b.velocity.y -= scene.sim.config.gravity as f32 / sim_core::TICKS_PER_SECOND as f32;
             let old = t.translation;
-            let new = old + b.velocity / 30.0;
+            let new = old + b.velocity / sim_core::TICKS_PER_SECOND as f32;
             let mut hit = false;
             for i in 1..=8 {
                 let v = old.lerp(new, i as f32 / 8.0);
@@ -2169,14 +2309,14 @@ fn advance(
             }
         }
         if scene.frame.is_multiple_of(30) {
-            println!(
-                "frame={} blast_age={age:.2}s removed={} pending_edits={} bodies={} tick_ms={:.1}",
-                scene.frame,
-                scene.sim.removed,
-                scene.sim.world.queued(),
-                scene.sim.bodies.list.len(),
-                scene.step_us as f64 / 1000.0
-            );
+            runtime_log.0.emit(status_log::Status::Progress {
+                frame: scene.frame,
+                age,
+                removed: scene.sim.removed,
+                pending: scene.sim.world.queued(),
+                bodies: scene.sim.bodies.list.len(),
+                tick_us: scene.step_us,
+            });
         }
         completed += 1;
     }
@@ -2196,7 +2336,8 @@ fn orient_gun(
     let aim = render::realtime::hull_rotation(pose.up, visible_gun_yaw(&scene, &visual));
     let hull = render::realtime::hull_rotation(pose.up, pose.yaw);
     let segments = moving::gun_segments(&scene, &visual, pose);
-    let age = (i64::from(scene.sim.tick) - i64::from(scene.sim.fire_tick)) as f32 / 30.0;
+    let age = (i64::from(scene.sim.tick) - i64::from(scene.sim.fire_tick)) as f32
+        / sim_core::TICKS_PER_SECOND as f32;
     let recoil = if (0.0..0.6).contains(&age) {
         (age * 14.0).sin() * (-age * 8.0).exp() * 3.0
     } else {
@@ -2205,7 +2346,7 @@ fn orient_gun(
     for (g, mut tr, mut visible, emitter) in &mut gun {
         let connected = emitter.is_none_or(|e| scene.sim.gun.barrel_connected(e.0));
         *visible =
-            if scene.sim.battle_mode() || (emitter.is_some() && (!scene.energy || !connected)) {
+            if !scene.sim.physical_gun() || (emitter.is_some() && (!scene.energy || !connected)) {
                 Visibility::Hidden
             } else {
                 Visibility::Inherited
@@ -2261,15 +2402,15 @@ fn animate_energy(
         return;
     }
     scene.fps = 1.0 / ((1.0 / scene.fps) * 0.95 + time.delta_secs().max(0.0001) * 0.05);
-    // Interpolation is presentation only; collision and ablation remain 30 Hz.
+    // Interpolation is presentation only; collision and ablation use the fixed simulation clock.
     let fraction = if scene.realtime {
-        (scene.acc * 30.0).clamp(0.0, 1.0)
+        (scene.acc * sim_core::TICKS_PER_SECOND as f32).clamp(0.0, 1.0)
     } else {
         1.0
     };
     effects.battle_energy(&scene.sim, fraction, &mut gas.params);
     let visual_tick = scene.sim.tick.saturating_sub(1) as f32 + fraction;
-    gas.params.weapon.y = visual_tick / 30.0;
+    gas.params.weapon.y = visual_tick / sim_core::TICKS_PER_SECOND as f32;
     let emitter =
         visible_muzzle(&scene, &visual) + visible_gun_rotation(&scene, &visual) * Vec3::X * 2.0;
     gas.params.beam = emitter.extend(gas.params.beam.w);
@@ -2334,8 +2475,12 @@ fn overview_frame(sim: &BlastRange, aim: Vec3, offset: Vec3, aspect: f32) -> (Ve
     if let Some(layout) = &sim.layout {
         if let Some(c) = &layout.course {
             include(
-                Vec3::new(c.min[0] as f32, 16.0, c.min[1] as f32),
-                Vec3::new(c.max[0] as f32, 55.0, c.max[1] as f32),
+                Vec3::new(c.min[0] as f32, layout.ground_level as f32, c.min[1] as f32),
+                Vec3::new(
+                    c.max[0] as f32,
+                    layout.ground_level as f32 + 39.0,
+                    c.max[1] as f32,
+                ),
             );
         }
         for b in &layout.blocks {
@@ -2373,7 +2518,7 @@ fn overview_frame(sim: &BlastRange, aim: Vec3, offset: Vec3, aspect: f32) -> (Ve
 fn sector_frame(z: &modding::range::RangeZone, offset: Vec3, aspect: f32) -> (Vec3, f32) {
     let aim = Vec3::new(
         (z.min[0] + z.max[0]) as f32 * 0.5,
-        34.0,
+        z.spawn[1] as f32 + 18.0,
         (z.min[1] + z.max[1]) as f32 * 0.5,
     );
     let rotation = Transform::from_translation(offset)
@@ -2383,7 +2528,7 @@ fn sector_frame(z: &modding::range::RangeZone, offset: Vec3, aspect: f32) -> (Ve
     for x in [z.min[0], z.max[0]] {
         for y in [0, 110] {
             for zz in [z.min[1], z.max[1]] {
-                let p = Vec3::new(x as f32, y as f32, zz as f32) - aim;
+                let p = Vec3::new(x as f32, y as f32 + (z.spawn[1] - 16) as f32, zz as f32) - aim;
                 extent = extent
                     .max(Vec2::new((rotation * Vec3::X).dot(p), (rotation * Vec3::Y).dot(p)).abs());
             }
@@ -2395,8 +2540,12 @@ fn sector_frame(z: &modding::range::RangeZone, offset: Vec3, aspect: f32) -> (Ve
     )
 }
 
-fn whole_map_frame(size: [u32; 3], offset: Vec3, aspect: f32) -> (Vec3, f32) {
-    let aim = Vec3::new(size[0] as f32 * 0.5, 34.0, size[2] as f32 * 0.5);
+fn whole_map_frame(size: [u32; 3], ground: i32, offset: Vec3, aspect: f32) -> (Vec3, f32) {
+    let aim = Vec3::new(
+        size[0] as f32 * 0.5,
+        ground as f32 + 18.0,
+        size[2] as f32 * 0.5,
+    );
     let rotation = Transform::from_translation(offset)
         .looking_at(Vec3::ZERO, Vec3::Y)
         .rotation;
@@ -2404,7 +2553,7 @@ fn whole_map_frame(size: [u32; 3], offset: Vec3, aspect: f32) -> (Vec3, f32) {
     let up = rotation * Vec3::Y;
     let mut extent = Vec2::ZERO;
     for x in [0.0, size[0] as f32] {
-        for y in [0.0, size[1] as f32] {
+        for y in [(ground - 16) as f32, size[1] as f32] {
             for z in [0.0, size[2] as f32] {
                 let p = Vec3::new(x, y, z) - aim;
                 extent = extent.max(Vec2::new(right.dot(p), up.dot(p)).abs());
@@ -2447,17 +2596,30 @@ fn framing_far(base: f32, eye_offset: Vec3, height: f32, terrain_height: u32) ->
     base.max(eye_offset.length() + height + terrain_height as f32)
 }
 
+/// Clamp the requested focus, not an offset measured from another view's
+/// sector centre. Retain the corrected offset so outward dragging cannot
+/// accumulate hidden travel that must be undone before reversing direction.
+fn map_pan(base: Vec3, pan: &mut Vec2, size: [u32; 3]) -> Vec3 {
+    let origin = Vec2::new(base.x, base.z);
+    let focus = (origin + *pan).clamp(Vec2::ZERO, Vec2::new(size[0] as f32, size[2] as f32));
+    *pan = focus - origin;
+    Vec3::new(focus.x, base.y, focus.y)
+}
+
 fn framing(
     scene: Res<Scene>,
-    workshop: Res<Workshop>,
+    mut pilot: ResMut<pilot::Pilot>,
+    effects: Res<fire::Effects>,
+    mut workshop: ResMut<Workshop>,
     visual: Res<moving::Visual>,
     stream: Res<streaming::Streaming>,
     profile: Res<profile::Profile>,
     time: Res<Time<Real>>,
+    laboratory: Option<Res<laboratory::Laboratory>>,
     mut camera: Query<(&mut Transform, &mut Projection, &Camera), With<GasCamera>>,
 ) {
     let age = if scene.sim.impact.is_some() {
-        (scene.sim.tick - scene.sim.impact_tick) as f32 / 30.0
+        (scene.sim.tick - scene.sim.impact_tick) as f32 / sim_core::TICKS_PER_SECOND as f32
     } else {
         0.0
     };
@@ -2467,6 +2629,13 @@ fn framing(
     let aim_x = if scene.energy { 285.0 } else { 207.0 };
     let rise = if scene.energy { 20.0 } else { 34.0 };
     for (mut transform, mut projection, camera) in &mut camera {
+        let aspect = camera
+            .logical_viewport_size()
+            .map_or(16.0 / 9.0, |v| v.x / v.y.max(1.0));
+        if laboratory.as_ref().is_some_and(|l|l.tool_camera(&mut transform,&mut projection,aspect)) {continue;}
+        if pilot.camera(&scene, &visual, &mut transform, &mut projection, aspect) {
+            continue;
+        }
         *transform = Transform::from_xyz(aim_x - 159.0, 240.0 + pullback * rise, 593.0)
             .looking_at(Vec3::new(aim_x, 34.0 + pullback * rise, 336.0), Vec3::Y);
         if let Projection::Orthographic(p) = &mut *projection {
@@ -2502,7 +2671,7 @@ fn framing(
                 let centre = Vec3::from(layout.target.map(|v| v as f32));
                 let mut aim = Vec3::new(
                     (layout.gun[0] as f32 + centre.x) * 0.5 + 35.0,
-                    34.0,
+                    layout.ground_level as f32 + 18.0,
                     centre.z,
                 );
                 let mut offset = Vec3::new(-155.0, 250.0, 320.0);
@@ -2519,7 +2688,8 @@ fn framing(
                 );
                 aim = fitted;
                 if scene.view == 6 {
-                    (aim, height) = whole_map_frame(scene.sim.size(), offset, aspect);
+                    (aim, height) =
+                        whole_map_frame(scene.sim.size(), scene.sim.ground_level(), offset, aspect);
                 }
                 if scene.view == 2 || scene.view == 3 {
                     let id = if scene.view == 3 { 1 } else { 0 };
@@ -2571,7 +2741,10 @@ fn framing(
                     .logical_viewport_size()
                     .unwrap_or(Vec2::new(1600.0, 900.0));
                 let ui_scale = panel::hud::scale(viewport);
-                let panel_fraction = 310.0 * ui_scale / viewport.y.max(1.0);
+                let lab_margins=laboratory.as_ref().and_then(|lab|lab.viewport_margins(viewport));
+                let panel_fraction = lab_margins.map_or(310.0 * ui_scale / viewport.y.max(1.0),|[top,bottom,left,right]| {
+                    ((top+bottom)/viewport.y.max(1.0)).max((left+right)/viewport.x.max(1.0)).min(0.8)
+                });
                 if scene.view == 1 || scene.view == 6 {
                     height /= 1.0 - panel_fraction;
                 }
@@ -2607,22 +2780,51 @@ fn framing(
                 };
                 if scene.view == 1 && height > local_limit {
                     let (whole_aim, whole_height) =
-                        whole_map_frame(scene.sim.size(), offset, aspect);
+                        whole_map_frame(scene.sim.size(), scene.sim.ground_level(), offset, aspect);
                     let full = whole_height / (1.0 - panel_fraction);
                     let progress =
                         ((height - local_limit) / (full - local_limit).max(1.0)).clamp(0.0, 1.0);
                     aim = aim.lerp(whole_aim, progress);
                 }
                 let full_height =
-                    whole_map_frame(scene.sim.size(), offset, aspect).1 / (1.0 - panel_fraction);
+                    whole_map_frame(scene.sim.size(), scene.sim.ground_level(), offset, aspect).1
+                        / (1.0 - panel_fraction);
                 height = height.min(full_height * 1.1);
-                if let Some(tour) = profile.camera_sample(time.elapsed_secs_f64(), scene.sim.size())
-                {
-                    aim = Vec3::new(tour.focus.x, 34.0, tour.focus.y);
+                let tour = profile.camera_sample(time.elapsed_secs_f64(), scene.sim.size());
+                if let Some(tour) = tour {
+                    aim = Vec3::new(
+                        tour.focus.x,
+                        scene.sim.ground_level() as f32 + 18.0,
+                        tour.focus.y,
+                    );
                     height = tour.height.min(full_height * 1.1);
                 }
-                aim -= screen_up * height * (238.0 - 72.0) * ui_scale / viewport.y.max(1.0) * 0.5;
-                aim += Vec3::new(pan.x, 0.0, pan.y);
+                // The nuclear test range's default overview follows the rising
+                // cloud. Explicit views, zoom and pan keep the player's framing.
+                if scene.view == 1
+                    && layout.idle_enemies
+                    && (zoom - 1.0).abs() < 0.01
+                    && pan.length_squared() < 1.0
+                {
+                    if let Some((at, blend)) = effects
+                        .nuclear_focus(scene.sim.tick as f32 / sim_core::TICKS_PER_SECOND as f32)
+                    {
+                        aim = aim.lerp(at + Vec3::Y * 850.0, blend);
+                        height = height.lerp(height.max(3800.0), blend);
+                    }
+                }
+                aim = if scene.camera_sweep || tour.is_some() {
+                    aim + Vec3::new(pan.x, 0.0, pan.y)
+                } else {
+                    workshop.frame_pan(scene.generation, scene.view, aim, scene.sim.size())
+                };
+                if let Some([top,bottom,left,right])=lab_margins {
+                    aim-=screen_up*height*(bottom-top)/viewport.y.max(1.0)*0.5;
+                    let screen_right=Transform::from_translation(offset).looking_at(Vec3::ZERO,Vec3::Y).rotation*Vec3::X;
+                    aim+=screen_right*height*aspect*(right-left)/viewport.x.max(1.0)*0.5;
+                } else {
+                    aim -= screen_up * height * (238.0 - 72.0) * ui_scale / viewport.y.max(1.0) * 0.5;
+                }
                 // Continuous at the local-window limit: the old branch jumped
                 // the eye hundreds of units, abruptly changing atmospheric depth.
                 let eye_offset =
@@ -2677,14 +2879,17 @@ fn capture(
     mut commands: Commands,
     mut scene: ResMut<Scene>,
     gas: Res<GasInput>,
+    streaming: Res<streaming::Streaming>,
+    laboratory: Option<Res<laboratory::Laboratory>>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    if !gas.ready.load(Ordering::Relaxed) {
+    if !gas.ready.load(Ordering::Relaxed) || streaming.loading() {
         return;
     }
     let Some(dir) = scene.out.clone() else {
         return;
     };
+    if laboratory.as_ref().is_some_and(|lab|!laboratory::capture_ready(lab)) {return;}
     // Editor captures have no simulation ticks. Save the actual paused UI
     // once and give the asynchronous screenshot writer time to finish.
     if scene.paused {
@@ -2709,7 +2914,7 @@ fn capture(
                 "CLOCK realtime={} wall={:.3}s sim={:.3}s remainder={:.4}s",
                 scene.realtime,
                 scene.live_elapsed,
-                scene.sim.tick as f32 / 30.0,
+                scene.sim.tick as f32 / sim_core::TICKS_PER_SECOND as f32,
                 scene.acc
             );
             println!(

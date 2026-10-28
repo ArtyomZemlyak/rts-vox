@@ -427,7 +427,7 @@ fn a_restore_mid_reclaim_continues_bit_for_bit() {
     }
     assert_eq!(reclaim(&a).piece_work(0), Some((id, 15)));
     let bytes = a.snapshot();
-    assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 64);
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 64);
     let mut b = BlastRange::restore(config(), &bytes).expect("restore mid-reclaim");
     assert_eq!(b.snapshot(), bytes);
     // Work on a piece that is not there is refused, and so is work past
@@ -517,7 +517,7 @@ fn a_dead_diggers_cargo_breaches_and_the_rest_is_reclaimed_by_digging() {
     assert_eq!(p.tank_held(0), Some(cargo));
     assert_eq!(p.matter.economy.ledger.sunk(Sink::ContainerBreach), 0);
     assert_eq!(
-        u32::from_le_bytes(p.snapshot()[..4].try_into().unwrap()),
+        u32::from_le_bytes(p.snapshot()[8..12].try_into().unwrap()),
         62
     );
 }
@@ -578,7 +578,7 @@ fn with_banks_a_piece_that_does_not_fit_sends_the_tank_to_haul() {
     assert!(r.hauling(0), "the piece filled the tank's room: it hauls");
     // Stores and reclaim: version 64 with the haul's section.
     let bytes = r.snapshot();
-    assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 64);
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 64);
     let mut b = BlastRange::restore(config(), &bytes).expect("restore with banks");
     assert_eq!(b.snapshot(), bytes);
     let mut came_back = false;

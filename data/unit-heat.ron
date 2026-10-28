@@ -3,8 +3,8 @@
 (
     cells_per_tick: 512,
     max_cells: 16384,
-    cooling_milli: 8,
-    conduction_milli: 8,
+    cooling_milli: 12,
+    conduction_milli: 12,
     // Armour, core, engine, weapon, sensor. Geometry shields inner cells.
     softening: (400, 650, 160, 350, 120),
     smoke: 90,
@@ -12,5 +12,5 @@
     // Each field visits at most this many sources; cold scenes do no probing.
     exchange_cells_per_tick: 64,
     exchange_reach: 4,
-    exchange_milli: 40,
+    exchange_milli: 60,
 )

@@ -2,7 +2,7 @@
 //! original data order, so overlapping solids and air cutouts keep last-writer semantics.
 use super::ROAD_GRADE_SHOULDER;
 use modding::range::RangeLayout;
-const TILE: usize = 128;
+pub(super) const TILE: usize = 128;
 #[derive(Clone, Default)]
 pub(super) struct Bin {
     pub foundations: Vec<usize>,

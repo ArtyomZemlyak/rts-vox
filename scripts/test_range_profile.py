@@ -389,6 +389,24 @@ class FrameCadenceTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    def test_shader_override_cannot_qualify_as_embedded_release_fps(self):
+        self.write()
+        before = profile.analyze(self.path)
+        self.assertTrue(before['acceptance_eligible'])
+        path = self.path / 'world-battle.manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest['ShaderOverride'] = dict(Directory='probe', Files=[dict(Name='gas.wgsl', Sha256='c' * 64)])
+        path.write_text(json.dumps(manifest))
+        diagnostic = profile.analyze(self.path)
+        self.assertTrue(diagnostic['valid_for_comparison'])
+        self.assertFalse(diagnostic['acceptance_eligible'])
+        self.assertIn('different:ShaderOverride', profile.compare(before, diagnostic)['reasons'])
+        self.assertTrue(profile.compare(diagnostic, diagnostic)['eligible'])
+        self.assertFalse(profile.compare(diagnostic, diagnostic)['fps_acceptance_eligible'])
+        manifest['ShaderOverride'] = None
+        path.write_text(json.dumps(manifest))
+        self.assertTrue(profile.analyze(self.path)['acceptance_eligible'])
+
     def test_workload_columns_require_the_matching_capture_contract(self):
         frames = [dict(row, **{key: '3' for key in profile.WORKLOAD_FIELDS}, workload_sample_ms='0.002') for row in self.frames]
         self.write(frames=frames)
@@ -454,6 +472,32 @@ class ReportTests(unittest.TestCase):
         after['manifest']['CameraTour'] = True
         self.assertIn('different:CameraTour', profile.compare(before, after)['reasons'])
 
+    def test_input_hash_order_is_not_content_but_duplicates_and_edits_are_rejected(self):
+        self.write()
+        before = profile.analyze(self.path)
+        before['manifest']['InputHashes'] += [dict(Path='data/a.ron', Sha256='c' * 64),
+            dict(Path='out/tuning.txt', Exists=False, Sha256=None)]
+        after = json.loads(json.dumps(before))
+        after['manifest']['InputHashes'].reverse()
+        self.assertTrue(profile.compare(before, after)['eligible'])
+        self.assertEqual(before['manifest']['InputHashes'][0]['Path'], 'data/fixture.ron')
+        for edit in ['digest','path','missing','exists','duplicate','unknown']:
+            changed = json.loads(json.dumps(after))
+            rows = changed['manifest']['InputHashes']
+            if edit == 'digest': rows[1]['Sha256'] = 'd' * 64
+            if edit == 'path': rows[1]['Path'] = 'data/A.ron'
+            if edit == 'missing': rows.pop()
+            if edit == 'exists': rows[0].update(Exists=True, Sha256='e' * 64)
+            if edit == 'duplicate': rows.append(dict(rows[1]))
+            if edit == 'unknown': rows[1]['ExtraEvidence'] = True
+            self.assertFalse(profile.compare(before, changed)['eligible'], edit)
+        for invalid in [None, [], {}, [dict(Path='x',Sha256='bad')],
+                [dict(Path='x',Exists='false',Sha256=None)],
+                [dict(Path='x',Exists=False,Sha256='f'*64)]]:
+            changed = json.loads(json.dumps(after))
+            changed['manifest']['InputHashes'] = invalid
+            self.assertFalse(profile.compare(changed, changed)['eligible'], repr(invalid))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -507,6 +551,39 @@ class ReportTests(unittest.TestCase):
                 self.assertIn(f'actual compute workers: {observed}', profile.markdown(result))
                 if not valid:
                     self.assertIn('compute_workers_override_mismatch', result['reasons'])
+
+    def test_frame_cap_and_launch_style_are_comparison_keys(self):
+        self.write()
+        before = profile.analyze(self.path)
+        path = self.path / 'world-battle.manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest.update(FpsLimit=0, LaunchWindowStyle='Hidden')
+        path.write_text(json.dumps(manifest))
+        explicit_defaults = profile.analyze(self.path)
+        reasons = profile.compare(before, explicit_defaults)['reasons']
+        self.assertNotIn('different:FpsLimit', reasons)
+        self.assertNotIn('different:LaunchWindowStyle', reasons)
+        manifest.update(FpsLimit=200, LaunchWindowStyle='Maximized')
+        path.write_text(json.dumps(manifest))
+        capped = profile.analyze(self.path)
+        reasons = profile.compare(before, capped)['reasons']
+        self.assertIn('different:FpsLimit', reasons)
+        self.assertIn('different:LaunchWindowStyle', reasons)
+        self.assertNotIn('different:FpsLimit', profile.compare(capped, capped)['reasons'])
+
+    def test_background_diagnostics_never_qualify_foreground_fps(self):
+        self.write()
+        foreground = profile.analyze(self.path)
+        path = self.path / 'world-battle.manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest['Background'] = True
+        path.write_text(json.dumps(manifest))
+        background = profile.analyze(self.path)
+        self.assertTrue(background['valid_for_comparison'])
+        self.assertFalse(background['acceptance_eligible'])
+        self.assertIn('different:Background', profile.compare(foreground, background)['reasons'])
+        self.assertTrue(profile.compare(background, background)['eligible'])
+        self.assertFalse(profile.compare(background, background)['fps_acceptance_eligible'])
 
     def test_compute_experiment_parameters_are_comparison_keys_and_legacy_zero_is_default(self):
         self.write()

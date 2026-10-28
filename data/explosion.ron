@@ -9,6 +9,9 @@
     material_energy_j: 112500000,
     air_cost: 100,
     soil_resistance: 165,
+    // Soil confinement per world unit below the impact; hull work is unchanged.
+    soil_depth_cost: 260,
+    soil_fracture_milli: 4000,
     concrete_resistance: 380,
     // Intact armor still stops the stock shell; repeated hits and a 4x
     // charge can tear the exposed face instead of leaving it immaculate.
@@ -23,7 +26,7 @@
     // pressure the body absorbed (ADR-297) - what dents the side throws
     // the machine, and a hull the wave never reached is not pushed.
     hull_impulse_milli: 50,
-    fire_tick: 45,
+    fire_tick: 30,
     shell_speed: 150,
     // The fireball lights fuel within thirty-two units: eighty heat at the
     // centre, falling to nothing at the edge, so the crowns of the trees

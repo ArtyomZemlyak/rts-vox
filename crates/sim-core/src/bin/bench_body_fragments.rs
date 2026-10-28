@@ -13,7 +13,16 @@ fn main() {
         .map_or(600, |w| w[1].parse().expect("ticks"));
     let stock = Tuning::from_ron(include_str!("../../../../data/sim.ron")).unwrap();
     assert!(ticks > 0);
-    for span in [0, stock.body_fragment_mm] {
+    let spans: Vec<u32> = args.windows(2).find(|w| w[0] == "--spans-mm").map_or_else(
+        || vec![0, stock.body_fragment_mm],
+        |w| {
+            w[1].split(',')
+                .map(|s| s.parse().expect("fragment span in mm"))
+                .collect()
+        },
+    );
+    assert!(!spans.is_empty() && spans.iter().all(|&s| s <= u16::MAX as u32));
+    for span in spans {
         let mut tuning = stock;
         tuning.body_fragment_mm = span;
         let mut world = World::new(7, 16, tuning);

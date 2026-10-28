@@ -43,14 +43,14 @@ mod tests {
         let t = Tuning::from_ron(text).unwrap();
         assert!(t.softening[0] > t.softening[2]);
         assert!(
-            Tuning::from_ron(&text.replace("conduction_milli: 8", "conduction_milli: 167"))
+            Tuning::from_ron(&text.replace("conduction_milli: 12", "conduction_milli: 167"))
                 .is_err()
         );
         assert!(Tuning::from_ron(&text.replace("max_cells: 16384", "max_cells: 1")).is_err());
         for (from, to) in [
             ("exchange_reach: 4", "exchange_reach: 9"),
             ("exchange_cells_per_tick: 64", "exchange_cells_per_tick: 0"),
-            ("exchange_milli: 40", "exchange_milli: 101"),
+            ("exchange_milli: 60", "exchange_milli: 101"),
         ] {
             assert!(Tuning::from_ron(&text.replace(from, to)).is_err());
         }

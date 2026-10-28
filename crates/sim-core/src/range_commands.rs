@@ -20,6 +20,8 @@ pub enum BattleLifecycle {
 /// of feeding its own decisions back into the external command journal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GunCommand {
+    /// Laboratory-only moving tool; shared streams or bounded solid-round flight.
+    LabStream { origin: [i32; 3], target: [i32; 3], enabled: bool },
     Control,
     Move { destination: [i32; 2] },
     Attack { target: usize },
@@ -28,10 +30,15 @@ pub enum GunCommand {
     GroundFire { at: [i32; 3] },
     Refire,
     Aim { at: Option<[i32; 3]> },
+    /// Reposition a model-free range emitter; physical vehicles reject this input.
+    Origin { at: [i32; 3] },
+    /// Trigger the configured charge in-place through the ordinary blast pipeline.
+    Detonate { at: [i32; 3] },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
+    Sculpt {at:[i32;3],edge:u32,material:u16,erase:bool},
     Gun(GunCommand),
     SetPatrols {
         enabled: bool,

@@ -1548,7 +1548,7 @@ def analyze(directory, scenario="world-battle", top=12):
     return dict(schema=6, directory=str(directory), scenario=scenario, manifest=manifest,
         valid_for_comparison=bool(validity.get("ValidForComparison")) and not reasons,
         meets_simulation_rate=meets_rate,
-        acceptance_eligible=bool(validity.get("ValidForComparison")) and not bool((manifest or {}).get("GpuTimestamps")) and not reasons and meets_rate and not bool((manifest or {}).get("CorePhases")) and stall_trace is None and not bool((manifest or {}).get("CoreTriggerMilliseconds")) and render_trace is None and not bool((manifest or {}).get("RenderTimeline")) and not task_build and render_tasks is None and not bool((manifest or {}).get("RenderTasks")) and not bool((manifest or {}).get("OsPressure")),
+        acceptance_eligible=bool(validity.get("ValidForComparison")) and not bool((manifest or {}).get("Background")) and not bool((manifest or {}).get("GpuTimestamps")) and not reasons and meets_rate and not bool((manifest or {}).get("CorePhases")) and stall_trace is None and not bool((manifest or {}).get("CoreTriggerMilliseconds")) and render_trace is None and not bool((manifest or {}).get("RenderTimeline")) and not task_build and render_tasks is None and not bool((manifest or {}).get("RenderTasks")) and not bool((manifest or {}).get("OsPressure")) and not bool((manifest or {}).get("ShaderOverride")),
         reasons=sorted(set(reasons)), frames=len(frames), frame_ms=stats([v for v in frame_times if v is not None]),
         frame_timing_metric="profile_begin_interval" if aligned else "bevy_time_delta_unaligned",
         bevy_frame_ms=stats([float(r["frame_ms"]) for r in frames]),
@@ -1614,6 +1614,32 @@ def recorded_build_context(report):
     return dict(toolchain=toolchain, tracked_inputs_refreshed=evidence.get("TrackedInputsRefreshed"))
 
 
+def canonical_input_hashes(entries):
+    """Order is presentation; file identity, presence and content are evidence.
+
+    Keep unknown fields and reject duplicate paths even when their hashes agree.
+    Do not normalize case or separators: this is not a filesystem alias resolver.
+    """
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("InputHashes must be a nonempty list")
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("Path"), str) or not entry["Path"]:
+            raise ValueError("Invalid input path")
+        if entry["Path"] in seen:
+            raise ValueError("Duplicate input path")
+        seen.add(entry["Path"])
+        digest = entry.get("Sha256")
+        if "Exists" in entry and not isinstance(entry["Exists"], bool):
+            raise ValueError("Invalid input existence flag")
+        if entry.get("Exists", True):
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+                raise ValueError("Invalid input SHA256")
+        elif digest is not None:
+            raise ValueError("Absent input has a hash")
+    return sorted(entries, key=lambda entry: entry["Path"])
+
+
 def compare(a, b):
     problems = []
     if (a.get("workload_snapshots") or {}).get("status", "unavailable_legacy") != (b.get("workload_snapshots") or {}).get("status", "unavailable_legacy"):
@@ -1626,13 +1652,21 @@ def compare(a, b):
         if not run["meets_simulation_rate"]:
             problems.append(f"{label}:simulation_not_realtime")
     keys = ["Scenario", "RequestedSeconds", "TargetFps", "RayonEnvironment", "NavigationWorkers", "GpuTimestamps",
-            "CpuThreads", "CorePhases", "EnvironmentSampleIntervalMs", "InputHashes", "RequestedWindow", "RustLog"]
+            "CpuThreads", "CorePhases", "EnvironmentSampleIntervalMs", "RequestedWindow", "RustLog"]
+    if int((a["manifest"] or {}).get("FpsLimit") or 0) != int((b["manifest"] or {}).get("FpsLimit") or 0):
+        problems.append("different:FpsLimit")
+    if bool((a["manifest"] or {}).get("Background")) != bool((b["manifest"] or {}).get("Background")):
+        problems.append("different:Background")
+    if (a["manifest"] or {}).get("LaunchWindowStyle", "Hidden") != (b["manifest"] or {}).get("LaunchWindowStyle", "Hidden"):
+        problems.append("different:LaunchWindowStyle")
     if bool((a["manifest"] or {}).get("RequestedMaximized")) != bool((b["manifest"] or {}).get("RequestedMaximized")):
         problems.append("different:RequestedMaximized")
     # Older runners always forced stock tuning. Saved-player runs must never
     # qualify as the other half of a stock pair, even if the file was absent.
     if (a["manifest"] or {}).get("TuningMode", "stock") != (b["manifest"] or {}).get("TuningMode", "stock"):
         problems.append("different:TuningMode")
+    if (a["manifest"] or {}).get("ShaderOverride") != (b["manifest"] or {}).get("ShaderOverride"):
+        problems.append("different:ShaderOverride")
     if (a.get("gpu") or {}).get("schema") != (b.get("gpu") or {}).get("schema"):
         problems.append("different:gpu_schema")
     if bool((a["manifest"] or {}).get("CameraTour")) != bool((b["manifest"] or {}).get("CameraTour")):
@@ -1652,6 +1686,14 @@ def compare(a, b):
     for key in ("schema", "gas_details", "span_limit", "span_bytes"):
         if (a.get("render_timeline") or {}).get(key) != (b.get("render_timeline") or {}).get(key):
             problems.append("different:render_timeline:" + key)
+    inputs = []
+    for label, run in [("before", a), ("after", b)]:
+        try:
+            inputs.append(canonical_input_hashes((run.get("manifest") or {}).get("InputHashes")))
+        except ValueError:
+            problems.append(f"{label}:invalid_InputHashes")
+    if len(inputs) == 2 and inputs[0] != inputs[1]:
+        problems.append("different:InputHashes")
     for key in keys:
         if (a["manifest"] or {}).get(key) != (b["manifest"] or {}).get(key):
             problems.append(f"different:{key}")
@@ -1905,12 +1947,25 @@ def main():
     parser.add_argument("--compare", type=Path)
     parser.add_argument("--top", type=int, default=12)
     parser.add_argument("--require-valid", action="store_true")
+    parser.add_argument("--trace", action="store_true", help="Export recorded intervals to Perfetto JSON and a slow-frame JSONL journal after analysis")
+    parser.add_argument("--trace-event-limit", type=int, default=500000)
+    parser.add_argument("--trace-all", action="store_true", help="Export the whole capture instead of windows around the --top worst frame intervals")
+    parser.add_argument("--trace-context-ms", type=float, default=250.0)
+    parser.add_argument("--slow-frame-ms", type=float, default=50.0)
     args = parser.parse_args()
     if args.top < 1:
         parser.error("--top must be positive")
+    if args.trace_event_limit < 1 or not math.isfinite(args.slow_frame_ms) or args.slow_frame_ms <= 0 or not math.isfinite(args.trace_context_ms) or args.trace_context_ms < 0:
+        parser.error("Trace event limit and slow-frame threshold must be positive and finite")
     result = analyze(args.directory, args.scenario, args.top)
     if args.compare:
         result["comparison"] = compare(analyze(args.compare, args.scenario, args.top), result)
+    if args.trace:
+        import range_trace
+        result["trace_export"] = range_trace.export(args.directory, args.scenario, result,
+            summarize_tick=summarize_tick, event_limit=args.trace_event_limit, slow_frame_ms=args.slow_frame_ms,
+            focus_frames=0 if args.trace_all else args.top, context_ms=args.trace_context_ms)
+        print(f"Trace: {result['trace_export']['path']} events={result['trace_export']['retained_events']} dropped={result['trace_export']['dropped_events']}")
     prefix = args.directory / f"{args.scenario}.analysis"
     prefix.with_suffix(".analysis.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     prefix.with_suffix(".analysis.md").write_text(markdown(result), encoding="utf-8")

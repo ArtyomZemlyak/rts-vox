@@ -1010,7 +1010,9 @@ mod tests {
                 }
             }
         }
-        cells.truncate(512);
+        let isolated = *cells.last().unwrap();
+        cells.truncate(511);
+        cells.push(isolated);
         let m = &mut r.matter;
         m.begin(u32::MAX, 4);
         m.begin_body_batch();

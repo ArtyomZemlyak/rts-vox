@@ -591,7 +591,11 @@ fn main() {
                 {
                     first_reaction[k] = Some(elapsed);
                 }
-                if first_motion[k].is_none() && sim.units[id].motion.pos != start[k] {
+                if first_motion[k].is_none()
+                    && [0, 2]
+                        .into_iter()
+                        .any(|a| sim.units[id].motion.pos[a] != start[k][a])
+                {
                     first_motion[k] = Some(elapsed);
                 }
             }
@@ -830,11 +834,17 @@ fn main() {
         .find(|w| w[0] == "--search-probe-tick")
         .map(|w| w[1].parse::<usize>().expect("probe tick"));
     // Order to first motion in the running battle (ADR-680): a hull that
-    // stands with a new destination waits until its position first changes.
+    // stands with a new destination waits until its horizontal position
+    // changes. Suspension settling is not a response to a movement order.
     // Not part of the tick: observed after it, never fed back.
     let mut order_wait: Vec<Option<u32>> = vec![None; sim.units.len()];
     // Each answered order with its wait, for the latency distribution.
     let order_trace = args.iter().any(|a| a == "--order-latency-trace");
+    let motion_trace: Vec<usize> = args
+        .windows(2)
+        .filter(|w| w[0] == "--motion-trace-unit")
+        .map(|w| w[1].parse().expect("motion trace unit"))
+        .collect();
     let mut order_prev: Vec<_> = sim
         .units
         .iter()
@@ -975,7 +985,9 @@ fn main() {
                     "motion_contacts" => motion_detail[2] = elapsed,
                     "motion_felling" => motion_detail[3] = elapsed,
                     "debris_begin" => {}
-                    "debris_bodies" => debris_detail[0] = elapsed,
+                    "debris_body_motion" | "debris_body_transfers" | "debris_bodies" => {
+                        debris_detail[0] += elapsed
+                    }
                     "debris_sections" => debris_detail[1] = elapsed,
                     "debris_hulls" => debris_detail[2] = elapsed,
                     "debris_confirm" => debris_detail[3] = elapsed,
@@ -1134,9 +1146,16 @@ fn main() {
         ));
         coarse_previous = sim.coarse_work;
         for (id, u) in sim.units.iter().enumerate() {
+            if motion_trace.contains(&id) {
+                let m = &u.motion;
+                println!("motion_trace tick={} id={id} kind={:?} coarse={:?} work={:?} frontier={} searching={} blocked={} recovering={} head={} vel={:?} path={} cursor={} partial={} destination={:?} pos={:?}",
+                    sim.tick, u.kind, m.coarse_waited(), m.coarse_work(), m.frontier_nodes(),
+                    m.searching(), m.blocked, m.recovering(), m.drive.head, m.drive.vel,
+                    m.path.len(), m.cursor, m.partial_path, m.destination, m.pos);
+            }
             let (pos, dest) = (u.motion.pos, u.motion.destination);
             let (old_pos, old_dest) = order_prev[id];
-            let moved = pos != old_pos;
+            let moved = [0, 2].into_iter().any(|a| pos[a] != old_pos[a]);
             if let Some(t0) = order_wait[id] {
                 if moved {
                     order_latency.push(sim.tick - t0);

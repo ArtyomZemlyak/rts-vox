@@ -20,6 +20,18 @@ impl PartialEq for Mask {
 }
 impl Eq for Mask {}
 impl Mask {
+    pub(super) fn filled(count: usize) -> Self {
+        let tail = !0u64 >> ((64 - count % 64) % 64);
+        if count == 0 {
+            Self::default()
+        } else if count <= 64 {
+            Self::Small(tail)
+        } else {
+            let mut words = vec![!0u64; count.div_ceil(64)];
+            *words.last_mut().unwrap() = tail;
+            Self::Wide(words.into_boxed_slice())
+        }
+    }
     pub(super) fn for_voxels(count: usize) -> Self {
         if count <= 64 {
             Self::default()
@@ -55,6 +67,23 @@ impl Mask {
     }
     pub(super) fn count_ones(&self) -> u32 {
         self.words().iter().map(|w| w.count_ones()).sum()
+    }
+    /// Merge one occupied row into an already allocated voxel span.
+    pub(super) fn insert_bits(&mut self, index: usize, bits: u64) {
+        if bits == 0 {
+            return;
+        }
+        let shift = index % 64;
+        match self {
+            Self::Small(word) => *word |= bits << shift,
+            Self::Wide(words) => {
+                let word = index / 64;
+                words[word] |= bits << shift;
+                if shift != 0 && bits >> (64 - shift) != 0 {
+                    words[word + 1] |= bits >> (64 - shift);
+                }
+            }
+        }
     }
     pub(super) fn rank(&self, before: usize) -> usize {
         let word = before / 64;
@@ -153,6 +182,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn packed_rows_match_scalar_insertion_including_clipped_and_cross_word_rows() {
+        for edge in [1usize, 4, 9, 16, 64] {
+            let mut packed = Mask::for_voxels(edge.pow(3));
+            let mut scalar = packed.clone();
+            for z in 0..edge {
+                for y in 0..edge {
+                    let skip = (y + z) % edge;
+                    let width = edge - skip;
+                    let bits = 0xa5a5_f0f0_1234_ffffu64 >> (64 - width);
+                    let index = skip + edge * (y + edge * z);
+                    packed.insert_bits(index, bits);
+                    for bit in 0..width {
+                        if bits & (1u64 << bit) != 0 {
+                            scalar.insert(index + bit);
+                        }
+                    }
+                }
+            }
+            assert_eq!(packed, scalar, "edge={edge}");
+            assert_eq!(packed.count_ones(), scalar.count_ones());
+        }
+    }
     #[test]
     fn exact_wide_mask_iteration_ranks_and_resumption_cross_word_boundaries() {
         let indices = [0, 3, 63, 64, 65, 127, 128, 511, 512, 728, 1727, 4095];

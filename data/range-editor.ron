@@ -2,4 +2,6 @@
 (
     clearing_side: 96,
     clearing_height: 64,
+    // Additional earth below the original surface: 8 m total at 0.1 m/unit.
+    subsoil_units: 64,
 )

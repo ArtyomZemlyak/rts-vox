@@ -82,13 +82,15 @@ impl BlastRange {
             if self.world.solid(p[0] as u32, p[1] as u32, p[2] as u32) {
                 return cell.is_none() && p == target;
             }
+            if p==target && cell.is_none() && p.iter().all(|v|*v>=0)
+                && self.water.amount(p.map(|v|v as u32))>0 {return true;}
             previous = p;
         }
         false
     }
 
     #[cfg(test)]
-    pub(super) fn laser_halo(
+    pub(crate) fn laser_halo(
         &mut self,
         from: [Fx; 3],
         to: [Fx; 3],
@@ -339,6 +341,21 @@ impl BlastRange {
                     .entry(cell)
                     .and_modify(|h| *h = (*h).max(heat))
                     .or_insert(heat);
+            }
+        }
+        // Water is a sparse, separate volume. Visit a bounded selection from
+        // the halo's box rather than expanding the solid-terrain scan into air.
+        for p in self.water.thermal_region(region_lo,region_hi,64) {
+            if contact==Some(p.map(|v|v as i32)) {continue;}
+            let q: [i64;3]=std::array::from_fn(|i|i64::from(p[i])*16+8-a[i]);
+            if outside_halo(q,d,length2,radius) {continue;}
+            let dot=(0..3).map(|i|q[i]*d[i]).sum::<i64>().clamp(0,length2);
+            let source:[i64;3]=std::array::from_fn(|i|a[i]+d[i]*dot/length2);
+            let distance2=(0..3).map(|i|(i64::from(p[i])*16+8-source[i]).pow(2)).sum::<i64>();
+            if distance2>=r2 {continue;}
+            let dose=(i64::from(tuning.heat)*(r2-distance2)/r2) as u32;
+            if dose>0 && self.laser_visible(source,p.map(|v|v as i32),None,&bounds) {
+                self.water.absorb_heat(p,dose,self.size);
             }
         }
         // The firing gun is separate from `units`: neither its hull nor its

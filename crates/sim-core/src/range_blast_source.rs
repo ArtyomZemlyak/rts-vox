@@ -1,6 +1,38 @@
 //! Surface detonations enter open air without bypassing the struck material.
-use super::{material, Explosion, ExplosionConfig, HitFrames, RangeUnit};
+use super::{material, BlastRange, Explosion, ExplosionConfig, HitFrames, RangeUnit};
 use voxel::World;
+
+impl BlastRange {
+    /// Shared by projectile contact and explicitly placed charges. Capture, wave
+    /// work and collapse remain subject to the ordinary per-tick engine budgets.
+    pub(super) fn begin_charge_impact(&mut self, at: [i32; 3], from: [i32; 3]) {
+        self.impact = Some(at);
+        self.impact_tick = self.tick;
+        self.heat.deposit(
+            &self.world,
+            &self.matter.economy.mats,
+            at,
+            self.config.heat_units,
+            self.config.heat_per_cell,
+        );
+        self.water.absorb_radial_heat(&self.world,at,self.config.heat_units,self.config.heat_per_cell);
+        self.matter
+            .begin(self.config.material_energy_j, self.config.fragment_box);
+        let reserved=self.upheaval.reserve(&self.world,at,&self.config,self.matter.remaining_mj);
+        self.matter.remaining_mj-=reserved;
+        let mut wave_config=self.config;
+        wave_config.material_energy_j=wave_config.material_energy_j.saturating_sub((reserved/1000) as u32);
+        self.explosion = Some(Explosion::begin_impact(
+            &self.world,
+            at,
+            from,
+            &wave_config,
+            &self.units,
+            self.matter.tuning.body_energy_pct,
+        ));
+        self.shell = None;
+    }
+}
 
 impl Explosion {
     pub(super) fn begin_impact(

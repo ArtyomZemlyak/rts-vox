@@ -88,6 +88,8 @@ struct Ground<'a> {
     radius: i32,
     step: i32,
     local_grade: bool,
+    /// Previous row of this corridor only; never retained across world views.
+    row: Vec<[u16; 2]>,
 }
 impl<'a> Ground<'a> {
     fn new(world: &'a World, rubble: &Rubble, shape: Shape, cfg: Config) -> Self {
@@ -101,8 +103,10 @@ impl<'a> Ground<'a> {
             radius: shape.half[0].min(shape.half[1]) + 1,
             step: shape.step,
             local_grade: cfg.local_grade,
+            row: Vec::new(),
         }
     }
+    #[cfg(test)]
     fn tile(&self, x: i32, z: i32) -> [u16; 2] {
         let [bottom, top] = self
             .world
@@ -121,36 +125,47 @@ impl<'a> Ground<'a> {
             && hi[1] < self.world.nz as i32 - 1)
             .then_some((lo, hi))
     }
-    /// Work of one test: its tiles, three reads each where the local grade
-    /// also compares neighbours; one for a test refused unread.
+    /// Logical work: the original tile/neighbor allowance, independent of
+    /// reused reads and early refusals; one for a test refused unread.
     fn cost(&self, a: [i32; 2], b: [i32; 2]) -> u64 {
         self.bounds(a, b).map_or(1, |(lo, hi)| {
             let tiles = [0, 1].map(|k| (hi[k] / 8 - lo[k] / 8 + 1) as u64);
             tiles[0] * tiles[1] * if self.local_grade { 3 } else { 1 }
         })
     }
-    fn clear(&self, a: [i32; 2], b: [i32; 2]) -> bool {
+    fn clear(&mut self, a: [i32; 2], b: [i32; 2]) -> bool {
         let Some((lo, hi)) = self.bounds(a, b) else {
             return false;
         };
         if self.local_grade {
+            let width = (hi[0] / 8 - lo[0] / 8 + 1) as usize;
+            // Missing upper/left neighbours have neutral extrema. Reset on
+            // every rectangle: an earlier refusal may have left a partial row.
+            self.row.resize(width, [u16::MAX, 0]);
+            self.row.fill([u16::MAX, 0]);
             for z in lo[1] / 8..=hi[1] / 8 {
-                for x in lo[0] / 8..=hi[0] / 8 {
-                    let [bottom, top] = self.tile(x, z);
-                    if i32::from(top) - i32::from(bottom) > self.step {
+                let mut left = [u16::MAX, 0];
+                let tiles = self
+                    .world
+                    .floor_tile_row(lo[0] as u32 / 8, z as u32, width, self.yielding)
+                    .unwrap();
+                for (column, [bottom, top]) in tiles.enumerate() {
+                    let x = lo[0] / 8 + column as i32;
+                    let top = top.max(self.debris.top(x as usize, z as usize));
+                    let above = self.row[column];
+                    // Previously visited neighbours have already passed their
+                    // own height checks. Only this tile and the cross terms
+                    // remain: top - neighbour bottom, neighbour top - bottom.
+                    // Do not compare the left neighbour with the upper one;
+                    // they need not be mutually traversable. Signed height
+                    // differences also keep extreme step values overflow-free.
+                    if i32::from(top) - i32::from(bottom.min(left[0]).min(above[0])) > self.step
+                        || i32::from(left[1].max(above[1])) - i32::from(bottom) > self.step
+                    {
                         return false;
                     }
-                    for (nx, nz) in [(x - 1, z), (x, z - 1)] {
-                        if nx < lo[0] / 8 || nz < lo[1] / 8 {
-                            continue;
-                        }
-                        let [next_bottom, next_top] = self.tile(nx, nz);
-                        if i32::from(top.max(next_top)) - i32::from(bottom.min(next_bottom))
-                            > self.step
-                        {
-                            return false;
-                        }
-                    }
+                    self.row[column] = [bottom, top];
+                    left = [bottom, top];
                 }
             }
             true
@@ -158,10 +173,21 @@ impl<'a> Ground<'a> {
             let mut low = u16::MAX;
             let mut high = 0;
             for z in lo[1] / 8..=hi[1] / 8 {
-                for x in lo[0] / 8..=hi[0] / 8 {
-                    let [bottom, top] = self.tile(x, z);
+                let width = (hi[0] / 8 - lo[0] / 8 + 1) as usize;
+                let tiles = self
+                    .world
+                    .floor_tile_row(lo[0] as u32 / 8, z as u32, width, self.yielding)
+                    .unwrap();
+                for (column, [bottom, top]) in tiles.enumerate() {
+                    let x = lo[0] / 8 + column as i32;
+                    let top = top.max(self.debris.top(x as usize, z as usize));
                     low = low.min(bottom);
                     high = high.max(top);
+                }
+                // Bounds only widen. Check once per contiguous row so a
+                // clear corridor retains its branch-free inner reduction.
+                if i32::from(high - low) > self.step {
+                    return false;
                 }
             }
             i32::from(high - low) <= self.step
@@ -346,6 +372,8 @@ enum Step {
 pub struct Search {
     shape: Shape,
     cfg: Config,
+    // Derived from cfg on construction/load; absent from the saved frontier.
+    cell_shift: Option<u32>,
     from: [Fx; 2],
     to: [i32; 2],
     origin: [i32; 2],
@@ -390,6 +418,9 @@ impl Search {
         let mut search = Self {
             shape,
             cfg,
+            cell_shift: (cfg.cell as u32)
+                .is_power_of_two()
+                .then(|| (cfg.cell as u32).trailing_zeros()),
             from,
             to,
             origin,
@@ -419,6 +450,54 @@ impl Search {
     /// Where the hull stood when the search was asked for.
     pub fn origin(&self) -> [Fx; 2] {
         self.from
+    }
+    /// A bounded, already checked start-side prefix while the full search
+    /// continues. No ground queries or frontier mutations. Live collision
+    /// remains authoritative; a stale search must finish its route recheck.
+    pub fn prefix_route(&self) -> Option<Route> {
+        if self.stale {
+            return None;
+        }
+        let mut path = match &self.stage {
+            Stage::Straight { last, .. } => vec![*last],
+            Stage::Meet(m) => self.frontier_prefix(&m.reached, &m.open[0])?,
+            Stage::Approach(a) => self.frontier_prefix(&a.reached, &a.open)?,
+            _ => return None,
+        };
+        let end = *path.last()?;
+        if (0..2).all(|a| (end[a] - self.origin[a]).abs() < 2 * self.cfg.cell) {
+            return None;
+        }
+        if path.first() == Some(&self.origin) {
+            path.remove(0);
+        }
+        Some(Route {
+            path: compact(self.origin, path),
+            partial: true,
+            stranded: false,
+            nodes: 0,
+            poses: 0,
+            scans: 0,
+            samples: 0,
+            exhausted: false,
+        })
+    }
+    fn frontier_prefix(&self, reached: &Grid, open: &Open) -> Option<Vec<[i32; 2]>> {
+        let &Reverse((_, cost, mut node)) = open.peek()?;
+        if reached.get(node).distance[0] != cost {
+            return None;
+        }
+        let mut path = Vec::new();
+        // Deriving an optional preview must not introduce a graph-sized scan.
+        for _ in 0..64 {
+            path.push(self.point(node));
+            if node == self.start {
+                path.reverse();
+                return Some(path);
+            }
+            node = reached.get(node).previous[0] as usize;
+        }
+        None
     }
     pub fn goal(&self) -> [i32; 2] {
         self.to
@@ -463,6 +542,9 @@ impl Search {
     fn index(&self, p: [i32; 2]) -> Option<usize> {
         let anchor = self.anchor();
         let c = [0, 1].map(|a| (p[a] - anchor[a]).div_euclid(self.cfg.cell));
+        self.cell_index(c)
+    }
+    fn cell_index(&self, c: [i32; 2]) -> Option<usize> {
         (c[0] >= 0 && c[1] >= 0 && c[0] < self.n as i32 && c[1] < self.rows as i32)
             .then(|| c[0] as usize + self.n * c[1] as usize)
     }
@@ -471,7 +553,11 @@ impl Search {
             (p[0] - goal[0]).unsigned_abs(),
             (p[1] - goal[1]).unsigned_abs(),
         ];
-        (10 * d[0].max(d[1]) + 4 * d[0].min(d[1])) * 2 / self.cfg.cell as u32
+        let cost = (10 * d[0].max(d[1]) + 4 * d[0].min(d[1])) * 2;
+        match self.cell_shift {
+            Some(shift) => cost >> shift,
+            None => cost / self.cfg.cell as u32,
+        }
     }
     fn heuristic(&self, i: usize, side: usize) -> u32 {
         let goal = if side == 0 { self.to } else { self.origin };
@@ -531,11 +617,53 @@ impl Search {
         rubble: &Rubble,
         budget: u64,
     ) -> (Option<Result<Route, Refusal>>, u64) {
+        let (answer, _, spent) = self.advance_mode(world, rubble, budget, false);
+        (answer, spent)
+    }
+    /// As advance, with one optional checked shortcut into a start prefix.
+    /// It pays from the same allowance and avoids turning back to a snapped
+    /// grid centre when the next forward cell is directly reachable.
+    pub fn advance_with_prefix(
+        &mut self,
+        world: &World,
+        rubble: &Rubble,
+        budget: u64,
+    ) -> (Option<Result<Route, Refusal>>, Option<Route>, u64) {
+        self.advance_mode(world, rubble, budget, true)
+    }
+    fn advance_mode(
+        &mut self,
+        world: &World,
+        rubble: &Rubble,
+        budget: u64,
+        preview: bool,
+    ) -> (Option<Result<Route, Refusal>>, Option<Route>, u64) {
         let mut walk = Walk {
             ground: Ground::new(world, rubble, self.shape, self.cfg),
             meter: Meter { budget, spent: 0 },
             explored: self.explored,
         };
+        let mut prefix = if preview { self.prefix_route() } else { None };
+        if let Some(route) = &mut prefix {
+            if route.path.len() > 1 {
+                let [first, next] = [route.path[0], route.path[1]];
+                // A compacted run may be arbitrarily long. Join only its
+                // first grid step, retaining the bounded atomic test price.
+                let join = [0, 1].map(|a| {
+                    first[a]
+                        + (next[a] - first[a]).signum()
+                            * self.cfg.cell.min((next[a] - first[a]).abs())
+                });
+                match walk.test(self.origin, join) {
+                    Some(true) if join == next => {
+                        route.path.remove(0);
+                    }
+                    Some(true) => route.path[0] = join,
+                    Some(false) => {} // The checked snapped entry is necessary.
+                    None => prefix = None,
+                }
+            }
+        }
         let out = loop {
             match self.step(&mut walk) {
                 Step::Continue => {}
@@ -545,7 +673,12 @@ impl Search {
         };
         self.explored = walk.explored;
         self.spent = self.spent.saturating_add(walk.meter.spent);
-        (out, walk.meter.spent)
+        // A straight prefix needs no extra joining test; it can be issued
+        // in the first slice in which it becomes available.
+        if preview && prefix.is_none() && matches!(self.stage, Stage::Straight { .. }) {
+            prefix = self.prefix_route();
+        }
+        (out, prefix, walk.meter.spent)
     }
     fn restart(&mut self) {
         self.restarts += 1;
@@ -830,11 +963,15 @@ impl Search {
         open: &mut Open,
         e: &mut Expanding,
     ) -> bool {
-        let at = self.point(e.node);
+        let cell = [(e.node % self.n) as i32, (e.node / self.n) as i32];
+        let at = cell.map(|c| c * self.cfg.cell + self.cfg.cell / 2);
+        let goal = if e.side == 0 { self.to } else { self.origin };
         while e.dir < DIR.len() {
             let d = DIR[e.dir];
             let q = [at[0] + d[0] * self.cfg.cell, at[1] + d[1] * self.cfg.cell];
-            if let Some(j) = self.index(q) {
+            // q is exactly one lattice step away. Avoid dividing its world
+            // coordinates back to cells, and retain the full boundary check.
+            if let Some(j) = self.cell_index([cell[0] + d[0], cell[1] + d[1]]) {
                 let next = e.cost + if d[0] != 0 && d[1] != 0 { 14 } else { 10 };
                 let old = reached.get(j);
                 if next < old.distance[e.side] {
@@ -846,7 +983,8 @@ impl Search {
                             r.distance[e.side] = next;
                             r.previous[e.side] = e.node as u32;
                             reached.set(j, r);
-                            open.push(Reverse((next + self.heuristic(j, e.side), next, j)));
+                            // q is point(j), already computed for the corridor.
+                            open.push(Reverse((next + self.estimate(q, goal), next, j)));
                         }
                     }
                 }
@@ -1377,6 +1515,178 @@ impl Search {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lattice_neighbors_match_world_round_trips_at_partial_edges() {
+        for size in [[8, 8], [33, 17], [257, 131], [1025, 513], [4096, 1024]] {
+            for cell in [8, 9, 15, 16, 31, 32, 77, 128] {
+                let cfg = Config { cell, ..config() };
+                let center = [cell / 2; 2];
+                let search = Search::new(size, shape(), center.map(Fx::from_int), center, cfg);
+                if size.into_iter().any(|n| n < cell as u32) {
+                    assert!(matches!(search, Err(Refusal::OffLattice)));
+                    continue;
+                }
+                let search = search.unwrap();
+                for node in 0..search.n * search.rows {
+                    let at = search.point(node);
+                    let c = [(node % search.n) as i32, (node / search.n) as i32];
+                    for d in DIR {
+                        let q = [at[0] + d[0] * cell, at[1] + d[1] * cell];
+                        let direct = search.cell_index([c[0] + d[0], c[1] + d[1]]);
+                        assert_eq!(
+                            direct,
+                            search.index(q),
+                            "size={size:?} cell={cell} node={node} d={d:?}"
+                        );
+                        if let Some(next) = direct {
+                            assert_eq!(q, search.point(next));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn heuristic_shift_preserves_exact_quotients_for_all_cell_profiles() {
+        for cell in (8..=256).chain([511, 512, 1023, 1024, 4095, 4096]) {
+            let search = Search::new(
+                [16384, 16384],
+                shape(),
+                [4096; 2].map(Fx::from_int),
+                [8192; 2],
+                Config { cell, ..config() },
+            )
+            .unwrap();
+            let mut state = 0x6d2b79f5u32;
+            for _ in 0..256 {
+                let mut coordinate = || {
+                    state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                    (state % 32769) as i32 - 16384
+                };
+                let p = [coordinate(), coordinate()];
+                let goal = [coordinate(), coordinate()];
+                let d = [0, 1].map(|a| (p[a] - goal[a]).unsigned_abs());
+                let expected = (10 * d[0].max(d[1]) + 4 * d[0].min(d[1])) * 2 / cell as u32;
+                assert_eq!(
+                    search.estimate(p, goal),
+                    expected,
+                    "cell={cell} {p:?}->{goal:?}"
+                );
+            }
+        }
+    }
+
+    // Independent full rectangle scan: no rolling row or early refusal.
+    fn reference_clear(g: &Ground<'_>, a: [i32; 2], b: [i32; 2]) -> bool {
+        let Some((lo, hi)) = g.bounds(a, b) else {
+            return false;
+        };
+        let mut clear = true;
+        let (mut low, mut high) = (u16::MAX, 0);
+        for z in lo[1] / 8..=hi[1] / 8 {
+            for x in lo[0] / 8..=hi[0] / 8 {
+                let [bottom, top] = g.tile(x, z);
+                low = low.min(bottom);
+                high = high.max(top);
+                if g.local_grade {
+                    clear &= i32::from(top) - i32::from(bottom) <= g.step;
+                    for (nx, nz) in [(x - 1, z), (x, z - 1)] {
+                        if nx >= lo[0] / 8 && nz >= lo[1] / 8 {
+                            let [nb, nt] = g.tile(nx, nz);
+                            clear &= i32::from(top.max(nt)) - i32::from(bottom.min(nb)) <= g.step;
+                        }
+                    }
+                }
+            }
+        }
+        if g.local_grade {
+            clear
+        } else {
+            i32::from(high - low) <= g.step
+        }
+    }
+
+    #[test]
+    fn corridor_rows_match_full_scan_after_refusals_craters_and_debris_changes() {
+        struct Terraces;
+        impl voxel::Generator for Terraces {
+            fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+                let floor = 6 + x / 32 + if z >= 128 { 12 } else { 0 };
+                if y < floor {
+                    2
+                } else if (40..88).contains(&x) && y < floor + 8 {
+                    4
+                } else {
+                    AIR
+                }
+            }
+        }
+        let mut world = World::new(256, 48, 192, 100000, Box::new(Terraces));
+        let mut rubble = Rubble::new();
+        let mut accepted = [0; 2];
+        let mut refused = [0; 2];
+        for stage in 0..3 {
+            if stage > 0 {
+                for z in 60..76 {
+                    for x in 108..124 {
+                        for y in 0..16 {
+                            world.queue_edit(voxel::Edit::put(x, y, z, AIR));
+                        }
+                    }
+                }
+                while world.queued() > 0 {
+                    world.flush();
+                }
+                if stage == 1 {
+                    rubble.insert([96, 80], 35);
+                } else {
+                    rubble.remove(&[96, 80]);
+                }
+            }
+            for local_grade in [false, true] {
+                for half in [[2, 3], [10, 5], [30, 30]] {
+                    let mut ground = Ground::new(
+                        &world,
+                        &rubble,
+                        Shape { half, ..shape() },
+                        Config {
+                            local_grade,
+                            ..config()
+                        },
+                    );
+                    // Different widths, reverse directions and early refusals
+                    // reuse the same scratch; stale row tails must not matter.
+                    for k in 0..600 {
+                        let a = [(k * 73 % 256) - 2, (k * 41 % 192) - 2];
+                        let b = [a[0] + k * 13 % 81 - 40, a[1] + k * 17 % 81 - 40];
+                        let expected = reference_clear(&ground, a, b);
+                        assert_eq!(
+                            ground.clear(a, b),
+                            expected,
+                            "stage={stage} local={local_grade} half={half:?} {a:?}->{b:?}"
+                        );
+                        assert_eq!(ground.clear(b, a), expected);
+                        // Changing the allowed rise exercises neutral borders
+                        // and the full i32 domain without step arithmetic.
+                        for step in [i32::MIN, -1, 0, 1, 8, i32::MAX] {
+                            ground.step = step;
+                            assert_eq!(ground.clear(a, b), reference_clear(&ground, a, b));
+                        }
+                        ground.step = shape().step;
+                        if expected {
+                            accepted[usize::from(local_grade)] += 1;
+                        } else {
+                            refused[usize::from(local_grade)] += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(accepted.into_iter().all(|n| n > 100));
+        assert!(refused.into_iter().all(|n| n > 100));
+    }
     struct Floor;
     impl voxel::Generator for Floor {
         fn material(&self, _x: u32, y: u32, _z: u32) -> Mat {
@@ -1407,6 +1717,107 @@ mod tests {
             local_grade: false,
             restarts: 2,
         }
+    }
+    #[test]
+    fn pending_prefixes_are_checked_bounded_and_do_not_change_the_frontier() {
+        let mut world = World::new(2048, 32, 768, 65536, Box::new(Floor));
+        for z in 1..480 {
+            for y in 6..26 {
+                world.queue_edit(voxel::Edit::put(640, y, z, 3));
+            }
+        }
+        world.flush();
+        world.prepare_navigation([4, 5]);
+        let rubble = Rubble::new();
+        let from = [128, 128].map(Fx::from_int);
+        let mut search = Search::new([2048, 768], shape(), from, [1800, 128], config()).unwrap();
+        let mut seen = [false; 2];
+        for slice in 0..1000 {
+            let budget = if slice < 8 { 32 } else { 512 };
+            let (answer, spent) = search.advance(&world, &rubble, budget);
+            assert!(spent <= budget);
+            if answer.is_some() {
+                break;
+            }
+            let mut before = fx::blob::Blob::new();
+            search.save(&mut before);
+            if let Some(prefix) = search.prefix_route() {
+                seen[usize::from(matches!(search.stage, Stage::Meet(_) | Stage::Approach(_)))] =
+                    true;
+                assert!(prefix.partial && !prefix.exhausted);
+                assert!(prefix.path.len() <= 64);
+                let mut ground = Ground::new(&world, &rubble, shape(), config());
+                let mut last = from.map(Fx::to_int_trunc);
+                for next in prefix.path {
+                    assert!(
+                        ground.clear(last, next),
+                        "unchecked prefix {last:?}->{next:?}"
+                    );
+                    last = next;
+                }
+                let mut stale = search.clone();
+                let mut changed = Changed::default();
+                changed.column(128, 128);
+                stale.note(&changed);
+                assert!(stale.prefix_route().is_none(), "stale route was published");
+            }
+            let mut after = fx::blob::Blob::new();
+            search.save(&mut after);
+            assert_eq!(before.v, after.v, "preview mutated the search");
+        }
+        assert_eq!(
+            seen,
+            [true, true],
+            "straight and graph previews must be exercised"
+        );
+    }
+    #[test]
+    fn a_prefix_joins_forward_without_returning_to_the_snapped_start() {
+        let world = World::new(2048, 32, 768, 65536, Box::new(Floor));
+        world.prepare_navigation([4, 5]);
+        let rubble = Rubble::new();
+        let from = [143, 135];
+        let mut search = Search::new(
+            [2048, 768],
+            shape(),
+            from.map(Fx::from_int),
+            [1800, 135],
+            config(),
+        )
+        .unwrap();
+        // A paused frontier whose snapped root is seven units behind the
+        // hull. Its four forward edges are all clear on this flat ground.
+        let mut reached = Grid::new(search.n * search.rows);
+        let root = search.start;
+        for step in 0..=4 {
+            let mut r = UNREACHED;
+            r.distance[0] = 10 * step;
+            if step > 0 {
+                r.previous[0] = (root + step as usize - 1) as u32;
+            }
+            reached.set(root + step as usize, r);
+        }
+        let node = root + 4;
+        let mut open = Open::new();
+        open.push(Reverse((search.heuristic(node, 0) + 40, 40, node)));
+        search.stage = Stage::Meet(Box::new(Meet {
+            reached,
+            open: [open, Open::new()],
+            expanded: 0,
+            node: None,
+        }));
+        assert!(search.prefix_route().unwrap().path[0][0] < from[0]);
+        let join = search.point(root + 1);
+        let budget = Ground::new(&world, &rubble, shape(), config()).cost(from, join);
+        let (answer, prefix, spent) = search.advance_with_prefix(&world, &rubble, budget);
+        assert!(answer.is_none());
+        assert_eq!(
+            spent, budget,
+            "preview must pay without lifting the ceiling"
+        );
+        let prefix = prefix.unwrap();
+        assert_eq!(prefix.path[0], join);
+        assert!(Ground::new(&world, &rubble, shape(), config()).clear(from, join));
     }
     #[test]
     fn complete_route_crosses_a_kilometre_and_sweeps_around_a_thin_wall() {

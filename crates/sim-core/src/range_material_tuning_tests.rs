@@ -133,7 +133,7 @@ fn material_properties_hash_and_restore_with_all_motion_and_debris_combinations(
                     );
                     assert_ne!(r.state_hash(), stock_hash);
                     let bytes = r.snapshot();
-                    assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 56);
+                    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 56);
                     let restored = BlastRange::restore(r.config, &bytes).unwrap();
                     assert_eq!(bytes, restored.snapshot());
                     assert_eq!(
@@ -150,7 +150,7 @@ fn material_properties_hash_and_restore_with_all_motion_and_debris_combinations(
 
 #[cfg(test)]
 fn prefix(bytes: &[u8]) -> usize {
-    let mut s = Scan::new(bytes);
+    let mut s = Scan::new(&bytes[8..]);
     s.u32();
     s.bool();
     s.bool();
@@ -194,7 +194,7 @@ fn density_changes_preserve_stock_validate_inputs_and_keep_history_after_reset()
         r.matter.save(&mut after);
         assert_eq!(matter.v, after.v, "command must not revalue or sink stock");
         let bytes = r.snapshot();
-        assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 57);
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 57);
         assert_eq!(
             bytes,
             BlastRange::restore(r.config, &bytes).unwrap().snapshot()
@@ -228,7 +228,7 @@ fn density_prelude_rejects_invalid_density_masks_and_legacy_reinterpretation() {
         assert!(BlastRange::restore(r.config, &bad).is_none());
     }
     let mut old = bytes.clone();
-    old[..4].copy_from_slice(&56u32.to_le_bytes());
+    old[8..12].copy_from_slice(&56u32.to_le_bytes());
     assert!(BlastRange::restore(r.config, &old).is_none());
     for end in at..at + 13 {
         assert!(BlastRange::restore(r.config, &bytes[..end]).is_none());
@@ -286,14 +286,16 @@ fn density_terrain_claims_use_confirmation_density_and_mixed_piles_keep_matter_o
             .sum::<u64>(),
         total
     );
-    // Put the two real extracted pieces on the same supported pile site.
-    for f in &mut r.matter.debris.fragments {
+    // Put the real extracted pieces face-to-face on the same supported site.
+    // Mere membership of a coarse pile cell must not teleport/reshape shards.
+    for (i,f) in r.matter.debris.fragments.iter_mut().enumerate() {
         f.position = V3::new(
-            Fx::from_ratio(501, 2),
+            Fx::from_ratio(501, 2).add(Fx::from_int(i as i32)),
             Fx::from_ratio(33, 2),
             Fx::from_ratio(501, 2),
         );
         f.velocity = V3::ZERO;
+        f.basis=crate::burst::IDENTITY;
         f.resting = true;
     }
     r.matter.debris.step_fragments(

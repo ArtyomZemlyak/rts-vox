@@ -3,7 +3,7 @@
 (
     delivery: Blast,
     motion: Ballistic,
-    charge_ticks: 24,
+    charge_ticks: 16,
     // Keep 65^3 pressure cells; the engine grows their edge with charge yield.
     half_cells: 32,
     cell_units: 4, // Minimum edge; stock yield derives 9, with exact wide contacts.
@@ -13,6 +13,9 @@
     material_energy_j: 4000000000,
     air_cost: 100,
     soil_resistance: 165,
+    // Soil confinement per world unit below the impact; hull work is unchanged.
+    soil_depth_cost: 12000,
+    soil_fracture_milli: 4000,
     concrete_resistance: 380,
     // The heavy siege envelope can penetrate armour; material still pays work.
     steel_resistance: 6000,
@@ -26,7 +29,7 @@
     // pressure the body absorbed (ADR-297) - what dents the side throws
     // the machine, and a hull the wave never reached is not pushed.
     hull_impulse_milli: 2,
-    fire_tick: 45,
+    fire_tick: 30,
     shell_speed: 400,
     // The fireball lights fuel within thirty-two units: eighty heat at the
     // centre, falling to nothing at the edge, so the crowns of the trees

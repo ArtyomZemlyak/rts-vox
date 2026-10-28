@@ -55,7 +55,7 @@ pub const NAV: usize = (WORLD / NAV_CELL) as usize;
 /// поэтому шаг за тик делится на это число. Голая тридцатка в формуле
 /// шага один раз уже стоила дорого: эталонный сценарий разводил
 /// стороны на расстояние, которое они не проходили за прогон (ADR-116).
-pub const TICKS_PER_SECOND: i32 = 30;
+pub const TICKS_PER_SECOND: i32 = modding::clock::HZ as i32;
 
 pub mod blast;
 mod body_wave;

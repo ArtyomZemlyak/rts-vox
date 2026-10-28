@@ -1,3 +1,3 @@
-// Strategic airburst: body/ground shares of the same finite material budget.
-(range: "nuclear", reload_ticks: 1800, flight_time_milli: 4000,
- material_energy_j: 20000000000, body_energy_pct: 90)
+// Strategic airburst: 100x the original 20 GJ, shared by bodies and ground.
+(range: "nuclear", reload_ticks: 1200, flight_time_milli: 4000,
+ material_energy_j: 2000000000000, body_energy_pct: 25)
