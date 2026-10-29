@@ -18,6 +18,16 @@ impl Fall {
 }
 
 impl Water {
+    /// Last integrated downward velocity of the connected free-fall column.
+    /// Resting and horizontally flowing water do not have a velocity here.
+    pub fn falling_speed_at(&self, mut p: Pos) -> Option<Fx> {
+        for _ in 0..self.tuning.motion.column_cells {
+            if self.amount(p)==0 {return None;}
+            if let Some(f)=self.falling.get(&p) {return Some(f.speed);}
+            p[1]=p[1].checked_sub(1)?;
+        }
+        None
+    }
     pub(super) fn advance_falling(
         &mut self,
         w: &World,

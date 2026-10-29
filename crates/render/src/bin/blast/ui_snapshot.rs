@@ -14,6 +14,8 @@ pub(super) struct UiSnapshot {
     pub weapon: u8,
     pub step_us: u128,
     pub notice: String,
+    pub crawler_cargo: Vec<Option<(u64, u64, bool, bool, u64, u64)>>,
+    pub base_cargo: Vec<Option<(u64, u64)>>,
 }
 
 pub(super) fn publish(
@@ -71,4 +73,15 @@ pub(super) fn publish(
     output.weapon = panel::weapon_of(&scene);
     output.step_us = scene.step_us;
     output.notice.clone_from(&scene.notice);
+    output.crawler_cargo.clear();
+    output.crawler_cargo.extend(scene.sim.units.iter().enumerate().map(|(i, u)| {
+        (u.kind == RangeUnitKind::Crawler).then(|| scene.sim.tank_fill(i).map(|(held, cap)| {
+            let (stored, limit) = scene.sim.side_store(scene.sim.allied(i)).unwrap_or((0, 0));
+            (held, cap, scene.sim.hauling(i), u.status.weapon && u.status.engine, stored, limit)
+        })).flatten()
+    }));
+    output.base_cargo.clear();
+    output.base_cargo.extend(scene.sim.units.iter().enumerate().map(|(i, u)| {
+        (u.kind == RangeUnitKind::Base).then(|| scene.sim.side_store(scene.sim.allied(i))).flatten()
+    }));
 }

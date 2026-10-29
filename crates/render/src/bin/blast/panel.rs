@@ -403,6 +403,7 @@ pub enum Action {
     RosterPage(i32),
     BattleWeapon(Option<BattleWeapon>),
     Skirmish(u8),
+    CrawlerField,
     Play,
     BattlePreset,
     BattleWorld,
@@ -577,6 +578,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
         ));
         let mut rows: Vec<(bool, Vec<(&str, Action)>)> = vec![
             (false, vec![("Лаборатория материалов", Action::Laboratory)]),
+            (false, vec![("Полигон краулера · сбор и бурение", Action::CrawlerField)]),
             (
                 false,
                 vec![("Прорыв укреплений · 3 на 3", Action::Skirmish(0))],
@@ -944,6 +946,7 @@ pub fn actions(
         if matches!(
             action,
             Action::BattleWorld
+                | Action::CrawlerField
                 | Action::BattleWorldAuto
                 | Action::BattlePreset
                 | Action::FreeRange
@@ -959,6 +962,7 @@ pub fn actions(
         if matches!(
             action,
             Action::FreeRange
+                | Action::CrawlerField
                 | Action::FreeControl
                 | Action::BattleStart
                 | Action::BattleReplay
@@ -1032,6 +1036,22 @@ pub fn actions(
                     scene.notice = "Выберите свой действующий танк".into();
                 }
             }
+            Action::CrawlerField => match edit.crawler_field(scene.sim.config.clone()) {
+                Ok(()) => {
+                    panel.battle_name = "Полигон краулера".into();
+                    panel.briefing = "Выберите краулер. Ctrl+ПКМ — добыча или сбор у точки; ПКМ — движение. Груз и запас базы видны в панели выбранного юнита.".into();
+                    panel.mission = None;
+                    panel.free_launch = true;
+                    panel.battle_launch = false;
+                    panel.battle_auto = false;
+                    panel.drawer = 0;
+                    panel.pending = None;
+                    panel.ground_fire = false;
+                    scene.repeat = false;
+                    scene.view = 1;
+                }
+                Err(e) => scene.notice = e,
+            },
             Action::Skirmish(id) => match edit.skirmish(id, scene.sim.config.clone()) {
                 Ok(briefing) => {
                     panel.battle_name = edit.sector().map_or_else(String::new, |z| z.name.clone());

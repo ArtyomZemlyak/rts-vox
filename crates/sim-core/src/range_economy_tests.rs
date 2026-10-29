@@ -11,6 +11,30 @@ const ROCK: u64 = 260;
 const FACE: [i32; 3] = [280, 8, 330];
 const FAR_FACE: [i32; 3] = [280, 8, 440];
 
+#[test]
+fn crawler_drill_finds_the_first_obstruction_and_never_cuts_through_it() {
+    struct Empty;
+    impl voxel::Generator for Empty {
+        fn material(&self, _: u32, _: u32, _: u32) -> u16 { 0 }
+    }
+    let mut world = voxel::World::new(32, 32, 32, 1024, Box::new(Empty));
+    world.queue_edit(voxel::Edit::put(8, 10, 10, 3));
+    world.queue_edit(voxel::Edit::put(12, 10, 10, 6));
+    world.flush();
+    let from = [4, 10, 10];
+    let mut budget = super::DRILL_RAY_STEPS;
+    assert_eq!(super::drill_front(&world, from, [12, 10, 10], &mut budget), Some([8, 10, 10]));
+    assert_eq!(super::drill_path_clear(&world, from, [8, 10, 10], &mut budget), Some(true));
+    assert_eq!(super::drill_path_clear(&world, from, [12, 10, 10], &mut budget), Some(false));
+    let mut exhausted = 1;
+    assert_eq!(super::drill_front(&world, from, [12, 10, 10], &mut exhausted), None);
+    assert_eq!(exhausted, 0);
+    world.queue_edit(voxel::Edit::dig(8, 10, 10));
+    world.flush();
+    let mut budget = super::DRILL_RAY_STEPS;
+    assert_eq!(super::drill_front(&world, from, [12, 10, 10], &mut budget), Some([12, 10, 10]));
+}
+
 fn config() -> ExplosionConfig {
     ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap()
 }

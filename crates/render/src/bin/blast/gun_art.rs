@@ -38,8 +38,10 @@ pub fn spawn(
                 Vec3::new(GUN[0] as f32, GUN[1] as f32, GUN[2] as f32) + pos,
             )
             .with_rotation(rot);
+            let mut model=mesh(buf);
+            model.asset_usage |= RenderAssetUsages::MAIN_WORLD;
             commands.spawn((
-                Mesh3d(meshes.add(mesh(buf))),
+                Mesh3d(meshes.add(model)),
                 MeshMaterial3d(finishes[k].clone()),
                 base,
                 Gun {

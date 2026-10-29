@@ -32,6 +32,7 @@ pub struct Flight {
     pub speed: f32,
     pub sensitivity: f32,
     pub fov: f32,
+    pub overview_return: Option<Transform>,
     held: [bool; 14],
 }
 impl Default for Flight {
@@ -45,6 +46,7 @@ impl Default for Flight {
             speed: 60.0,
             sensitivity: 0.0025,
             fov: 70.0,
+            overview_return: None,
             held: [false; 14],
         }
     }
@@ -85,7 +87,7 @@ fn travel(pose: &mut Transform, h: [bool; 14], speed: f32, dt: f32, size: [u32; 
             pose.translation[axis].clamp(lo, (size[axis] as f32 - lo - 0.5).max(lo));
     }
 }
-fn release(lab: &mut Laboratory) {
+pub(super) fn release(lab: &mut Laboratory) {
     lab.tools.flight.captured = false;
     lab.tools.flight.request = false;
     lab.tools.flight.trigger_ready = false;
@@ -119,6 +121,11 @@ pub fn input(
         return;
     };
     if !lab.active() || !lab.tools.live || !lab.tools.flying {
+        if lab.active() && lab.tools.live && !lab.tools.flying && window.focused
+            && lab.ui.editing.is_none() && !lab.ui.help && !lab.browser && keys.just_pressed(KeyCode::Tab) {
+            lab.constructor.pending.push(LabAction::LiveCapture);
+            keys.reset(KeyCode::Tab);
+        }
         wheel.clear();
         if *owns_cursor {
             if !pilot.as_ref().is_some_and(|p| p.active()) {

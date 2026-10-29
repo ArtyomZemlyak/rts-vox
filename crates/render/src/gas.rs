@@ -84,6 +84,7 @@ pub struct GasParams {
     pub energy_sources: [EnergySource; ENERGY_SOURCES],
     /// Physical toroidal coordinate of the window origin, computed once on CPU.
     pub terrain_wrap: Vec4,
+    pub section: Vec4,
 }
 impl Default for GasParams {
     fn default() -> Self {
@@ -109,6 +110,7 @@ impl Default for GasParams {
             energy_count: Vec4::ZERO,
             energy_sources: [EnergySource::default(); ENERGY_SOURCES],
             terrain_wrap: Vec4::ZERO,
+            section: Vec4::ZERO,
         }
     }
 }
@@ -170,6 +172,9 @@ pub struct GasInput {
     pub params: GasParams,
     pub atmosphere: Atmosphere,
     pub terrain_words: Arc<Vec<u32>>,
+    /// Bounded sparse heat/burn table used only by laboratory diagnostics.
+    pub metric_words: Arc<Vec<u32>>,
+    pub metric_revision: u64,
     /// Conservative occupied height per toroidal x/z slot. Main-world only;
     /// extraction uploads words and does not copy this CPU work cache.
     pub terrain_column_top: Vec<u16>,
@@ -216,6 +221,8 @@ impl Default for GasInput {
             params: GasParams::default(),
             atmosphere: Atmosphere::default(),
             terrain_words: Arc::new(vec![]),
+            metric_words: Arc::new(vec![0; (8192+16)*4]),
+            metric_revision: 0,
             terrain_column_top: Vec::new(),
             terrain_revision: 0,
             distant_uploads: default(),
@@ -276,6 +283,8 @@ impl ExtractResource for GasInput {
             // Never share the full mutable terrain with the render world:
             // doing so makes Arc::make_mut copy 157 MB on each moving tick.
             terrain_words: Arc::new(Vec::new()),
+            metric_words: source.metric_words.clone(),
+            metric_revision: source.metric_revision,
             terrain_column_top: Vec::new(),
             // One contiguous payload, even for 245760 disjoint rows of a
             // streamed x slab. A Vec allocation per row stalled extraction.
@@ -812,6 +821,9 @@ struct Pipeline {
     empty: Buffer,
     regions: [Option<GpuRegion>; REGIONS],
     terrain: Buffer,
+    metric: Buffer,
+    metric_bytes: usize,
+    metric_revision: u64,
     terrain_revision: u64,
     distant_revision: u64,
     bricks: bricks::Bricks,
@@ -1023,6 +1035,7 @@ fn init(
                 (9, texture_2d_array(TextureSampleType::Depth)),
                 (10, sampler(SamplerBindingType::Comparison)),
                 (11, uniform_buffer::<GpuLights>(true)),
+                (13, storage_buffer_read_only::<Vec<u32>>(false)),
             ),
         ),
     );
@@ -1072,6 +1085,10 @@ fn init(
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let metric=device.create_buffer(&BufferDescriptor {
+        label:Some("laboratory metric cells"),size:((8192+16)*4*4) as u64,
+        usage:BufferUsages::STORAGE|BufferUsages::COPY_DST,mapped_at_creation:false,
+    });
     commands.insert_resource(Pipeline {
         mask_layout,
         mask_build,
@@ -1092,6 +1109,9 @@ fn init(
         display: display::DisplayPipeline::new(&cache, shaders.display.clone()),
         bounds: bounds::BoundsPipeline::new(&cache, shaders.bounds.clone()),
         terrain,
+        metric,
+        metric_bytes:(8192+16)*4*4,
+        metric_revision:u64::MAX,
         terrain_revision: 0,
         distant_revision: 0,
         ready_frames: 0,
@@ -1121,6 +1141,18 @@ fn prepare(
     trace: Option<Res<crate::timeline::RenderTrace>>,
 ) -> Result<(), BevyError> {
     let (device, queue) = gpu;
+    if pipeline.metric_revision!=input.metric_revision {
+        let bytes=input.metric_words.len()*4;
+        if bytes!=pipeline.metric_bytes {
+            pipeline.metric=device.create_buffer(&BufferDescriptor {
+                label:Some("laboratory metric cells"),size:bytes as u64,
+                usage:BufferUsages::STORAGE|BufferUsages::COPY_DST,mapped_at_creation:false,
+            });
+            pipeline.metric_bytes=bytes;
+        }
+        queue.write_buffer(&pipeline.metric,0,le_bytes(&input.metric_words).as_ref());
+        pipeline.metric_revision=input.metric_revision;
+    }
     let trace = trace.as_ref().and_then(|t| t.0.as_ref());
     let scope = trace.map(|t| t.scope("gas_prepare"));
     let mut work = trace.map(|_| input.profile_work());
@@ -1317,6 +1349,7 @@ fn prepare(
         p.terrain = params.terrain;
         p.terrain_origin = params.terrain_origin;
         p.terrain_wrap = params.terrain_wrap;
+        p.section = params.section;
         p.distant = params.distant;
         p.distant_bounds = params.distant_bounds;
         p.weapon.y = params.weapon.y;
@@ -1607,7 +1640,8 @@ fn draw_gas(
         let wanted = input.atmosphere.clock.saturating_sub(source.born);
         // At most 16 substeps per region per frame, matching the scene's eight
         // 30 Hz ticks. Pending deposits stay ordered until the GPU catches up.
-        let end = wanted.min(r.simulated + 16);
+        let budget=source.substep_budget(r.simulated);
+        let end = wanted.min(r.simulated.saturating_add(budget));
         loop {
             for d in &r.deposits {
                 if d.serial > r.applied && d.step <= r.simulated {
@@ -1719,6 +1753,7 @@ fn shade_terrain(
             (9, &shadows.directional_light_depth_texture_view),
             (10, &samplers.directional_light_comparison_sampler),
             (11, lights.view_gpu_lights.binding().unwrap()),
+            (13, pipeline.metric.as_entire_binding()),
         )),
     );
     let diagnostics = ctx.diagnostic_recorder();

@@ -45,6 +45,41 @@ mod tests;
 pub const DIG: u32 = 0xfffd_0000;
 const TAG: u32 = 0xffff_0000;
 
+// All crawlers share this per-tick budget for tracing their cutting faces.
+// The remaining work waits for a later tick, never bypassing solid cover.
+const DRILL_RAY_STEPS: usize = 8192;
+
+fn drill_front(world: &voxel::World, from: [i32; 3], target: [i32; 3], budget: &mut usize) -> Option<[i32; 3]> {
+    if from.iter().all(|v| *v >= 0) && world.solid(from[0] as u32, from[1] as u32, from[2] as u32) {
+        return Some(from);
+    }
+    let mut found = None;
+    let mut exhausted = false;
+    voxel::los::walk((from[0], from[1], from[2]), (target[0], target[1], target[2]), |x, y, z| {
+        if *budget == 0 { exhausted = true; return false; }
+        *budget -= 1;
+        if x >= 0 && y >= 0 && z >= 0 && world.solid(x as u32, y as u32, z as u32) {
+            found = Some([x, y, z]);
+            false
+        } else { true }
+    });
+    if exhausted { None } else { Some(found.unwrap_or(target)) }
+}
+
+fn drill_path_clear(world: &voxel::World, from: [i32; 3], target: [u32; 3], budget: &mut usize) -> Option<bool> {
+    let mut clear = true;
+    let mut exhausted = false;
+    voxel::los::walk((from[0], from[1], from[2]), (target[0] as i32, target[1] as i32, target[2] as i32), |x, y, z| {
+        if *budget == 0 { exhausted = true; return false; }
+        *budget -= 1;
+        if x >= 0 && y >= 0 && z >= 0 && world.solid(x as u32, y as u32, z as u32) {
+            clear = false;
+            false
+        } else { true }
+    });
+    if exhausted { None } else { Some(clear) }
+}
+
 /// The digger a dig edit was queued for.
 pub fn dig_slot(by: u32) -> Option<usize> {
     (by & TAG == DIG).then_some((by & !TAG) as usize)
@@ -67,6 +102,8 @@ struct Digger {
     k: KindEconomy,
     rate: u32,
     full: bool,
+    /// Nearby debris may be claimed, waiting for search, or still in work.
+    reclaim_pending: bool,
 }
 
 /// The economy's state on a range whose layout has an economy section.
@@ -325,6 +362,7 @@ impl BlastRange {
                     k: *k,
                     rate: k.dig_edits_per_tick,
                     full: false,
+                    reclaim_pending: false,
                 });
             } else {
                 m.mark_full(id);
@@ -344,6 +382,7 @@ impl BlastRange {
         let n = diggers.len();
         let start = *tick as usize % n;
         let mut cursor = voxel::World::mat_cursor();
+        let mut drill_steps = DRILL_RAY_STEPS;
         'diggers: for step in 0..n {
             let Digger {
                 id,
@@ -351,23 +390,64 @@ impl BlastRange {
                 k,
                 rate,
                 full,
+                reclaim_pending,
             } = diggers[(start + step) % n];
             if full || rate == 0 {
                 continue;
             }
             let tank = m.tank(id).expect("digger has a tank");
+            // Reclaim can still run above when the drill is damaged, but
+            // solid terrain needs both its connected drive and its motor.
+            if k.kind == modding::range::RangeUnitKind::Crawler
+                && (!units[id].status.weapon || !units[id].status.engine)
+            {
+                if !reclaim_pending && m.inflight[id] == 0 && ledger.held(tank) > 0 {
+                    m.mark_full(id);
+                }
+                continue;
+            }
             let mut room = ledger.room(tank) - m.inflight[id];
             let mut rate = rate;
+            let mut face_pending = false;
+            let drill_origin = (k.kind == modding::range::RangeUnitKind::Crawler)
+                .then(|| units[id].world_pos(voxel::unit::CRAWLER_DRILL_TIP));
+            let cut_face = if let Some(origin) = drill_origin {
+                let Some(front) = drill_front(world, origin, face, &mut drill_steps) else {
+                    starved = true;
+                    continue;
+                };
+                front
+            } else { face };
             let spans = Arc::clone(m.balls.get(&k.dig_radius).expect("dig ball is prepared"));
             for &span in spans.iter() {
-                for [x, y, z] in occupied_row(world, face, span) {
+                for [x, y, z] in occupied_row(world, cut_face, span) {
                     if m.reserved.contains_key(&[x, y, z]) || matter.debris.claimed([x, y, z]) {
+                        // Do not depart while another queued edit or debris
+                        // may still make this face productive.
+                        face_pending = true;
                         continue;
                     }
                     let material = world.material_cached(&mut cursor, x, y, z);
                     let amount = matter.economy.per_voxel(material);
                     if material == AIR || amount == 0 {
                         continue;
+                    }
+                    if k.kind == modding::range::RangeUnitKind::Crawler {
+                        // Fixed, bounded work approximation: harder material
+                        // accepts fewer cuts over time. A spatial phase spreads
+                        // work across ticks and needs no per-voxel save state.
+                        let strength = matter.economy.mats.get(material).map_or(512, |m| m.strength);
+                        let period = strength.div_ceil(16).clamp(1, 32);
+                        let phase = x.wrapping_mul(17).wrapping_add(y.wrapping_mul(31)).wrapping_add(z.wrapping_mul(47));
+                        if tick.wrapping_add(phase) % period != 0 {
+                            face_pending = true;
+                            continue;
+                        }
+                        match drill_path_clear(world, drill_origin.expect("crawler drill origin"), [x, y, z], &mut drill_steps) {
+                            Some(true) => {},
+                            Some(false) => { face_pending = true; continue; },
+                            None => { starved = true; break 'diggers; },
+                        }
                     }
                     // The next voxel does not fit: the tank is full.
                     if amount > room {
@@ -395,6 +475,15 @@ impl BlastRange {
                         continue 'diggers;
                     }
                 }
+            }
+            // A small salvage job may end long before the tank is full. Send
+            // the real crawler home once this face is exhausted, but never
+            // while a reclaim search, claimed cell or dig edit is pending.
+            if k.kind == modding::range::RangeUnitKind::Crawler
+                && !reclaim_pending && !face_pending && m.inflight[id] == 0
+                && rate == k.dig_edits_per_tick && ledger.held(tank) > 0
+            {
+                m.mark_full(id);
             }
         }
         if starved {

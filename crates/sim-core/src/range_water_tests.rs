@@ -46,6 +46,19 @@ fn water_free_fall_acceleration_does_not_depend_on_liquid_viscosity() {
 }
 
 #[test]
+fn water_falling_speed_is_available_through_the_whole_moving_column() {
+    let w=world();
+    let mut f=liquid(&w,[30,50,30],[31,53,31]);
+    for _ in 0..5 {f.step(&w,&[]);}
+    let column=f.cells().map(|(p,_)|p).collect::<Vec<_>>();
+    let low=*column.iter().min_by_key(|p|p[1]).unwrap();
+    let speed=f.falling_speed_at(low).expect("moving water speed");
+    assert!(speed>Fx::ZERO);
+    assert!(column.iter().all(|p|f.falling_speed_at(*p)==Some(speed)));
+    assert_eq!(f.falling_speed_at([29,low[1],30]),None);
+}
+
+#[test]
 fn water_free_flight_moves_a_whole_column_even_with_one_work_item_per_tick() {
     let w=world();let mut slow=liquid(&w,[30,40,30],[31,56,31]);
     let mut normal=liquid(&w,[30,40,30],[31,56,31]);slow.tuning.checks_per_tick=1;
@@ -106,6 +119,25 @@ fn liquid(w: &World, min: [i32; 3], max: [i32; 3]) -> Water {
 }
 fn sum(w: &Water) -> u64 {
     w.cells().map(|(_, v)| u64::from(v)).sum()
+}
+#[test]
+fn large_water_volume_spreads_promptly_and_preserves_mass() {
+    let w=world();
+    for (name,min,max) in [("fall",[20,35,20],[28,43,28]),("spread",[20,4,18],[37,16,54])] {
+        let mut water=liquid(&w,min,max);
+        let total=sum(&water);
+        for tick in 1..=20 {
+            water.step(&w,&[]);
+            if [1,5,10,20].contains(&tick) {
+                let low=water.cells().map(|(p,_)|p[1]).min().unwrap();
+                let outside=water.cells().filter(|(p,_)|p[0]<min[0] as u32 || p[0]>=max[0] as u32 || p[2]<min[2] as u32 || p[2]>=max[2] as u32).map(|(_,v)|u64::from(v)).sum::<u64>();
+                if name=="fall" && tick==10 {assert_eq!(low,23);}
+                if name=="spread" && tick==5 {assert!(outside>=1_000_000,"large pool barely moved: {outside}");}
+                if name=="spread" && tick==20 {assert!(outside>=1_800_000,"large pool spread too slowly: {outside}");}
+            }
+            assert_eq!(sum(&water),total);
+        }
+    }
 }
 #[test]
 fn water_spread_from_a_grounded_column_is_prompt_and_conservative() {
@@ -211,6 +243,29 @@ fn water_pressure_equalizes_vessels_through_a_submerged_passage() {
         left.abs_diff(right) < volume / 4,
         "levels did not approach each other: {left} {right}"
     );
+}
+
+#[test]
+fn laboratory_vessels_move_water_much_faster_without_changing_volume() {
+    let exp=modding::laboratory::experiments::stock().into_iter().find(|e|e.id=="water-vessels").unwrap();
+    let cfg=modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut amounts=Vec::new();
+    for legacy in [true,false] {
+        let mut sim=BlastRange::with_layout(cfg,exp.layout.clone()).unwrap();
+        if legacy {sim.water.tuning.pressure_checks=2048;sim.water.tuning.pressure_packets=64;
+            sim.water.tuning.pressure_interval=4;sim.water.tuning.transfers_per_tick=1024;}
+        let volume=sim.water.stats().initial_units;
+        for _ in 0..10 {
+            sim.water.step(&sim.world,&[]);
+            assert_eq!(sim.water.stats().units,volume);
+            assert!(sim.water.checks<=sim.water.tuning.checks_per_tick);
+            assert!(sim.water.transfers<=sim.water.tuning.transfers_per_tick);
+        }
+        let right:u64=sim.water.cells().filter(|(p,_)|p[0]>=385).map(|(_,n)|u64::from(n)).sum();
+        assert!(legacy || right>volume/100,"new flow did not reach the second vessel");
+        amounts.push(right);
+    }
+    assert!(amounts[1]>=amounts[0].saturating_mul(10),"old={} new={}",amounts[0],amounts[1]);
 }
 
 #[test]
@@ -436,8 +491,9 @@ fn water_shared_float_scene_keeps_wood_dynamic_after_displacing_its_own_water() 
         r.bodies
             .list
             .iter()
-            .all(|b| b.voxels.first().is_none_or(|v| v.mat != 6)),
-        "stone stayed afloat"
+            .filter(|b| b.voxels.first().is_some_and(|v| v.mat == 6))
+            .all(|b| b.resting && b.oy <= 20 && !b.can_fall(&r.world)),
+        "stone remained above the basin floor"
     );
     assert_eq!(r.water.stats().units, r.water.stats().initial_units);
 }

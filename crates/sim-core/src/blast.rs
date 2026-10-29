@@ -4920,7 +4920,7 @@ impl BlastRange {
     }
     pub fn muzzle(&self) -> [Fx; 3] {
         if let Some(l) = self.layout.as_ref().filter(|l| l.gun_point) { return l.gun.map(Fx::from_int); }
-        if self.gun.kind != RangeUnitKind::Tank {
+        {
             let muzzles = self.stream_muzzles();
             if !muzzles.is_empty() {
                 // Heavy rounds use one barrel per reload. Keep the launched
@@ -4947,9 +4947,8 @@ impl BlastRange {
         let x=Fx::from_int(layout.target[0]).sub(gun.motion.pos[0]);
         let z=Fx::from_int(layout.target[2]).sub(gun.motion.pos[2]);
         let angle=fx::angle::atan2(z.raw(),x.raw());
-        let muzzle=if gun.kind!=RangeUnitKind::Tank {
-            weapons::muzzles(&gun,angle).first().copied().unwrap_or_else(||Self::tank_muzzle(&gun,Self::heading_at(angle)))
-        }else{Self::tank_muzzle(&gun,Self::heading_at(angle))};
+        let muzzle=weapons::muzzles(&gun,angle).first().copied()
+            .unwrap_or_else(||Self::tank_muzzle(&gun,Self::heading_at(angle)));
         muzzle.map(Fx::to_int_trunc)
     }
     pub fn new(config: ExplosionConfig) -> Self {
@@ -5304,6 +5303,27 @@ impl BlastRange {
             spawned: Vec::new(),
         };
         result.turret = crate::turret::Traverse::new(result.aim_angle());
+        result.gun.update_pose(result.turret.angle);
+        if let Some(layout) = result.layout.as_ref().filter(|l| !l.initial_debris.is_empty()) {
+            let mut cells = Vec::new();
+            for piece in &layout.initial_debris {
+                for z in piece.min[2]..piece.max[2] {
+                    for y in piece.min[1]..piece.max[1] {
+                        for x in piece.min[0]..piece.max[0] {
+                            cells.push(([x as u32, y as u32, z as u32], piece.material));
+                        }
+                    }
+                }
+            }
+            let start = result.matter.debris.fragments.len();
+            let (_, returned) = result.matter.debris.pieces_from_cells(
+                &mut result.world, &cells, &mut result.matter.economy, &result.matter.tuning, 4,
+            );
+            if returned > 0 {
+                eprintln!("authored debris: {returned} cells retained as terrain because the fragment pool is full");
+            }
+            for f in &mut result.matter.debris.fragments[start..] { f.resting = true; }
+        }
         // Generator-authored laboratory blocks have no initial edit event.
         // Wake their support checks too: a suspended solid must fall when the
         // experiment starts, even if the sand below it is already at rest.
@@ -6553,9 +6573,12 @@ impl BlastRange {
     }
 
     /// Charge another round against the current, already damaged world.
+    fn gun_armed(&self) -> bool {
+        self.gun.kind != RangeUnitKind::Crawler && self.gun.status.alive && self.gun.status.weapon
+    }
     pub fn ready(&self) -> bool {
         !self.battle_mode()
-            && (self.point_gun() || (self.gun.status.alive && self.gun.status.weapon))
+            && (self.point_gun() || self.gun_armed())
             && self.shot_ready()
     }
     fn shot_ready(&self) -> bool {
@@ -6695,7 +6718,7 @@ impl BlastRange {
         if !self.auto_attack {
             return;
         }
-        if !self.gun.status.alive || !self.gun.status.weapon {
+        if !self.gun_armed() {
             self.set_auto_attack_inner(false);
             return;
         }
@@ -7643,7 +7666,7 @@ impl BlastRange {
                 self.fire_tick = self.fire_tick.saturating_add(1);
             }
             if self.tick == self.fire_tick
-                && (self.point_gun() || (self.gun.status.alive && self.gun.status.weapon))
+                && (self.point_gun() || self.gun_armed())
                 && matches!(
                     self.config.delivery,
                     modding::explosion::Delivery::Blast | modding::explosion::Delivery::Kinetic
@@ -12991,6 +13014,16 @@ mod tests {
         );
     }
     #[test]
+    fn player_tank_muzzle_uses_the_actual_tilted_and_turned_barrel() {
+        let mut r = BlastRange::new(ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap());
+        r.gun.motion.hull.up = crate::damage::V3::new(Fx::from_ratio(1, 10), Fx::ONE, Fx::from_ratio(-1, 5));
+        r.turret.angle = fx::angle::FULL / 7;
+        r.gun.update_pose(r.turret.angle);
+        let actual = r.stream_muzzles();
+        assert_eq!(actual.len(), 1);
+        assert_eq!(r.muzzle(), actual[0]);
+    }
+    #[test]
     fn off_axis_aim_rotates_muzzle_without_increasing_horizontal_speed_and_resumes() {
         let mut c =
             ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
@@ -13002,8 +13035,9 @@ mod tests {
         layout.course = None;
         layout.target = [450, 24, 380];
         let mut a = BlastRange::with_layout(c, layout).unwrap();
-        assert!(a.muzzle()[2] > Fx::from_int(MUZZLE[2]));
-        assert!(a.muzzle()[0] < Fx::from_int(MUZZLE[0]));
+        let forward = weapons::muzzles(&a.gun, 0)[0];
+        assert!(a.muzzle()[2] > forward[2]);
+        assert!(a.muzzle()[0] < forward[0]);
         a.step();
         let speed = a.velocity[0]
             .mul(a.velocity[0])

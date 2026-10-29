@@ -1032,6 +1032,8 @@ fn subsystem_slot(p: Part) -> Option<usize> {
 /// бруска, туда не ложилось.
 pub const BODY_MM: u16 = 100;
 
+/// Local voxel at the front of the crawler's fixed drill.
+pub const CRAWLER_DRILL_TIP: [usize; 3] = [47, 12, 14];
 /// Tracked utility vehicle: a protected engine and core, an open cargo
 /// hopper, and a broad low salvage blade. All parts are damageable voxels.
 pub fn crawler() -> UnitBody {
@@ -1054,7 +1056,36 @@ pub fn crawler() -> UnitBody {
     // Intake and blade are structural, so hits can sever them normally.
     fill_f(&mut u, (40, 47), (3, 7), (7, 21), a, FINISH_STEEL);
     fill_f(&mut u, (46, 48), (1, 5), (4, 24), a, FINISH_GUN);
-    seat(u, "краулер")
+    // Reinforced intake and replaceable teeth give the working end a clear
+    // direction. They are connected armour, so damage can break them away.
+    fill_f(&mut u, (41, 47), (7, 9), (8, 20), a, FINISH_PLATE);
+    for z in [5, 9, 13, 17, 21] {
+        fill_f(&mut u, (46, 48), (0, 1), (z, z + 2), a, FINISH_STEEL);
+    }
+    for x in [23, 28, 33, 37] {
+        mark(&mut u, (x, x + 1), (12, 19), (7, 9), FINISH_STEEL);
+        mark(&mut u, (x, x + 1), (12, 19), (19, 21), FINISH_STEEL);
+    }
+    // Opposite cab window, cooling louvers and front work lights are actual
+    // cells, not detached effects; the hopper stays visibly open.
+    fill_f(&mut u, (9, 14), (19, 21), (20, 21), Part::Sensor, FINISH_OPTIC);
+    for x in [8, 10, 12, 14] {
+        mark(&mut u, (x, x + 1), (20, 21), (10, 18), FINISH_GUN);
+    }
+    for z in [7, 18] {
+        fill_f(&mut u, (43, 45), (8, 9), (z, z + 2), Part::Sensor, FINISH_OPTIC);
+    }
+    // Armoured drill drive and cutting head. The weapon subsystem is reused
+    // as the destructible working mechanism; this unit still has no gun.
+    cyl_f(&mut u, 0, (36, 48), (12, 14), 3, 0, Part::Weapon, FINISH_GUN);
+    for x in [38, 42, 46] {
+        mark_cyl(&mut u, 0, (x, x + 1), (12, 14), 3, FINISH_STEEL);
+    }
+    mark_cyl(&mut u, 0, (47, 48), (12, 14), 2, FINISH_OPTIC);
+    let mut u = seat(u, "краулер");
+    // The drill is fixed to the hull; this chassis has no traversing turret.
+    u.turret_y = u.vol.ny;
+    u
 }
 
 /// Танк: 6.0 × 3.0 × 3.0 м при вокселе 100 мм — том 60×30×30.
@@ -1884,7 +1915,7 @@ mod command_base_tests {
     fn crawler_has_a_working_engine_and_a_destructible_core() {
         let mut unit = crawler();
         let status = unit.status(&mut CoreBufs::new());
-        assert!(status.alive && status.engine && !status.weapon);
+        assert!(status.alive && status.engine && status.weapon);
         let (x, y, z) = unit.core;
         for dz in 0..unit.core_size as usize {
             for dy in 0..unit.core_size as usize {
@@ -1894,6 +1925,26 @@ mod command_base_tests {
             }
         }
         assert!(!unit.status(&mut CoreBufs::new()).alive);
+    }
+    #[test]
+    fn crawler_drill_is_a_connected_destructible_subsystem() {
+        let mut unit = crawler();
+        assert!(unit.status(&mut CoreBufs::new()).weapon);
+        let [x, y, z] = CRAWLER_DRILL_TIP;
+        assert!(unit.vol.get(x, y, z) && unit.part_at(x, y, z) == Part::Weapon);
+        let mut drill_cells = 0;
+        for z in 0..unit.vol.nz as usize {
+            for y in 0..unit.vol.ny as usize {
+                for x in 0..unit.vol.nx as usize {
+                    if unit.vol.get(x, y, z) && unit.part_at(x, y, z) == Part::Weapon {
+                        unit.remove(x, y, z);
+                        drill_cells += 1;
+                    }
+                }
+            }
+        }
+        let status = unit.status(&mut CoreBufs::new());
+        assert!(drill_cells > 0 && status.alive && status.engine && !status.weapon);
     }
     #[test]
     fn command_base_is_stationary_and_loses_when_its_core_is_destroyed() {
@@ -2385,6 +2436,12 @@ pub fn spider() -> UnitBody {
                     (2, 3),
                     FINISH_STEEL,
                 );
+                // Recessed actuator bands and the long hydraulic channel are
+                // part of the moving link, not separate animated meshes.
+                for x in [5, length / 2, length - 5] {
+                    mark(&mut link, (x, x + 1), (0, width), (0, width), FINISH_GUN);
+                }
+                mark(&mut link, (4, length - 3), (1, 2), (0, 1), FINISH_STEEL);
                 u.push_segment(
                     Attach::aimed(
                         (origin.0 as i16, origin.1, origin.2 as i16),
@@ -2428,6 +2485,9 @@ pub fn spider() -> UnitBody {
                 Part::Armour,
                 FINISH_PLATE,
             );
+            for x in [2, 5, 8] {
+                mark(&mut foot, (x, x + 1), (3, 4), (1, 7), FINISH_STEEL);
+            }
             u.push_segment(Attach::flat((ax as i16, 4, az as i16), (6, 4, 4)), foot);
             // Two legs per suspension quadrant, but not a synchronized pair:
             // the second leg starts 38% of a cycle later. With a 25% swing,
@@ -2539,6 +2599,21 @@ pub fn spider() -> UnitBody {
         Part::Sensor,
         FINISH_OPTIC,
     );
+    // Raised armour cassettes break up the otherwise broad side skirts.
+    // Each remains joined to the main hull, and leaves the hips uncovered.
+    for x in [28, 38, 48, 58] {
+        for z in [16, 62] {
+            fill_f(&mut u, (x, x + 4), (30, 37), (z, z + 2), Part::Armour, FINISH_STEEL);
+            fill_f(&mut u, (x + 1, x + 3), (31, 36), (z, z + 2), Part::Armour, FINISH_PLATE);
+            mark(&mut u, (x + 1, x + 3), (33, 34), (z, z + 2), FINISH_GUN);
+        }
+    }
+    // Paired sight housings flank the main laser; dark surrounds make the
+    // small optical windows legible without changing the weapon path.
+    for z in [30, 46] {
+        fill_f(&mut u, (61, 67), (44, 49), (z, z + 4), Part::Armour, FINISH_GUN);
+        fill_f(&mut u, (66, 68), (45, 48), (z + 1, z + 3), Part::Sensor, FINISH_OPTIC);
+    }
     // Broad reactor stays below the laser turntable and inside the armour.
     fill(&mut u, (38, 51), (27, 40), (33, 47), Part::Core);
     // No sealed air behind the laser-head shoulder.

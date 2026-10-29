@@ -177,6 +177,25 @@ impl Validator {
                 }
             }
         }
+        for piece in &layout.initial_debris {
+            for z in piece.min[2]..piece.max[2] {
+                for x in piece.min[0]..piece.max[0] {
+                    let column = terrain.column_of(x as u32, z as u32);
+                    if terrain.at(&column, x as u32, (piece.min[1] - 1) as u32, z as u32) == 0 {
+                        return Err(Rejection::Terrain);
+                    }
+                    for y in piece.min[1]..piece.max[1] {
+                        if terrain.at(&column, x as u32, y as u32, z as u32) != 0 {
+                            return Err(Rejection::Terrain);
+                        }
+                        if units.iter().any(|(shape, at)| shape.columns.get(&[x - at[0], z - at[2]])
+                            .is_some_and(|ys| ys.contains(&(y - at[1])))) {
+                            return Err(Rejection::Units);
+                        }
+                    }
+                }
+            }
+        }
         Ok(terrain)
     }
 }

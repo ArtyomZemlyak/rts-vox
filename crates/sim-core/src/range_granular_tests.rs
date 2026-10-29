@@ -144,6 +144,21 @@ fn pile(mat: u16) -> (World, Flow) {
 }
 
 #[test]
+fn dry_sand_slides_promptly_and_preserves_its_volume() {
+    let (mut w,mut f)=pile(10);
+    for tick in 1..=40 {
+        f.step(&mut w,|_|false);
+        if tick==20 {
+            let (n,_,spread)=count(&w,10);
+            assert_eq!(n,768);
+            assert!(spread>=225,"sand spread too slowly: {spread}");
+        }
+    }
+    assert_eq!(count(&w,10).0,768);
+    assert!(f.pending()<20,"sand is still slowly settling: {}",f.pending());
+}
+
+#[test]
 fn granular_sand_spreads_settles_and_preserves_every_cell() {
     let (mut w, mut f) = pile(10);
     for _ in 0..700 {

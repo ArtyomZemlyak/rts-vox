@@ -4,6 +4,8 @@ use bevy::input::{keyboard::KeyboardInput, ButtonState};
 use modding::lab_tools::DeviceKind;
 pub struct State {
     pub section: section::State,
+    pub metric: u8,
+    pub metric_scale: u8,
     pub orbit: Option<orbit::View>,
     pub device_preview: Option<([i32;3],bool)>,
     pub flight: first_person::Flight,
@@ -32,6 +34,8 @@ impl Default for State {
     fn default() -> Self {
         Self {
             section: section::State::default(),
+            metric: 0,
+            metric_scale: 1,
             orbit: None,
             device_preview: None,
             flight: first_person::Flight::default(),
@@ -137,6 +141,12 @@ pub fn input(
     t.camera = Some(pose);
 }
 impl Laboratory {
+    pub fn editor_camera(&self) -> bool {
+        self.active() && !self.tools.live && !self.constructor.voxel_editing() && !self.tools.flying
+    }
+    pub fn camera_ui_blocked(&self) -> bool {
+        self.browser || self.ui.help || self.ui.editing.is_some()
+    }
     pub fn flying(&self) -> bool {
         self.active() && (self.tools.flying || (self.constructor.voxel_editing() && self.tools.orbit.is_some()))
     }
@@ -153,6 +163,13 @@ impl Laboratory {
             return false;
         };
         *transform = camera;
+        if self.tools.flight.preview && std::env::var("RTS_LAB_CAPTURE_CASE").is_ok_and(|s|s.starts_with("metric-") && s!="metric-live") {
+            *projection=Projection::Orthographic(OrthographicProjection {
+                scaling_mode:bevy::camera::ScalingMode::FixedVertical{viewport_height:if std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("metric-fragment") {12.0}else{80.0}},
+                ..OrthographicProjection::default_3d()
+            });
+            return true;
+        }
         *projection = Projection::Perspective(PerspectiveProjection {
             fov: if self.constructor.voxel_editing() {orbit::FOV.to_radians()}else{self.tools.flight.fov.to_radians()},
             aspect_ratio: aspect,

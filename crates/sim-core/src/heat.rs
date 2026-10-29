@@ -21,6 +21,8 @@ mod melt_flow;
 /// The edit slot fire digs by: the ledger sends what it took to the
 /// combustion sink instead of crediting a unit.
 pub const FIRE: u32 = u32::MAX - 1;
+/// Thermal ablation sends material into the existing dispersed-matter sink.
+pub const VAPOR: u32 = u32::MAX - 2;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HeatCell {
@@ -178,6 +180,10 @@ impl Heat {
             .iter()
             .filter(|(_, c)| c.burn > 0)
             .map(|(p, _)| *p)
+    }
+    /// Read-only active thermal cells for diagnostic rendering.
+    pub fn diagnostic_cells(&self) -> impl Iterator<Item=([u32;3],HeatCell)> + '_ {
+        self.cells.iter().map(|(&p,&cell)|(p,cell))
     }
     pub fn cell(&self, p: [u32; 3]) -> HeatCell {
         self.cells.get(&p).copied().unwrap_or_default()

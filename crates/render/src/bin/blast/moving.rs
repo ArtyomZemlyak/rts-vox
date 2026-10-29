@@ -25,6 +25,7 @@ pub struct Visual {
     /// Previous authoritative weapon frames, including the fixed-point angle
     /// table and the hull-local traverse. Interpolate their picture only.
     battle_heads: Vec<(Quat, Vec3)>,
+    gun_head: Option<(Quat, Vec3)>,
     occupied: Vec<usize>,
     /// Reuse the merged occupancy allocation from the previous tick.
     scratch: Vec<usize>,
@@ -143,6 +144,7 @@ pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWin
     v.turret = Some(sim.turret.angle);
     v.battle_turrets = sim.battle.actors.iter().map(|a| a.turret.angle).collect();
     v.battle_heads = sim.units.iter().map(weapon_picture).collect();
+    v.gun_head = Some(weapon_picture(&sim.gun));
     // Capture resting pieces too: one may wake during the upcoming step.
     // Reuse dense origins; each parallel picture leaf merges its sorted IDs.
     v.fragments
@@ -679,7 +681,7 @@ fn append_dirty_word(spans: &mut Vec<std::ops::Range<usize>>, word: usize) {
     }
     spans.push(word..word + 1);
 }
-fn weapon_picture(u: &RangeUnit) -> (Quat, Vec3) {
+pub(super) fn weapon_picture(u: &RangeUnit) -> (Quat, Vec3) {
     let f = u.root_frame(usize::from(u.body.turret_y));
     let vec = |v: sim_core::damage::V3| {
         Vec3::new(
@@ -692,6 +694,12 @@ fn weapon_picture(u: &RangeUnit) -> (Quat, Vec3) {
         Quat::from_mat3(&Mat3::from_cols(vec(f.x), vec(f.y), vec(f.z))).normalize(),
         vec(f.base.sub(u.pose.base)),
     )
+}
+pub(super) fn visible_gun_frame(scene: &Scene, visual: &Visual) -> (Quat, Vec3) {
+    let now = weapon_picture(&scene.sim.gun);
+    let was = visual.gun_head.unwrap_or(now);
+    let t = fraction(scene);
+    (was.0.slerp(now.0, t), was.1.lerp(now.1, t))
 }
 pub fn animate(
     scene: Res<Scene>,
@@ -721,7 +729,6 @@ pub fn animate(
     let Visual {
         previous,
         previous_feet,
-        battle_turrets,
         battle_heads,
         rigs,
         frame_poses,
@@ -733,28 +740,10 @@ pub fn animate(
         let frame = &mut frame_poses[i];
         frame.pos = p.pos;
         frame.hull = render::realtime::hull_rotation(p.up, p.yaw);
-        let yaw = if scene.sim.battle_mode() {
-            scene.sim.battle.actors.get(i).map_or(p.yaw, |actor| {
-                let angle = actor.turret.angle;
-                let was = battle_turrets.get(i).copied().unwrap_or(angle);
-                -(was as f32 + fx::angle::diff(angle, was) as f32 * t) * std::f32::consts::TAU
-                    / fx::angle::FULL as f32
-            })
-        } else {
-            p.yaw
-        };
-        frame.turret = if yaw == p.yaw {
-            frame.hull
-        } else {
-            render::realtime::hull_rotation(p.up, yaw)
-        };
-        frame.turret_offset = Vec3::ZERO;
-        if u.kind == modding::range::RangeUnitKind::Spider && scene.sim.battle_mode() {
-            let now = weapon_picture(u);
-            let was = battle_heads.get(i).copied().unwrap_or(now);
-            frame.turret = was.0.slerp(now.0, t);
-            frame.turret_offset = was.1.lerp(now.1, t);
-        }
+        let now = weapon_picture(u);
+        let was = battle_heads.get(i).copied().unwrap_or(now);
+        frame.turret = was.0.slerp(now.0, t);
+        frame.turret_offset = was.1.lerp(now.1, t);
         frame.kind = u.kind.index();
         frame.legs.clear();
         // The range plants the feet (ADR-279); the picture interpolates
@@ -827,11 +816,15 @@ pub fn gun_segments(scene: &Scene, v: &Visual, p: Pose) -> Vec<Transform> {
         return Vec::new();
     }
     let root = render::realtime::hull_rotation(p.up, p.yaw);
+    let (weapon, weapon_offset) = visible_gun_frame(scene, v);
     let frames = render::model::segment_frames(&u.body, 0.01);
     let rigs = gait::rigs_of(&u.body, 0.01, &frames);
     let mut out: Vec<_> = frames
         .iter()
-        .map(|f| Transform::from_translation(p.pos + root * f.pos).with_rotation(root * f.rot))
+        .map(|f| {
+            let (rot, offset) = if f.turret { (weapon, weapon_offset) } else { (root, Vec3::ZERO) };
+            Transform::from_translation(p.pos + offset + rot * f.pos).with_rotation(rot * f.rot)
+        })
         .collect();
     for (i, rig) in rigs.iter().enumerate() {
         let Some(now) = u

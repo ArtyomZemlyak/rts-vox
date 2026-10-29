@@ -35,15 +35,47 @@ pub use collectors::draw as collectors_draw;
 pub use first_person::{input as first_person_input, draw as first_person_draw, flush as flush_live};
 #[path="laboratory/live_tools.rs"]
 mod live_tools;
-pub fn tick_live(lab:&mut Laboratory,scene:&mut Scene) {
-    scenario::advance(lab,scene);
-    live_tools::tick(lab,scene);
+pub fn tick_live(lab:&mut Laboratory,scene:&mut Scene) -> bool {
+    if lab.replay.playing {
+        if let Err(e)=lab.replay.before_tick(&mut scene.sim) {scene.paused=true;lab.replay.playing=false;lab.notice=e;return false;}
+    } else {scenario::advance(lab,scene);live_tools::tick(lab,scene);}
+    true
+}
+pub fn replay_playing(lab:&Laboratory)->bool {lab.replay.playing}
+pub fn finish_replay_tick(lab:&mut Laboratory,scene:&mut Scene)->bool {
+    if !lab.replay.playing{return false;}
+    match lab.replay.after_tick(&mut scene.sim) {
+        Ok(true)=>{scene.paused=true;lab.notice="Воспроизведение завершено".into();true},
+        Ok(false)=>false,
+        Err(e)=>{scene.paused=true;lab.replay.playing=false;lab.notice=e;true},
+    }
 }
 #[path="laboratory/highlight.rs"]
 mod highlight;
 #[path="laboratory/section.rs"]
 mod section;
+#[path="laboratory/metrics.rs"]
+mod metrics;
+#[path="laboratory/metric_fragments.rs"]
+mod metric_fragments;
+#[path="laboratory/replay.rs"]
+mod replay;
+pub use metrics::{draw as metrics_draw,terrain_offset as metrics_terrain_offset};
+pub(crate) use metrics::{scale as metric_colour,UNKNOWN as METRIC_UNKNOWN};
+pub use metric_fragments::draw as metric_fragments_draw;
+pub use replay::input as replay_input;
 pub use section::camera as section_camera;
+pub use section::clip_units as section_clip_units;
+pub use section::unit_caps as section_unit_caps;
+pub fn section_effect_mesh(source:Mesh,cut:Option<(usize,i32,bool)>)->Mesh {
+    let Some((axis,at,positive))=cut else {return source;};
+    let mut n=Vec3::ZERO;n[axis]=if positive {1.0}else{-1.0};
+    let plane=n.extend(-n[axis]*at as f32);
+    if let Some(mut clipped)=section::clip_mesh(&source,&Transform::IDENTITY,plane,None) {
+        clipped.asset_usage|=RenderAssetUsages::MAIN_WORLD;
+        clipped
+    } else {source}
+}
 pub use highlight::update as highlight;
 pub use tools::input as tools_input;
 pub use constructor::pointer;
@@ -68,7 +100,8 @@ mod voxel_editor_tests;
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub enum LabAction {
-    SectionToggle,SectionShift(i32),SectionFocus,
+    SectionToggle,SectionShift(i32),SectionFocus,SectionAxis(u8),SectionSide,Metric(u8),MetricScale,
+    ReplayStart,ReplayStop,ReplaySeek(u32),ReplayJump(i32),ReplaySave,ReplayOpen,ReplayBrowse(i32),ReplayPlay,ReplayLeave,
     LiveTools,LiveTool(u8),LivePoint,LivePower(i32),LiveApply([i32;3],[i32;3]),LiveRelease,LiveCapture,LiveSpeed(i32),LiveLook(i32),LiveFov(i32),
     SurfaceSnap,AllowOverlap,Flying,
     ProbeMove(u8,i32),ClearProbe,ProbeFocus,
@@ -207,10 +240,18 @@ pub struct Laboratory {
     events: Vec<modding::laboratory::events::Event>,
     browser: bool,
     metrics: String,
+    replay: replay::Replay,
     ui: ui::State,
     tools:tools::State,
 }
 impl Laboratory {
+    pub fn metric_mode(&self)->u8 {if self.active(){self.tools.metric}else{0}}
+    pub fn section_cut(&self)->Option<(usize,i32,bool)> {
+        (self.active() && self.tools.section.enabled).then(|| {
+            let s=&self.tools.section;let axis=s.axis.min(2) as usize;
+            (axis,s.point()[axis],s.positive)
+        })
+    }
     pub fn new(requested: bool) -> Self {
         Self {
             definition: Definition::stock(),
@@ -236,6 +277,7 @@ impl Laboratory {
             events: modding::laboratory::events::stock(),
             browser: false,
             metrics: String::new(),
+            replay: replay::Replay::default(),
             ui: ui::State::default(),
             tools:tools::State::default(),
         }
@@ -516,12 +558,29 @@ pub fn actions(
             Ok((mut sim, workshop)) => {
                 if capture_fixture {
                     let case=std::env::var("RTS_LAB_CAPTURE_CASE").unwrap_or_default();
+                    if matches!(case.as_str(),"section-unit"|"section-unit-metric"|"unit-metric"|"section-unit-laser") {
+                        let (lo,hi)=sim.units.first().expect("section tank").bounds();
+                        lab.tools.section.enabled=case!="unit-metric";lab.tools.section.axis=0;lab.tools.section.positive=true;
+                        lab.tools.metric=if matches!(case.as_str(),"section-unit"|"section-unit-laser") {0}else{1};
+                        lab.tools.section.anchor=std::array::from_fn(|i|(lo[i]+hi[i])/2);
+                        if case=="section-unit-laser" {
+                            let y=(lo[1]+hi[1])/2;let z=(lo[2]+hi[2])/2;
+                            sim.set_physics_workers(1);sim.set_navigation_workers(1);
+                            sim.execute_command(Command::ConfigureWeapon{config:weapon_config(false,false,1000,Delivery::Laser)});
+                            assert!(sim.execute_command(Command::Gun(GunCommand::LabStream{origin:[lo[0]-20,y,z],target:[hi[0]+20,y,z],enabled:true})).accepted());
+                            for _ in 0..24 {sim.step();}
+                            println!("UNIT_LASER_FIXTURE melted={} debris={}",sim.thermals.melted,sim.matter.debris.fragments.len());
+                        }
+                    }
                     if case=="melt-steel" {
                         sim.set_physics_workers(1);sim.set_navigation_workers(1);
                         sim.execute_command(Command::ConfigureWeapon{config:weapon_config(false,false,1000,Delivery::Laser)});
                         sim.execute_command(Command::Gun(GunCommand::LabStream{origin:[350,30,345],target:[410,30,345],enabled:true}));
                         for _ in 0..24 {sim.step();}
                         println!("MELT_CAPTURE melted={} hot={}",sim.heat.melted_total,sim.heat.hot());
+                    }
+                    if case=="metric-section" || case=="metric-surface" || case=="metric-live" || case=="metric-fragment" {
+                        sim.heat.deposit(&sim.world,&sim.matter.economy.mats,[385,31,345],12,900);
                     }
                     if case.starts_with("collector-") {
                         sim.set_physics_workers(1);sim.set_navigation_workers(1);
@@ -545,6 +604,14 @@ pub fn actions(
                         for _ in 0..if case.ends_with("flight") {16}else{140} {sim.step();}
                         let pieces=&sim.matter.debris.fragments;
                         println!("HE_LANDING case={case} fragments={} flying={} resting={} inventory={} geometry={}",pieces.len(),pieces.iter().filter(|f|!f.resting).count(),pieces.iter().filter(|f|f.resting).count(),pieces.iter().map(|f|u64::from(f.count)).sum::<u64>(),pieces.iter().map(|f|u64::from(f.shape.count_ones())).sum::<u64>());
+                        if case=="he-fragments-heat-flight" {
+                            lab.tools.metric=1;lab.tools.section.enabled=true;lab.tools.section.axis=0;
+                            lab.tools.section.anchor=[392,20,344];lab.ui.tab=30;
+                            if std::env::var("RTS_LAB_CAPTURE_HEAT_STRESS").as_deref()==Ok("1") {
+                                for x in 350..430 {for z in 300..380 {sim.heat.add(&sim.world,[x,5,z],900);}}
+                            }
+                            println!("HE_HEAT_FIXTURE hot={}",sim.heat.hot());
+                        }
                     }
                     if ticks>0 {
                         sim.set_physics_workers(1);sim.set_navigation_workers(1);
@@ -601,6 +668,42 @@ pub fn actions(
                 if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("melt-steel") {
                     lab.tools.flight.preview=true;scene.paused=true;scene.realtime=true;
                 }
+                if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("replay-ui") {
+                    scene.sim.set_physics_workers(1);scene.sim.set_navigation_workers(1);
+                    lab.replay.start(&mut scene.sim).expect("replay fixture start");
+                    let outcome=scene.sim.execute_command(Command::Sculpt{at:[380,25,345],edge:1,material:11,erase:false});assert!(outcome.accepted());
+                    for _ in 0..8 {scene.sim.step();}
+                    lab.replay.stop(&mut scene.sim).expect("replay fixture stop");
+                    scene.paused=true;scene.realtime=true;scene.acc=0.0;scene.skip_delta=true;
+                }
+                if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("replay-effects") {
+                    scene.sim.set_physics_workers(1);scene.sim.set_navigation_workers(1);
+                    scene.sim.execute_command(Command::ConfigureWeapon{config:weapon_config(false,false,1000,Delivery::Blast)});
+                    lab.replay.start(&mut scene.sim).expect("replay effects fixture start");
+                    assert!(scene.sim.execute_command(Command::Gun(GunCommand::Detonate{at:[380,22,345]})).accepted());
+                    for _ in 0..8 {scene.sim.step();}
+                    lab.replay.stop(&mut scene.sim).expect("replay effects fixture stop");
+                    lab.replay.seek(4).expect("replay effects fixture seek");
+                    scene.paused=true;scene.realtime=true;scene.acc=0.0;scene.skip_delta=true;
+                }
+                if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").is_ok_and(|s|s=="metric-section"||s=="metric-surface"||s=="metric-live"||s=="metric-fragment") {
+                    lab.tools.section.enabled=std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("metric-section");lab.tools.section.anchor=[385,31,345];lab.tools.selected=Some([385,31,345]);lab.tools.metric=1;
+                    lab.tools.flight.preview=true;
+                    if std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("metric-live") {lab.tools.live=true;lab.tools.distance=88.0;}
+                    if std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("metric-fragment") {
+                        let sim=&mut scene.sim;
+                        let (made,returned)=sim.matter.debris.pieces_from_cells(&mut sim.world,&[([380,25,345],3)],&mut sim.matter.economy,&sim.matter.tuning,2);
+                        assert_eq!((made,returned),(1,0));
+                        let f=&mut sim.matter.debris.fragments[0];f.velocity.x=fx::Fx::from_int(2);f.resting=false;
+                        let centre=fragments::pos([f.position.x,f.position.y,f.position.z]);
+                        lab.tools.selected=Some(centre.floor().to_array().map(|v|v as i32));
+                        lab.tools.camera=Some(Transform::from_translation(centre+Vec3::new(-8.0,6.0,8.0)).looking_at(centre,Vec3::Y));
+                        println!("METRIC_FRAGMENT_FIXTURE id={} material={} x={:.2} y={:.2} z={:.2}",f.id,f.material,centre.x,centre.y,centre.z);
+                        lab.tools.metric=6;
+                    }
+                    if let Some(mode)=std::env::var("RTS_LAB_CAPTURE_METRIC").ok().and_then(|v|v.parse::<u8>().ok()).filter(|v|*v<=10) {lab.tools.metric=mode;}
+                    scene.paused=true;scene.realtime=true;scene.acc=0.0;scene.skip_delta=true;
+                }
                 if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").is_ok_and(|s|s.starts_with("water-gravity-")) {
                     let profile=std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("water-gravity-profile");
                     let centre=Vec3::new(384.0,22.0,336.0);
@@ -637,6 +740,7 @@ pub fn actions(
                         }
                     }
                     scene.paused=!case.ends_with("profile");
+                    if case=="fps-overview" {lab.constructor.pending.push(LabAction::Frame);}
                 }
                 if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("live-tools") {
                     let p=Vec3::new(378.0,24.0,398.0);
@@ -670,6 +774,19 @@ pub fn actions(
     }
     if !lab.active() {
         return;
+    }
+    let mut replay_effects=None;
+    let mut replay_restored=false;
+    match lab.replay.advance() {
+        Ok(Some((sim,restored_effects))) => {
+            if scene.generation < u64::MAX-1 {
+                scene.sim=sim;scene.generation+=1;scene.paused=true;scene.frame=scene.sim.tick;
+                scene.skip_delta=true;scene.acc=0.0;scene.previous_shell=None;
+                lab.sampled=None;lab.notice=format!("Показан тик {}",scene.sim.tick);transition=true;replay_effects=Some(restored_effects);replay_restored=true;
+            } else {lab.notice="Исчерпан номер сцены".into();}
+        }
+        Ok(None)=>{},
+        Err(e)=>{lab.replay.cancel();lab.notice=e;},
     }
     parameters::keyboard(&mut lab, &mut keys);
     let mut actions = std::mem::take(&mut lab.constructor.pending);
@@ -749,6 +866,8 @@ pub fn actions(
             continue;
         }
         if action == LabAction::Back {
+            if lab.replay.recording {let _=lab.replay.stop(&mut scene.sim);}
+            lab.replay.leave();
             let generation = scene
                 .generation
                 .checked_add(1)
@@ -787,8 +906,18 @@ pub fn actions(
             lab.notice="Завершите редактирование детали кнопкой «Готово» или «Отмена»".into();
             continue;
         }
+        let replay_view_action=matches!(action,LabAction::Tab(31)|LabAction::Tab(30)|LabAction::Tab(14)|LabAction::Tab(3)|LabAction::Tab(16)|LabAction::Tab(21)|LabAction::Frame|LabAction::Camera|LabAction::Help|LabAction::SectionToggle|LabAction::SectionShift(_)|LabAction::SectionFocus|LabAction::SectionAxis(_)|LabAction::SectionSide|LabAction::Metric(_)|LabAction::MetricScale|LabAction::Tool(4)|LabAction::ProbeMove(_,_)|LabAction::ClearProbe|LabAction::ProbeFocus|LabAction::Grid);
+        if lab.replay.target.is_some() && !replay_view_action && !matches!(action,LabAction::ReplaySeek(_)|LabAction::ReplayJump(_)|LabAction::ReplayLeave) {
+            lab.notice="Дождитесь окончания перемотки".into();continue;
+        }
+        if lab.replay.position.is_some() && !lab.replay.recording && !matches!(action,
+            LabAction::ReplayStart|LabAction::ReplaySeek(_)|LabAction::ReplayJump(_)|LabAction::ReplaySave|LabAction::ReplayOpen|LabAction::ReplayBrowse(_)|LabAction::ReplayPlay|LabAction::ReplayLeave)
+            && !replay_view_action
+            && !(lab.replay.playing && matches!(action,LabAction::Pause|LabAction::Step)) {
+            lab.notice="Режим записи: используйте «Воспроизвести» или «Продолжить отсюда»".into();continue;
+        }
         if !live_tools::allowed(&lab,action) {lab.notice="Завершите режим «Живые инструменты» кнопкой «Готово» или Esc".into();continue;}
-        if lab.tools.live && !matches!(action,LabAction::LiveApply(_,_)|LabAction::LiveRelease) {
+        if lab.tools.live && !(lab.replay.position.is_some() && replay_view_action) && !matches!(action,LabAction::LiveApply(_,_)|LabAction::LiveRelease|LabAction::ReplayStart|LabAction::ReplaySeek(_)|LabAction::ReplayJump(_)|LabAction::ReplayPlay|LabAction::ReplayLeave|LabAction::ReplaySave|LabAction::ReplayOpen|LabAction::ReplayBrowse(_)) {
             live_tools::stop(&mut lab,&mut scene);lab.tools.live_tick=None;
         }
         let before = lab.recipe;
@@ -796,9 +925,48 @@ pub fn actions(
         let mut rebuild = false;
         let mut fire = false;
         match action {
+            LabAction::ReplayStart => {
+                match lab.replay.start(&mut scene.sim) {Ok(())=>lab.notice="Запись начата".into(),Err(e)=>lab.notice=e}
+            },
+            LabAction::ReplayStop => {
+                match lab.replay.stop(&mut scene.sim) {Ok(())=>{scene.paused=true;lab.notice="Запись остановлена; перемещайте ползунок".into();},Err(e)=>lab.notice=e}
+            },
+            LabAction::ReplaySave => {
+                lab.notice=lab.replay.save().map_or_else(|e|format!("Не удалось сохранить: {e}"),|p|format!("Запись сохранена: {p}"));
+            },
+            LabAction::ReplayOpen | LabAction::ReplayBrowse(_) => {
+                let delta=if let LabAction::ReplayBrowse(d)=action {d}else{0};
+                match lab.replay.open(delta) {
+                    Ok(path)=>{let start=lab.replay.bounds().unwrap().0;scene.paused=true;lab.step_requested=false;lab.launch.clear();lab.observing=false;lab.tools.live_target=None;
+                        match lab.replay.seek(start){Ok(())=>lab.notice=format!("Открыта запись: {path}"),Err(e)=>lab.notice=e}}
+                    Err(e)=>lab.notice=format!("Не удалось открыть запись: {e}"),
+                }
+            },
+            LabAction::ReplayPlay => {
+                match lab.replay.play(&scene.sim) {Ok(())=>{scene.paused=false;lab.launch.clear();lab.observing=false;lab.tools.live_target=None;lab.notice="Воспроизведение записи".into();},Err(e)=>lab.notice=e}
+            },
+            LabAction::ReplayLeave => {lab.replay.leave();scene.paused=true;lab.notice="Можно продолжить симуляцию с текущего состояния".into();},
+            LabAction::ReplaySeek(tick) => {
+                scene.paused=true;lab.step_requested=false;lab.launch.clear();lab.observing=false;lab.tools.live_target=None;
+                if let Err(e)=lab.replay.seek(tick) {lab.notice=e;}
+            },
+            LabAction::ReplayJump(delta) => {
+                if let Some((a,b))=lab.replay.bounds() {
+                    let at=lab.replay.target.or(lab.replay.position).unwrap_or(scene.sim.tick);
+                    let target=if delta==i32::MIN {a}else if delta==i32::MAX {b}else{(i64::from(at)+i64::from(delta)).clamp(i64::from(a),i64::from(b)) as u32};
+                    scene.paused=true;lab.step_requested=false;lab.launch.clear();lab.observing=false;lab.tools.live_target=None;
+                    if let Err(e)=lab.replay.seek(target) {lab.notice=e;}
+                }
+            },
             LabAction::SectionToggle => section::toggle(&mut lab, &scene),
             LabAction::SectionShift(delta) => section::shift(&mut lab, delta),
             LabAction::SectionFocus => section::focus(&mut lab, &scene),
+            LabAction::SectionAxis(axis) => lab.tools.section.set_axis(axis),
+            LabAction::SectionSide => lab.tools.section.positive=!lab.tools.section.positive,
+            LabAction::Metric(mode) => {
+                lab.tools.metric=mode.min(10);
+            },
+            LabAction::MetricScale => lab.tools.metric_scale=match lab.tools.metric_scale {1=>2,2=>4,_=>1},
             LabAction::LiveTools|LabAction::LiveTool(_)|LabAction::LivePoint|LabAction::LivePower(_)|LabAction::LiveApply(_,_)|LabAction::LiveRelease|LabAction::LiveCapture|LabAction::LiveSpeed(_)|LabAction::LiveLook(_)|LabAction::LiveFov(_)=> {
                 live_tools::action(&mut lab,&mut scene,action);
                 configure_gas(&scene.sim,scene.energy,scene.anni,&mut gas);
@@ -990,12 +1158,19 @@ pub fn actions(
             }
             LabAction::Frame => {
                 if lab.constructor.voxel_editing() {orbit::frame(&mut lab);continue;}
+                if lab.tools.live && lab.tools.flying {lab.tools.flight.overview_return=lab.tools.camera;}
+                first_person::release(&mut lab);
+                lab.tools.flying=false;
+                lab.tools.camera=None;
+                for mut projection in &mut projections {
+                    *projection=Projection::Orthographic(OrthographicProjection::default_3d());
+                }
                 scene.view = 1;
                 edit.pan = Vec2::ZERO;
                 edit.zoom = 0.9;
                 edit.orbit = 0.0;
                 edit.pitch = 0.0;
-                scene.view = 1;
+                lab.notice="Общий вид · живые инструменты доступны в панели".into();
             }
             LabAction::Camera => {
                 edit.orbit += std::f32::consts::FRAC_PI_4;
@@ -1096,6 +1271,9 @@ pub fn actions(
             }
         }
         if before != lab.recipe || rebuild {
+            if lab.replay.recording {
+                match lab.replay.stop(&mut scene.sim) {Ok(())=>{lab.replay.leave();lab.notice="Запись остановлена перед пересозданием сцены".into();},Err(e)=>lab.notice=e}
+            }
             if scene.generation >= u64::MAX - 1 {
                 lab.recipe = before;
                 lab.notice = "Scene generation exhausted".into();
@@ -1143,9 +1321,24 @@ pub fn actions(
         profile.configure_workers(&mut scene.sim);
         moving::reset(&mut visual);
         if !(scene.out.is_some() && lab.tools.live && lab.tools.flight.preview) {effects.clear();}
+        if let Some(restored)=replay_effects.take() {effects.restore_replay(restored);}
         gas.atmosphere.clear();
         gas.params.control.z = 0.0;
         configure_gas(&scene.sim, scene.energy, scene.anni, &mut gas);
+        if replay_restored && scene.sim.config.delivery!=Delivery::Kinetic {
+            if let (Some(at),Some((start,_)))=(scene.sim.impact,lab.replay.bounds()) {
+                if scene.sim.impact_tick>=start && scene.sim.impact_tick<=scene.sim.tick {
+                    let point=Vec3::from(at.map(|v|v as f32));
+                    let mut params=gas.params;
+                    params.control.z=1.0;
+                    params.source=gas.surface_source(point,Vec3::Y).extend(scene.sim.config.gas_source_radius as f32);
+                    let born=scene.sim.impact_tick.saturating_mul(2);
+                    let now=scene.sim.tick.saturating_mul(2);
+                    let g=&mut *gas;
+                    g.atmosphere.restore_replay_impact(params,born,now,&g.terrain_words,g.window);
+                }
+            }
+        }
         streaming.invalidate();
         for e in &ejecta {
             commands.entity(e).despawn();
@@ -1181,6 +1374,7 @@ pub fn measure(mut lab: ResMut<Laboratory>, mut scene: ResMut<Scene>) {
     if !lab.active() {
         return;
     }
+    lab.replay.observe_tick(scene.sim.tick);
     lab.elapsed = lab.start.map_or(0, |t| scene.sim.tick.saturating_sub(t));
     // A paused single step must show its exact tick; quiet paused frames reuse it.
     if scene.paused && lab.sampled != Some(scene.sim.tick) {
@@ -1505,7 +1699,7 @@ pub fn refresh(
             21=>lab.tools.probe.clone(),
             24=>lab.constructor.voxel_text(&lab.definition,lab.recipe),
             25=>live_tools::text(&lab,scene.paused),
-            26|27=>ui::text(&lab,*kind),
+            26|27|28|29|30=>ui::text(&lab,*kind),
             22=>format!("Кисть: {}³ · дистанция: {} ед.\nПоверхность: {} · пересечения: {}",lab.tools.edge,lab.tools.distance as u32,if lab.constructor.workspace.surface_snap.unwrap_or(true){"вкл"}else{"выкл"},if lab.constructor.workspace.allow_overlap{"вкл"}else{"выкл"}),
             14 => format!(
                 "{} · тик {}",

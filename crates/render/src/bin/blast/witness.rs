@@ -54,7 +54,7 @@ fn build(unit: &Snapshot, pristine: &voxel::unit::UnitBody, skins: &SkinBindings
             body_tint(unit.allied, id),
             1.0,
             rows,
-            0.35,
+            if unit.revision.damage>0 {render::model::DAMAGE_BEVEL}else{0.35},
             pivot,
             &mut bufs,
         );
@@ -290,7 +290,9 @@ pub(super) fn update(
                     }
                 }
                 let base = Vec3::from(unit.anchor.map(|v| v as f32));
-                for b in parts {
+                for mut b in parts {
+                    // Section view needs the original vertices in the main world.
+                    b.mesh.asset_usage |= RenderAssetUsages::MAIN_WORLD;
                     let mut transform = b.local;
                     transform.translation += base;
                     commands.spawn((
@@ -450,6 +452,22 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_ne!(colors(&clean), colors(&marked));
+    }
+    #[test]
+    fn isolated_surviving_voxel_of_a_damaged_tank_keeps_wide_flat_faces() {
+        let sim=single(RangeUnitKind::Tank);let pristine=sim.units[0].body.clone();
+        let skins=SkinBindings::new(&pristine);let mut damaged=snapshot(&sim,0);
+        let (nx,ny,nz)=(usize::from(pristine.vol.nx),usize::from(pristine.turret_y),usize::from(pristine.vol.nz));
+        let cell=(0..nx).flat_map(|x|(0..ny).flat_map(move |y|(0..nz).map(move |z|[x,y,z])))
+            .find(|p|pristine.vol.get(p[0],p[1],p[2])).expect("occupied hull cell");
+        damaged.body.vol.cols.fill(0);damaged.body.vol.set(cell[0],cell[1],cell[2],true);damaged.revision.damage=1;
+        let built=build(&damaged,&pristine,&skins);
+        let piece=built.iter().find(|b|b.segment.is_none() && !b.turret).expect("isolated hull voxel");
+        let bevy::mesh::VertexAttributeValues::Float32x3(positions)=piece.mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap() else {panic!("positions")};
+        let bevy::mesh::VertexAttributeValues::Float32x3(normals)=piece.mesh.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap() else {panic!("normals")};
+        let face:Vec<_>=positions.iter().zip(normals).filter(|(_,n)|n[0]>0.99).map(|(p,_)|p).collect();
+        let extent=|a:usize|face.iter().map(|p|p[a]).fold(f32::NEG_INFINITY,f32::max)-face.iter().map(|p|p[a]).fold(f32::INFINITY,f32::min);
+        assert!(face.len()>=3 && extent(1)>0.7 && extent(2)>0.7,"damage bevel collapsed a cube into a diamond");
     }
     #[cfg(test)]
     #[test]

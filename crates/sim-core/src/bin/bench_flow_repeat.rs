@@ -39,6 +39,12 @@ fn main() {
                 }
             }
             let mut sim = BlastRange::with_layout(config, e.layout).unwrap();
+            if args.iter().any(|v|v=="--legacy-water") {
+                sim.water.tuning.pressure_checks=2048;
+                sim.water.tuning.pressure_packets=64;
+                sim.water.tuning.pressure_interval=4;
+                sim.water.tuning.transfers_per_tick=1024;
+            }
             sim.control();
             sim.set_physics_workers(workers);
             sim.set_navigation_workers(workers);

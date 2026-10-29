@@ -85,10 +85,16 @@ const SIDES: [([i32; 3], usize, bool); 6] = [
 /// в бою. Только на половине форма меняется так, что видно
 /// с игровой камеры (ADR-206).
 pub const BEVEL: f32 = 0.5;
+/// Exposed damaged voxels and detached panels retain a cubic outline instead
+/// of collapsing into isolated octahedra under the intact model's bevel.
+pub const DAMAGE_BEVEL: f32 = 0.12;
 
-/// A connected debris volume has one closed outer surface. Internal voxel
-/// faces and seams do not become geometry; only actual outer edges are cut.
+/// A connected debris volume has one cubic outer surface. Internal voxel
+/// faces and seams do not become geometry.
 pub fn fragment_to_mesh(shape: u64, side: u8, colour: [f32; 4]) -> MeshBuf {
+    // A half-cell bevel turns a single debris voxel into an octahedron. Keep
+    // debris cubic, with fewer triangles and the same physical bounds.
+    const FRAGMENT_BEVEL:f32=0.0;
     let side = i32::from(side.clamp(1, 4));
     let solid = |p: [i32; 3]| {
         p.iter().all(|&v| v >= 0 && v < side)
@@ -111,7 +117,7 @@ pub fn fragment_to_mesh(shape: u64, side: u8, colour: [f32; 4]) -> MeshBuf {
         let put = |p: [f32; 3]| {
             std::array::from_fn(|a| lo[a] + 0.01 + p[a] * (span[a] - 0.02) - 0.5 - centre[a])
         };
-        let bevel = BEVEL / span.into_iter().fold(f32::INFINITY, f32::min);
+        let bevel = FRAGMENT_BEVEL;
         for (_, axis, positive) in SIDES {
             face(axis, positive, bevel, colour, &|_, _| true, &put, &mut out);
         }
@@ -136,10 +142,10 @@ pub fn fragment_to_mesh(shape: u64, side: u8, colour: [f32; 4]) -> MeshBuf {
         };
         for (d, axis, positive) in SIDES {
             if !solid(std::array::from_fn(|a| at[a] + d[a])) {
-                face(axis, positive, BEVEL, colour, &free, &put, &mut out);
+                face(axis, positive, FRAGMENT_BEVEL, colour, &free, &put, &mut out);
             }
         }
-        corners(BEVEL, colour, &free, &put, &mut out);
+        corners(FRAGMENT_BEVEL, colour, &free, &put, &mut out);
     }
     out
 }
@@ -399,7 +405,7 @@ fn section_to_mesh_impl<const BOUNDED: bool>(
                 tint,
                 scale,
                 (0, source.vol.ny as usize),
-                BEVEL,
+                if corpse.is_some() {BEVEL}else{DAMAGE_BEVEL},
                 centre,
                 &mut buffers,
                 region,
@@ -428,7 +434,7 @@ fn section_to_mesh_impl<const BOUNDED: bool>(
                 tint,
                 scale,
                 (0, part.vol.ny as usize),
-                BEVEL,
+                if corpse.is_some() {BEVEL}else{DAMAGE_BEVEL},
                 centre,
                 &mut buffers,
                 region,

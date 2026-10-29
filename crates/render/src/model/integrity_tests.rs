@@ -21,6 +21,17 @@ fn templates() -> Vec<(&'static str, UnitBody)> {
     bodies
 }
 
+#[test]
+fn crawler_drill_is_rendered_with_the_hull_not_as_a_turret() {
+    let body = voxel::unit::crawler();
+    let cut = body.turret_y as usize;
+    assert_eq!(cut, body.vol.ny as usize);
+    let hull = mesh(&body, (0, cut), BEVEL);
+    let turret = mesh(&body, (cut, usize::MAX), BEVEL);
+    assert!(hull.iter().any(|part| !part.idx.is_empty()));
+    assert!(turret.iter().all(|part| part.idx.is_empty()));
+}
+
 fn mesh(body: &UnitBody, rows: (usize, usize), bevel: f32) -> [MeshBuf; crate::look::FINISHES] {
     let mut out = std::array::from_fn(|_| MeshBuf::default());
     body_to_mesh(body, [0.3, 0.5, 0.9], 1.0, rows, bevel, [0.0; 3], &mut out);

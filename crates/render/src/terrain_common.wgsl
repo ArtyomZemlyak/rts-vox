@@ -8,6 +8,7 @@ struct Params {
     energy:vec4<f32>, beam:vec4<f32>, weapon:vec4<f32>, look:vec4<f32>, distant:vec4<f32>, distant_bounds:vec4<f32>,
     energy_count:vec4<f32>, energy_sources:array<EnergySource,24>,
     terrain_wrap:vec4<f32>,
+    section:vec4<f32>,
 };
 @group(0) @binding(3) var<uniform> p: Params;
 @group(0) @binding(5) var<storage, read> terrain: array<u32>;

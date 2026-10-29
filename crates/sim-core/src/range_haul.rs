@@ -300,6 +300,13 @@ impl BlastRange {
                         dig_reach,
                         fresh: false,
                     }),
+                Leg::Hauling(Some(_)) => {
+                    // A dead or otherwise invalid dock must not leave its old
+                    // route active while the hauler waits for a new search.
+                    units[id].motion.stop();
+                    h.legs[id] = Leg::Hauling(None);
+                    need.push((id, tank, face, dig_reach));
+                }
                 _ => need.push((id, tank, face, dig_reach)),
             }
         }

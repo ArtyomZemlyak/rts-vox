@@ -548,8 +548,13 @@ impl Bodies {
                 continue;
             }
             if self.list[i].resting {
-                i += 1;
-                continue;
+                // A retained rotated body remains a body, so it can resume
+                // falling when its supporting terrain is removed.
+                if !self.list[i].can_fall(w) {
+                    i += 1;
+                    continue;
+                }
+                self.list[i].resting = false;
             }
             if self.list[i].awaiting_removal(w) {
                 i += 1;
@@ -594,6 +599,22 @@ impl Bodies {
                 // на высоте, куда донесла бы скорость.
             }
             if contact(&mut self.list[i],w) {i+=1;continue;}
+            if self.list[i].tilt_axis >= 3 && self.list[i].tilt_angle != 0
+                && self.list[i].riders.is_empty()
+            {
+                // Rounding each rotated voxel back to the world lattice
+                // distorts a rolling rock and creates artificial gaps. Keep
+                // its existing rigid mesh and authoritative local voxels.
+                let b=&mut self.list[i];
+                self.landed_log.push(Landed { id:b.id, fallen:b.fallen, oy:b.oy, riders:Vec::new() });
+                b.resting=true;
+                b.vy=Fx::ZERO;
+                b.fy=Fx::ZERO;
+                b.tilt_speed=0;
+                st.landed+=1;
+                i+=1;
+                continue;
+            }
             {
                 // Приземление: запечь обратно и убрать тело.
                 let b = self.list.swap_remove_stable(i);
@@ -795,6 +816,39 @@ mod tests {
 
     fn world() -> World {
         World::new(32, 32, 32, 100_000, Box::new(Flat { floor: 4 }))
+    }
+
+    #[test]
+    fn rotated_rock_keeps_shape_and_can_fall_again_after_support_is_removed() {
+        let mut w=world();
+        let cells=put_box(&mut w,[10,12,10],[13,15,13],3);
+        let mut bodies=Bodies::new(8,test_gravity());
+        assert!(bodies.detach(&mut w,&cells));
+        w.flush();
+        let original=bodies.list[0].voxels.clone();
+        bodies.list[0].tilt_axis=4;
+        bodies.list[0].tilt_angle=4096;
+        for _ in 0..100 {
+            bodies.step(&mut w);w.flush();
+            if bodies.list[0].resting {break;}
+        }
+        let b=&bodies.list[0];
+        assert!(b.resting);
+        assert_eq!(b.voxels,original);
+        assert_eq!((b.tilt_axis,b.tilt_angle),(4,4096));
+        assert_eq!(count(&w,3),0,"rotated voxels must not be baked into the grid");
+        let initial_y=b.oy;
+        let mut bytes=fx::blob::Blob::new();bodies.save(&mut bytes);
+        let mut restored=Bodies::new(8,test_gravity());
+        assert!(restored.load(&mut fx::blob::Scan::new(&bytes.v)));
+        assert!(restored.list[0].resting);
+        assert_eq!(restored.list[0].voxels,original);
+        assert_eq!(restored.list[0].tilt_angle,4096);
+        for x in 1..31 {for z in 1..31 {w.queue_edit(crate::Edit::dig(x,3,z));}}
+        w.flush();
+        for _ in 0..15 {bodies.step(&mut w);w.flush();}
+        assert!(bodies.list[0].oy<initial_y,"rock did not react to removed support");
+        assert_eq!(bodies.list[0].voxels,original);
     }
 
     /// Кусок, оторванный над полом, падает ровно до пола и запекается.

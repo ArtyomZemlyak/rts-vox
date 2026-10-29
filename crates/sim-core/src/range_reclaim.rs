@@ -331,6 +331,9 @@ pub(super) fn reclaim(
         diggers,
     );
     let cap = |id: usize| ledger.get(tanks[id].expect("digger has a tank")).cap;
+    for d in diggers.iter_mut() {
+        d.reclaim_pending = rc.work[d.id].is_some();
+    }
     // Work still there, still in reach and still fitting the tank.
     for d in diggers.iter() {
         let valid = match rc.work[d.id] {
@@ -371,6 +374,9 @@ pub(super) fn reclaim(
         .collect();
     let n = need.len();
     if n > 0 {
+        // A queued search is still work; only the bounded search below can
+        // establish that the candidates are too distant, held or too large.
+        for &i in &need { diggers[i].reclaim_pending = true; }
         let take = (rc.data.searches_per_tick as usize).min(n);
         if take < n {
             rc.search_deferred += 1;
@@ -378,7 +384,8 @@ pub(super) fn reclaim(
         // In u64: the same start on every pointer width.
         let start = (u64::from(tick) * take as u64 % n as u64) as usize;
         for step in 0..take {
-            let d = diggers[need[(start + step) % n]];
+            let index = need[(start + step) % n];
+            let d = diggers[index];
             rc.searches += 1;
             let mut best: Option<((i64, u8, u64), Work)> = None;
             for &(t, p) in near.around(d.face) {
@@ -409,7 +416,7 @@ pub(super) fn reclaim(
                     }
                     rc.work[d.id] = Some(work);
                 }
-                None => rc.search_misses += 1,
+                None => { rc.search_misses += 1; diggers[index].reclaim_pending = false; },
             }
         }
     }

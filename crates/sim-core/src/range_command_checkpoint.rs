@@ -597,187 +597,7 @@ pub(super) fn save_inbox(b: &mut Blob, inbox: &Inbox) {
             Some(Outcome::PathFailed) => 5,
             Some(Outcome::Busy) => 6,
         });
-        match entry.envelope.command {
-            Command::Gun(command) => {
-                use super::super::GunCommand;
-                b.u8(9);
-                b.usize(0);
-                match command {
-                    GunCommand::Control => b.u8(0),
-                    GunCommand::Move { destination } => {
-                        b.u8(1);
-                        for x in destination {
-                            b.i32(x);
-                        }
-                    }
-                    GunCommand::Attack { target } => {
-                        b.u8(2);
-                        b.usize(target);
-                    }
-                    GunCommand::Stop => b.u8(3),
-                    GunCommand::AutoAttack { enabled } => {
-                        b.u8(4);
-                        b.bool(enabled);
-                    }
-                    GunCommand::GroundFire { at } => {
-                        b.u8(5);
-                        for x in at {
-                            b.i32(x);
-                        }
-                    }
-                    GunCommand::Refire => b.u8(6),
-                    GunCommand::Origin { at } => { b.u8(8); for x in at { b.i32(x); } }
-                    GunCommand::Detonate { at } => { b.u8(9); for x in at { b.i32(x); } }
-                    GunCommand::LabStream { origin, target, enabled } => { b.u8(10); for x in origin.into_iter().chain(target) { b.i32(x); } b.bool(enabled); }
-                    GunCommand::Aim { at } => {
-                        b.u8(7);
-                        b.bool(at.is_some());
-                        if let Some(at) = at {
-                            for x in at {
-                                b.i32(x);
-                            }
-                        }
-                    }
-                }
-            }
-            Command::SetPatrols { enabled } => {
-                b.u8(10);
-                b.usize(0);
-                b.bool(enabled);
-            }
-            Command::ConfigureEnemyAi { tuning } => {
-                b.u8(8);
-                b.usize(0);
-                b.u32(tuning.decision_ticks);
-                b.bool(tuning.focus_fire);
-                b.i32(tuning.armed_bonus);
-                b.i32(tuning.mobile_bonus);
-                b.i32(tuning.switch_margin);
-            }
-            Command::BattleLifecycle(command) => {
-                b.u8(6);
-                b.usize(0);
-                match command {
-                    super::BattleLifecycle::StartBattle => b.u8(0),
-                    super::BattleLifecycle::FreeControl => b.u8(1),
-                    super::BattleLifecycle::Autonomy { enabled } => {
-                        b.u8(2);
-                        b.bool(enabled);
-                    }
-                }
-            }
-            Command::SetBattleWeapon { actor, weapon } => {
-                b.u8(7);
-                b.usize(actor);
-                b.u8(weapon.map_or(0, |weapon| weapon as u8 + 1));
-            }
-            Command::ConfigureWeapon { config } => {
-                b.u8(5);
-                b.usize(0);
-                crate::blast::weapon_configuration::save(&config, b);
-            }
-            Command::TuneMaterial {
-                material,
-                field,
-                value,
-            } => {
-                b.u8(4);
-                b.usize(usize::from(material));
-                b.u8(field as u8);
-                b.u32(value);
-            }
-            Command::TuneDebris { field, value } => {
-                b.u8(3);
-                b.usize(0); // Reserved target: this command addresses the world.
-                b.u8(field as u8);
-                b.u32(value);
-            }
-            Command::TuneMotion {
-                kind,
-                include_gun,
-                field,
-                value,
-            } => {
-                b.u8(2);
-                b.usize(kind.index());
-                b.bool(include_gun);
-                b.u8(field as u8);
-                b.i32(value);
-            }
-            Command::Order {
-                actor,
-                order,
-                destination,
-            } => {
-                b.u8(0);
-                b.usize(actor);
-                use super::super::Order;
-                match order {
-                    Order::Auto => b.u8(0),
-                    Order::Hold => b.u8(1),
-                    Order::Move => b.u8(2),
-                    Order::Attack(target) => {
-                        b.u8(3);
-                        b.usize(target);
-                    }
-                    Order::Ground(at) => {
-                        b.u8(4);
-                        for x in at {
-                            b.i32(x);
-                        }
-                    }
-                    Order::Dig(at) => {
-                        b.u8(5);
-                        for x in at {
-                            b.i32(x);
-                        }
-                    }
-                    Order::Pilot {
-                        throttle,
-                        turn,
-                        aim,
-                        fire,
-                    } => {
-                        b.u8(6);
-                        b.u8(throttle.wrapping_add(1) as u8);
-                        b.u8(turn.wrapping_add(1) as u8);
-                        for x in aim {
-                            b.i32(x);
-                        }
-                        b.bool(fire);
-                    }
-                }
-                b.bool(destination.is_some());
-                if let Some(at) = destination {
-                    for x in at {
-                        b.i32(x);
-                    }
-                }
-            }
-            Command::FormationMove {
-                actor,
-                destination,
-                fallback,
-            } => {
-                b.u8(1);
-                b.usize(actor);
-                for x in destination.into_iter().chain(fallback) {
-                    b.i32(x);
-                }
-            }
-            Command::Produce { actor, kind } => {
-                b.u8(11);
-                b.usize(actor);
-                b.u8(kind.index() as u8);
-            }
-            Command::Sculpt{at,edge,material,erase}=> {
-                b.u8(13);b.usize(0);for v in at {b.i32(v);}b.u32(edge);b.u16(material);b.bool(erase);
-            }
-            Command::Cancel { actor } => {
-                b.u8(12);
-                b.usize(actor);
-            }
-        }
+        save_recorded_command(b, entry.envelope.command);
     }
     b.usize(inbox.plans.len());
     for receipt in &inbox.plans {
@@ -1017,4 +837,196 @@ mod wire_tests {
             assert!(Reader(Scan::new(&b.v[..len])).command().is_none());
         }
     }
+}
+
+
+pub(super) fn save_recorded_command(b: &mut Blob, command: Command) {
+        match command {
+            Command::Gun(command) => {
+                use super::super::GunCommand;
+                b.u8(9);
+                b.usize(0);
+                match command {
+                    GunCommand::Control => b.u8(0),
+                    GunCommand::Move { destination } => {
+                        b.u8(1);
+                        for x in destination {
+                            b.i32(x);
+                        }
+                    }
+                    GunCommand::Attack { target } => {
+                        b.u8(2);
+                        b.usize(target);
+                    }
+                    GunCommand::Stop => b.u8(3),
+                    GunCommand::AutoAttack { enabled } => {
+                        b.u8(4);
+                        b.bool(enabled);
+                    }
+                    GunCommand::GroundFire { at } => {
+                        b.u8(5);
+                        for x in at {
+                            b.i32(x);
+                        }
+                    }
+                    GunCommand::Refire => b.u8(6),
+                    GunCommand::Origin { at } => { b.u8(8); for x in at { b.i32(x); } }
+                    GunCommand::Detonate { at } => { b.u8(9); for x in at { b.i32(x); } }
+                    GunCommand::LabStream { origin, target, enabled } => { b.u8(10); for x in origin.into_iter().chain(target) { b.i32(x); } b.bool(enabled); }
+                    GunCommand::Aim { at } => {
+                        b.u8(7);
+                        b.bool(at.is_some());
+                        if let Some(at) = at {
+                            for x in at {
+                                b.i32(x);
+                            }
+                        }
+                    }
+                }
+            }
+            Command::SetPatrols { enabled } => {
+                b.u8(10);
+                b.usize(0);
+                b.bool(enabled);
+            }
+            Command::ConfigureEnemyAi { tuning } => {
+                b.u8(8);
+                b.usize(0);
+                b.u32(tuning.decision_ticks);
+                b.bool(tuning.focus_fire);
+                b.i32(tuning.armed_bonus);
+                b.i32(tuning.mobile_bonus);
+                b.i32(tuning.switch_margin);
+            }
+            Command::BattleLifecycle(command) => {
+                b.u8(6);
+                b.usize(0);
+                match command {
+                    super::BattleLifecycle::StartBattle => b.u8(0),
+                    super::BattleLifecycle::FreeControl => b.u8(1),
+                    super::BattleLifecycle::Autonomy { enabled } => {
+                        b.u8(2);
+                        b.bool(enabled);
+                    }
+                }
+            }
+            Command::SetBattleWeapon { actor, weapon } => {
+                b.u8(7);
+                b.usize(actor);
+                b.u8(weapon.map_or(0, |weapon| weapon as u8 + 1));
+            }
+            Command::ConfigureWeapon { config } => {
+                b.u8(5);
+                b.usize(0);
+                crate::blast::weapon_configuration::save(&config, b);
+            }
+            Command::TuneMaterial {
+                material,
+                field,
+                value,
+            } => {
+                b.u8(4);
+                b.usize(usize::from(material));
+                b.u8(field as u8);
+                b.u32(value);
+            }
+            Command::TuneDebris { field, value } => {
+                b.u8(3);
+                b.usize(0); // Reserved target: this command addresses the world.
+                b.u8(field as u8);
+                b.u32(value);
+            }
+            Command::TuneMotion {
+                kind,
+                include_gun,
+                field,
+                value,
+            } => {
+                b.u8(2);
+                b.usize(kind.index());
+                b.bool(include_gun);
+                b.u8(field as u8);
+                b.i32(value);
+            }
+            Command::Order {
+                actor,
+                order,
+                destination,
+            } => {
+                b.u8(0);
+                b.usize(actor);
+                use super::super::Order;
+                match order {
+                    Order::Auto => b.u8(0),
+                    Order::Hold => b.u8(1),
+                    Order::Move => b.u8(2),
+                    Order::Attack(target) => {
+                        b.u8(3);
+                        b.usize(target);
+                    }
+                    Order::Ground(at) => {
+                        b.u8(4);
+                        for x in at {
+                            b.i32(x);
+                        }
+                    }
+                    Order::Dig(at) => {
+                        b.u8(5);
+                        for x in at {
+                            b.i32(x);
+                        }
+                    }
+                    Order::Pilot {
+                        throttle,
+                        turn,
+                        aim,
+                        fire,
+                    } => {
+                        b.u8(6);
+                        b.u8(throttle.wrapping_add(1) as u8);
+                        b.u8(turn.wrapping_add(1) as u8);
+                        for x in aim {
+                            b.i32(x);
+                        }
+                        b.bool(fire);
+                    }
+                }
+                b.bool(destination.is_some());
+                if let Some(at) = destination {
+                    for x in at {
+                        b.i32(x);
+                    }
+                }
+            }
+            Command::FormationMove {
+                actor,
+                destination,
+                fallback,
+            } => {
+                b.u8(1);
+                b.usize(actor);
+                for x in destination.into_iter().chain(fallback) {
+                    b.i32(x);
+                }
+            }
+            Command::Produce { actor, kind } => {
+                b.u8(11);
+                b.usize(actor);
+                b.u8(kind.index() as u8);
+            }
+            Command::Sculpt{at,edge,material,erase}=> {
+                b.u8(13);b.usize(0);for v in at {b.i32(v);}b.u32(edge);b.u16(material);b.bool(erase);
+            }
+            Command::Cancel { actor } => {
+                b.u8(12);
+                b.usize(actor);
+            }
+        }
+}
+
+pub(super) fn read_recorded_command(bytes: &[u8]) -> Option<(Command, usize)> {
+    let mut reader = Reader(Scan::new(bytes));
+    let command = reader.command()?;
+    let used = bytes.len().checked_sub(reader.0.left())?;
+    reader.0.ok().then_some((command, used))
 }

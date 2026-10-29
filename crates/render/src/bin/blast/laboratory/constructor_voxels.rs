@@ -28,6 +28,11 @@ impl Constructor {
                     | LabAction::SectionToggle
                     | LabAction::SectionShift(_)
                     | LabAction::SectionFocus
+                    | LabAction::SectionAxis(_)
+                    | LabAction::SectionSide
+                    | LabAction::Metric(_)
+                    | LabAction::MetricScale
+                    | LabAction::ReplayStart | LabAction::ReplayStop | LabAction::ReplaySeek(_) | LabAction::ReplayJump(_) | LabAction::ReplaySave | LabAction::ReplayOpen | LabAction::ReplayBrowse(_) | LabAction::ReplayPlay | LabAction::ReplayLeave | LabAction::Tab(31)
                     | LabAction::Tab(30)
                     | LabAction::VoxelTool(_)
                     | LabAction::VoxelStroke

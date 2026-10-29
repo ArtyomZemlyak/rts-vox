@@ -2,6 +2,161 @@ use super::*;
 use modding::laboratory::catalog::{self, SceneFile, WeaponAsset};
 
 #[test]
+fn crawler_without_economy_reports_why_its_tank_is_inactive() {
+    let mut layout = Definition::stock().layout;
+    layout.size = [128, 128, 128]; layout.clear_min = [1, 1]; layout.clear_max = [127, 127];
+    layout.gun = [32, 24, 64]; layout.gun_point = true; layout.target = [90, 16, 64];
+    layout.units.push(modding::range::RangeUnitDef { kind: RangeUnitKind::Crawler, allied: true, at: [75, 16, 64], weapon: None });
+    let sim = BlastRange::with_layout(config(false, false), layout).unwrap();
+    let status = experiments::readout(&sim);
+    assert!(status.contains("БАК И ДОБЫЧА НЕ АКТИВНЫ"));
+    assert!(status.contains("Краулер и база"));
+}
+
+#[test]
+fn ordinary_camera_orbits_pans_and_zooms_close_without_editing_simulation() {
+    use bevy::camera::{CameraProjection,RenderTargetInfo};
+    use bevy::input::mouse::{MouseScrollUnit,MouseWheel};
+    let mut layout=Definition::stock().layout;
+    layout.size=[128,128,128];layout.clear_min=[1,1];layout.clear_max=[127,127];
+    layout.gun=[40,24,64];layout.gun_point=true;layout.target=[64,16,64];
+    let sim=BlastRange::with_layout(config(false,false),layout.clone()).unwrap();
+    let mut app=app_with_base(panel::hud::tests::app_with_scene(sim,Workshop::new(Some(layout.clone()),false)));
+    app.world_mut().resource_mut::<Laboratory>().definition.layout=layout;
+    app.add_message::<MouseWheel>().add_systems(Update,workbench::input.after(actions));
+    let projection=OrthographicProjection{area:Rect::from_corners(Vec2::new(-100.0,-60.0),Vec2::new(100.0,60.0)),near:1.0,far:1200.0,..OrthographicProjection::default_3d()};
+    let mut camera=Camera::default();camera.computed.clip_from_view=projection.get_clip_from_view();
+    camera.computed.target_info=Some(RenderTargetInfo{physical_size:UVec2::new(1600,900),scale_factor:1.0});
+    let transform=GlobalTransform::from(Transform::from_xyz(64.0,160.0,120.0).looking_at(Vec3::new(64.0,16.0,64.0),Vec3::Y));
+    let mut window=Window{resolution:bevy::window::WindowResolution::new(1600,900).with_scale_factor_override(1.0),focused:true,..default()};
+    window.set_cursor_position(Some(Vec2::new(700.0,400.0)));
+    let window_id=app.world_mut().spawn(window).id();
+    app.world_mut().spawn((camera,transform,GasCamera));
+    enter(&mut app);
+    let hash=app.world().resource::<Scene>().sim.state_hash();
+    app.world_mut().resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Middle);
+    app.update();
+    app.world_mut().get_mut::<Window>(window_id).unwrap().set_cursor_position(Some(Vec2::new(750.0,425.0)));
+    app.update();
+    let (orbit,pitch,pan)={let w=app.world().resource::<Workshop>();(w.orbit,w.pitch,w.pan)};
+    assert!(orbit.abs()>0.1 && pitch.abs()>0.05,"middle drag must orbit");
+    app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::ShiftLeft);
+    app.world_mut().get_mut::<Window>(window_id).unwrap().set_cursor_position(Some(Vec2::new(770.0,440.0)));
+    app.update();
+    let w=app.world().resource::<Workshop>();assert_eq!(w.orbit,orbit);assert_ne!(w.pan,pan,"shift-middle must pan");
+    app.world_mut().resource_mut::<ButtonInput<MouseButton>>().release(MouseButton::Middle);
+    app.world_mut().resource_mut::<ButtonInput<KeyCode>>().release(KeyCode::ShiftLeft);
+    app.world_mut().write_message(MouseWheel{unit:MouseScrollUnit::Line,x:0.0,y:40.0,window:window_id,phase:bevy::input::touch::TouchPhase::Moved});
+    app.update();
+    assert!(app.world().resource::<Workshop>().zoom<0.01,"zoom remains limited to the old overview");
+    assert_eq!(app.world().resource::<Scene>().sim.state_hash(),hash);
+}
+
+#[test]
+fn ordinary_camera_wheel_keeps_ground_under_the_cursor_after_framing() {
+    use bevy::camera::{CameraProjection,RenderTargetInfo,ScalingMode};
+    use bevy::input::mouse::{MouseScrollUnit,MouseWheel};
+    let mut layout=Definition::stock().layout;
+    layout.size=[128,128,128];layout.clear_min=[1,1];layout.clear_max=[127,127];
+    layout.gun=[40,24,64];layout.gun_point=true;layout.target=[64,16,64];
+    let sim=BlastRange::with_layout(config(false,false),layout.clone()).unwrap();
+    let mut app=app_with_base(panel::hud::tests::app_with_scene(sim,Workshop::new(Some(layout.clone()),false)));
+    app.world_mut().resource_mut::<Laboratory>().definition.layout=layout;
+    app.init_resource::<Time<Real>>().add_message::<MouseWheel>()
+        .add_systems(Update,(workbench::input,framing).chain().after(actions));
+    let mut window=Window{resolution:bevy::window::WindowResolution::new(1600,900).with_scale_factor_override(1.0),focused:true,..default()};
+    let cursor=Vec2::new(1050.0,470.0);window.set_cursor_position(Some(cursor));
+    let window_id=app.world_mut().spawn(window).id();
+    let mut camera=Camera::default();camera.computed.target_info=Some(RenderTargetInfo{physical_size:UVec2::new(1600,900),scale_factor:1.0});
+    let camera_id=app.world_mut().spawn((camera,Transform::default(),GlobalTransform::default(),Projection::Orthographic(OrthographicProjection::default_3d()),GasCamera)).id();
+    enter(&mut app);
+    fn sync(app:&mut App,e:Entity) {
+        let t=*app.world().get::<Transform>(e).unwrap();
+        let Projection::Orthographic(p)=app.world().get::<Projection>(e).unwrap() else {panic!("orthographic")};
+        let ScalingMode::FixedVertical{viewport_height}=p.scaling_mode else {panic!("height")};
+        let half=Vec2::new(viewport_height*1600.0/900.0,viewport_height)*0.5;
+        let clip=OrthographicProjection{area:Rect::from_corners(-half,half),..p.clone()}.get_clip_from_view();
+        *app.world_mut().get_mut::<GlobalTransform>(e).unwrap()=GlobalTransform::from(t);
+        app.world_mut().get_mut::<Camera>(e).unwrap().computed.clip_from_view=clip;
+    }
+    sync(&mut app,camera_id);
+    let camera=app.world().get::<Camera>(camera_id).unwrap();let gt=app.world().get::<GlobalTransform>(camera_id).unwrap();
+    let ray=camera.viewport_to_world(gt,cursor).unwrap();
+    let hit=workbench::pick(&app.world().resource::<Scene>().sim,ray).expect("ground under cursor").0;
+    let y=hit[1] as f32+0.5;
+    let point=ray.origin+*ray.direction*((y-ray.origin.y)/ray.direction.y);
+    let before=camera.world_to_viewport(gt,point).unwrap();
+    app.world_mut().write_message(MouseWheel{unit:MouseScrollUnit::Line,x:0.0,y:2.0,window:window_id,phase:bevy::input::touch::TouchPhase::Moved});
+    app.update();sync(&mut app,camera_id);
+    let after=app.world().get::<Camera>(camera_id).unwrap().world_to_viewport(app.world().get::<GlobalTransform>(camera_id).unwrap(),point).unwrap();
+    assert!(before.distance(after)<3.0,"wheel moved the point from {before:?} to {after:?}");
+    for _ in 0..2 {
+        app.world_mut().write_message(MouseWheel{unit:MouseScrollUnit::Line,x:0.0,y:20.0,window:window_id,phase:bevy::input::touch::TouchPhase::Moved});
+        app.update();sync(&mut app,camera_id);
+        let close=app.world().get::<Camera>(camera_id).unwrap().world_to_viewport(app.world().get::<GlobalTransform>(camera_id).unwrap(),point).unwrap();
+        assert!(before.distance(close)<8.0,"close zoom lost cursor focus: {before:?} -> {close:?}");
+    }
+    assert!(app.world().resource::<Workshop>().zoom<0.002);
+    let Projection::Orthographic(p)=app.world().get::<Projection>(camera_id).unwrap() else {panic!("orthographic")};
+    let ScalingMode::FixedVertical{viewport_height}=p.scaling_mode else {panic!("height")};
+    assert!(viewport_height<1.0,"zoom must reach inside a 10 cm world voxel");
+}
+
+#[test]
+fn replay_timeline_click_moves_to_the_corresponding_tick() {
+    let mut layout=Definition::stock().layout;
+    layout.size=[128,128,128];layout.clear_min=[1,1];layout.clear_max=[127,127];
+    layout.gun=[40,24,64];layout.gun_point=true;layout.target=[64,16,64];
+    let mut sim=BlastRange::with_layout(config(false,false),layout.clone()).unwrap();
+    sim.set_physics_workers(1);sim.set_navigation_workers(1);
+    let mut app=app_with_base(panel::hud::tests::app_with_scene(sim,Workshop::new(Some(layout.clone()),false)));
+    app.world_mut().resource_mut::<Laboratory>().definition.layout=layout;
+    enter(&mut app);click(&mut app,LabAction::ReplayStart);
+    for _ in 0..10 {app.world_mut().resource_mut::<Scene>().sim.step();}
+    click(&mut app,LabAction::ReplayStop);
+    app.init_resource::<ButtonInput<MouseButton>>().add_systems(Update,replay::input.after(actions));
+    app.world_mut().spawn((replay::Track,Interaction::Pressed,bevy::ui::RelativeCursorPosition{cursor_over:true,normalized:Some(Vec2::new(-0.25,0.0))}));
+    app.world_mut().spawn((replay::Fill,Node::default()));
+    app.world_mut().resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Left);
+    app.update();
+    app.world_mut().resource_mut::<ButtonInput<MouseButton>>().release(MouseButton::Left);
+    app.update();app.update();
+    for _ in 0..10 {if app.world().resource::<Laboratory>().replay.target.is_none(){break;}app.update();}
+    assert_eq!(app.world().resource::<Scene>().sim.tick,3);
+    click(&mut app,LabAction::ReplaySeek(10));
+    assert!(app.world().resource::<Laboratory>().replay.target.is_some());
+    click(&mut app,LabAction::ReplayLeave);
+    let lab=app.world().resource::<Laboratory>();
+    assert!(lab.replay.target.is_none());assert!(lab.replay.position.is_none());
+    assert_eq!(app.world().resource::<Scene>().sim.tick,3);
+}
+
+#[test]
+fn replay_controls_restore_and_play_a_recorded_laboratory_tick() {
+    let mut layout=Definition::stock().layout;
+    layout.size=[128,128,128];layout.clear_min=[1,1];layout.clear_max=[127,127];
+    layout.gun=[40,24,64];layout.gun_point=true;layout.target=[64,16,64];
+    let mut sim=BlastRange::with_layout(config(false,false),layout.clone()).unwrap();
+    sim.set_physics_workers(1);sim.set_navigation_workers(1);
+    let mut app=app_with_base(panel::hud::tests::app_with_scene(sim,Workshop::new(Some(layout.clone()),false)));
+    app.world_mut().resource_mut::<Laboratory>().definition.layout=layout;
+    enter(&mut app);click(&mut app,LabAction::ReplayStart);
+    let before=app.world().resource::<Scene>().sim.state_hash();
+    {let mut s=app.world_mut().resource_mut::<Scene>();
+        assert!(s.sim.execute_command(Command::Sculpt{at:[60,30,60],edge:1,material:11,erase:false}).accepted());s.sim.step();}
+    let end=app.world().resource::<Scene>().sim.state_hash();
+    click(&mut app,LabAction::ReplayStop);click(&mut app,LabAction::ReplaySeek(0));
+    for _ in 0..3 {app.update();}
+    assert_eq!(app.world().resource::<Scene>().sim.state_hash(),before);
+    click(&mut app,LabAction::ReplayPlay);
+    app.world_mut().resource_scope(|world,mut lab:Mut<Laboratory>| {
+        let mut scene=world.resource_mut::<Scene>();assert!(tick_live(&mut lab,&mut scene));scene.sim.step();assert!(finish_replay_tick(&mut lab,&mut scene));
+    });
+    assert_eq!(app.world().resource::<Scene>().sim.state_hash(),end);
+    assert!(app.world().resource::<Scene>().paused);
+}
+
+#[test]
 fn scenario_every_stock_case_exposes_its_authored_sources_and_roundtrips() {
     use modding::laboratory::experiments::Input;
     let mut lab=Laboratory::new(false);

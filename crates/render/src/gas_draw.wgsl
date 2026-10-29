@@ -5,6 +5,54 @@
 @group(0) @binding(1) var scene_sampler:sampler;
 @group(0) @binding(2) var depth:texture_depth_2d;
 @group(0) @binding(6) var normals:texture_2d<f32>;
+@group(0) @binding(13) var<storage,read> metric_cells:array<u32>;
+fn thermal_metric(cell:vec3<i32>, mode:u32, code:u32)->vec3<f32> {
+    if any(cell<vec3(0)) {return vec3(0.35,0.35,0.38);}
+    let slots=arrayLength(&metric_cells)/4u-16u;
+    if mode==2u && (code>=16u || (metric_cells[(slots+code)*4u]&0x80000000u)==0u) {return vec3(0.35,0.35,0.38);}
+    let q=vec3<u32>(cell);
+    var hash=(q.x*73856093u)^(q.y*19349663u)^(q.z*83492791u);
+    hash^=hash>>16u;hash*=0x7feb352du;hash^=hash>>15u;hash*=0x846ca68bu;hash^=hash>>16u;
+    var value=0u;var found=false;
+    for(var probe=0u;probe<32u;probe++) {
+        let i=((hash+probe)&(slots-1u))*4u;
+        let x=metric_cells[i];
+        if x==0u {break;}
+        if x==q.x+1u && metric_cells[i+1u]==q.y && metric_cells[i+2u]==q.z {
+            value=metric_cells[i+3u];found=true;break;
+        }
+    }
+    if !found && p.look.w>0.5 {return vec3(0.35,0.35,0.38);}
+    var max_value=1000.0;
+    if mode==2u {max_value=100.0;}
+    if mode==7u {max_value=2000.0;}
+    if mode==8u {max_value=40.0;}
+    let t=clamp(f32(value)/max_value,0.0,1.0);
+    if t<0.5 {let k=t*2.0;return vec3(0.08,0.2+0.65*k,0.85-0.65*k);}
+    let k=(t-0.5)*2.0;return vec3(0.08+0.88*k,0.85-0.68*k,0.2-0.12*k);
+}
+fn terrain_property(code:u32,mode:u32)->vec3<f32> {
+    let unknown=vec3(0.35,0.35,0.38);
+    if code>=16u {return unknown;}
+    let base=(arrayLength(&metric_cells)/4u-16u+code)*4u;
+    if mode==3u {
+        let phase=metric_cells[base]&0xffu;
+        if phase==1u {return vec3(0.1,0.45,0.95);}
+        if phase==2u {return vec3(0.95,0.72,0.1);}
+        if phase==3u {return vec3(0.58,0.58,0.62);}
+        return unknown;
+    }
+    let index=select(select(3u,2u,mode==5u),1u,mode==4u);
+    let value=metric_cells[base+index];
+    if value==0xffffffffu {return unknown;}
+    if mode==10u {
+        return vec3(0.18+f32(value*43u%70u)/100.0,0.18+f32(value*67u%70u)/100.0,0.18+f32(value*29u%70u)/100.0);
+    }
+    let max_value=select(500.0,1000.0,mode==5u);
+    let t=clamp(f32(value)/max_value,0.0,1.0);
+    if t<0.5 {let k=t*2.0;return vec3(0.08,0.2+0.65*k,0.85-0.65*k);}
+    let k=(t-0.5)*2.0;return vec3(0.08+0.88*k,0.85-0.68*k,0.2-0.12*k);
+}
 // Maximum omitted direct-light contribution per HDR channel and region.
 // Cloud opacity, cloud shadows, soot and hot fissures are not culled.
 const LIGHT_EPSILON:f32=0.00001;
@@ -128,11 +176,25 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
     let normal=textureLoad(normals,vec2<i32>(input.position.xy),0).xyz*2.0-vec3(1.0);
     let m=raw_material(vec3<i32>(floor(pos-normal*0.08)));
     if m==0u || m==15u {discard;}
+    let metric_mode=u32(p.look.y);
+    if metric_mode==1u || metric_mode==2u || metric_mode==7u || metric_mode==8u {
+        // Preserve orientation so equally-valued faces remain legible.
+        let metric_shade=0.55+0.45*max(0.0,dot(normal,normalize(p.sun.xyz)));
+        return vec4(thermal_metric(vec3<i32>(floor(pos-normal*0.08)),metric_mode,m)*metric_shade,1.0);
+    }
+    if metric_mode==3u || metric_mode==4u || metric_mode==5u || metric_mode==10u {
+        let metric_shade=0.55+0.45*max(0.0,dot(normal,normalize(p.sun.xyz)));
+        return vec4(terrain_property(m,metric_mode)*metric_shade,1.0);
+    }
     let sun=normalize(p.sun.xyz);
+    // The cut exposes an artificial interior face. Illuminate that face for
+    // inspection without adding lights or changing the rest of the scene.
+    let section_face=dot(p.section.xyz,p.section.xyz)>0.5 &&
+        abs(dot(pos,p.section.xyz)+p.section.w)<0.04 && dot(normal,-p.section.xyz)>0.98;
     let surface_offset=select(0.12,0.45,m>=9u && m<=10u);
     let facing=max(0.0,dot(normal,sun));
     var visibility=0.0;
-    if facing>0.0 && trace_ground_sun(pos+normal*surface_offset,sun,240.0).material==0u {
+    if !section_face && facing>0.0 && trace_ground_sun(pos+normal*surface_offset,sun,240.0).material==0u {
         visibility=mesh_sun_visibility(pos,normal);
     }
     let diffuse=facing*mix(0.025,1.0,visibility);
@@ -141,6 +203,7 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
     let c=surface_colour(m,pos,normal,footprint);
     let ambient=vec3(0.26,0.34,0.44)*(0.4+0.6*max(0.0,normal.y));
     var lit=c*(ambient+vec3(1.0,0.81,0.54)*diffuse*p.sun.w);
+    if section_face {lit=max(lit,c*0.72);}
     if p.weapon.x>0.5 && (p.energy.w>0.0 || p.beam.w>0.0) {
         let centre=select(p.beam.xyz,p.energy.xyz,p.energy.w>0.0);
         let delta=centre-pos;
@@ -259,15 +322,31 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
     if p.control.w<0.5 && p.energy_count.x>0.0 && d>0.0 && (m==0u || m==15u) {
         bg=vec4(bg.rgb+battle_energy_light(world_pos,world_normal,bg.rgb,500.0,0.15),bg.a);
     }
+    // Restrict ray-based effects and smoke to the retained half-space, just
+    // as the terrain prepass does. The underlying simulation is untouched.
+    var effect_start=0.0;var effect_end=maxdist;
+    if dot(p.section.xyz,p.section.xyz)>0.5 {
+        let side=dot(ro,p.section.xyz)+p.section.w;
+        let slope=dot(rd,p.section.xyz);
+        if abs(slope)<0.000001 {
+            if side<0.0 {effect_end=0.0;}
+        } else {
+            let crossing=-side/slope;
+            if slope>0.0 {effect_start=max(effect_start,crossing);}
+            else {effect_end=min(effect_end,crossing);}
+        }
+    }
+    let effect_ro=ro+rd*max(0.0,effect_start);
+    let effect_length=max(0.0,effect_end-max(0.0,effect_start));
     // The annihilation bolt swallows what is behind its core before any
     // light is added (ADR-289).
-    if p.control.w<0.5 && (p.weapon.x>1.5 || p.energy_count.x>0.0) {bg=vec4(bg.rgb*(1.0-anni_absorb(ro,rd,maxdist)),bg.a);}
-    if p.control.w<0.5 {bg=vec4(bg.rgb+energy_effect(ro,rd,maxdist),1.0);}
+    if effect_length>0.0 && p.control.w<0.5 && (p.weapon.x>1.5 || p.energy_count.x>0.0) {bg=vec4(bg.rgb*(1.0-anni_absorb(effect_ro,rd,effect_length)),bg.a);}
+    if effect_length>0.0 && p.control.w<0.5 {bg=vec4(bg.rgb+energy_effect(effect_ro,rd,effect_length),1.0);}
     if p.control.w<0.0 || p.control.z<0.001 {return bg;}
     let inv=1.0/select(vec3(1e-30),rd,rd!=vec3(0.0));
     let lo=(p.origin.xyz-ro)*inv;let hi=(p.origin.xyz+vec3(f32(N)*p.origin.w)-ro)*inv;
     let a=min(lo,hi);let b=max(lo,hi);
-    var t=max(0.0,max(a.x,max(a.y,a.z)));let end=min(maxdist,min(b.x,min(b.y,b.z)));
+    var t=max(effect_start,max(0.0,max(a.x,max(a.y,a.z))));let end=min(effect_end,min(b.x,min(b.y,b.z)));
     if end<=t {return bg;}
     // Only reject rays missing every potentially visible display cube. Keep
     // the original DDA start/step budget on all surviving rays. Expand for

@@ -525,12 +525,29 @@ impl BlastRange {
                 hit = true;
                 break;
             }
-            // A molten cell absorbs part of the beam but does not behave as
-            // an intact armoured plate. Continue to the next solid surface.
+            // Molten matter absorbs the beam until its remaining vaporisation
+            // energy is paid. Only the surplus can reach the next cell.
             let m = material(&self.world, p);
-            if self.heat_tuning.melt_flow.iter().flatten().any(|f|f.liquid==m)
-                && !near.iter().any(|&id| { let (lo,hi)=boxes[id]; (0..3).all(|a|p[a]>=lo[a] && p[a]<=hi[a]) && self.units[id].solid(p) }) {
-                self.heat.add(&self.world, p.map(|v|v as u32), (effective.heat / 8).max(1));
+            if let Some(flow) = self.heat_tuning.melt_flow.iter().flatten().find(|f|f.liquid==m).copied().filter(|_| effective.heat>0)
+                .filter(|_| !self.world.on_frame(p[0] as u32,p[1] as u32,p[2] as u32))
+                .filter(|_| !near.iter().any(|&id| { let (lo,hi)=boxes[id]; (0..3).all(|a|p[a]>=lo[a] && p[a]<=hi[a]) && self.units[id].solid(p) })) {
+                let q=p.map(|v|v as u32);
+                let threshold=self.matter.economy.mats.get(flow.solid).map_or(flow.freeze,|m|m.melt.max(flow.freeze))
+                    .saturating_mul(3).max(1);
+                let needed=threshold.saturating_sub(self.heat.cell(q).heat);
+                let absorbed=effective.heat.min(needed);
+                self.heat.add(&self.world,q,absorbed);
+                effective.heat-=absorbed;
+                effective.work=(u64::from(tuning.work)*u64::from(effective.heat)/u64::from(tuning.heat.max(1))) as u32;
+                if self.heat.cell(q).heat<threshold || self.world.has_pending_dig(q[0],q[1],q[2]) || self.matter.debris.claimed(q) {
+                    completed("orders_laser_query");completed("orders_laser_contact_world");
+                    contact=Some(p);hit=true;break;
+                }
+                self.world.queue_dig_by(q[0],q[1],q[2],crate::heat::VAPOR);
+                if effective.heat==0 {
+                    completed("orders_laser_query");completed("orders_laser_contact_world");
+                    contact=Some(p);hit=true;break;
+                }
                 previous = p;
                 free_end = point;
                 continue;
@@ -770,11 +787,11 @@ impl BlastRange {
         tuning.work = scale(tuning.work);
         tuning.heat = scale(tuning.heat);
         tuning.fracture_j = scale(tuning.fracture_j);
-        if self.tick == self.fire_tick && (self.point_gun() || (self.gun.status.alive && self.gun.status.weapon)) {
+        if self.tick == self.fire_tick && (self.point_gun() || self.gun_armed()) {
             self.streams.left = tuning.burst_ticks;
             self.streams.next = modding::clock::stream_time(self.tick) as u32;
         }
-        if !self.point_gun() && (!self.gun.status.alive || !self.gun.status.weapon) {
+        if !self.point_gun() && !self.gun_armed() {
             self.streams.left = 0;
         }
         if self.streams.left > 0 {
@@ -995,6 +1012,40 @@ mod tests {
         l.units.truncate(1);
         l.units[0].at = [285, 16, 336];
         BlastRange::with_layout(c, l).unwrap()
+    }
+
+    #[test]
+    fn laser_heats_melt_before_vaporising_it_and_passing_to_the_next_layer() {
+        let mut r=laser_range(vec![modding::range::RangeBlock{min:[230,100,336],max:[232,101,337],material:3}]);
+        for x in 230..232 {r.world.queue_transfer(voxel::Edit::put(x,100,336,13));}
+        r.world.flush_transfers();
+        let mut tuning=r.streams.tuning.laser.clone();tuning.heat=200;tuning.heat_radius=0;
+        let config=r.config;let from=[100,100,336].map(Fx::from_int);let q=[230,100,336];
+        for _ in 0..5 {
+            let trace=r.laser_ray(from,[250,100,336],None,&tuning,&config,(&mut |_|{},&|_,_|{}));
+            assert!(trace.hit);assert_eq!(trace.to[0].to_int_trunc(),230);
+            assert!(!r.world.has_pending_dig(q[0],q[1],q[2]));
+            assert_eq!(r.heat.cell([231,100,336]).heat,0,"beam heated through liquid");
+        }
+        r.laser_ray(from,[250,100,336],None,&tuning,&config,(&mut |_|{},&|_,_|{}));
+        assert!(r.world.has_pending_dig(q[0],q[1],q[2]));
+        r.world.flush();
+        assert_eq!(r.world.material(q[0],q[1],q[2]),0);
+        assert!(r.heat.cell([231,100,336]).heat>0,"surplus did not reach the next layer");
+    }
+
+    #[test]
+    fn sustained_laser_opens_a_hole_and_accounts_for_vaporised_matter() {
+        let mut r=laser_range(vec![modding::range::RangeBlock{min:[230,0,330],max:[233,60,342],material:3}]);
+        r.heat_tuning.melt_moves_per_tick=0;
+        r.control();r.aim=Some([392,40,336]);assert!(r.refire());
+        let mut first=None;let mut passed=false;
+        for _ in 0..45 {r.step();if let Some(t)=r.streams.traces.first() {
+            let p=t.to.map(Fx::to_int_trunc);first.get_or_insert(p);passed|=p[0]>=233;
+        }}
+        assert!(passed,"laser never opened a passage");
+        assert!(r.matter.economy.ledger.sunk(crate::matter::Sink::Pulverised)>0,"vaporised matter was not accounted for");
+        assert!(r.matter.economy.ledger.balanced());
     }
 
     #[test]
@@ -1572,6 +1623,25 @@ mod tests {
     }
 
     #[test]
+    fn stock_kinetic_penetrates_less_than_the_previous_round_but_still_damages_cover() {
+        let current = ExplosionConfig::from_ron(include_str!("../../../data/kinetic-shell.ron")).unwrap();
+        let mut previous = current;
+        previous.energy = 48000;
+        for mat in [1, 2, 3] {
+            let depth = |config: ExplosionConfig| {
+                let mut r = kinetic_range(vec![plate(218, 250, mat)]);
+                r.kinetic_hit([218, 40, 336], [Fx::from_int(config.shell_speed), Fx::ZERO, Fx::ZERO], &config);
+                r.world.flush();
+                (218..250).take_while(|&x| material(&r.world, [x, 40, 336]) == 0).count()
+            };
+            let old = depth(previous);
+            let new = depth(current);
+            eprintln!("material={mat} penetration: {old} -> {new} cells");
+            assert!(new > 0 && new < old, "material {mat}: {old} -> {new}");
+        }
+    }
+
+    #[test]
     fn stock_kinetic_auto_aim_kills_front_armour_and_survives_restore() {
         let mut r = stock_kinetic_range();
         assert_eq!(r.config.shell_speed, 560);
@@ -1598,16 +1668,17 @@ mod tests {
             }
         }
         assert!(!r.units[0].status.alive);
-        assert_eq!(hits, 2);
+        assert_eq!(hits, 4);
         assert_eq!(r.units[0].annihilated_mm3(), 0);
         assert!(r.matter.economy.ledger.balanced());
     }
 
     #[test]
-    fn stock_kinetic_kills_front_armour_with_three_different_aim_points() {
+    fn stock_kinetic_damages_front_armour_with_three_different_aim_points() {
         let mut r = stock_kinetic_range();
         let mut contacts = Vec::new();
         for (shot, offset) in [-3, 3, 0].into_iter().enumerate() {
+            let removed_before = r.units[0].removed.len();
             let u = &r.units[0];
             let half = usize::from(u.body.core_size) / 2;
             let mut aim = u.world_pos([
@@ -1634,7 +1705,8 @@ mod tests {
                 }
                 r.step();
             }
-            assert_eq!(r.units[0].status.alive, shot < 2, "shot {}", shot + 1);
+            assert!(r.units[0].status.alive, "shot {}", shot + 1);
+            assert!(r.units[0].removed.len() > removed_before, "shot {} did no damage", shot + 1);
         }
         assert!(contacts.windows(2).all(|p| p[0] != p[1]));
         assert!(r.matter.economy.ledger.balanced());
@@ -2174,6 +2246,38 @@ mod tests {
             "the slower burst missed the target"
         );
         assert!(r.matter.economy.ledger.balanced());
+    }
+    #[test]
+    fn stock_flame_transfers_fifty_times_the_old_heat_to_materials_water_and_units() {
+        let mut r = range(Delivery::Flame, false, false);
+        let tuning = r.streams.tuning.flame.clone();
+        assert_eq!(tuning.heat, 55 * 50);
+        let config = r.config;
+        for (x, mat) in [(190, 5), (200, 3), (210, 2)] {
+            let p = [x, 100, 336];
+            r.world.queue_edit(voxel::world::Edit::put(p[0] as u32, p[1] as u32, p[2] as u32, mat));
+        }
+        r.world.flush();
+        let water = [201, 100, 336];
+        assert!(r.water.edit_volume(water, true));
+        for x in [190, 200, 210] {
+            let p = [x, 100, 336];
+            r.stream_contact(p, &tuning, true, r.gun.at, &config);
+            assert_eq!(r.heat.cell(p.map(|v| v as u32)).heat, tuning.heat);
+        }
+        let expected_vapor = (tuning.heat * 3 / 4 / r.water.tuning.evaporation_heat) as u64;
+        assert_eq!(r.water.stats().vapor_units, expected_vapor);
+        let (point, _, cell) = hull_side(&r);
+        r.stream_contact(point, &tuning, true, r.gun.at, &config);
+        assert_eq!(r.thermals.heat(thermal::Cell { unit: 0, part: 0, at: cell.map(|v| v as u8) }), tuning.heat);
+    }
+    #[test]
+    fn crawler_drill_does_not_turn_the_chassis_into_a_gun() {
+        let mut r = range(Delivery::Flame, false, false);
+        r.gun = RangeUnit::of_kind(RangeUnitKind::Crawler, r.gun.at);
+        assert!(r.gun.status.weapon, "intact drill should be available");
+        assert!(!r.ready());
+        assert!(!r.refire());
     }
     #[test]
     fn flame_flight_cover_and_local_damage() {

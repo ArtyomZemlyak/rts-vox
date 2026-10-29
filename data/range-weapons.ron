@@ -3,7 +3,9 @@
     kinetic: (max_jobs: 128, cells_per_tick: 512),
     flame: (burst_ticks: 72, interval_ticks: 2, range: "flame",
         standoff_milli: 750,
-        spread_milli: 70, work: 85, heat: 55, heat_radius: 2,
+        // Fifty times the previous heat per contact; retain the bounded
+        // footprint and emission cadence so this does not multiply ray work.
+        spread_milli: 70, work: 85, heat: 2750, heat_radius: 2,
         fracture_j: 80000, reload_ticks: 14),
     // Fifteen paired salvos per one-second burst, shared by battle and trials.
     // Per-hit work stays unchanged; the denser burst is deliberately stronger.

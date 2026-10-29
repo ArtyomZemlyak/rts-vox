@@ -623,14 +623,17 @@ fn a_dead_producers_blank_breaches_and_is_reclaimed_by_digging() {
     // A digger at the hull takes it.
     let hull = r.units[BASE].motion.pos.map(|v| v.to_int_trunc());
     assert!(r.battle_order(0, Order::Dig([hull[0], hull[1] + 4, hull[2]]), None));
-    for _ in 0..1500 {
+    // The blank grows with the actual tank template; allow enough bounded
+    // edit ticks for all of it, plus time to approach the wreck.
+    let work_ticks = (paid - lost).div_ceil(16 * 260) as usize;
+    for _ in 0..work_ticks + 1500 {
         r.step();
         assert!(r.matter.economy.ledger.balanced());
         if r.matter.economy.ledger.held(blank) == 0 {
             break;
         }
     }
-    assert_eq!(r.matter.economy.ledger.held(blank), 0);
+    assert_eq!(r.matter.economy.ledger.held(blank), 0, "pos={:?} destination={:?} blocked={} tank={:?} hauling={} order={:?}", r.units[0].motion.pos.map(|v| v.to_int_trunc()), r.units[0].motion.destination, r.units[0].motion.blocked, r.tank_held(0), r.hauling(0), r.battle.actors[0].order);
     assert_eq!(r.tank_held(0), Some(paid - lost));
 }
 

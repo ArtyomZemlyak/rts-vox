@@ -1502,6 +1502,8 @@ impl Matter {
             // falls as a body, crumbles into pieces, or was sunk already.
             let sink = if by == crate::heat::FIRE {
                 Sink::Combustion
+            } else if by == crate::heat::VAPOR {
+                Sink::Pulverised
             } else if by == voxel::world::NOBODY
                 || by & 0xffff0000 == 0xfffe0000
                 || super::economy::dig_slot(by).is_some()

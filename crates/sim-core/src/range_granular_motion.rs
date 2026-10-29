@@ -193,7 +193,18 @@ impl Flow {
             .speed
             .add(self.gravity)
             .min(Fx::from_int(max_steps as i32));
-        grain.fraction = grain.fraction.add(grain.speed);
+        // Dry sand flows readily down an exposed slope. Accelerate its
+        // supported lateral motion without changing free-fall gravity or the
+        // behaviour of cohesive and wet soil. The destination still checks
+        // each swept cell and the same shared work budgets apply.
+        let supported = p[1] > 1 && {
+            let below=[p[0],p[1]-1,p[2]];
+            read(w,changes,below)!=0 || w.has_pending_dig(below[0],below[1],below[2]) || blocked(below)
+        };
+        let travel = if grain.material==10 && supported && bonus(p)<=0 {
+            grain.speed.add(grain.speed)
+        } else { grain.speed };
+        grain.fraction = grain.fraction.add(travel);
         let steps = (grain.fraction.to_int_trunc().max(0) as u32).min(max_steps);
         let drop = self.tuning.material(grain.material).unwrap().repose_drop as i32;
         let mut to = p;
@@ -212,6 +223,10 @@ impl Flow {
                 } // Resume without exceeding the shared path budget.
             }
         }
+        // High-speed sand can accumulate more distance than one bounded
+        // sweep can consume. Keep the remainder within the same limit that
+        // the motion snapshot loader accepts.
+        grain.fraction = grain.fraction.min(Fx::from_int(max_steps as i32 * 2));
         Advance {
             to,
             grain: Some(grain),
@@ -355,4 +370,23 @@ fn destination(
         }
     }
     Ok(best)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct Empty;
+    impl voxel::Generator for Empty {
+        fn material(&self, _:u32, _:u32, _:u32)->u16 {0}
+    }
+    #[test]
+    fn fast_supported_sand_never_produces_an_unloadable_motion_remainder() {
+        let w=World::new(64,64,64,1024,Box::new(Empty));
+        let flow=Flow::new();
+        let grain=Grain{material:10,speed:Fx::from_int(8),fraction:Fx::from_int(16)};
+        let mut checks=1000;
+        let result=flow.sweep(&w,&BTreeMap::new(),[30,30,30],grain,&|p|p==[30,29,30],&|_|0,&mut checks);
+        let next=result.grain.expect("moving sand");
+        assert!(next.fraction<=Fx::from_int(flow.tuning.motion.max_steps as i32*2));
+    }
 }

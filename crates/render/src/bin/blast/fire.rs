@@ -50,7 +50,7 @@ struct Tracer {
     head: Vec3,
     born: f32,
 }
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone)]
 pub struct Effects {
     alive: Vec<bool>,
     shell_fired: Vec<u32>,
@@ -68,7 +68,7 @@ pub struct Effects {
     fire: Option<Handle<Mesh>>,
     smoke: Option<Handle<Mesh>>,
     serial: u32,
-    last_frame: Option<(f32, Option<projectiles::View>, bool)>,
+    last_frame: Option<(f32, Option<projectiles::View>, bool, Option<(usize,i32,bool)>)>,
     last_dust_tick: Option<u32>,
     sources: Vec<(u64, Option<[usize; 3]>)>,
     heat_spots: Vec<(HeatCell, u32)>,
@@ -157,6 +157,20 @@ fn destruction_origin(u: &sim_core::blast::RangeUnit) -> Vec3 {
     Vec3::from(u.world_pos(cell).map(|v| v as f32)) + Vec3::Y
 }
 impl Effects {
+    /// Restore the simulation-derived presentation while keeping the live GPU
+    /// mesh handles and entities owned by the existing renderer.
+    pub(super) fn restore_replay(&mut self, mut restored: Self) {
+        restored.fire=self.fire.take();restored.smoke=self.smoke.take();
+        restored.last_frame=None;*self=restored;
+    }
+    #[cfg(test)]
+    pub(super) fn replay_counts(&self)->(usize,usize,usize) {
+        (self.particles.len(),self.tracers.len(),self.nuclear.len())
+    }
+    #[cfg(test)]
+    pub(super) fn replay_particles(&self)->Vec<[u32;10]> {
+        self.particles.iter().map(|p|[p.at.x.to_bits(),p.at.y.to_bits(),p.at.z.to_bits(),p.velocity.x.to_bits(),p.velocity.y.to_bits(),p.velocity.z.to_bits(),p.born.to_bits(),p.life.to_bits(),p.edge.to_bits(),p.seed]).collect()
+    }
     pub(super) fn nuclear_focus(&self, now: f32) -> Option<(Vec3, f32)> {
         self.nuclear.last().and_then(|&(at, born)| {
             let age = (now - born).max(0.0);
@@ -1217,7 +1231,8 @@ pub fn draw(
         .next()
         .and_then(|(t, c, p)| projectiles::View::camera(t, c, p));
     let enabled = panel.as_ref().is_none_or(|p| p.projectile_markers);
-    let frame = (now, view, enabled);
+    let section=lab.as_ref().and_then(|l|l.section_cut());
+    let frame = (now, view, enabled, section);
     if fx.last_frame == Some(frame) {
         return;
     }
@@ -1298,12 +1313,12 @@ pub fn draw(
     }
     if let Some(mesh) = prepared.hot {
         if let Some(mut asset) = fx.fire.as_ref().and_then(|h| meshes.get_mut(h)) {
-            *asset = mesh;
+            *asset = laboratory::section_effect_mesh(mesh,section);
         }
     }
     if let Some(mesh) = prepared.smoke {
         if let Some(mut asset) = fx.smoke.as_ref().and_then(|h| meshes.get_mut(h)) {
-            *asset = mesh;
+            *asset = laboratory::section_effect_mesh(mesh,section);
         }
     }
 }

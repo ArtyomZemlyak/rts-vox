@@ -123,9 +123,13 @@ pub fn readout(sim: &BlastRange) -> String {
     for (i, unit) in sim.units.iter().enumerate().filter(|(_,u)| u.kind == RangeUnitKind::Crawler) {
         if let Some((held, capacity)) = sim.tank_fill(i) {
             let (stored, limit) = sim.side_store(sim.allied(i)).unwrap_or((0, 0));
-            text.push_str(&format!("\nКраулер {} · {}\nБак: {} / {} · запас базы: {} / {}", i+1,
-                if !unit.status.alive {"УНИЧТОЖЕН"} else if sim.hauling(i) {"ДОСТАВКА НА БАЗУ"} else {"ДОБЫЧА / РЕКЛЕЙМ"},
+            let ordered = sim.battle.actors.get(i).is_some_and(|a| matches!(a.order, Order::Dig(_)));
+            text.push_str(&format!("\nКраулер {} · {}\nБур: {} · бак: {} / {} · запас базы: {} / {}", i+1,
+                if !unit.status.alive {"УНИЧТОЖЕН"} else if sim.hauling(i) {"ДОСТАВКА НА БАЗУ"} else if !ordered {"ОЖИДАНИЕ ПРИКАЗА"} else if unit.motion.destination.is_some() {"ЕДЕТ К ТОЧКЕ"} else {"БУРЕНИЕ / СБОР"},
+                if unit.status.engine && unit.status.weapon {"ГОТОВ"} else {"ПОВРЕЖДЁН"},
                 held, capacity, stored, limit));
+        } else {
+            text.push_str(&format!("\nКраулер {} · БАК И ДОБЫЧА НЕ АКТИВНЫ\nДля работы загрузите опыт «Краулер и база: добыча и доставка» с экономикой.", i+1));
         }
     }
     for (i,d) in sim.layout.as_ref().into_iter().flat_map(|l|&l.lab_devices).enumerate() {

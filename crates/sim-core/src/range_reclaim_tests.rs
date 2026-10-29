@@ -362,6 +362,9 @@ fn a_spent_sub_pool_defers_reclaim_and_searches_wait_their_turn() {
     let mut l = layout(1_000_000, 4, 4);
     let e = l.economy.as_mut().unwrap();
     e.dig_edits_in_flight = 4;
+    // Stock also enables the crawler: every configured digger must fit the
+    // reduced shared pool, even when the fixture only places tanks.
+    e.kind_mut(RangeUnitKind::Crawler).unwrap().dig_edits_per_tick = 4;
     e.reclaim.as_mut().unwrap().searches_per_tick = 1;
     let mut r = range(l);
     let (a, _) = drop_piece(&mut r, 6, 2, SPOT);

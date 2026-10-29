@@ -65,7 +65,7 @@ impl Sink {
             Sink::ToEnergy => "конверсия материи в энергию",
             Sink::ContainerBreach => "потери при разрушении контейнера",
             Sink::OverCap => "излишек над упавшим потолком игрока",
-            Sink::Pulverised => "распыление воронкой",
+            Sink::Pulverised => "распыление и испарение",
             Sink::Combustion => "сгорание",
         }
     }

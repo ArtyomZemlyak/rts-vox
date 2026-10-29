@@ -47,6 +47,7 @@ pub fn section(editor: bool, a: Action) -> u8 {
     }
     match a {
         Action::Skirmish(_)
+        | Action::CrawlerField
         | Action::BattleWorld
         | Action::BattleWorldAuto
         | Action::BattlePreset
@@ -255,7 +256,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 label(
                     p,
                     font,
-                    "ЛКМ: выбрать  /  ПКМ: отдать приказ",
+                    "ЛКМ: выбрать  /  ПКМ: приказ  /  Ctrl+ПКМ: добыча краулером",
                     12.0,
                     theme::MUTED,
                 );
@@ -680,6 +681,8 @@ pub fn refresh(
                             "2"
                         } else if u.kind == RangeUnitKind::Base {
                             "Б"
+                        } else if u.kind == RangeUnitKind::Crawler {
+                            "КР"
                         } else {
                             "Ш"
                         },
@@ -777,6 +780,10 @@ pub fn refresh(
                         );
                     }
                     if u.kind == RangeUnitKind::Base {
+                        if let Some((stored, capacity)) = scene.base_cargo.get(id).copied().flatten() {
+                            return format!("БАЗА {:02} · {}\nЗапас стороны {stored} / {capacity}", id + 1,
+                                if u.status.alive { "В СТРОЮ" } else { "УНИЧТОЖЕНА" });
+                        }
                         return format!(
                             "БАЗА {:02}  ·  {}\nЯдро {}%   ·   ЦЕЛЬ БОЯ",
                             id + 1,
@@ -787,6 +794,14 @@ pub fn refresh(
                             },
                             u.integrity.core.mul(fx::Fx::from_int(100)).to_int_trunc()
                         );
+                    }
+                    if u.kind == RangeUnitKind::Crawler {
+                        let cargo = scene.crawler_cargo.get(id).copied().flatten();
+                        let detail = cargo.map_or_else(|| "Бак недоступен: экономика сцены выключена".to_string(), |(held, cap, hauling, drill, stored, capacity)| {
+                            format!("Груз {held} / {cap} · база {stored} / {capacity}\n{} · бур: {}", if hauling { "ДОСТАВКА" } else { "НА ЗАДАНИИ / ОЖИДАНИЕ" }, if drill { "ГОТОВ" } else { "ПОВРЕЖДЁН" })
+                        });
+                        let number = if id == usize::MAX { String::new() } else { format!(" {:02}", id + 1) };
+                        return format!("КРАУЛЕР{number} · {}\n{}", if u.status.alive { "В СТРОЮ" } else { "УНИЧТОЖЕН" }, detail);
                     }
                     if matches!(
                         u.kind,
@@ -1354,6 +1369,42 @@ pub(crate) mod tests {
         let e = app.world_mut().spawn((action, Interaction::Pressed)).id();
         app.update();
         app.world_mut().despawn(e);
+    }
+    #[test]
+    fn crawler_field_hud_shows_the_tank_and_the_base_store() {
+        let layout = RangeLayout::from_ron(include_str!("../../../../../../data/range-crawler-field.ron")).unwrap();
+        let config = ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron")).unwrap();
+        let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
+        sim.start_free_control().unwrap();
+        let mut workshop = Workshop::new(Some(layout), false);
+        workshop.controlled = Some(0);
+        let mut app = app_with_scene(sim, workshop);
+        app.add_systems(PostUpdate, refresh.after(super::super::super::ui_snapshot::publish));
+        let text = app.world_mut().spawn((HudText(1), Text::new(""))).id();
+        app.update();
+        let label = &app.world().get::<Text>(text).unwrap().0;
+        assert!(label.contains("Груз 0 / 120000") && label.contains("база 0 / 1100000"), "{label}");
+        app.world_mut().resource_mut::<Workshop>().controlled = Some(1);
+        app.update();
+        let label = &app.world().get::<Text>(text).unwrap().0;
+        assert!(label.contains("БАЗА") && label.contains("Запас стороны 0 / 1100000"), "{label}");
+    }
+    #[test]
+    fn crawler_field_menu_enters_free_control_without_enemies() {
+        let layout = RangeLayout::from_ron(include_str!("../../../../../../data/range-crawler-field.ron")).unwrap();
+        let config = ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron")).unwrap();
+        let sim = BlastRange::with_layout(config, layout.clone()).unwrap();
+        let mut app = app_with_scene(sim, Workshop::new(Some(layout), false));
+        click(&mut app, Action::CrawlerField);
+        assert!(app.world().resource::<Panel>().free_launch);
+        let (config, layout) = app.world_mut().resource_mut::<Workshop>().pending.take().unwrap();
+        app.world_mut().resource_mut::<Scene>().sim = BlastRange::with_layout(config, layout).unwrap();
+        app.update();
+        let scene = app.world().resource::<Scene>();
+        assert!(scene.sim.battle_mode() && scene.sim.player && !scene.paused);
+        assert!(scene.sim.units.iter().enumerate().all(|(i, _)| scene.sim.allied(i)));
+        assert_eq!(app.world().resource::<Workshop>().controlled, Some(0));
+        assert!(!app.world().resource::<Panel>().free_launch);
     }
     #[test]
     fn nuclear_launch_button_selects_only_silos_and_arms_point_selection() {

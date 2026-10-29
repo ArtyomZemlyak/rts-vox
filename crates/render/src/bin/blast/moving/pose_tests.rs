@@ -58,18 +58,6 @@ fn reference(witness: &Witness, scene: &Scene, visual: &Visual) -> Transform {
     let unit = &scene.sim.units[witness.0];
     let p = visible(unit, visual.previous.get(witness.0), scene);
     let t = fraction(scene);
-    let yaw = if witness.3 && scene.sim.battle_mode() {
-        let angle = scene.sim.battle.actors[witness.0].turret.angle;
-        let was = visual
-            .battle_turrets
-            .get(witness.0)
-            .copied()
-            .unwrap_or(angle);
-        -(was as f32 + fx::angle::diff(angle, was) as f32 * t) * std::f32::consts::TAU
-            / fx::angle::FULL as f32
-    } else {
-        p.yaw
-    };
     let mut local = witness.1;
     if let Some(segment) = witness.2 {
         let hull = render::realtime::hull_rotation(p.up, p.yaw);
@@ -102,15 +90,12 @@ fn reference(witness: &Witness, scene: &Scene, visual: &Visual) -> Transform {
             }
         }
     }
-    let (rotation, offset) = if witness.3
-        && unit.kind == modding::range::RangeUnitKind::Spider
-        && scene.sim.battle_mode()
-    {
+    let (rotation, offset) = if witness.3 {
         let now = weapon_picture(unit);
         let was = visual.battle_heads.get(witness.0).copied().unwrap_or(now);
         (was.0.slerp(now.0, t), was.1.lerp(now.1, t))
     } else {
-        (render::realtime::hull_rotation(p.up, yaw), Vec3::ZERO)
+        (render::realtime::hull_rotation(p.up, p.yaw), Vec3::ZERO)
     };
     local.translation = p.pos + offset + rotation * local.translation;
     local.rotation = rotation * local.rotation;
@@ -345,4 +330,50 @@ fn elevated_spider_picture_matches_physical_mount_and_occupancy_refreshes() {
         false
     ));
     assert_eq!(old.turret_pitch, 0);
+}
+
+#[test]
+fn every_actor_weapon_picture_follows_the_physical_elevated_frame() {
+    let mut app = app();
+    {
+        let mut scene = app.world_mut().resource_mut::<Scene>();
+        for (i, u) in scene.sim.units.iter_mut().enumerate() {
+            u.motion.hull.up = V3::new(Fx::from_ratio(1, 10), Fx::ONE, Fx::from_ratio(-1, 5));
+            u.turret_pitch = -fx::angle::FULL / 24;
+            u.update_pose(fx::angle::FULL / 7 + i as i32 * 173);
+        }
+    }
+    app.update();
+    let scene = app.world().resource::<Scene>();
+    let visual = app.world().resource::<Visual>();
+    for (i, u) in scene.sim.units.iter().enumerate() {
+        let f = u.root_frame(usize::from(u.body.turret_y));
+        let expected = Vec3::new(f.x.x.to_f64_lossy() as f32, f.x.y.to_f64_lossy() as f32, f.x.z.to_f64_lossy() as f32);
+        assert!((visual.frame_poses[i].turret * Vec3::X - expected).length() < 0.0001, "{:?}", u.kind);
+        let local = [Fx::from_ratio(u.body.vol.nx as i32, 2), Fx::from_int(u.body.turret_y as i32), Fx::from_ratio(u.body.vol.nz as i32, 2)];
+        let mount = f.world(local);
+        let expected = Vec3::new(mount.x.to_f64_lossy() as f32, mount.y.to_f64_lossy() as f32, mount.z.to_f64_lossy() as f32);
+        let rendered = visual.frame_poses[i].pos + visual.frame_poses[i].turret_offset + visual.frame_poses[i].turret * Vec3::Y * (u.body.turret_y as f32 * u.body.mm as f32 / voxel::unit::WORLD_MM as f32);
+        assert!((rendered - expected).length() < 0.001, "{:?}", u.kind);
+    }
+}
+
+#[test]
+fn player_weapon_picture_and_muzzle_follow_the_same_tilted_frame() {
+    let mut scene = scene();
+    scene.sim.gun.motion.hull.up = V3::new(Fx::from_ratio(1, 10), Fx::ONE, Fx::from_ratio(-1, 5));
+    scene.sim.gun.turret_pitch = -fx::angle::FULL / 24;
+    scene.sim.turret.angle = fx::angle::FULL / 7;
+    scene.sim.gun.update_pose(scene.sim.turret.angle);
+    let visual = Visual::default();
+    let (rotation, offset) = visible_gun_frame(&scene, &visual);
+    let physical = scene.sim.gun.root_frame(usize::from(scene.sim.gun.body.turret_y));
+    let forward = Vec3::new(physical.x.x.to_f64_lossy() as f32, physical.x.y.to_f64_lossy() as f32, physical.x.z.to_f64_lossy() as f32);
+    assert!((rotation * Vec3::X - forward).length() < 0.0001);
+    let path = scene.sim.gun.body.weapon_paths()[0];
+    let local = Vec3::new(path.max[0] as f32 + 1.0, (path.min[1] as f32 + path.max[1] as f32) * 0.5, (path.min[2] as f32 + path.max[2] as f32) * 0.5);
+    let centre = Vec3::new(scene.sim.gun.body.vol.nx as f32 * 0.5, 0.0, scene.sim.gun.body.vol.nz as f32 * 0.5);
+    let scale = scene.sim.gun.body.mm as f32 / voxel::unit::WORLD_MM as f32;
+    let rendered = pose(&scene.sim.gun).pos + offset + rotation * ((local - centre) * scale);
+    assert!((rendered - super::super::visible_muzzle(&scene, &visual)).length() < 0.001);
 }

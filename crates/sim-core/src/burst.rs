@@ -3432,6 +3432,30 @@ mod tests {
         crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap()
     }
     #[test]
+    fn settled_irregular_piece_does_not_support_an_empty_corner() {
+        let piece=Fragment{id:1,position:V3::new(Fx::from_int(48),Fx::from_int(20),Fx::from_int(48)),
+            velocity:V3::ZERO,material:1,paint:None,mm:100,basis:IDENTITY,mass_g:1,count:3,
+            shape:0b1_0011,side:2,chunk:None,held:0,resting:true};
+        let index=Settled::around(&[piece],&[],|_,_|true);
+        let at=|x:i32,z:i32|[Fx::from_int(48).add(Fx::from_ratio(x,3)),Fx::from_int(20),Fx::from_int(48).add(Fx::from_ratio(z,3))];
+        let meets=|p:[Fx;3]|index.hit(p.map(|v|v.sub(Fx::from_ratio(1,10))),p.map(|v|v.add(Fx::from_ratio(1,10))),u32::MAX,None);
+        assert!(!meets(at(2,2)),"an empty corner is not a physical support");
+        assert!(meets(at(2,-1)),"occupied material must remain collidable");
+    }
+    #[test]
+    fn support_under_only_the_riders_empty_corner_does_not_suspend_it() {
+        let rider=Fragment{id:1,position:V3::new(Fx::from_int(48),Fx::from_int(20),Fx::from_int(48)),
+            velocity:V3::ZERO,material:1,paint:None,mm:100,basis:IDENTITY,mass_g:1,count:3,
+            shape:0b1_0011,side:2,chunk:None,held:0,resting:false};
+        let make_support=|z:i32|Fragment{id:2,position:V3::new(Fx::from_int(48).add(Fx::from_ratio(2,3)),Fx::from_int(19),Fx::from_int(48).add(Fx::from_ratio(z,3))),
+            velocity:V3::ZERO,material:1,paint:None,mm:100,basis:IDENTITY,mass_g:1,count:1,
+            shape:1,side:1,chunk:None,held:0,resting:true};
+        let check=|support|{let pieces=[Fragment{chunk:None,..rider},support];let index=Settled::around(&pieces,&[],|_,_|true);
+            let (lo,hi)=pieces[0].bounds();index.supports(arr(pieces[0].position),lo,hi,0)};
+        assert!(!check(make_support(2)),"empty rider corner must not hold the piece");
+        assert!(check(make_support(-1)),"occupied rider corner must retain support");
+    }
+    #[test]
     fn thin_stacked_fragments_sleep_until_their_support_is_removed() {
         let (mut b, mut e) = (Bursts::default(), economy());
         let mut w = world();
@@ -8545,8 +8569,57 @@ pub(crate) struct Settled {
     /// pieces. The cell lists use those indices throughout the tick, even
     /// when pieces wake or merge. Reuses the construction scratch buffer.
     boxes: Vec<([Fx; 3], [Fx; 3])>,
+    /// Frozen geometry of indexed irregular pieces; broad boxes remain the
+    /// first filter and single-cell/chunk contacts keep their existing path.
+    shape_index: Vec<u32>,
+    shapes: Vec<SettledShape>,
     /// Number of prepared query ranges, not a second physics state.
     requests: usize,
+}
+#[derive(Clone, Copy)]
+struct SettledShape {
+    pos: V3,
+    basis: [V3;3],
+    centre: [Fx;3],
+    radius: [Fx;3],
+    scale: Fx,
+    shape: u64,
+    side: u8,
+}
+impl SettledShape {
+    fn new(f:&Fragment)->Self {
+        let scale=Fx::from_ratio(f.mm as i32,voxel::unit::WORLD_MM as i32);
+        let half=Fx::from_ratio(49,100).mul(scale);
+        let radius=std::array::from_fn(|a|arr(f.basis[0])[a].abs().add(arr(f.basis[1])[a].abs()).add(arr(f.basis[2])[a].abs()).mul(half));
+        Self{pos:f.position,basis:f.basis,centre:arr(shape_centre(f.shape,f.side)),radius,scale,shape:f.shape,side:f.side}
+    }
+    fn meets(&self,lo:[Fx;3],hi:[Fx;3])->bool {
+        let mut bits=self.shape;
+        while bits!=0 {
+            let i=bits.trailing_zeros();bits&=bits-1;
+            if i>=box_cells(self.side) {continue;}
+            let q=shape_cell(i,self.side);let mut offset=V3::ZERO;
+            for a in 0..3 {offset=offset.add(self.basis[a].scale(Fx::from_int(q[a]).sub(self.centre[a]).mul(self.scale)));}
+            let p=arr(self.pos.add(offset));
+            if (0..3).all(|a|lo[a]<p[a].add(self.radius[a])&&p[a].sub(self.radius[a])<hi[a]) {return true;}
+        }
+        false
+    }
+    fn meets_pair(&self,lo:[Fx;3],hi:[Fx;3],other:&SettledShape,shift_lo:[Fx;3],shift_hi:[Fx;3])->bool {
+        let mut bits=self.shape;
+        while bits!=0 {
+            let i=bits.trailing_zeros();bits&=bits-1;
+            if i>=box_cells(self.side) {continue;}
+            let q=shape_cell(i,self.side);let mut offset=V3::ZERO;
+            for a in 0..3 {offset=offset.add(self.basis[a].scale(Fx::from_int(q[a]).sub(self.centre[a]).mul(self.scale)));}
+            let p=arr(self.pos.add(offset));
+            let cell_lo=[0,1,2].map(|a|p[a].sub(self.radius[a]));
+            let cell_hi=[0,1,2].map(|a|p[a].add(self.radius[a]));
+            if (0..3).all(|a|lo[a]<cell_hi[a]&&cell_lo[a]<hi[a])
+                && other.meets([0,1,2].map(|a|cell_lo[a].sub(shift_hi[a])),[0,1,2].map(|a|cell_hi[a].sub(shift_lo[a]))){return true;}
+        }
+        false
+    }
 }
 /// A bounded bit mask replaces repeated tree lookups for dense container IDs.
 /// Compaction and destruction keep their original slot order.
@@ -9650,6 +9723,7 @@ impl Settled {
         task: &(impl Fn(usize, &'static str) + Sync),
     ) {
         out.cells.clear();
+        out.shapes.clear();out.shape_index.clear();
         out.requests = 0;
         want.clear();
         completed("settled_clear");
@@ -9764,6 +9838,17 @@ impl Settled {
             fragments.iter().enumerate().map(candidate).collect()
         };
         completed("settled_candidates");
+        out.shape_index.resize(fragments.len(),u32::MAX);
+        for (i,entry) in selected.iter().enumerate() {
+            let f=&fragments[i];
+            let cells=box_cells(f.side);
+            let full=if cells==64 {u64::MAX}else{(1u64<<cells)-1};
+            // An axis-aligned full box has no empty corners to refine.
+            if (entry.is_some() || asks(i,f)) && f.chunk.is_none() && f.shape.count_ones()>1 && !(f.basis==IDENTITY && f.shape==full) {
+                out.shape_index[i]=out.shapes.len() as u32;
+                out.shapes.push(SettledShape::new(f));
+            }
+        }
         out.cells
             .build(&selected, want, fragments.len() >= 1024, task);
         completed("settled_cells");
@@ -9775,14 +9860,22 @@ impl Settled {
         let hi = [0, 1, 2].map(|a| p[a].add(high[a]));
         let bottom = lo[1];
         lo[1] = bottom.sub(Fx::from_ratio(1, 2));
-        self.hit(lo, hi, skip, Some(bottom))
+        self.hit_refined(lo, hi, skip, Some(bottom))
     }
     /// Whether the box `lo..hi` shares space with a resting piece other
     /// than `skip`. The pieces are boxes here, as they are to the world.
     fn hit(&self, lo: [Fx; 3], hi: [Fx; 3], skip: u32, from_above: Option<Fx>) -> bool {
+        self.hit_impl(lo,hi,skip,from_above,false)
+    }
+    fn hit_refined(&self, lo: [Fx; 3], hi: [Fx; 3], skip: u32, from_above: Option<Fx>) -> bool {
+        self.hit_impl(lo,hi,skip,from_above,true)
+    }
+    fn hit_impl(&self, lo: [Fx; 3], hi: [Fx; 3], skip: u32, from_above: Option<Fx>, refine_moving:bool) -> bool {
         if self.cells.is_empty() {
             return false;
         }
+        let moving=refine_moving.then(||self.shape_index.get(skip as usize).and_then(|&n|self.shapes.get(n as usize))).flatten();
+        let shifts=moving.and_then(|_|self.boxes.get(skip as usize)).map(|(old_lo,old_hi)|([0,1,2].map(|a|lo[a].sub(old_lo[a])),[0,1,2].map(|a|hi[a].sub(old_hi[a]))));
         let (c0, c1) = settled_cells(lo, hi);
         for z in c0[2]..=c1[2] {
             for y in c0[1]..=c1[1] {
@@ -9801,7 +9894,15 @@ impl Settled {
                         if from_above.is_some_and(|bottom| qhi[1] > bottom) {
                             continue;
                         }
-                        if (0..3).all(|a| lo[a] < qhi[a] && qlo[a] < hi[a]) {
+                        if !(0..3).all(|a| lo[a] < qhi[a] && qlo[a] < hi[a]) {continue;}
+                        let shape=self.shape_index.get(i as usize).and_then(|&n|self.shapes.get(n as usize));
+                        let intersects=match (shape,moving,shifts) {
+                            (Some(q),Some(m),Some((sl,sh)))=>q.meets_pair(lo,hi,m,sl,sh),
+                            (Some(q),_,_)=>q.meets(lo,hi),
+                            (None,Some(m),Some((sl,sh)))=>m.meets([0,1,2].map(|a|qlo[a].sub(sh[a])),[0,1,2].map(|a|qhi[a].sub(sl[a]))),
+                            _=>true,
+                        };
+                        if intersects {
                             return true;
                         }
                     }
@@ -10131,7 +10232,8 @@ fn substeps(
             };
             let blocked = world_contact
                 || hull_hit(p, low, high, hulls, inside).is_some()
-                || settled.hit(
+                || (if axis == 1 && delta[axis] < Fx::ZERO {Settled::hit_refined} else {Settled::hit})(
+                    settled,
                     [0, 1, 2].map(|a| p[a].add(low[a])),
                     [0, 1, 2].map(|a| p[a].add(high[a])),
                     skip,

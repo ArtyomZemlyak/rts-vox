@@ -71,7 +71,7 @@ impl Tuning {
             || !(1..=8192).contains(&t.obstacle_checks)
             || !(1..=65536).contains(&t.pressure_checks)
             || !(500..=1000).contains(&t.pressure_fill_milli)
-            || !(1..=256).contains(&t.pressure_packets)
+            || !(1..=512).contains(&t.pressure_packets)
             || !(1..=60).contains(&t.pressure_interval)
             || !(1..=32).contains(&t.body_samples)
             || !(1..=64).contains(&t.body_depth)

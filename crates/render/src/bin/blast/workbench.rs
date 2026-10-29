@@ -147,6 +147,7 @@ pub struct Workshop {
     preview: Option<Preview>,
     pub(super) validator: sim_core::blast::placement::Validator,
     previous_cursor: Option<Vec2>,
+    camera_drag: bool,
     pub drag_start: Option<Vec2>,
     pub drag_current: Option<Vec2>,
     pub pending: Option<(ExplosionConfig, RangeLayout)>,
@@ -195,6 +196,7 @@ impl Workshop {
             preview: None,
             validator: default(),
             previous_cursor: None,
+            camera_drag: false,
             drag_start: None,
             drag_current: None,
             pending: None,
@@ -289,6 +291,20 @@ impl Workshop {
         self.selected_units = vec![0];
         self.pan = Vec2::ZERO;
         self.zoom = 0.85;
+        self.orbit = 0.0;
+        self.pitch = 0.0;
+        Ok(())
+    }
+    pub fn crawler_field(&mut self, config: ExplosionConfig) -> Result<(), String> {
+        let layout = RangeLayout::from_ron(include_str!("../../../../../data/range-crawler-field.ron"))?;
+        self.commit(layout, config)?;
+        self.zone = 0;
+        self.editing = false;
+        self.selected = Some(Selection::Unit(0));
+        self.controlled = Some(0);
+        self.selected_units = vec![0];
+        self.pan = Vec2::ZERO;
+        self.zoom = 1.0;
         self.orbit = 0.0;
         self.pitch = 0.0;
         Ok(())
@@ -1015,6 +1031,36 @@ pub(super) fn pick(sim: &BlastRange, ray: Ray3d) -> Option<([i32; 3], Option<Sel
     })
 }
 
+/// The orthographic camera pans in world X/Z. Scaling about the centre of
+/// the unobscured viewport keeps the point below the cursor in place.
+fn editor_zoom_pan(anchor:Vec3, centre:Vec3, ratio:f32)->Vec2 {
+    Vec2::new(anchor.x-centre.x,anchor.z-centre.z)*(1.0-ratio)
+}
+fn ray_at_height(ray:Ray3d, y:f32)->Option<Vec3> {
+    let d=ray.direction.y;
+    if d.abs()<0.0001 {return None;}
+    let t=(y-ray.origin.y)/d;
+    (t.is_finite() && t>=0.0).then(||ray.origin+*ray.direction*t)
+}
+fn editor_zoom_focus(sim:&BlastRange,camera:&Camera,gt:&GlobalTransform,cursor:Vec2,viewport:Vec2,margins:[f32;4])->Option<(Vec3,Vec3)> {
+    let ray=camera.viewport_to_world(gt,cursor).ok()?;
+    // Only query the scene on a wheel event; skip units whose bounds are
+    // nowhere near the current ray cell and cap the walk through empty air.
+    let units:Vec<_>=sim.units.iter().map(|u|(u,u.bounds())).collect();
+    let mut steps=0;
+    let hit=visit_pick_ray(sim.size(),ray,|p| {
+        steps+=1;if steps>2048 {return Some(None);}
+        let unit=units.iter().any(|(u,(lo,hi))|(0..3).all(|a|p[a]>=lo[a] && p[a]<=hi[a]) && u.solid(p));
+        let water=p.iter().all(|v|*v>=0) && sim.water.amount(p.map(|v|v as u32))>0;
+        (unit || water || sim_core::blast::material(&sim.world,p)!=0).then_some(Some(p))
+    }).flatten();
+    let height=hit.map_or(sim.ground_level() as f32,|p|p[1] as f32+0.5);
+    let [top,bottom,left,right]=margins;
+    let center=Vec2::new((left+viewport.x-right)*0.5,(top+viewport.y-bottom)*0.5);
+    let middle=camera.viewport_to_world(gt,center).ok()?;
+    Some((ray_at_height(ray,height)?,ray_at_height(middle,height)?))
+}
+
 pub fn issue_battle_group_order(
     sim: &mut BlastRange,
     ids: &[usize],
@@ -1076,12 +1122,13 @@ pub fn input(
     laboratory: Option<Res<laboratory::Laboratory>>,
 ) {
     if pilot.as_ref().is_some_and(|p| p.active()) {
+        edit.camera_drag=false;
         edit.drag_start = None;
         edit.drag_current = None;
         wheel.clear();
         return;
     }
-    if laboratory.as_ref().is_some_and(|l|l.flying()) {wheel.clear();return;}
+    if laboratory.as_ref().is_some_and(|l|l.flying()) {edit.camera_drag=false;wheel.clear();return;}
     // A release outside the window can miss `just_released`. Do not keep an
     // old drag alive when the mouse button is no longer held.
     if !mouse.pressed(MouseButton::Left) && !mouse.just_released(MouseButton::Left) {
@@ -1101,6 +1148,7 @@ pub fn input(
         return;
     };
     if !window.focused {
+        edit.camera_drag = false;
         edit.drag_start = None;
         edit.drag_current = None;
         edit.previous_cursor = None;
@@ -1109,7 +1157,8 @@ pub fn input(
     }
     let stock = knobs::Overrides::default();
     let overrides = overrides.as_deref().unwrap_or(&stock);
-    if keys.just_pressed(KeyCode::KeyE) {
+    let lab_active=laboratory.as_ref().is_some_and(|l|l.active());
+    if !lab_active && keys.just_pressed(KeyCode::KeyE) {
         edit.editing = !edit.editing;
         scene.paused = true;
         scene.repeat = false;
@@ -1123,12 +1172,19 @@ pub fn input(
             ));
         }
     }
-    if keys.just_pressed(KeyCode::Home) {
+    if !lab_active && keys.just_pressed(KeyCode::Home) {
         edit.pan = Vec2::ZERO;
         edit.zoom = 1.0;
         scene.view = 1;
     }
-    let blocked = panel.as_ref().is_some_and(|p| p.blocked);
+    let editor=laboratory.as_ref().is_some_and(|l|l.editor_camera());
+    let blocked = panel.as_ref().is_some_and(|p| p.blocked)
+        || laboratory.as_ref().is_some_and(|l|l.active() && l.camera_ui_blocked());
+    let cursor = window.cursor_position();
+    if editor {
+        if !mouse.pressed(MouseButton::Middle) {edit.camera_drag=false;}
+        if mouse.just_pressed(MouseButton::Middle) {edit.camera_drag=!blocked;}
+    }
     for ev in wheel.read() {
         if blocked {
             continue;
@@ -1139,9 +1195,20 @@ pub fn input(
             } else {
                 1.0
             };
-        edit.zoom = (edit.zoom * (-y * 0.08).exp()).clamp(0.3, 32.0);
+        let before=edit.zoom;
+        let next=(before * (-y * if editor {0.16}else{0.08}).exp()).clamp(if editor {0.0001}else{0.3}, 32.0);
+        if editor && before>0.0 && next!=before {
+            if let (Some(cursor),Ok((camera,gt)),Some(lab))=(cursor,cameras.single(),laboratory.as_ref()) {
+                let viewport=camera.logical_viewport_size().unwrap_or(Vec2::new(window.width(),window.height()));
+                if let Some(margins)=lab.viewport_margins(viewport) {
+                    if let Some((anchor,centre))=editor_zoom_focus(&scene.sim,camera,gt,cursor,viewport,margins) {
+                        edit.pan_by(editor_zoom_pan(anchor,centre,next/before));
+                    }
+                }
+            }
+        }
+        edit.zoom = next;
     }
-    let cursor = window.cursor_position();
     if cursor.is_none() {
         edit.drag_start = None;
         edit.drag_current = None;
@@ -1152,10 +1219,12 @@ pub fn input(
         return;
     };
     if let (Some(a), Some(b)) = (edit.previous_cursor, cursor) {
-        if !blocked && mouse.pressed(MouseButton::Middle) {
-            if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+        if !blocked && mouse.pressed(MouseButton::Middle) && (!editor || edit.camera_drag) {
+            let shift=keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+            if shift != editor {
                 edit.orbit = (edit.orbit + (b.x - a.x) * 0.006).rem_euclid(std::f32::consts::TAU);
-                edit.pitch = (edit.pitch + (a.y - b.y) * 0.006).clamp(-0.6, 0.6);
+                let range=if editor {1.5}else{0.6};
+                edit.pitch = (edit.pitch + (a.y - b.y) * 0.006).clamp(-range,range);
             } else if let (Ok(ra), Ok(rb)) = (
                 camera.viewport_to_world(gt, a),
                 camera.viewport_to_world(gt, b),
@@ -1258,8 +1327,14 @@ pub fn input(
                                 let ids = edit.battle_selected_ids(&scene.sim);
                                 if !ids.is_empty() {
                                     use sim_core::blast::battle::Order;
+                                    let dig = !fire
+                                        && (keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight))
+                                        && !matches!(selection, Some(Selection::Unit(_)))
+                                        && ids.iter().any(|&id| scene.sim.units[id].kind == RangeUnitKind::Crawler);
                                     let order = if fire {
                                         Order::Ground(hit)
+                                    } else if dig {
+                                        Order::Dig(hit)
                                     } else if let Some(Selection::Unit(enemy)) = selection {
                                         if scene.sim.allied(enemy) {
                                             if !scene.sim.units[enemy].status.alive {
@@ -1274,14 +1349,18 @@ pub fn input(
                                     };
                                     if scene.sim.battle.phase
                                         == sim_core::blast::battle::Phase::Setup
-                                        && !matches!(order, Order::Move | Order::Hold)
+                                        && !matches!(order, Order::Move | Order::Hold | Order::Dig(_))
                                     {
-                                        scene.notice =
+                                        scene.notice = if dig {
+                                            "Для добычи сначала начните бой или свободное управление."
+                                        } else {
                                             "Стрельба выключена: сначала нажмите «Начать бой»."
-                                                .into();
+                                        }.into();
                                         return;
                                     }
-                                    let eligible = if order == Order::Move {
+                                    let eligible = if matches!(order, Order::Dig(_)) {
+                                        ids.iter().filter(|&&id| scene.sim.units[id].kind == RangeUnitKind::Crawler).count()
+                                    } else if order == Order::Move {
                                         ids.iter()
                                             .filter(|&&id| {
                                                 scene
@@ -1295,11 +1374,14 @@ pub fn input(
                                         ids.len()
                                     };
                                     let autonomous = scene.sim.battle.autonomous;
+                                    let diggers: Vec<_> = if dig {
+                                        ids.iter().copied().filter(|&id| scene.sim.units[id].kind == RangeUnitKind::Crawler).collect()
+                                    } else { Vec::new() };
                                     let accepted = issue_battle_group_order(
                                         &mut scene.sim,
-                                        &ids,
+                                        if dig { &diggers } else { &ids },
                                         order,
-                                        Some([hit[0], hit[2]]),
+                                        if dig { None } else { Some([hit[0], hit[2]]) },
                                     );
                                     if accepted > 0
                                         && fire
@@ -1313,6 +1395,8 @@ pub fn input(
                                     }
                                     if eligible == 0 && order == Order::Move {
                                         scene.notice = "В выделении нет подвижных юнитов".into();
+                                    } else if accepted == eligible && accepted > 0 && dig {
+                                        scene.notice = "Краулер: добыча и сбор обломков у отмеченной точки".into();
                                     } else if accepted == eligible && accepted > 0 {
                                         if autonomous && !scene.sim.battle.autonomous {
                                             scene.notice = "Ручное управление: союзный ИИ передал вам управление. ЛКМ — выбор, ПКМ — приказ.".into();
@@ -1947,6 +2031,69 @@ pub fn overlay(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn crawler_field_opens_as_a_noncombat_economy_scene() {
+        use super::*;
+        let base = RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        let config = ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
+        let mut edit = Workshop::new(Some(base), false);
+        edit.crawler_field(config).unwrap();
+        let layout = edit.layout.as_ref().unwrap();
+        assert!(layout.battle && layout.economy.is_some());
+        assert!(layout.units.iter().all(|u| u.allied));
+        assert_eq!(layout.units[0].kind, RangeUnitKind::Crawler);
+        assert_eq!(layout.units[1].kind, RangeUnitKind::Base);
+        assert!(!layout.initial_debris.is_empty());
+        assert_eq!(edit.controlled, Some(0));
+        assert!(edit.pending.is_some());
+    }
+    #[test]
+    fn crawler_field_ctrl_right_click_orders_digging_in_free_control() {
+        use super::*;
+        use bevy::camera::{CameraProjection, RenderTargetInfo};
+        use sim_core::blast::battle::Order;
+        let layout = RangeLayout::from_ron(include_str!("../../../../../data/range-crawler-field.ron")).unwrap();
+        let config = ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
+        let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
+        sim.start_free_control().unwrap();
+        let mut workshop = Workshop::new(Some(layout), false);
+        workshop.editing = false; workshop.controlled = Some(0); workshop.selected_units = vec![0];
+        let mut app = panel::hud::tests::app_with_scene(sim, workshop);
+        app.init_resource::<ButtonInput<MouseButton>>().add_message::<MouseWheel>().add_systems(Update, input);
+        let projection = OrthographicProjection { area: Rect::from_corners(Vec2::new(-320.0, -240.0), Vec2::new(320.0, 240.0)), near: 1.0, far: 1200.0, ..OrthographicProjection::default_3d() };
+        let mut camera = Camera::default();
+        camera.computed.clip_from_view = projection.get_clip_from_view();
+        camera.computed.target_info = Some(RenderTargetInfo { physical_size: UVec2::new(1600, 900), scale_factor: 1.0 });
+        let gt = GlobalTransform::from(Transform::from_xyz(320.0, 300.0, 320.0).looking_at(Vec3::new(320.0, 0.0, 320.0), Vec3::NEG_Z));
+        let screen = camera.world_to_viewport(&gt, Vec3::new(416.0, 28.0, 248.0)).unwrap();
+        let mut window = Window { resolution: bevy::window::WindowResolution::new(1600, 900).with_scale_factor_override(1.0), focused: true, ..default() };
+        window.set_cursor_position(Some(screen));
+        app.world_mut().spawn(window); app.world_mut().spawn((camera, gt, GasCamera));
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::ControlLeft);
+        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Right);
+        app.update();
+        let scene = app.world().resource::<Scene>();
+        assert!(matches!(scene.sim.battle.actors[0].order, Order::Dig(_)), "{}", scene.notice);
+    }
+    #[test]
+    fn group_dig_command_reaches_a_real_crawler() {
+        use super::*;
+        use sim_core::blast::battle::Order;
+        let e = modding::laboratory::experiments::stock().into_iter()
+            .find(|e| e.id == "crawler-base").unwrap();
+        let mut layout = e.layout;
+        layout.size = [256, 128, 256];
+        layout.clear_min = [1, 1]; layout.clear_max = [255, 255];
+        layout.gun = [96, 24, 128]; layout.target = [190, 18, 128];
+        layout.units[0].at = [120, 16, 128]; layout.units[1].at = [48, 16, 128];
+        layout.blocks[0].min = [180, 1, 120]; layout.blocks[0].max = [202, 16, 136];
+        let config = ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
+        let mut sim = BlastRange::with_layout(config, layout).unwrap();
+        sim.start_free_control().unwrap();
+        let face = [190, 8, 128];
+        assert_eq!(issue_battle_group_order(&mut sim, &[0], Order::Dig(face), None), 1);
+        assert_eq!(sim.battle.actors[0].order, Order::Dig(face));
+    }
     use super::*;
     #[test]
     fn rounded_relief_guides_and_clearings_follow_height_and_clip_to_world_ceiling() {

@@ -169,6 +169,10 @@ impl Water {
     pub fn moisture(&self, p: Pos) -> u32 {
         self.wet.get(&p).map_or(0, |v| v.1)
     }
+    /// Read-only wet cells for bounded diagnostic presentation.
+    pub fn diagnostic_wet_cells(&self) -> impl Iterator<Item=(Pos,u16,u32)> + '_ {
+        self.wet.iter().map(|(&p,&(mat,amount))|(p,mat,amount))
+    }
     pub fn repose_bonus(&self, p: Pos) -> i32 {
         let Some(&(mat, n)) = self.wet.get(&p) else {
             return 0;

@@ -218,7 +218,7 @@ fn single_block(lab: &Laboratory) -> bool {
 }
 fn section_visible(lab: &Laboratory, id: u8) -> bool {
     match id {
-        0..=3 | 9 | 10 | 14 | 16 | 17 | 21 | 24 | 25 | 30 => lab.ui.tab == id,
+        0..=3 | 9 | 10 | 14 | 16 | 17 | 21 | 24 | 25 | 30 | 31 => lab.ui.tab == id,
         4 => lab.constructor.creating(),
         5 => editing(lab).is_some(),
         6 => matches!(
@@ -300,6 +300,7 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
                 ("+90° · E", "rotate-cw", LabAction::Turn(1)),
                 ("Сетка", "grid-3x3", LabAction::Grid),
                 ("Разрез · F7", "layers", LabAction::Tab(30)),
+                ("Реплей · запись", "circle", LabAction::Tab(31)),
                 ("Общий вид · Home", "camera", LabAction::Frame),
                 ("Живые · F2", "hammer", LabAction::LiveTools),
             ],
@@ -385,20 +386,44 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
     commands.spawn(root(right,camera)).with_children(|p| {
         heading(p,&f,"Инспектор");
         section(p,19,|p|{controls(p,&font(&f,12.0),&[("Объект","box",LabAction::Tab(0)),("Материал","layers",LabAction::Tab(1)),
-            ("Оружие","crosshair",LabAction::Tab(2)),("Результат","file-text",LabAction::Tab(3)),("Сцена","settings-2",LabAction::Tab(9)),("Сценарий","file-text",LabAction::Tab(24)),("Устройства","hammer",LabAction::Tab(25)),("Источники","crosshair",LabAction::Tab(10)),("Инструменты","hammer",LabAction::Tab(16)),("Пипетка","pipette",LabAction::Tab(14)),("Кубики","grid-3x3",LabAction::Tab(17))]);});
+            ("Оружие","crosshair",LabAction::Tab(2)),("Результат","file-text",LabAction::Tab(3)),("Сцена","settings-2",LabAction::Tab(9)),("Сценарий","file-text",LabAction::Tab(24)),("Устройства","hammer",LabAction::Tab(25)),("Источники","crosshair",LabAction::Tab(10)),("Инструменты","hammer",LabAction::Tab(16)),("Пипетка","pipette",LabAction::Tab(14)),("Кубики","grid-3x3",LabAction::Tab(17)),("Реплей","circle",LabAction::Tab(31))]);});
         section(p,20,|p|{controls(p,&font(&f,12.0),&[("Кубики","grid-3x3",LabAction::Tab(17)),("Материал","layers",LabAction::Tab(1))]);});
         section(p,22,|p|{controls(p,&font(&f,12.0),&[("Инструмент","hammer",LabAction::Tab(21)),("Материал","layers",LabAction::Tab(1))]);});
         scrolling::area(p, 1, |p| {
-            for tab in [0,1,2,3,9,10,16,14,17,21,24,25,30] {
+            for tab in [0,1,2,3,9,10,16,14,17,21,24,25,30,31] {
                 p.spawn((Inspector(tab),Node{width:percent(100),flex_direction:FlexDirection::Column,row_gap:px(if tab==10 {6}else{10}),..default()})).with_children(|p|match tab {
+                    31=>{
+                        heading(p,&f,"Реплей опыта");label(p,&f,"",Some(30));
+                        caption(p,&f,"1. Начните запись и запустите опыт. 2. Остановите запись. 3. Сохраните реплей в файл или перемотайте ползунок ниже.");
+                        controls(p,&f,&[("Начать запись","circle",LabAction::ReplayStart),("Остановить запись","square",LabAction::ReplayStop)]);
+                        controls(p,&f,&[("Сохранить реплей","save",LabAction::ReplaySave),("Открыть последний","folder-open",LabAction::ReplayOpen)]);
+                        controls(p,&f,&[("Предыдущая запись","chevron-left",LabAction::ReplayBrowse(-1)),("Следующая запись","chevron-right",LabAction::ReplayBrowse(1))]);
+                        controls(p,&f,&[("Воспроизвести","play",LabAction::ReplayPlay),("Продолжить отсюда","move",LabAction::ReplayLeave)]);
+                        replay::track(p,&f);
+                        controls(p,&f,&[("В начало","chevron-left",LabAction::ReplayJump(i32::MIN)),("−10","chevron-left",LabAction::ReplayJump(-10)),("−1","chevron-left",LabAction::ReplayJump(-1))]);
+                        controls(p,&f,&[("+1","chevron-right",LabAction::ReplayJump(1)),("+10","chevron-right",LabAction::ReplayJump(10)),("В конец","chevron-right",LabAction::ReplayJump(i32::MAX))]);
+                        caption(p,&f,"Перетащите ползунок и отпустите, затем нажмите «Воспроизвести». «Продолжить отсюда» выходит из просмотра или отменяет перемотку. Записи находятся в out/material-lab/recordings. Частицы пересчитываются с начала записи; дым последнего взрыва восстанавливается приблизительно и постепенно.");
+                    },
                     30=>{
                         heading(p,&f,"Разрез по плоскости");
                         label(p,&f,"",Some(27));
                         controls(p,&f,&[("Вкл / выкл · F7","layers",LabAction::SectionToggle),("К выбранному","crosshair",LabAction::SectionFocus)]);
-                        caption(p,&f,"Плоскость направлена по взгляду камеры и проходит через выбранный куб или объект. Пипеткой выберите куб, затем нажмите «К выбранному».");
-                        controls(p,&f,&[("Ближе на 1 м","chevron-left",LabAction::SectionShift(-10)),("Ближе на 10 см","chevron-left",LabAction::SectionShift(-1))]);
-                        controls(p,&f,&[("Дальше на 10 см","chevron-right",LabAction::SectionShift(1)),("Дальше на 1 м","chevron-right",LabAction::SectionShift(10))]);
-                        caption(p,&f,"Разрез только скрывает видимую часть сцены: физика и кубики не меняются. В режиме вида от первого лица разрез временно отключён.");
+                        caption(p,&f,"Плоскость остаётся на месте при движении камеры. Стрелка показывает оставляемую сторону. Выберите куб пипеткой и нажмите «К выбранному».");
+                        caption(p,&f,"Разрез показывает грунт, воду, юниты, дым и частицы эффектов. Отдельные обломки и падающие цельные куски пока отображаются целиком.");
+                        controls(p,&f,&[("Ось X","move",LabAction::SectionAxis(0)),("Ось Y","move",LabAction::SectionAxis(1)),("Ось Z","move",LabAction::SectionAxis(2)),("Другая сторона","layers",LabAction::SectionSide)]);
+                        controls(p,&f,&[("−1 м","chevron-left",LabAction::SectionShift(-10)),("−10 см","chevron-left",LabAction::SectionShift(-1)),("+10 см","chevron-right",LabAction::SectionShift(1)),("+1 м","chevron-right",LabAction::SectionShift(10))]);
+                        heading(p,&f,"Карта свойств");
+                        label(p,&f,"",Some(28));
+                        label(p,&f,"",Some(29));
+                        controls(p,&f,&[("Масштаб карты","camera",LabAction::MetricScale)]);
+                        controls(p,&f,&[("Выкл","x",LabAction::Metric(0)),("Нагрев","flame",LabAction::Metric(1)),("Влажность","droplets",LabAction::Metric(2))]);
+                        controls(p,&f,&[("Состояние","layers",LabAction::Metric(3)),("Прочность","shield",LabAction::Metric(4)),("Плотность","box",LabAction::Metric(5))]);
+                        controls(p,&f,&[("Скорость","move",LabAction::Metric(6)),("Повреждение","crosshair",LabAction::Metric(7))]);
+                        controls(p,&f,&[("Горение","flame",LabAction::Metric(8)),("Наполнение","droplets",LabAction::Metric(9)),("Материал","box",LabAction::Metric(10))]);
+                        caption(p,&f,"Карта показывает область вокруг выбранного куба; в живых инструментах — вокруг цели. Больший охват использует более редкие пробы. Без разреза окрашиваются видимые грани; с разрезом — плоскость. Синий — мало, красный — много; серый — данные недоступны. Нагрев указан в единицах симуляции на объём, не в градусах; для воды и обломков температура не рассчитывается. Скорость показывает поступательное движение юнитов и падение сыпучего вещества и воды.");
+                        caption(p,&f,"Состояние: синий — вода и расплав, жёлтый — сыпучее, серый — связное твёрдое. Вода и юниты не имеют всех свойств грунта.");
+                        caption(p,&f,"Обломки: окрашиваются до 64 находящихся в зоне; скорость и свойства материала берутся из самого обломка. Прочие данные для него не хранятся.");
+                        caption(p,&f,"Разрез только скрывает видимую часть сцены: физика и кубики не меняются. Он работает и в режиме живых инструментов.");
                         caption(p,&f,"У юнитов показывается срез их видимой оболочки; отдельная заливка внутренних кубиков модели пока не строится.");
                     },
                     0=>{
@@ -698,7 +723,7 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
     help.padding = UiRect::all(px(22));
     commands.spawn((root(help,camera),Help)).with_children(|p| {
         heading(p,&f,"Быстрый старт");
-        label(p,&f,"1. Выберите карточку в библиотеке снизу.\n2. Наведите на сцену: зелёный — можно разместить, красный — нельзя.\n3. Q / E или R — поворот на 90°. Page Up / Down — высота.\n4. ЛКМ — поставить; ПКМ / Esc — завершить размещение.\n5. V — выбор, G — перенос выбранного объекта мышью. I — пипетка кубика 10 см.\n6. Ctrl+D — копия, Delete — удалить. Ctrl+S — сохранить сцену.\n7. «Источники»: добавьте точку и поставьте её кнопкой «Позиция».\n8. Для ствола модели выберите юнит слева и нажмите «К юниту».\n9. «Оружие»: настройте выбранный источник и цель (T). F запускает выбранный источник; в готовом сценарии — все его команды по порядку.\n10. «Сцена»: размер карты, шаг сетки и длительность наблюдения.\n11. Выберите объект → «Материал» → материал по имени → «Применить к цели». Для части сборки сначала «Разобрать сборку».\n\nБиблиотека «Воздействия»: выберите взрыв → поставьте в сцене → F. PgUp/PgDn задают высоту. «Сценарии» открывают обвалы, падения, огонь и другие готовые проверки; «Вернуть мою сборку» возвращает вашу сцену.\n\nЧисла: клик → ввод → Enter или «Применить». Esc отменяет; Ctrl+A выделяет всё. При ошибке значение остаётся для исправления. Пробел — пауза, F5 — повторить.\n\nКамера: колёсико — масштаб; средняя кнопка + мышь — перемещение; Shift + средняя кнопка — поворот; Home — общий вид.\nEsc закрывает подсказку или отменяет инструмент. Кнопка «Полигон» возвращает прежнюю сессию.",None);
+        label(p,&f,"1. Выберите карточку в библиотеке снизу.\n2. Наведите на сцену: зелёный — можно разместить, красный — нельзя.\n3. Q / E или R — поворот на 90°. Page Up / Down — высота.\n4. ЛКМ — поставить; ПКМ / Esc — завершить размещение.\n5. V — выбор, G — перенос выбранного объекта мышью. I — пипетка кубика 10 см.\n6. Ctrl+D — копия, Delete — удалить. Ctrl+S — сохранить сцену.\n7. «Источники»: добавьте точку и поставьте её кнопкой «Позиция».\n8. Для ствола модели выберите юнит слева и нажмите «К юниту».\n9. «Оружие»: настройте выбранный источник и цель (T). F запускает выбранный источник; в готовом сценарии — все его команды по порядку.\n10. «Сцена»: размер карты, шаг сетки и длительность наблюдения.\n11. Выберите объект → «Материал» → материал по имени → «Применить к цели». Для части сборки сначала «Разобрать сборку».\n\nБиблиотека «Воздействия»: выберите взрыв → поставьте в сцене → F. PgUp/PgDn задают высоту. «Сценарии» открывают обвалы, падения, огонь и другие готовые проверки; «Вернуть мою сборку» возвращает вашу сцену.\n\nЧисла: клик → ввод → Enter или «Применить». Esc отменяет; Ctrl+A выделяет всё. При ошибке значение остаётся для исправления. Пробел — пауза, F5 — повторить.\n\nКамера: колёсико — приблизить к курсору; средняя кнопка + мышь — вращение; Shift + средняя кнопка — перемещение; Home — общий вид.\nEsc закрывает подсказку или отменяет инструмент. Кнопка «Полигон» возвращает прежнюю сессию.",None);
         controls(p,&f,&[("Камера","camera",LabAction::Camera),("Понятно · Esc","x",LabAction::Help)]);
     });
 }
@@ -741,6 +766,9 @@ pub fn selected(lab: &Laboratory, a: LabAction) -> bool {
         LabAction::Tab(i) => lab.ui.tab == i,
         LabAction::Grid => lab.ui.grid,
         LabAction::SectionToggle => lab.tools.section.enabled,
+        LabAction::SectionAxis(axis) => lab.tools.section.axis==axis,
+        LabAction::ReplayStart=>lab.replay.recording,
+        LabAction::Metric(mode) => lab.tools.metric==mode,
         LabAction::Help => lab.ui.help,
         LabAction::ParameterDetails => lab.ui.parameter_details,
         LabAction::Experiments => lab.browser,
@@ -757,7 +785,10 @@ pub fn selected(lab: &Laboratory, a: LabAction) -> bool {
 pub fn text(lab: &Laboratory, kind: u8) -> String {
     let c = &lab.constructor;
     match kind {
-        27=>format!("{} · точка X {} Y {} Z {} · сдвиг {:+} см",if lab.tools.section.enabled {"Разрез включён"}else{"Разрез выключен"},lab.tools.section.anchor[0],lab.tools.section.anchor[1],lab.tools.section.anchor[2],lab.tools.section.offset.saturating_mul(10)),
+        30=>lab.replay.text(lab.replay.position.unwrap_or(0)),
+        29=>if matches!(lab.tools.metric,1|2|3|4|5|7|8|10) {"Земля и вода целиком · обломки локально · серый: нет данных".into()}else{format!("Земля: {:.1} × {:.1} м · вода целиком · шаг пробы {} см",4.8*f32::from(lab.tools.metric_scale),4.8*f32::from(lab.tools.metric_scale),10*u32::from(lab.tools.metric_scale))},
+        28=>match lab.tools.metric {0=>"Карта выключена".into(),1=>"Нагрев: синий 0 → красный 1000 ед.; серый — нет данных".into(),2=>"Влажность: синий 0% → красный 100%".into(),3=>"Синий — жидкость · жёлтый — сыпучее · серый — твёрдое".into(),4=>"Прочность: синий 0 → красный 500".into(),5=>"Плотность: синий 0 → красный 10 000 кг/м³".into(),6=>"Скорость: синий 0 → красный 5 м/с".into(),7=>"Деформация: синий 0 → красный 2000 ед.".into(),8=>"Горение: синий 0 → красный 40 тиков; серый — нет данных".into(),9=>"Вода: синий пусто → красный полный куб".into(),_=>"Материал: каждому ID соответствует свой цвет".into()},
+        27=>format!("{} · ось {} · сторона {} · точка X {} Y {} Z {}",if lab.tools.section.enabled {"Разрез включён"}else{"Разрез выключен"},["X","Y","Z"][lab.tools.section.axis.min(2) as usize],if lab.tools.section.positive {"+"}else{"−"},lab.tools.section.point()[0],lab.tools.section.point()[1],lab.tools.section.point()[2]),
         26=>format!("Выбрано: {}",scenario::label(lab,lab.ui.scenario_input)),
         12=>{
             if let Some((_,text,_))=&lab.ui.editing {return format!("Ввод: {text} · Enter — применить · Esc — отмена");}
@@ -1082,14 +1113,26 @@ pub fn sync(
 }
 
 pub fn capture_ready(lab: &Laboratory) -> bool {
-    !lab.active() || (!lab.tools.flight.profile && lab.ui.ready_frames >= 4 && lab.ui.viewport_ready >= 4)
+    if matches!(std::env::var("RTS_LAB_CAPTURE_CASE").as_deref(),Ok("replay-effects"|"section-unit-laser")) && lab.ui.ready_frames<24 {return false;}
+    !lab.active() || (!lab.tools.flight.profile && lab.replay.target.is_none() && lab.ui.ready_frames >= if lab.tools.metric>0 && !lab.tools.section.enabled {20}else{4} && lab.ui.viewport_ready >= 4)
 }
 /// Explicit screenshot fixtures only; never used by a normal interactive session.
 pub fn capture_fixture(lab: &mut Laboratory) -> bool {
     let Ok(case) = std::env::var("RTS_LAB_CAPTURE_CASE") else {
         return false;
     };
-    if case == "melt-steel" {
+    if matches!(case.as_str(),"section-unit"|"section-unit-metric"|"unit-metric"|"section-unit-laser") {
+        let c=&mut lab.constructor;
+        let tank=c.catalog.iter().find(|e|e.id=="tank").expect("tank catalog").clone();
+        c.placed.clear();c.selected=None;c.base=None;c.stand=false;
+        c.placed.push(modding::laboratory::catalog::Placed{element:tank,at:[384,16,336],turns:0});
+        let centre=Vec3::new(384.0,24.0,336.0);
+        lab.tools.flying=true;
+        lab.tools.camera=Some(Transform::from_translation(centre+Vec3::new(-35.0,30.0,55.0)).looking_at(centre,Vec3::Y));
+        lab.ui.tab=30;
+        return true;
+    }
+    if case == "melt-steel" || case == "metric-section" || case == "metric-surface" || case == "metric-live" || case == "metric-fragment" || case == "replay-ui" || case == "replay-effects" {
         let c=&mut lab.constructor;
         c.placed.clear(); c.selected=None; c.base=None; c.stand=false;
         c.placed.push(modding::laboratory::catalog::Placed {
@@ -1102,7 +1145,7 @@ pub fn capture_fixture(lab: &mut Laboratory) -> bool {
         let centre=Vec3::new(384.0,31.0,345.0);
         lab.tools.flying=true;
         lab.tools.camera=Some(Transform::from_translation(centre+Vec3::new(-52.0,38.0,62.0)).looking_at(centre,Vec3::Y));
-        lab.ui.tab=3;
+        lab.ui.tab=if case.starts_with("metric-") {30}else if case.starts_with("replay-") {31}else{3};
         return true;
     }
     if ["collector-before","collector-after","collector-profile"].contains(&case.as_str()) {
@@ -1119,7 +1162,7 @@ pub fn capture_fixture(lab: &mut Laboratory) -> bool {
     }
     if ![
         "overview", "valid", "invalid", "help", "results", "weapon", "draft", "block", "aim",
-        "sources", "settings", "number", "bound", "error", "events", "scenarios", "collapse-kit", "event-preview", "material-scene", "material-catalog", "material-result", "water-scene", "water-result", "water-float", "physics-tools", "physics-wetting", "physics-dome", "physics-devices", "physics-glass", "physics-erosion", "material-object", "material-stand", "voxel-inspector", "voxel-editor", "live-tools", "he-fragments-flight", "he-fragments-landed", "fragment-inspector", "surround", "fps-laser", "fps-water", "fps-menu", "fps-profile", "fps-water-profile", "fps-fire", "fps-fire-profile", "fps-mg-profile", "fps-he-profile", "fps-ap-profile",
+        "sources", "settings", "number", "bound", "error", "events", "scenarios", "collapse-kit", "event-preview", "material-scene", "material-catalog", "material-result", "water-scene", "water-result", "water-float", "physics-tools", "physics-wetting", "physics-dome", "physics-devices", "physics-glass", "physics-erosion", "material-object", "material-stand", "voxel-inspector", "voxel-editor", "live-tools", "he-fragments-flight", "he-fragments-heat-flight", "he-fragments-landed", "fragment-inspector", "surround", "fps-laser", "fps-water", "fps-menu", "fps-overview", "fps-profile", "fps-water-profile", "fps-fire", "fps-fire-profile", "fps-mg-profile", "fps-he-profile", "fps-ap-profile",
     ]
     .contains(&case.as_str())
     {
@@ -1294,6 +1337,14 @@ pub fn enabled(lab: &Laboratory, a: LabAction) -> bool {
     if a==LabAction::BeginVoxelEdit {return lab.constructor.can_voxel_edit();}
     let c = &lab.constructor;
     match a {
+        LabAction::ReplayStart=>!lab.replay.recording,
+        LabAction::ReplayStop=>lab.replay.recording,
+        LabAction::ReplaySave=>lab.replay.bounds().is_some(),
+        LabAction::ReplayOpen=>!lab.replay.recording,
+        LabAction::ReplayBrowse(_)=>!lab.replay.recording,
+        LabAction::ReplayPlay=>lab.replay.bounds().is_some_and(|(_,end)|lab.replay.position.is_some_and(|at|at<end)) && lab.replay.target.is_none() && !lab.replay.playing,
+        LabAction::ReplayLeave=>lab.replay.position.is_some() || lab.replay.target.is_some(),
+        LabAction::ReplaySeek(_)|LabAction::ReplayJump(_)=>lab.replay.bounds().is_some(),
         LabAction::LiveTool(_)|LabAction::LivePoint|LabAction::LivePower(_)|LabAction::LiveCapture|LabAction::LiveSpeed(_)|LabAction::LiveLook(_)|LabAction::LiveFov(_)|LabAction::Tab(21)=>lab.tools.live,
         LabAction::VoxelUndo=>c.voxel_can_undo(false),
         LabAction::VoxelRedo=>c.voxel_can_undo(true),
@@ -1363,6 +1414,14 @@ fn display(node: &mut Mut<'_, Node>, value: Display) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn metric_legend_and_sampling_scale_are_described() {
+        let mut lab=Laboratory::new(false);
+        lab.tools.metric=6;lab.tools.metric_scale=4;
+        assert!(text(&lab,28).contains("5 м/с"));
+        assert!(text(&lab,29).contains("19.2"));
+        assert!(text(&lab,29).contains("40 см"));
+    }
     #[test]
     fn scenario_and_device_panels_show_only_applicable_fields() {
         use modding::laboratory::experiments::{Input,Plan};

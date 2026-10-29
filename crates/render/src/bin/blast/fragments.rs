@@ -368,9 +368,9 @@ mod tests {
         assert_eq!(rubble_variant(&f), 0);
     }
     #[test]
-    fn solid_piles_have_one_closed_bevelled_surface() {
+    fn solid_piles_and_single_voxels_have_cubic_surfaces() {
         let mesh = piece_mesh(u64::MAX, 4, [1.0; 4]);
-        assert_eq!(mesh.indices().unwrap().len() / 3, 44);
+        assert_eq!(mesh.indices().unwrap().len() / 3, 12);
         // Sixty-four independent cubes used to submit 768 triangles.
         let buf = render::model::fragment_to_mesh(u64::MAX, 4, [1.0; 4]);
         for tri in buf.idx.chunks_exact(3) {
@@ -381,7 +381,9 @@ mod tests {
             assert!(centre.dot(normal) > 1.0, "an internal face survived");
         }
         let shard = piece_mesh(1, 1, [1.0; 4]);
-        assert_eq!(shard.indices().unwrap().len() / 3, 8);
+        assert_eq!(shard.indices().unwrap().len() / 3, 12);
+        let normals=shard.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap().as_float3().unwrap();
+        assert!(normals.iter().all(|n|n.iter().filter(|v|v.abs()>0.001).count()==1));
     }
     #[test]
     fn saturated_pile_mesh_matches_physical_bounds() {

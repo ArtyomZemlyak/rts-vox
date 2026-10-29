@@ -5,7 +5,7 @@ use voxel::bodies::Body;
 
 impl Flow {
     pub fn slope_candidate(&self, b: &Body) -> bool {
-        (b.tilt_axis == 0 || b.tilt_axis >= 3)
+        !b.resting && (b.tilt_axis == 0 || b.tilt_axis >= 3)
             && b.fallen > 0
             && b.vy >= Fx::ZERO
             && b.riders.is_empty()

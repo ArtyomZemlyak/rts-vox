@@ -25,7 +25,7 @@ if ($Build -or !(Test-Path -LiteralPath $binary)) {
 # An in-use Windows executable cannot always be replaced. A separately built
 # release can be used by the same launcher until the normal build is newer.
 if (!$Build) {
-    foreach ($candidate in @('target/release/blast-staged.exe', 'target/release/blast-section.exe', 'target/release/blast-hot.exe', 'target/release/blast-crawler.exe', 'target/release/blast-dune.exe', 'target/release/blast-thermal.exe', 'target/release/blast-melt.exe', 'target/release/blast-vapor.exe', 'target/release/blast-water.exe', 'target/release/blast-waterflow.exe')) {
+    foreach ($candidate in @('target/release/blast-staged.exe', 'target/release/blast-section.exe', 'target/release/blast-hot.exe', 'target/release/blast-crawler.exe', 'target/release/blast-dune.exe', 'target/release/blast-thermal.exe', 'target/release/blast-melt.exe', 'target/release/blast-vapor.exe', 'target/release/blast-water.exe', 'target/release/blast-waterflow.exe', 'target/release/blast-metrics.exe', 'target/release/blast-metrics5.exe', 'target/release/blast-metrics8.exe', 'target/release/blast-metrics9.exe', 'target/release/blast-replay.exe', 'target/release/blast-replay2.exe', 'target/release/blast-replay3.exe', 'target/release/blast-replay4.exe', 'target/release/blast-support.exe', 'target/release/blast-support2.exe', 'target/release/blast-support3.exe', 'target/release/blast-melt-settle.exe', 'target/release/blast-overview.exe', 'target/release/blast-global-metrics3.exe', 'target/release/blast-cubic.exe')) {
         $stagedBinary = Join-Path $repoRoot $candidate
         if ((Test-Path -LiteralPath $stagedBinary) -and
             (Get-Item -LiteralPath $stagedBinary).LastWriteTimeUtc -gt (Get-Item -LiteralPath $binary).LastWriteTimeUtc) {

@@ -175,6 +175,14 @@ pub struct RangeBlock {
     pub max: [i32; 3],
     pub material: u16,
 }
+
+/// An authored, resting, reclaimable fragment, in world-cell coordinates.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeDebris {
+    pub min: [i32; 3],
+    pub max: [i32; 3],
+    pub material: u16,
+}
 /// Smooth elliptical relief. Bounds describe the base and absolute summit height;
 /// overlapping mounds take the maximum, rather than adding unbounded elevation.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -271,6 +279,8 @@ pub struct RangeLayout {
     pub unit_yaws: Vec<u8>,
     /// Later blocks override earlier blocks, allowing cladding and cutouts.
     pub blocks: Vec<RangeBlock>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_debris: Vec<RangeDebris>,
     #[serde(default)]
     pub roads: Vec<RangeRoad>,
     /// Optional relief: absent/empty keeps the old layout text and terrain.
@@ -387,6 +397,7 @@ impl RangeLayout {
             shift(&mut b.min);
             shift(&mut b.max);
         }
+        for b in &mut self.initial_debris { shift(&mut b.min); shift(&mut b.max); }
         for m in &mut self.mounds {
             shift(&mut m.min);
             shift(&mut m.max);
@@ -451,6 +462,13 @@ impl RangeLayout {
             || r.units.iter().any(|u| !u.valid_loadout())
             || !(1..=100_000).contains(&r.auto_attack_range)
             || r.blocks.len() > MAX_RANGE_BLOCKS
+            || r.initial_debris.len() > 128
+            || r.initial_debris.iter().enumerate().any(|(i, b)| {
+                ![2, 3, 5, 6].contains(&b.material)
+                    || b.min[1] != r.ground_level
+                    || (0..3).any(|a| b.min[a] <= 0 || b.max[a] >= size[a] || b.max[a] <= b.min[a] || b.max[a] - b.min[a] > 4)
+                    || r.initial_debris[..i].iter().any(|other| (0..3).all(|a| b.min[a] < other.max[a] && other.min[a] < b.max[a]))
+            })
             || r.mounds.len() > 16
             || r.mounds
                 .iter()
@@ -610,6 +628,22 @@ mod tests {
         assert!(layout.validate().is_err());
         layout.mounds = vec![m; 17];
         assert!(layout.validate().is_err());
+    }
+
+    #[test]
+    fn crawler_field_debris_survives_scene_roundtrip_and_ground_translation() {
+        let original = RangeLayout::from_ron(include_str!("../../../data/range-crawler-field.ron")).unwrap();
+        assert!(!original.initial_debris.is_empty());
+        assert_eq!(RangeLayout::from_ron(&original.to_ron().unwrap()).unwrap(), original);
+        let shifted = original.clone().with_ground_level(80).unwrap();
+        assert_eq!(shifted.initial_debris[0].min[1], original.initial_debris[0].min[1] + 64);
+        assert_eq!(shifted.with_ground_level(16).unwrap(), original);
+        let mut invalid = original.clone();
+        invalid.initial_debris.push(invalid.initial_debris[0].clone());
+        assert!(invalid.validate().is_err(), "overlapping fragments must be rejected");
+        invalid = original;
+        invalid.initial_debris[0].max[0] += 1;
+        assert!(invalid.validate().is_err(), "oversized fragment must be rejected");
     }
 
     #[test]

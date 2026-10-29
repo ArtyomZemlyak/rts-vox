@@ -254,6 +254,20 @@ impl Water {
                 }
             }
         }
+        // Interior of a filled volume has no free neighbouring cell and no
+        // solid contact. It cannot flow or absorb until a neighbour changes;
+        // wake_near will then enqueue it. Starting with the boundary avoids
+        // spending the first seconds scanning thousands of inert cells.
+        let size=[w.nx,w.ny,w.nz];
+        let queued=std::mem::take(&mut self.queue);
+        self.queued.clear();
+        for p in queued {
+            if DIRS.iter().all(|&d| neighbour(p,d,size).is_some_and(|q|self.amount(q)>=self.tuning.units_per_voxel)) {
+                continue;
+            }
+            self.queued.insert(p);
+            self.queue.push_back(p);
+        }
     }
     pub fn observe(&mut self, edits: &[Edit], size: Pos) {
         if self.is_empty() {
@@ -271,7 +285,7 @@ impl Water {
         w.solid(p[0], p[1], p[2]) || obstacles.contains(p)
     }
     fn transfer(&mut self, from: Pos, to: Pos, request: u32, size: Pos) -> u32 {
-        if self.transfers >= self.tuning.transfers_per_tick {
+        if from==to || self.transfers >= self.tuning.transfers_per_tick {
             return 0;
         }
         let dst = self.amount(to);
@@ -545,6 +559,33 @@ impl Water {
                 sides[..count].rotate_left(first);
             }
             for q in sides[..count].iter().flatten().copied() {
+                // A wet vertical column transmits pressure without requiring
+                // every interior cell to be processed first. Move a full
+                // packet from its connected surface to a neighbouring lower
+                // column. The path is checked cell by cell, so this cannot
+                // cross a solid wall or an air gap. Work per candidate is
+                // bounded, and transfer() preserves volume and heat.
+                let capacity = self.tuning.units_per_voxel;
+                if self.amount(p) >= capacity && self.amount(q) < capacity
+                    && neighbour(q, [0,-1,0], size).is_some_and(|below|
+                        Self::blocked(w,below,obstacles) || self.amount(below)>=capacity)
+                {
+                    let mut top = p;
+                    for _ in 0..12 {
+                        let Some(up)=neighbour(top,[0,1,0],size) else {break;};
+                        // A partially filled top cell still adds hydrostatic
+                        // head. Requiring a full cell stalled shallow streams
+                        // just as their source column began to drain.
+                        let volume=self.amount(up);
+                        if volume==0 || airborne.contains(&up) || Self::blocked(w,up,obstacles) {break;}
+                        top=up;
+                        // A partial cell is the surface, not a connection to
+                        // another cell above its unfilled portion.
+                        if volume<capacity {break;}
+                    }
+                    let packet=self.rate(capacity-self.amount(q));
+                    if top!=p && self.transfer(top,q,packet,size)>0 {continue;}
+                }
                 let diff = self.amount(p).saturating_sub(self.amount(q));
                 let amount = if diff > self.tuning.surface_tension {
                     // Equalise a neighbouring pair in one visit. The old
@@ -737,4 +778,37 @@ fn neighbour(p: Pos, d: [i32; 3], size: Pos) -> Option<Pos> {
 }
 fn linear(p: Pos, size: Pos) -> u64 {
     (u64::from(p[2]) * u64::from(size[1]) + u64::from(p[1])) * u64::from(size[0]) + u64::from(p[0])
+}
+
+#[cfg(test)]
+mod pressure_regressions {
+    use super::*;
+    struct Floor;
+    impl voxel::Generator for Floor {
+        fn material(&self,_x:u32,y:u32,_z:u32)->u16 {if y<4 {6}else{0}}
+    }
+    #[test]
+    fn transfer_to_the_same_cell_does_not_create_water() {
+        let mut water=Water::new();let p=[10,10,10];assert!(water.edit_volume(p,true));
+        let before=water.stats();let amount=water.amount(p);
+        assert_eq!(water.transfer(p,p,amount/2,[64;3]),0);
+        assert_eq!(water.amount(p),amount);assert_eq!(water.stats().units,before.units);
+        assert_eq!(water.stats().transfers,before.transfers);
+    }
+    #[test]
+    fn partially_filled_column_drives_a_stronger_outflow_without_losing_volume() {
+        let mut world=World::new(64,64,64,65536,Box::new(Floor));
+        for p in [[29,4,30],[30,4,29],[30,4,31]] {
+            world.queue_transfer(Edit::put(p[0],p[1],p[2],2));
+        }
+        world.flush_transfers();
+        let mut water=Water::new();let bottom=[30,4,30];let top=[30,5,30];let outlet=[31,4,30];
+        assert!(water.edit_volume(bottom,true));assert!(water.edit_volume(top,true));
+        let cap=water.tuning.units_per_voxel;water.set(top,cap*3/4);water.initial-=u64::from(cap/4);
+        let before=water.stats().units;water.step(&world,&[]);
+        assert_eq!(water.stats().units,before);
+        assert!(water.amount(outlet)>=cap*3/4,"partial upper water did not drive the outflow");
+        assert!(water.amount(bottom)>=cap*3/4,"the source column drained unrealistically");
+        assert!(water.checks<=water.tuning.checks_per_tick && water.transfers<=water.tuning.transfers_per_tick);
+    }
 }

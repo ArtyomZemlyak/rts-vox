@@ -57,6 +57,10 @@ mod tests {
 }
 impl BlastRange {
     pub fn inspect_cell(&self, at: [u32; 3]) -> Option<CellInspection> {
+        self.inspect_cell_with_motion(at, true)
+    }
+    /// Skip the potentially deep granular-column query for static overlays.
+    pub fn inspect_cell_with_motion(&self, at: [u32; 3], motion: bool) -> Option<CellInspection> {
         if (0..3).any(|a| at[a] >= self.size[a]) {
             return None;
         }
@@ -88,7 +92,7 @@ impl BlastRange {
             repose_drop: granular
                 .map(|m| (m.repose_drop as i32 + self.water.repose_bonus(at)).max(1) as u32),
             yield_pressure: granular.map(|m| m.yield_pressure),
-            motion: self.granular.motion_at(&self.world, at),
+            motion: if motion {self.granular.motion_at(&self.world, at)} else {None},
         })
     }
 }

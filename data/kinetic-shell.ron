@@ -7,8 +7,8 @@
     charge_ticks: 8,
     half_cells: 20,
     cell_units: 2,
-    // 2x launch speed, 4x finite work; armour stays harder than internal core.
-    energy: 48000,
+    // Keep the launch speed while limiting the finite work available for penetration.
+    energy: 24000,
     material_energy_j: 5400000,
     air_cost: 100,
     soil_resistance: 1200,

@@ -1,6 +1,72 @@
 use super::*;
 
 #[test]
+fn live_he_debris_settles_after_a_ground_shot() {
+    let (mut lab,mut scene)=setup();
+    action(&mut lab,&mut scene,LabAction::LiveTools);
+    action(&mut lab,&mut scene,LabAction::LiveTool(6));
+    action(&mut lab,&mut scene,LabAction::LiveApply([64,16,64],[40,24,64]));
+    for _ in 0..40 {tick(&mut lab,&mut scene);scene.sim.step();if scene.sim.shell.is_some() || scene.sim.impact.is_some(){break;}}
+    action(&mut lab,&mut scene,LabAction::LiveRelease);
+    for _ in 0..150 {scene.sim.step();}
+    let pieces=&scene.sim.matter.debris.fragments;
+    let flying=pieces.iter().filter(|f|!f.resting).count();
+    let max_y=pieces.iter().map(|f|f.position.y.to_int_trunc()).max().unwrap_or(0);
+    println!("live HE: tick={} impact={:?} pieces={} flying={} resting={} max_y={}",scene.sim.tick,scene.sim.impact,pieces.len(),flying,pieces.len()-flying,max_y);
+    println!("full={} sparse={} rotated={} above_25={}",pieces.iter().filter(|f|f.shape==u64::MAX&&f.side==4).count(),pieces.iter().filter(|f|f.shape!=u64::MAX).count(),pieces.iter().filter(|f|f.basis!=sim_core::burst::IDENTITY).count(),pieces.iter().filter(|f|f.resting&&f.position.y.to_int_trunc()>25).count());
+    println!("shape 1={} 2-8={} 9-32={} 33+={}",pieces.iter().filter(|f|f.shape.count_ones()==1).count(),pieces.iter().filter(|f|(2..=8).contains(&f.shape.count_ones())).count(),pieces.iter().filter(|f|(9..=32).contains(&f.shape.count_ones())).count(),pieces.iter().filter(|f|f.shape.count_ones()>32).count());
+    let mut false_support=0;
+    let cells=|q:&sim_core::burst::Fragment| {
+        let qp=[q.position.x,q.position.y,q.position.z].map(|v|v.to_f64_lossy());
+        let basis=q.basis.map(|v|[v.x,v.y,v.z].map(|x|x.to_f64_lossy()));
+        let centre=sim_core::burst::shape_centre(q.shape,q.side);let centre=[centre.x,centre.y,centre.z].map(|v|v.to_f64_lossy());
+        let scale=q.mm as f64/100.0;let radius=std::array::from_fn::<_,3,_>(|k|basis.iter().map(|v|v[k].abs()).sum::<f64>()*0.49*scale);
+        (0..u32::from(q.side).pow(3)).filter(|&bit|q.shape&(1u64<<bit)!=0).map(|bit|{
+            let s=q.side as u32;let cell=[bit%s,(bit/s)%s,bit/(s*s)];
+            let p=std::array::from_fn::<_,3,_>(|k|qp[k]+(0..3).map(|axis|basis[axis][k]*(cell[axis] as f64-centre[axis])*scale).sum::<f64>());
+            (std::array::from_fn::<_,3,_>(|k|p[k]-radius[k]),std::array::from_fn::<_,3,_>(|k|p[k]+radius[k]))
+        }).collect::<Vec<_>>()
+    };
+    let mut false_moving_support=0;
+    for (index,f) in pieces.iter().enumerate().filter(|(_,f)|f.resting) {
+        let p=[f.position.x,f.position.y,f.position.z].map(|v|v.to_f64_lossy());
+        let (a,b)=f.bounds();let lo=std::array::from_fn::<_,3,_>(|k|p[k]+a[k].to_f64_lossy());let hi=std::array::from_fn::<_,3,_>(|k|p[k]+b[k].to_f64_lossy());
+        if lo[1]<0.5 {continue;}
+        let low=[lo[0],lo[1]-0.5,lo[2]].map(|v|v.floor().clamp(0.0,127.0) as u32);
+        let high=hi.map(|v|v.floor().clamp(0.0,127.0) as u32);
+        if scene.sim.world.any_solid_box(low,high){continue;}
+        let mut broad=false;let mut actual=false;let mut actual_pair=false;let moving_cells=cells(f);
+        for (other,q) in pieces.iter().enumerate().filter(|(i,q)|*i!=index&&q.resting) {
+            let _=other;let qp=[q.position.x,q.position.y,q.position.z].map(|v|v.to_f64_lossy());let (qa,qb)=q.bounds();
+            let qlo=std::array::from_fn::<_,3,_>(|k|qp[k]+qa[k].to_f64_lossy());let qhi=std::array::from_fn::<_,3,_>(|k|qp[k]+qb[k].to_f64_lossy());
+            let testlo=[lo[0],lo[1]-0.5,lo[2]];
+            if qhi[1]>lo[1]||!(0..3).all(|k|testlo[k]<qhi[k]&&qlo[k]<hi[k]){continue;}
+            broad=true;
+            let basis=q.basis.map(|v|[v.x,v.y,v.z].map(|x|x.to_f64_lossy()));
+            let centre=sim_core::burst::shape_centre(q.shape,q.side);let centre=[centre.x,centre.y,centre.z].map(|v|v.to_f64_lossy());
+            let scale=q.mm as f64/100.0;let radius=std::array::from_fn::<_,3,_>(|k|basis.iter().map(|v|v[k].abs()).sum::<f64>()*0.49*scale);
+            for bit in 0..u32::from(q.side).pow(3) {if q.shape&(1u64<<bit)==0{continue;}
+                let s=q.side as u32;let cell=[bit%s,(bit/s)%s,bit/(s*s)];
+                let centre_world=std::array::from_fn::<_,3,_>(|k|qp[k]+(0..3).map(|axis|basis[axis][k]*(cell[axis] as f64-centre[axis])*scale).sum::<f64>());
+                let cell_lo=std::array::from_fn::<_,3,_>(|k|centre_world[k]-radius[k]);
+                let cell_hi=std::array::from_fn::<_,3,_>(|k|centre_world[k]+radius[k]);
+                if (0..3).all(|k|testlo[k]<cell_hi[k]&&cell_lo[k]<hi[k]) {
+                    actual=true;
+                    if moving_cells.iter().any(|(a,b)|(0..3).all(|k|a[k]-if k==1 {0.5}else{0.0}<cell_hi[k]&&cell_lo[k]<b[k])) {actual_pair=true;break;}
+                }
+            }
+            if actual_pair {break;}
+        }
+        if broad&&!actual {false_support+=1;}
+        if actual&&!actual_pair {false_moving_support+=1;}
+    }
+    assert_eq!(false_support,0,"a resting piece is supported only by empty parts of other fragment boxes");
+    assert_eq!(false_moving_support,0,"a resting piece is supported only under its own empty bounding corner");
+    assert!(scene.sim.impact.is_some(),"live gun must actually fire");
+    assert!(!pieces.is_empty(),"ground shot must produce fragments");
+}
+
+#[test]
 fn scenario_edits_actor_commands_and_device_parameters_atomically() {
     use modding::laboratory::experiments::{Input,Plan};
     use modding::lab_tools::{Device,DeviceKind,Collector};

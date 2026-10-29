@@ -300,38 +300,27 @@ fn range_sim(
     }
 }
 fn gun_rotation(sim: &BlastRange) -> Quat {
+    if !sim.point_gun() {
+        return moving::weapon_picture(&sim.gun).0;
+    }
     let d = sim.heading();
     Quat::from_rotation_y(-(d[2].to_f64_lossy() as f32).atan2(d[0].to_f64_lossy() as f32))
 }
-/// The turret's yaw this frame, in the picture's convention, interpolated
-/// through the tick like the hull's own heading.
-fn visible_gun_yaw(scene: &Scene, visual: &moving::Visual) -> f32 {
-    let old = visual.turret.unwrap_or(scene.sim.turret.angle);
-    let fraction = if scene.realtime && !scene.paused {
-        (scene.acc * sim_core::TICKS_PER_SECOND as f32).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
-    let turn = old as f32 + fx::angle::diff(scene.sim.turret.angle, old) as f32 * fraction;
-    -turn * std::f32::consts::TAU / fx::angle::FULL as f32
-}
 fn visible_gun_rotation(scene: &Scene, visual: &moving::Visual) -> Quat {
-    Quat::from_rotation_y(visible_gun_yaw(scene, visual))
+    if scene.sim.point_gun() { gun_rotation(&scene.sim) }
+    else { moving::visible_gun_frame(scene, visual).0 }
 }
 fn muzzle_vec(sim: &BlastRange) -> Vec3 {
     Vec3::from(sim.muzzle().map(|v| v.to_f64_lossy() as f32))
 }
 fn visible_muzzle(scene: &Scene, visual: &moving::Visual) -> Vec3 {
     if scene.sim.point_gun() { return muzzle_vec(&scene.sim); }
-    let current = moving::pose(&scene.sim.gun);
     let visible = moving::visible(&scene.sim.gun, visual.previous.last(), scene);
-    let current_yaw =
-        -scene.sim.turret.angle as f32 * std::f32::consts::TAU / fx::angle::FULL as f32;
-    let current_rotation = render::realtime::hull_rotation(current.up, current_yaw);
-    let visible_rotation =
-        render::realtime::hull_rotation(visible.up, visible_gun_yaw(scene, visual));
-    visible.pos
-        + visible_rotation * (current_rotation.inverse() * (muzzle_vec(&scene.sim) - current.pos))
+    let current = moving::pose(&scene.sim.gun);
+    let (current_rotation, current_offset) = moving::weapon_picture(&scene.sim.gun);
+    let (visible_rotation, visible_offset) = moving::visible_gun_frame(scene, visual);
+    visible.pos + visible_offset + visible_rotation
+        * (current_rotation.inverse() * (muzzle_vec(&scene.sim) - current.pos - current_offset))
 }
 /// Radius of one burning voxel's flame, world units (P-22).
 const FLAME_RADIUS: f32 = 2.4;
@@ -1145,16 +1134,16 @@ fn main() {
                     orient_gun,
                     witness::update,
                     profile::stamp,
-                    moving::animate,
+                    (moving::animate, laboratory::section_clip_units, laboratory::section_unit_caps).chain(),
                     fragments::draw,
                     bodies::draw,
                     water::draw,
-                    laboratory::highlight,
+                    (laboratory::highlight, laboratory::metrics_draw, laboratory::metric_fragments_draw).chain(),
                     profile::stamp,
                 )
                     .chain(),
                 (
-                    (framing, laboratory::section_camera).chain(),
+                    (framing, laboratory::section_camera, laboratory::metrics_terrain_offset).chain(),
                     fire::draw,
                     weapon_art,
                     animate_energy,
@@ -1175,7 +1164,7 @@ fn main() {
                         panel::hud::refresh,
                         knobs::refresh,
                         pilot::hud,
-                        (laboratory::refresh, laboratory::sync_ui, laboratory::sync_parameters, laboratory::sync_scenario, laboratory::scroll_ui).chain(),
+                        (laboratory::refresh, laboratory::sync_ui, laboratory::sync_parameters, laboratory::sync_scenario, laboratory::scroll_ui, laboratory::replay_input).chain(),
                     )
                         .chain(),
                     panel::hud::refresh_selection_box,
@@ -1956,8 +1945,9 @@ fn advance(
         }
         let before=(scene.sim.impact,scene.sim.impact_tick);
         let weapon_before=(scene.sim.config,scene.energy,scene.anni);
+        let replaying=laboratory.as_ref().is_some_and(|lab|laboratory::replay_playing(lab));
         if let Some(lab)=laboratory.as_mut() {
-            laboratory::tick_live(lab,&mut scene);
+            if !laboratory::tick_live(lab,&mut scene) {break;}
         }
         if weapon_before!=(scene.sim.config,scene.energy,scene.anni) {
             configure_gas(&scene.sim,scene.energy,scene.anni,&mut gas);
@@ -1980,7 +1970,7 @@ fn advance(
                 scene.sim.order_attack(2);
             }
         }
-        pilot.tick(&mut scene);
+        if !replaying {pilot.tick(&mut scene);}
         let started = std::time::Instant::now();
         let generation = scene.generation;
         profile.step(&mut scene.sim, generation);
@@ -2319,6 +2309,7 @@ fn advance(
             });
         }
         completed += 1;
+        if let Some(lab)=laboratory.as_mut() {if laboratory::finish_replay_tick(lab,&mut scene) {break;}}
     }
     profile.record_batch(batch_started.elapsed(), steps - completed);
 }
@@ -2333,7 +2324,7 @@ fn orient_gun(
     let origin = Vec3::from(GUN.map(|v| v as f32));
     // The turret turns about the hull's own up, not the world's (P-28): on
     // a tilted hull a level turret left a gap at the ring.
-    let aim = render::realtime::hull_rotation(pose.up, visible_gun_yaw(&scene, &visual));
+    let (aim, aim_offset) = moving::visible_gun_frame(&scene, &visual);
     let hull = render::realtime::hull_rotation(pose.up, pose.yaw);
     let segments = moving::gun_segments(&scene, &visual, pose);
     let age = (i64::from(scene.sim.tick) - i64::from(scene.sim.fire_tick)) as f32
@@ -2359,7 +2350,7 @@ fn orient_gun(
         }
         let rotation = if g.turret { aim } else { hull };
         *tr = g.base;
-        tr.translation = pivot
+        tr.translation = pivot + if g.turret { aim_offset } else { Vec3::ZERO }
             + rotation
                 * (g.base.translation - origin - Vec3::X * if g.turret { recoil } else { 0.0 });
         tr.rotation = rotation * g.base.rotation;
@@ -2566,10 +2557,15 @@ fn whole_map_frame(size: [u32; 3], ground: i32, offset: Vec3, aspect: f32) -> (V
     )
 }
 
+#[cfg(test)]
 fn orbit_offset(offset: Vec3, orbit: f32, pitch: f32) -> Vec3 {
+    orbit_offset_mode(offset,orbit,pitch,false)
+}
+fn orbit_offset_mode(offset: Vec3, orbit: f32, pitch: f32, editor: bool) -> Vec3 {
     let radius = offset.length();
+    let (min,max)=if editor {(5.0f32,85.0f32)}else{(20.0f32,80.0f32)};
     let angle = (offset.y.atan2(Vec2::new(offset.x, offset.z).length()) + pitch)
-        .clamp(20.0f32.to_radians(), 80.0f32.to_radians());
+        .clamp(min.to_radians(), max.to_radians());
     let horizontal = Quat::from_rotation_y(orbit) * Vec3::new(offset.x, 0.0, offset.z).normalize();
     horizontal * (radius * angle.cos()) + Vec3::Y * (radius * angle.sin())
 }
@@ -2681,7 +2677,7 @@ fn framing(
                 if workshop.sector().is_some() {
                     offset.y = 420.0;
                 }
-                offset = orbit_offset(offset, workshop.orbit, workshop.pitch);
+                offset = orbit_offset_mode(offset, workshop.orbit, workshop.pitch, laboratory.as_ref().is_some_and(|l|l.editor_camera()));
                 let (fitted, mut height) = workshop.sector().map_or_else(
                     || overview_frame(&scene.sim, aim, offset, aspect),
                     |z| sector_frame(z, offset, aspect),
@@ -2769,7 +2765,12 @@ fn framing(
                 } else {
                     (workshop.zoom, workshop.pan)
                 };
-                height = if scene.view == 1 {
+                height = if scene.view == 1 && laboratory.as_ref().is_some_and(|l|l.editor_camera()) {
+                    // Keep zoom proportional even when the default frame is
+                    // wider than the detailed streaming window. Otherwise the
+                    // first wheel steps pan without actually changing scale.
+                    height.min(local_limit) * zoom
+                } else if scene.view == 1 {
                     // The authored sector is wider than the detailed GPU
                     // window. Its default overview used to stop at this
                     // limit; keep that sharp local view until the player
