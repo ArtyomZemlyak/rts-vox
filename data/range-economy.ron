@@ -29,7 +29,9 @@
         (kind: ArtilleryTurretT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
         (kind: NuclearSilo, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
         (kind: ArtilleryTurretT3, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
-        (kind: Crawler, tank: 900000, dig_radius: 4, dig_reach: 35, dig_edits_per_tick: 16),
+        (kind: Crawler, tank: 100000000, dig_radius: 4, dig_reach: 110, dig_edits_per_tick: 16),
+        (kind: LightningTank, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+        (kind: EidolonTank, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
     ],
     bank: Some((
         // Each side's store with no dock standing.
@@ -39,14 +41,14 @@
         refine_den: 10,
         // A hauler unloads within this horizontal distance of its dock;
         // a base is 80 wide.
-        unload_reach: 100,
+        unload_reach: 150,
         // Dock searches of all haulers in one tick.
         dock_searches_per_tick: 8,
     )),
     reclaim: Some((
         // A digger at its face takes resting debris whose centre lies this
         // close to the face, and the tank of a dead digger whose hull does.
-        reach: 8,
+        reach: 64,
         // Reclaim searches of all diggers in one tick.
         searches_per_tick: 8,
         // A dead digger's tank loses a quarter of its cargo, as a breached

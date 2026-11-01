@@ -3,6 +3,22 @@ use super::{material, BlastRange, Explosion, ExplosionConfig, HitFrames, RangeUn
 use voxel::World;
 
 impl BlastRange {
+    /// Detonate an authored charge in a free-control scenario. The same
+    /// wave and damage budgets as a normal impact apply; never replace an
+    /// unfinished wave or let a scenario charge escape the map.
+    pub fn scenario_charge(&mut self, at: [i32; 3], power_milli: u32) -> bool {
+        if !self.battle_mode() || !self.shot_ready()
+            || self.explosion.as_ref().is_some_and(|e| e.capturing())
+            || (0..3).any(|a| at[a] < 0 || at[a] >= self.size[a] as i32)
+        {
+            return false;
+        }
+        let config = self.config;
+        self.config = config.at_power(power_milli);
+        self.begin_charge_impact(at, at);
+        self.config = config;
+        true
+    }
     /// Shared by projectile contact and explicitly placed charges. Capture, wave
     /// work and collapse remain subject to the ordinary per-tick engine budgets.
     pub(super) fn begin_charge_impact(&mut self, at: [i32; 3], from: [i32; 3]) {

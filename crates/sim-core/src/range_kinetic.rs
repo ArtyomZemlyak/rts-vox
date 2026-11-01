@@ -119,6 +119,7 @@ impl Job {
 impl BlastRange {
     // Flight reserves continuation capacity before any complete salvo is fired.
     pub(super) fn solid_flight_room(&self, rounds: &[battle::Round], count: usize) -> bool {
+        if self.battle_mode() && self.battle.autonomous { return true; }
         self.kinetic.jobs.len()
             + self.streams.rounds.len()
             + rounds
@@ -144,7 +145,8 @@ impl BlastRange {
         tuning: &modding::range_weapon::Stream,
         config: &ExplosionConfig,
     ) {
-        assert!(self.pending_machine_gun_contacts() < self.streams.tuning.kinetic.max_jobs);
+        // An already-flying round retains its contact even if ownership
+        // changed or the admission budget was lowered after launch.
         let mut config = *config;
         config.energy = tuning.work;
         config.material_energy_j = tuning.fracture_j;
@@ -217,10 +219,6 @@ impl BlastRange {
         }
         // Producers count pending jobs together with flying solid rounds.
         // They wait before firing, never discard an already accepted hit.
-        assert!(
-            self.kinetic.jobs.len() - self.pending_machine_gun_contacts()
-                < self.streams.tuning.kinetic.max_jobs
-        );
         let mut ray = Vec::with_capacity(RAY_CELLS);
         for i in 0..RAY_CELLS {
             let distance = Fx::from_ratio(i as i32, 2);
@@ -264,8 +262,13 @@ impl BlastRange {
         if self.kinetic.jobs.is_empty() {
             return;
         }
-        let mut budget = self.streams.tuning.kinetic.cells_per_tick;
         let count = self.kinetic.jobs.len();
+        let mut budget = self.streams.tuning.kinetic.cells_per_tick;
+        if self.battle_mode() && self.battle.autonomous {
+            // Under sustained AI fire, scale work with the actual backlog so
+            // admitted impacts do not spend seconds behind a fixed quota.
+            budget = budget.max(count.saturating_mul(128));
+        }
         // No other material producer runs between these atomic batches.
         let mut room = self.matter.claim_room();
         for _ in 0..count {
@@ -296,11 +299,16 @@ impl BlastRange {
         budget: &mut usize,
         room: Option<&mut u32>,
     ) -> bool {
-        let before: Vec<_> = self
-            .units
-            .iter()
-            .map(|u| (u.removed.len(), u.seg_removed.len()))
-            .collect();
+        // Direct contacts can affect at most one unit; ground contacts affect none.
+        let one = match job.direct.as_ref() {
+            Some(Direct::Body((id, _, _))) => {
+                let u = &self.units[*id];
+                Some((*id, (u.removed.len(), u.seg_removed.len())))
+            }
+            _ => None,
+        };
+        let before = job.direct.is_none().then(|| self.units.iter()
+            .map(|u| (u.removed.len(), u.seg_removed.len())).collect::<Vec<_>>());
         let previous = (self.matter.remaining_mj, self.matter.fragment_box());
         self.matter.remaining_mj = job.remaining_mj;
         self.matter.fragment_size(job.config.fragment_box);
@@ -321,9 +329,16 @@ impl BlastRange {
         job.remaining_mj = self.matter.remaining_mj;
         self.matter.remaining_mj = previous.0;
         self.matter.fragment_size(u32::from(previous.1));
-        for (id, (u, old)) in self.units.iter_mut().zip(before).enumerate() {
+        if let Some((id, old)) = one {
+            let u = &mut self.units[id];
             if (u.removed.len(), u.seg_removed.len()) != old {
                 u.refresh_damage(id);
+            }
+        } else if let Some(before) = before {
+            for (id, (u, old)) in self.units.iter_mut().zip(before).enumerate() {
+                if (u.removed.len(), u.seg_removed.len()) != old {
+                    u.refresh_damage(id);
+                }
             }
         }
         if !finished {

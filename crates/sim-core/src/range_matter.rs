@@ -1641,6 +1641,8 @@ impl Matter {
                     modding::range::RangeUnitKind::NuclearSilo => voxel::unit::nuclear_silo(),
                     modding::range::RangeUnitKind::Strider => voxel::unit::strider(),
                     modding::range::RangeUnitKind::Spider => voxel::unit::spider(),
+                    modding::range::RangeUnitKind::LightningTank => voxel::unit::lightning_tank(),
+                    modding::range::RangeUnitKind::EidolonTank => voxel::unit::eidolon_tank(),
                     modding::range::RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                     modding::range::RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
                     modding::range::RangeUnitKind::Base => voxel::unit::command_base(),

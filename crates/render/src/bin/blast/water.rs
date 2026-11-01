@@ -32,12 +32,12 @@ fn coloured_quad(b: &mut MeshBuf, normal: [f32; 3], corners: [[f32; 3]; 4], colo
 fn top_colour(x: f32, z: f32, height: f32, edge: f32) -> [f32; 4] {
     let glint = (((x * 0.095 + z * 0.061).sin() + (z * 0.11 - x * 0.043).sin()) * 0.5 + 1.0) * 0.5;
     let shallow = (1.0 - height).clamp(0.0, 1.0);
-    let foam = edge.clamp(0.0, 1.0) * 0.28;
+    let foam = edge.clamp(0.0, 1.0) * 0.20;
     let mix = |a: f32, b: f32| a + (b - a) * foam;
-    [mix(0.085 + glint * 0.055 + shallow * 0.035, 0.50),
-     mix(0.32 + glint * 0.08 + shallow * 0.055, 0.73),
-     mix(0.43 + glint * 0.09 + shallow * 0.055, 0.78),
-     0.74 + height * 0.10]
+    [mix(0.12 + glint * 0.045 + shallow * 0.035, 0.50),
+     mix(0.39 + glint * 0.065 + shallow * 0.055, 0.73),
+     mix(0.49 + glint * 0.075 + shallow * 0.055, 0.78),
+     0.32 + height * 0.10]
 }
 fn height(water: &Water, p: Chunk) -> f32 {
     if water.amount(p) == 0 {
@@ -80,7 +80,7 @@ fn surface_for(water: &Water, chunk: Chunk, mode:u8, mats:Option<&modding::Regis
                 let (x, y, z) = (x as f32, y as f32, z as f32);
                 let top = y + h;
                 let metric=water_metric(water,p,mode,mats);
-                let colour = metric.unwrap_or([0.08, 0.29, 0.39, 0.82]);
+                let colour = metric.unwrap_or([0.10, 0.31, 0.41, 0.36]);
                 if !retained([p[0],p[1]+1,p[2]],section) || water.amount([p[0], p[1] + 1, p[2]]) == 0 {
                     let colours=metric.map(|c|[c;4]).unwrap_or_else(||{
                         let edge = |dx: i32, dz: i32| {
@@ -145,8 +145,8 @@ fn surface_for(water: &Water, chunk: Chunk, mode:u8, mats:Option<&modding::Regis
                             [x, top, zz],
                         ]
                     };
-                    let upper = [0.13, 0.40, 0.51, 0.82];
-                    let lower = [0.055, 0.23, 0.32, 0.86];
+                    let upper = [0.16, 0.44, 0.55, 0.38];
+                    let lower = [0.075, 0.28, 0.38, 0.48];
                     let colours = metric.map(|c|[c;4]).unwrap_or(if axis == 0 {
                         [lower, upper, upper, lower]
                     } else {
@@ -204,8 +204,8 @@ pub fn draw(
             materials.add(StandardMaterial {
                 base_color: Color::srgba(0.90, 0.98, 1.0, 1.0),
                 alpha_mode: AlphaMode::Blend,
-                perceptual_roughness: 0.18,
-                reflectance: 0.65,
+                perceptual_roughness: 0.24,
+                reflectance: 0.50,
                 cull_mode: None,
                 ..default()
             })
@@ -302,5 +302,15 @@ mod tests {
         assert!(edge[0] > middle[0] && edge[1] > middle[1]);
         assert!(edge[1] < 0.6, "edge must not turn a whole tile white");
         assert_eq!(edge[3], middle[3]);
+    }
+    #[test]
+    fn ordinary_water_remains_translucent_without_extra_geometry() {
+        let mut w = Water::new();
+        assert!(w.edit_volume([2, 2, 2], true));
+        let b = surface(&w, [0; 3]);
+        assert_eq!((b.pos.len(), b.idx.len()), (24, 36));
+        assert!(b.col.iter().all(|c| (0.30..=0.50).contains(&c[3])));
+        assert!(b.col.iter().any(|c| c[3] < 0.40));
+        assert!(w.amount([2, 2, 2]) > 0);
     }
 }

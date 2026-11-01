@@ -57,7 +57,7 @@ fn sample(f: Finish, u: f32, v: f32) -> Sample {
         ),
         Finish::Rubber => (0.78 + grain * 0.16, 0.90 + grain * 0.08, 0.0, grain * 0.22),
         Finish::Optic => (0.98, 0.09, 0.0, 0.0),
-        Finish::Core => (1.0, 0.40, 0.0, 0.0),
+        Finish::Core | Finish::Energy => (1.0, 0.40, 0.0, 0.0),
     };
     Sample {
         albedo: [shade; 3],
@@ -130,6 +130,7 @@ pub fn materials(
         let colour = images.add(crate::tex::tile_image(colour, true));
         let props = images.add(crate::tex::tile_image(props, false));
         let normal = images.add(crate::tex::tile_image(normal, false));
+        let glow = look::finish_glow(f);
         materials.add(StandardMaterial {
             base_color: Color::WHITE,
             base_color_texture: Some(colour),
@@ -137,6 +138,7 @@ pub fn materials(
             perceptual_roughness: 1.0,
             metallic_roughness_texture: Some(props),
             normal_map_texture: Some(normal),
+            emissive: LinearRgba::rgb(glow[0], glow[1], glow[2]),
             ..default()
         })
     })

@@ -35,10 +35,60 @@ fn compact(buffer: MeshBuf) -> Option<Mesh> {
     mesh.asset_usage = RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD;
     Some(mesh)
 }
+
+/// Green nested charge frames inside the three physical T3 sockets.
+/// Everything uses the turret's actual damaged, rotating voxel frame.
+fn siege_ports(buf: &mut MeshBuf, unit: &sim_core::blast::RangeUnit, charge: f32) {
+    if charge <= 0.0 { return; }
+    let frame = unit.root_frame(usize::from(unit.body.turret_y));
+    let strength = charge * charge * (3.0 - 2.0 * charge);
+    // Back, right and left use the same socket turned through 90 degrees.
+    for (anchor, side) in [([41,14,27], 0), ([55,14,42], 1), ([55,14,13], 2)] {
+        if unit.removed.contains(&anchor) || !unit.body.vol.get(anchor[0] as usize, anchor[1] as usize, anchor[2] as usize) { continue; }
+        let mut quad = |r: f32, t0: f32, t1: f32, y0: f32, y1: f32, colour: [f32; 4]| {
+            let position = |t: f32, y: f32| -> [f32; 3] {
+                let local = match side { 0 => [56.0-r,y,28.0+t], 1 => [56.0+t,y,28.0+r], _ => [56.0+t,y,28.0-r] };
+                let v = frame.world(local.map(|v| fx::Fx::from_ratio((v * 10.0) as i32, 10)));
+                [v.x.to_f64_lossy() as f32, v.y.to_f64_lossy() as f32, v.z.to_f64_lossy() as f32]
+            };
+            let points = [position(t0,y0),position(t0,y1),position(t1,y1),position(t1,y0)];
+            let normal = (Vec3::from(points[1]) - Vec3::from(points[0])).cross(Vec3::from(points[2]) - Vec3::from(points[0])).normalize_or_zero();
+            let first = buf.pos.len() as u32;
+            buf.pos.extend(points); buf.nrm.extend([normal.to_array(); 4]); buf.col.extend([colour; 4]);
+            buf.idx.extend([first,first+1,first+2,first,first+2,first+3]);
+        };
+        // Thin separated frames leave the dark back and the depth visible.
+        for (r,w,h,threshold) in [(16.7,5.0,2.0,0.35), (15.8,3.6,1.5,0.10)] {
+            let level = ((strength-threshold)/(1.0-threshold)).clamp(0.0,1.0);
+            let colour = [0.03+level*0.3, 0.9+level*3.4, 0.65+level*2.4, 0.8];
+            let thick = 0.35;
+            quad(r,-w,w,14.0-h,14.0-h+thick,colour);
+            quad(r,-w,w,14.0+h-thick,14.0+h,colour);
+            quad(r,-w,-w+thick,14.0-h,14.0+h,colour);
+            quad(r,w-thick,w,14.0-h,14.0+h,colour);
+        }
+        quad(14.9,-1.5,1.5,13.4,14.6,[0.3+strength*1.8,2.0+strength*7.0,1.6+strength*5.5,0.98]);
+    }
+    // A smaller, recessed light in the open muzzle accompanies the charge.
+    let anchor = [109, 13, 27];
+    if !unit.removed.contains(&anchor) && unit.body.vol.get(109,13,27) {
+        let points = [[1101,122,254],[1101,148,254],[1101,148,306],[1101,122,306]].map(|p| {
+            let v = frame.world(p.map(|v| fx::Fx::from_ratio(v,10)));
+            [v.x.to_f64_lossy() as f32,v.y.to_f64_lossy() as f32,v.z.to_f64_lossy() as f32]
+        });
+        let normal = (Vec3::from(points[1])-Vec3::from(points[0])).cross(Vec3::from(points[2])-Vec3::from(points[0])).normalize_or_zero();
+        let first = buf.pos.len() as u32;
+        buf.pos.extend(points); buf.nrm.extend([normal.to_array(); 4]);
+        buf.col.extend([[0.1+strength*0.4,0.7+strength*2.8,0.6+strength*2.0,0.8]; 4]);
+        buf.idx.extend([first,first+1,first+2,first,first+2,first+3]);
+    }
+}
+
 pub(super) fn prepare(input: Input<'_>, pool: Option<&bevy::tasks::TaskPool>) -> Prepared {
     let particle_smoke = input.particles.iter().filter(|(p, _, _)| p.smoke).count();
     let mut smoke_count = particle_smoke;
     let mut hot_count = input.particles.len() - particle_smoke
+        + input.effects.reclaim_flights.len()
         + input.effects.tracers.len() * 2
         + input.sim.battle.lasers.len() * 4
         + input.sim.battle.rounds.len()
@@ -90,6 +140,26 @@ pub(super) fn prepare(input: Input<'_>, pool: Option<&bevy::tasks::TaskPool>) ->
         }
     }
 }
+/// Emissive cubic bloom, bounded to the visible ray. The translucent outer
+/// blocks suggest hot-air shimmer without a full-screen refraction pass.
+fn laser_emission(buf: &mut MeshBuf, from: Vec3, to: Vec3, hit: bool, scale: f32, now: f32) {
+    let axis = (to - from).normalize_or(Vec3::X);
+    let pulse = 0.88 + 0.12 * (now * 17.0).sin();
+    let origin = from + axis * (0.8 * scale);
+    cube(buf, origin, 2.4 * scale * pulse, [8.0, 0.55, 0.18, 0.9]);
+    cube(buf, origin, 5.0 * scale, [2.0, 0.08, 0.03, 0.12]);
+    if !hit { return; }
+    let at = to - axis * (0.25 * scale);
+    cube(buf, at, 3.2 * scale * pulse, [11.0, 3.0, 0.55, 0.95]);
+    cube(buf, at, 7.0 * scale, [2.8, 0.2, 0.035, 0.16]);
+    let side = axis.any_orthonormal_vector();
+    let up = axis.cross(side).normalize_or_zero();
+    for vector in [side, -side, up, -up] {
+        beam(buf, at - axis * (0.4 * scale), at + vector * (4.0 * scale) - axis * (1.5 * scale),
+            0.35 * scale, [7.5, 1.5, 0.2, 0.65]);
+    }
+}
+
 fn hot(input: Input<'_>) -> MeshBuf {
     let Input {
         sim,
@@ -103,6 +173,33 @@ fn hot(input: Input<'_>) -> MeshBuf {
         first_person_origin,
     } = input;
     let mut hot = MeshBuf::default();
+    for flight in &fx.reclaim_flights {
+        let t = ((now - flight.born) / RECLAIM_FLIGHT_LIFE).clamp(0.0, 1.0);
+        let Some(unit) = sim.units.get(flight.crawler) else { continue; };
+        let end = Vec3::from(unit.world_pos([180, 20, 56]).map(|v| v as f32));
+        let arc = (std::f32::consts::PI * t).sin();
+        let jitter = Vec3::new(noise(flight.seed) - 0.5, 0.0, noise(flight.seed.wrapping_add(17)) - 0.5);
+        let at = flight.from.lerp(end, smooth01(t)) + Vec3::Y * arc * 6.0 + jitter * arc * 3.0;
+        let mut colour = fragments::material_colour(flight.material);
+        colour[3] = (1.0 - smooth01((t - 0.80) / 0.20)).max(0.0);
+        cube(&mut hot, at, 1.2 + noise(flight.seed.wrapping_add(3)) * 1.2, colour);
+    }
+    if sim.battle_mode() {
+        let tick = sim.tick.saturating_sub(1) as f32 + fraction;
+        for (id, unit) in sim.units.iter().enumerate() {
+            if unit.kind != RangeUnitKind::ArtilleryTurretT3 || !unit.status.alive || !unit.status.weapon { continue; }
+            let Some(deadline) = sim.battle_charge(id) else { continue; };
+            let duration = sim.battle.config(BattleWeapon::Siege).charge_ticks.max(1) as f32;
+            let charge = (1.0 - (deadline as f32 - tick) / duration).clamp(0.0, 1.0);
+            siege_ports(&mut hot, unit, charge);
+        }
+    } else if sim.gun.kind == RangeUnitKind::ArtilleryTurretT3 && sim.gun.status.alive
+        && sim.gun.status.weapon && sim.fire_tick != u32::MAX && sim.fire_tick >= sim.tick
+    {
+        let duration = sim.config.charge_ticks.max(1) as f32;
+        let charge = (1.0 - (sim.fire_tick as f32 - (sim.tick as f32 + fraction)) / duration).clamp(0.0, 1.0);
+        siege_ports(&mut hot, &sim.gun, charge);
+    }
     nuclear::append(&mut hot, fx, now, false);
     for trace in &sim.battle.lasers {
         let from = point(trace.from);
@@ -110,9 +207,38 @@ fn hot(input: Input<'_>) -> MeshBuf {
         beam(&mut hot, from, to, 10.0, [1.8, 0.025, 0.018, 0.09]);
         beam(&mut hot, from, to, 4.8, [5.0, 0.12, 0.04, 0.30]);
         beam(&mut hot, from, to, 1.9, [12.0, 2.8, 0.8, 0.95]);
-        if trace.hit {
-            cube(&mut hot, to, 6.0, [9.0, 1.8, 0.3, 0.9]);
+        laser_emission(&mut hot, from, to, trace.hit, 2.0, now);
+    }
+    for trace in &sim.battle.lightning {
+        let from = point(trace.from);
+        let to = point(trace.to);
+        let direction = to - from;
+        let mut side = direction.cross(Vec3::Y).normalize_or_zero();
+        if side.length_squared() < 0.01 { side = Vec3::X; }
+        let up = side.cross(direction.normalize_or_zero()).normalize_or_zero();
+        let bend = (direction.length() * 0.035).clamp(3.0, 18.0);
+        let mut previous = from;
+        for i in 1..=16 {
+            let t = i as f32 / 16.0;
+            let mut seed = trace.serial.wrapping_mul(747796405).wrapping_add((i as u32).wrapping_mul(2891336453));
+            seed ^= seed >> 16; seed = seed.wrapping_mul(2246822519); seed ^= seed >> 13;
+            let a = ((seed >> 8) & 255) as f32 / 127.5 - 1.0;
+            let b = ((seed >> 24) & 255) as f32 / 127.5 - 1.0;
+            let offset = if i == 16 { Vec3::ZERO } else {
+                (side * a + up * b) * bend * (std::f32::consts::PI * t).sin().sqrt()
+            };
+            let next = from.lerp(to, t) + offset;
+            beam(&mut hot, previous, next, 3.5, [0.08, 1.2, 5.0, 0.19]);
+            beam(&mut hot, previous, next, 0.8, [2.0, 5.5, 10.0, 0.98]);
+            if i == 5 || i == 10 || i == 13 {
+                let fork = next + (side * b - up * a) * bend * 0.8 + direction * 0.07;
+                let elbow = next.lerp(fork, 0.55) + side * a * bend * 0.35;
+                beam(&mut hot, next, elbow, 0.7, [0.8, 3.6, 8.0, 0.8]);
+                beam(&mut hot, elbow, fork, 0.35, [0.5, 2.6, 7.0, 0.55]);
+            }
+            previous = next;
         }
+        if trace.hit { cube(&mut hot, to, 2.0, [1.2, 4.5, 9.0, 0.8]); }
     }
     if sim.config.delivery == Delivery::Laser && !sim.battle_mode() {
         for trace in &sim.streams.traces {
@@ -131,9 +257,7 @@ fn hot(input: Input<'_>) -> MeshBuf {
             }
             beam(&mut hot, from, to, 2.4 * size, [2.8, 0.06, 0.025, 0.18]);
             beam(&mut hot, from, to, 0.65 * size, [7.0, 0.36, 0.25, 0.92]);
-            if trace.hit {
-                cube(&mut hot, to, 2.5 * size, [5.0, 0.65, 0.18, 0.75]);
-            }
+            laser_emission(&mut hot, from, to, trace.hit, size, now);
         }
     }
     if sim.config.delivery == Delivery::MachineGun || sim.battle_mode() {
@@ -345,7 +469,10 @@ fn smoke_with_pool(input: Input<'_>, pool: Option<&bevy::tasks::TaskPool>) -> Me
     let mut smoke = MeshBuf::default();
     nuclear::append_smoke(&mut smoke, input.effects, input.now, pool);
     for &(p, at, t) in input.particles.iter().filter(|(p, _, _)| p.smoke) {
-        if p.steam {
+        if p.trail_smoke {
+            let fade = (t * 12.0).min(1.0) * (1.0 - t).powi(2);
+            puff(&mut smoke, at, p.edge * (0.7 + t * 0.8), [0.31, 0.32, 0.33, fade * 0.12], p, t);
+        } else if p.steam {
             let fade=(t*10.0).min(1.0)*(1.0-t).powi(2);
             puff(&mut smoke,at,p.edge*(0.75+t*0.9),[0.74,0.79,0.82,fade*0.26],p,t);
         } else if p.contact == Some(ContactKind::Dust) {
@@ -433,6 +560,68 @@ fn puff(buf: &mut MeshBuf, at: Vec3, edge: f32, col: [f32; 4], p: &Particle, t: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn laser_emission_is_bounded_and_impact_only_on_hit() {
+        let from = Vec3::new(10.0, 20.0, 30.0);
+        let to = Vec3::new(40.0, 20.0, 30.0);
+        let mut miss = MeshBuf::default();
+        let mut hit = MeshBuf::default();
+        laser_emission(&mut miss, from, to, false, 1.0, 0.2);
+        laser_emission(&mut hit, from, to, true, 1.0, 0.2);
+        assert!(!miss.is_empty());
+        assert!(hit.pos.len() > miss.pos.len());
+        assert!(hit.pos.len() < 500, "laser endpoint geometry is not bounded");
+        assert!(miss.pos.iter().all(|p| Vec3::from(*p).distance(from) < 10.0));
+        assert!(hit.pos.iter().any(|p| Vec3::from(*p).distance(to) < 5.0));
+    }
+
+    #[test]
+    fn siege_ports_follow_turret_and_disappear_with_their_backing() {
+        let mut u = sim_core::blast::RangeUnit::of_kind(RangeUnitKind::ArtilleryTurretT3, [128,16,128]);
+        let mut off = MeshBuf::default();
+        siege_ports(&mut off, &u, 0.0);
+        assert!(off.pos.is_empty());
+        let mut charged = MeshBuf::default();
+        siege_ports(&mut charged, &u, 1.0);
+        assert_eq!(charged.pos.len(), 112);
+        assert!(charged.col.iter().all(|c| c[1] > c[0]));
+        u.turret_delta = fx::angle::FULL / 4;
+        u.turret_pitch = fx::angle::FULL / 16;
+        let mut turned = MeshBuf::default();
+        siege_ports(&mut turned, &u, 1.0);
+        assert_ne!(charged.pos, turned.pos);
+        u.removed.push([41,14,27]);
+        let mut damaged = MeshBuf::default();
+        siege_ports(&mut damaged, &u, 1.0);
+        assert_eq!(damaged.pos.len(), 76);
+    }
+    #[test]
+    fn siege_ports_light_during_an_actual_battle_charge() {
+        use sim_core::blast::battle::Order;
+        let mut layout=RangeLayout::from_ron(include_str!("../../../../../../data/range-crawler-field.ron")).unwrap();
+        layout.units.truncate(2);
+        layout.units[0].kind=RangeUnitKind::ArtilleryTurretT3;
+        layout.units[1].kind=RangeUnitKind::Tank;
+        layout.units[1].allied=false;
+        layout.units[1].at=[540,16,320];
+        let mut sim=BlastRange::with_layout(config(false,false),layout).unwrap();
+        sim.set_physics_workers(1); sim.set_navigation_workers(1);
+        sim.start_battle().unwrap();
+        assert!(sim.battle_order(0,Order::Ground([400,16,320]),None));
+        let effects=Effects::default();let poses=Poses::new();
+        let mut lit=false;let mut fired=false;
+        for _ in 0..240 {
+            sim.step();
+            if sim.battle_charge(0).is_some() {
+                let b=hot(Input {sim:&sim,effects:&effects,particles:&[],now:sim.tick as f32 / sim_core::TICKS_PER_SECOND as f32,
+                    fraction:1.0,poses:&poses,markers:None,single:(None,2.0),first_person_origin:None});
+                lit |= b.pos.len() >= 12 && b.col.iter().any(|c|c[1]>2.0 && c[3]>0.8);
+            }
+            if sim.battle.actors[0].fired>0 { fired=true;break; }
+        }
+        assert!(lit,"the actual charge never emitted visible port faces");
+        assert!(fired,"fixture never completed the shot");
+    }
 
     fn fixture(count: usize) -> (BlastRange, Effects, Poses) {
         let mut layout =

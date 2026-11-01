@@ -3,6 +3,26 @@ use super::*;
 use voxel::{bodies::Bodies, Edit};
 
 #[test]
+fn dune_large_rock_keeps_moving_after_contact_with_other_rocks() {
+    let e=modding::laboratory::experiments::stock().into_iter().find(|e|e.id=="dune-rockfall").unwrap();
+    let config=ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut r=BlastRange::with_layout(config,e.layout).unwrap();r.control();r.set_physics_workers(1);r.set_navigation_workers(1);
+    let mut previous=None; let mut still=0; let mut max_still=0; let mut descended=false;
+    for _ in 0..55 {
+        r.step();
+        if let Some(b)=r.bodies.list.iter().find(|b|b.voxels.len()==729) {
+            let pos=(b.ox,b.oy,b.oz,b.tilt_angle);
+            if b.fallen>5 && b.oy>25 && previous==Some(pos) {still+=1;}else{still=0;}
+            max_still=max_still.max(still); previous=Some(pos);
+            descended |= b.oy <= 25 && b.ox > 395;
+        }
+        assert!(r.matter.economy.ledger.balanced());
+    }
+    assert!(descended, "the largest rock must continue downhill after contact");
+    assert!(max_still <= 5, "the largest rock stalled for {max_still} ticks above the foot of the dune");
+}
+
+#[test]
 fn dune_rockfall_authored_scene_falls_descends_and_restores_without_losing_material() {
     let e=modding::laboratory::experiments::stock().into_iter().find(|e|e.id=="dune-rockfall").unwrap();
     let config=ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();

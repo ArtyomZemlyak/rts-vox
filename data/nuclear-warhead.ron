@@ -1,11 +1,11 @@
 // Same 204.8 m capture ceiling; gameplay pressure decays before this boundary.
 // Hulls are steel: only modest role differences above the world's steel900.
 // Wide square terraces, a deep core and shallow outer shelves; air blast stays broad.
-// Finite strategic fracture payload remains 2 TJ in range-nuclear.ron.
+// Finite strategic fracture payload is 4 TJ in range-nuclear.ron.
 (
  delivery: Blast, motion: Ballistic,
  charge_ticks: 40, fire_tick: 40,
- half_cells: 32, cell_units: 64, energy: 2400,
+ half_cells: 32, cell_units: 64, energy: 4000,
  material_energy_j: 4000000000,
  air_cost: 100, soil_resistance: 60, concrete_resistance: 150,
  soil_depth_cost: 32,

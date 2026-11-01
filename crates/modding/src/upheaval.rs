@@ -22,7 +22,7 @@ impl Tuning {
         let t: Self = ron::from_str(s).map_err(|e| e.to_string())?;
         if !(2..=64).contains(&t.minimum_burial)
             || !(1..=8).contains(&t.radius_per_depth)
-            || !(4..=64).contains(&t.radius)
+            || !(4..=128).contains(&t.radius)
             || !(2..=16).contains(&t.side)
             || t.side % 2 != 0
             || !(1..=16).contains(&t.layers)

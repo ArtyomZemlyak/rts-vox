@@ -12,6 +12,32 @@ struct Job {
     tiles: Vec<[i32; 2]>,
     cursor: usize,
     energy: u64,
+    speed: i32,
+}
+// Scale length by the cube root of yield; keep the arithmetic deterministic.
+fn yield_scale(energy: u32) -> i32 {
+    let target = u128::from(energy) * 1_000_000_000 / 3500;
+    let (mut lo, mut hi) = (0u128, 10_000u128);
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        if mid * mid * mid <= target { lo = mid; } else { hi = mid - 1; }
+    }
+    lo as i32
+}
+fn tile_side(radius: i32, t: Tuning) -> i32 {
+    if radius > 32 { (t.side * 2).min(16) } else { t.side }
+}
+// Use the live column when its surface is terrain, including laboratory
+// additions and craters; an unrelated building above the ground should not
+// become a stack of soil to lift.
+fn ground_surface(w: &voxel::World, x: u32, z: u32) -> Option<u32> {
+    let ceiling = w.column_ceiling(x, z);
+    if ceiling == 0 { return None; }
+    if matches!(w.material(x, ceiling - 1, z), 1 | 6 | 7 | 8 | 10) {
+        Some(ceiling)
+    } else {
+        w.soil_height(x, z).map(|h| h.min(ceiling))
+    }
 }
 pub(super) struct Upheaval {
     t: Tuning,
@@ -54,11 +80,11 @@ impl Upheaval {
     ) -> u64 {
         if self.jobs.len() >= self.t.jobs
             || config.delivery != modding::explosion::Delivery::Blast
-            || at.iter().any(|v| *v < 1)
+            || (0..3).any(|a| at[a] < 1 || at[a] >= [w.nx, w.ny, w.nz][a] as i32 - 1)
         {
             return 0;
         }
-        let Some(surface) = w.soil_height(at[0] as u32, at[2] as u32) else {
+        let Some(surface) = ground_surface(w, at[0] as u32, at[2] as u32) else {
             return 0;
         };
         let depth = surface as i32 - at[1];
@@ -68,7 +94,10 @@ impl Upheaval {
         if !(at[1] + 1..=surface as i32).any(|y| w.solid(at[0] as u32, y as u32, at[2] as u32)) {
             return 0;
         }
-        let radius = (depth * self.t.radius_per_depth).min(self.t.radius);
+        let scale = yield_scale(config.energy);
+        let radius = ((depth * self.t.radius_per_depth * scale / 1000).max(self.t.side))
+            .min(self.t.radius);
+        let speed = self.t.speed * scale.clamp(1000, 3000) / 1000;
         let reserved = energy / 1000 * u64::from(self.t.energy_milli); // exact whole joules
         if reserved == 0 {
             return 0;
@@ -76,9 +105,10 @@ impl Upheaval {
         self.jobs.push_back(Job {
             at,
             radius,
-            tiles: tiles(at, radius, self.t.side),
+            tiles: tiles(at, radius, tile_side(radius, self.t)),
             cursor: 0,
             energy: reserved,
+            speed,
         });
         reserved
     }
@@ -95,9 +125,10 @@ impl Upheaval {
             b.i32(j.radius);
             b.u32(j.cursor as u32);
             b.u64(j.energy);
+            b.i32(j.speed);
         }
     }
-    pub fn load(&mut self, s: &mut Scan, size: [u32; 3]) -> Option<()> {
+    pub fn load(&mut self, s: &mut Scan, size: [u32; 3], scaled: bool) -> Option<()> {
         *self = Self::new();
         self.raised = s.u64();
         let n = s.u32() as usize;
@@ -109,14 +140,16 @@ impl Upheaval {
             let radius = s.i32();
             let cursor = s.u32() as usize;
             let energy = s.u64();
+            let speed = if scaled { s.i32() } else { self.t.speed };
             if (0..3).any(|a| at[a] < 1 || at[a] >= size[a] as i32 - 1)
                 || radius < 1
                 || radius > self.t.radius
                 || energy > u64::from(u32::MAX) * 1000
+                || speed < self.t.speed || speed > self.t.speed * 3
             {
                 return None;
             }
-            let tiles = tiles(at, radius, self.t.side);
+            let tiles = tiles(at, radius, tile_side(radius, self.t));
             if cursor > tiles.len() {
                 return None;
             }
@@ -126,6 +159,7 @@ impl Upheaval {
                 tiles,
                 cursor,
                 energy,
+                speed,
             });
         }
         s.ok().then_some(())
@@ -134,29 +168,32 @@ impl Upheaval {
 impl BlastRange {
     pub(super) fn step_upheaval(&mut self) {
         let t = self.upheaval.t;
-        let mut checks = t.checks;
+        let mut checks = if self.upheaval.jobs.iter().any(|j| j.radius > 32) {
+            t.checks.saturating_mul(4)
+        } else { t.checks };
         let mut pieces = t.pieces;
         let turns = self.upheaval.jobs.len();
         for _ in 0..turns {
             let Some(mut j) = self.upheaval.jobs.pop_front() else {
                 break;
             };
+            let side = tile_side(j.radius, t);
             while j.cursor < j.tiles.len()
-                && checks >= (t.side * t.side) as usize * (t.layers as usize + 1)
+                && checks >= (side * side) as usize * (t.layers as usize + 1)
                 && pieces > 0
                 && self.bodies.list.len() < self.bodies.max_bodies
             {
                 let p = j.tiles[j.cursor];
                 j.cursor += 1;
-                let dx = p[0] + t.side / 2 - j.at[0];
-                let dz = p[1] + t.side / 2 - j.at[2];
+                let dx = p[0] + side / 2 - j.at[0];
+                let dz = p[1] + side / 2 - j.at[2];
                 let speed = t.edge_speed
-                    + (t.speed - t.edge_speed) * (j.radius * j.radius - dx * dx - dz * dz).max(0)
+                    + (j.speed - t.edge_speed) * (j.radius * j.radius - dx * dx - dz * dz).max(0)
                         / (j.radius * j.radius);
                 let mut cells = Vec::new();
                 let mut cost = 0u64;
-                for z in p[1]..p[1] + t.side {
-                    for x in p[0]..p[0] + t.side {
+                for z in p[1]..p[1] + side {
+                    for x in p[0]..p[0] + side {
                         if x < 1
                             || z < 1
                             || x >= self.size[0] as i32 - 1
@@ -165,11 +202,7 @@ impl BlastRange {
                             continue;
                         }
                         checks -= 1;
-                        let top = self
-                            .world
-                            .soil_height(x as u32, z as u32)
-                            .unwrap_or(0)
-                            .min(self.world.column_ceiling(x as u32, z as u32));
+                        let top = ground_surface(&self.world, x as u32, z as u32).unwrap_or(0);
                         let bottom = top.saturating_sub(t.layers).max((j.at[1] + 1) as u32);
                         for y in bottom..top {
                             checks -= 1;
@@ -214,6 +247,37 @@ impl BlastRange {
                     self.upheaval.raised += cells.len() as u64;
                     j.energy -= cost;
                     self.matter.spent_mj += cost;
+                    // A mobile hull standing on this patch receives the
+                    // patch's upward velocity. Pay its kinetic energy from
+                    // the same finite reserve; fixed structures stay anchored.
+                    for u in &mut self.units {
+                        if !u.status.alive || u.kind.emplacement() { continue; }
+                        let [ux, uy, uz] = u.motion.pos.map(Fx::to_int_trunc);
+                        if ux < p[0] || ux >= p[0] + side || uz < p[1] || uz >= p[1] + side { continue; }
+                        let Some(top) = ground_surface(&self.world, ux as u32, uz as u32) else { continue; };
+                        if (uy - top as i32).abs() > 3
+                            || !cells.iter().any(|&(x,y,z)| x == ux as u32 && z == uz as u32 && y + 1 == top)
+                        { continue; }
+                        let old = u.motion.hull.vy.max(Fx::ZERO);
+                        let new = Fx::from_int(speed).max(old);
+                        if new == old { continue; }
+                        let mm_per_unit = u64::from(voxel::unit::WORLD_MM);
+                        let old_mm = (old.raw().max(0) as u128 * u128::from(mm_per_unit)) >> 32;
+                        let new_mm = (new.raw().max(0) as u128 * u128::from(mm_per_unit)) >> 32;
+                        let mass_kg = if u.motion.chassis.mass > 0 {
+                            u64::from(u.motion.chassis.mass as u32) * 1000
+                        } else {
+                            ((u128::from(u.body.volume_mm3()) * u.motion.chassis.density.max(1) as u128) / 1_000_000_000)
+                                .clamp(1, u128::from(u64::MAX)) as u64
+                        };
+                        let work = (u128::from(mass_kg) * (new_mm * new_mm - old_mm * old_mm) / 2000)
+                            .min(u128::from(u64::MAX)) as u64;
+                        if work <= j.energy {
+                            u.motion.hull.vy = new;
+                            j.energy -= work;
+                            self.matter.spent_mj += work;
+                        }
+                    }
                     pieces -= 1;
                 }
             }

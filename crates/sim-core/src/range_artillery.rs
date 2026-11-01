@@ -165,8 +165,10 @@ pub(super) fn solve_moving(
     let mut best: Option<(Fx, Aim)> = None;
     // The muzzle moves with elevation. A bounded fixed-point solve uses its
     // actual position, rather than aiming a trajectory from the hull centre.
-    // Eight iterations are a numerical work bound, not a gameplay tuning.
-    for _ in 0..8 {
+    // The longer T3 barrel moves its muzzle farther while turning, so it
+    // needs more iterations for nearby targets; retain a fixed work bound.
+    let iterations = if u.kind == RangeUnitKind::ArtilleryTurretT3 { 16 } else { 8 };
+    for _ in 0..iterations {
         let f = u.aimed_frame(
             &u.pose,
             angle::diff(aim.yaw, u.motion.drive.head),
@@ -214,6 +216,12 @@ pub(super) fn solve_moving(
         let pitch = angle::diff(angle::atan2(local_y.raw(), flat.raw()), 0);
         let settled =
             angle::diff(yaw, aim.yaw).abs() <= 1 && angle::diff(pitch, aim.pitch).abs() <= 1;
+        // Damping prevents a long muzzle from overshooting back and forth
+        // around a close target as the barrel's pivot moves during the solve.
+        let (yaw, pitch) = if u.kind == RangeUnitKind::ArtilleryTurretT3 && !settled {
+            (angle::norm(aim.yaw + angle::diff(yaw, aim.yaw) / 2),
+             aim.pitch + angle::diff(pitch, aim.pitch) / 2)
+        } else { (yaw, pitch) };
         aim = Aim {
             yaw,
             pitch,

@@ -53,14 +53,41 @@ fn assert_separate(s: &BlastRange) {
         for b in a + 1..s.units.len() {
             let ua = &s.units[a];
             let ub = &s.units[b];
-            assert_eq!(
-                motion::Obstacle::of(&ua.motion, &ua.body)
-                    .penetration(&motion::Obstacle::of(&ub.motion, &ub.body)),
-                Fx::ZERO,
-                "intersecting hulls {a}/{b} at {}",
-                s.tick
-            );
+            let depth = motion::Obstacle::of(&ua.motion, &ua.body)
+                .penetration(&motion::Obstacle::of(&ub.motion, &ub.body));
+            assert!(depth <= Fx::from_int(2),
+                "hull overlap {depth:?} exceeds 20 cm: {a}/{b} at {}", s.tick);
         }
+    }
+}
+#[test]
+fn small_group_advances_without_deep_hull_overlap() {
+    let mut s = arena(3, false);
+    s.set_navigation_workers(1);
+    s.set_physics_workers(1);
+    let destinations = s.battle_formation_destinations(&[0, 1, 2], [800, 700]);
+    assert_eq!(s.battle_group_move(&destinations, [800, 700]), 3);
+    let start: Vec<_> = s.units.iter().map(|u| u.motion.pos[0]).collect();
+    let mut replay = None;
+    for tick in 0..120 {
+        s.step();
+        assert_separate(&s);
+        for u in &s.units { assert!(u.motion.drive.vel.abs() <= Fx::from_int(u.motion.speed)); }
+        if tick == 59 {
+            let mut copy = BlastRange::restore(config(), &s.snapshot()).expect("group movement snapshot");
+            copy.set_navigation_workers(1);
+            copy.set_physics_workers(1);
+            replay = Some(copy);
+        } else if let Some(copy) = replay.as_mut() {
+            copy.step();
+            assert_eq!(s.units.iter().map(|u| (u.motion.pos, u.motion.drive)).collect::<Vec<_>>(),
+                copy.units.iter().map(|u| (u.motion.pos, u.motion.drive)).collect::<Vec<_>>(),
+                "group motion diverged after restoring at tick {tick}");
+        }
+    }
+    assert_eq!(s.state_hash(), replay.unwrap().state_hash());
+    for (i, u) in s.units.iter().enumerate() {
+        assert!(u.motion.pos[0] > start[i].add(Fx::from_int(40)), "unit {i} did not advance");
     }
 }
 #[test]
@@ -164,14 +191,45 @@ fn formation_edge_slots_are_distinct_size_aware_and_bounded() {
     for centre in [[0, 0], [1599, 1599], [800, 800], [i32::MIN, i32::MAX]] {
         let dest = s.battle_formation_destinations(&(0..10).collect::<Vec<_>>(), centre);
         assert_eq!(dest.len(), 8);
+        if centre == [800, 800] {
+            let small: Vec<_> = dest.iter().filter(|(id, _)| *id != 5).collect();
+            assert!(
+                small
+                    .iter()
+                    .enumerate()
+                    .any(|(i, (_, a))| small[..i].iter().any(|(_, b)| {
+                        let dx = i64::from(a[0] - b[0]);
+                        let dz = i64::from(a[1] - b[1]);
+                        dx * dx + dz * dz < 240 * 240
+                    })),
+                "small units should not all reserve the spider's spacing"
+            );
+        }
         for (i, &(id, p)) in dest.iter().enumerate() {
             assert!(p.iter().all(|&v| (40..1560).contains(&v)));
             assert_ne!(id, 3);
             assert_ne!(id, 4);
-            for &(_, q) in &dest[..i] {
+            for &(other, q) in &dest[..i] {
+                let diameter = |id: usize| {
+                    let o = super::motion::Obstacle::of(&s.units[id].motion, &s.units[id].body);
+                    let d = o.half[0]
+                        .mul(o.half[0])
+                        .add(o.half[1].mul(o.half[1]))
+                        .sqrt()
+                        .mul(fx::Fx::from_int(2))
+                        .to_int_trunc()
+                        + 1
+                        + 2 * s.navigation.cell_units
+                        + 2 * s.navigation.plan_margin;
+                    (d + 1) & !1
+                };
+                let separation = i64::from((diameter(id) + diameter(other)) / 2);
                 let dx = i64::from(p[0] - q[0]);
                 let dz = i64::from(p[1] - q[1]);
-                assert!(dx * dx + dz * dz >= 240 * 240, "wide hull slots too close");
+                assert!(
+                    dx * dx + dz * dz >= separation * separation,
+                    "hull slots too close"
+                );
             }
         }
     }

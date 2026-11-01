@@ -15,6 +15,85 @@ fn lab() -> BlastRange {
     r.control();
     r
 }
+
+#[test]
+fn tank_energy_cannon_damages_more_than_the_previous_shot() {
+    use modding::range::{RangeUnitDef,RangeUnitKind};
+    let mut layout=modding::laboratory::Definition::stock().layout;
+    layout.size=[128,128,128];layout.clear_min=[1,1];layout.clear_max=[127,127];
+    layout.gun_point=true;layout.gun=[32,32,32];layout.target=[64,16,64];layout.laboratory=true;
+    layout.units=vec![RangeUnitDef{allied:true,kind:RangeUnitKind::Tank,at:[64,16,64],weapon:None}];
+    let current=ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut previous=current;previous.energy=1550;previous.heat_per_cell=105;
+    let mut damage=[0;2];
+    for (index, config) in [current,previous].into_iter().enumerate() {
+        let mut sim=BlastRange::with_layout(config,layout.clone()).unwrap();
+        sim.control();sim.set_physics_workers(1);sim.set_navigation_workers(1);
+        assert!(sim.execute_command(Command::Gun(battle::commands::GunCommand::Detonate {at:[64,30,64]})).admitted());
+        for _ in 0..40 {sim.step();}
+        damage[index]=sim.units[0].removed.len()+sim.units[0].seg_removed.len();
+        assert!(sim.matter.economy.ledger.balanced());
+    }
+    eprintln!("energy cannon tank cells removed: new={} previous={}",damage[0],damage[1]);
+    assert!(damage[1]>0 && damage[0]>damage[1],"current/previous tank damage: {damage:?}");
+}
+
+#[test]
+fn spider_weapon_survives_repeated_t2_energy_impacts_at_the_muzzle() {
+    use modding::range::{RangeUnitDef,RangeUnitKind};
+    let mut layout=modding::laboratory::Definition::stock().layout;
+    layout.size=[256,128,256];layout.clear_min=[1,1];layout.clear_max=[255,255];
+    layout.gun_point=true;layout.gun=[32,32,32];layout.target=[128,16,128];layout.laboratory=true;
+    layout.units=vec![RangeUnitDef{allied:true,kind:RangeUnitKind::Spider,at:[128,16,128],weapon:None}];
+    let mut config=ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap().at_power(1200);
+    config.hull_impulse_milli=0; // Keep each deliberate strike on the same spot.
+    let mut r=BlastRange::with_layout(config,layout).unwrap();r.control();
+    r.set_physics_workers(1);r.set_navigation_workers(1);
+    let at=r.units[0].world_pos([86,45,40]);
+    let mut landed=0;
+    for _ in 0..4 {
+        for _ in 0..120 {if r.ready(){break;}r.step();}
+        assert!(r.execute_command(Command::Gun(battle::commands::GunCommand::Detonate{at})).admitted());
+        for _ in 0..120 {r.step();if r.ready(){break;}}
+        landed+=1;
+        assert!(r.units[0].status.alive && r.units[0].status.weapon,
+            "spider core or weapon lost after {landed} concentrated hits: {:?}",r.units[0].status);
+        assert!(r.matter.economy.ledger.balanced());
+    }
+}
+
+#[test]
+fn spider_armour_rebalance_increases_damage_from_t2_energy() {
+    use modding::range::{RangeUnitDef,RangeUnitKind};
+    let mut damage = [0usize; 2];
+    for (index, previous) in [true, false].into_iter().enumerate() {
+        let mut layout=modding::laboratory::Definition::stock().layout;
+        layout.size=[256,128,256];layout.clear_min=[1,1];layout.clear_max=[255,255];
+        layout.gun_point=true;layout.gun=[32,32,32];layout.target=[128,16,128];layout.laboratory=true;
+        layout.units=vec![RangeUnitDef{allied:true,kind:RangeUnitKind::Spider,at:[128,16,128],weapon:None}];
+        let mut config=ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap().at_power(1200);
+        config.hull_impulse_milli=0;
+        let mut r=BlastRange::with_layout(config,layout).unwrap();r.control();
+        r.set_physics_workers(1);r.set_navigation_workers(1);
+        if previous {
+            let grade=[4500,3000,2500,20000,2000];
+            r.units[0].body.ablation_milli=grade;
+            for part in &mut r.units[0].body.segments { part.body.ablation_milli=grade; }
+        }
+        let at=r.units[0].world_pos([86,45,40]);
+        for _ in 0..4 {
+            for _ in 0..120 {if r.ready(){break;}r.step();}
+            assert!(r.execute_command(Command::Gun(battle::commands::GunCommand::Detonate{at})).admitted());
+            for _ in 0..120 {r.step();if r.ready(){break;}}
+        }
+        damage[index]=r.units[0].removed.len()+r.units[0].seg_removed.len();
+        assert!(r.units[0].status.alive && r.units[0].status.weapon,
+            "spider lost its core or weapon during four T2 energy impacts");
+        assert!(r.matter.economy.ledger.balanced());
+    }
+    eprintln!("T2 energy, four muzzle impacts: previous/current removed cells {damage:?}");
+    assert!(damage[1]>damage[0], "previous vs current removed cells: {damage:?}");
+}
 #[test]
 fn lab_live_cannon_tracks_during_charge_keeps_its_deadline_and_restores_flight() {
     use battle::commands::GunCommand as G;
@@ -456,6 +535,145 @@ fn lab_physics_buried_charge_lifts_real_ground_then_bakes_it_back() {
     );
     assert!(r.matter.spent_mj > 0 && r.matter.spent_mj <= r.matter.supplied_mj);
     assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn buried_charge_varied_power_and_depth_preserves_energy_and_moves_units() {
+    use modding::range::{RangeUnitDef, RangeUnitKind};
+    for power in [100u32, 500, 1000, 4000] {
+        for y in [1, 8, 14, 16] {
+            let mut l = modding::laboratory::Definition::stock().layout;
+            l.size=[128,128,128];l.clear_min=[1,1];l.clear_max=[127,127];l.gun_point=true;l.gun=[32,32,32];l.target=[64,16,64];l.laboratory=true;
+            l.units=vec![RangeUnitDef{allied:true,kind:RangeUnitKind::Tank,at:[64,16,64],weapon:None}];
+            let c=ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap().at_power(power);
+            let mut r=BlastRange::with_layout(c,l).unwrap();r.control();r.set_physics_workers(1);r.set_navigation_workers(1);
+            assert!(r.execute_command(Command::Gun(battle::commands::GunCommand::Detonate{at:[64,y,64]})).admitted());
+            let initial=r.units[0].motion.pos[1];let mut max=initial;
+            for _ in 0..35 {r.step();max=max.max(r.units[0].motion.pos[1]);}
+            if y < 16 {
+                assert!(r.upheaval.raised > 0, "no uplift: power={power} y={y}");
+                assert!(max > initial, "unit remained suspended: power={power} y={y}");
+            } else {
+                assert_eq!(r.upheaval.raised, 0, "surface charge must not create underground uplift");
+            }
+            assert!(r.matter.economy.ledger.balanced());
+            assert!(r.matter.spent_mj<=r.matter.supplied_mj);
+        }
+    }
+}
+
+#[test]
+fn buried_scenario_charge_power_expands_real_uplift_and_replays() {
+    let mut results = Vec::new();
+    for power in [1000, 10_000, 100_000] {
+        let mut l = modding::laboratory::Definition::stock().layout;
+        l.size = [256, 128, 256];
+        l.clear_min = [1, 1];
+        l.clear_max = [255, 255];
+        l.gun_point = true;
+        l.gun = [32, 32, 32];
+        l.target = [128, 16, 128];
+        l.laboratory = true;
+        l.units.clear();
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap().at_power(power);
+        let mut r = BlastRange::with_layout(c, l).unwrap();
+        r.control();
+        r.set_physics_workers(1);
+        r.set_navigation_workers(1);
+        assert!(r.execute_command(Command::Gun(battle::commands::GunCommand::Detonate { at: [128, 8, 128] })).admitted());
+        let mut radius = 0i64;
+        let mut max_speed = 0i64;
+        for tick in 0..8 {
+            r.step();
+            for body in &r.bodies.list {
+                for v in &body.voxels {
+                    let x = body.ox + i64::from(v.x) - 128;
+                    let z = body.oz + i64::from(v.z) - 128;
+                    radius = radius.max(x * x + z * z);
+                }
+                max_speed = max_speed.max(-body.vy.raw());
+            }
+            if tick == 1 {
+                let mut restored = BlastRange::restore(r.config, &r.snapshot()).expect("scaled uplift snapshot");
+                assert_eq!(restored.state_hash(), r.state_hash());
+                let mut uninterrupted = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+                for _ in 0..2 {
+                    restored.step();
+                    uninterrupted.step();
+                    assert_eq!(restored.state_hash(), uninterrupted.state_hash());
+                }
+            }
+        }
+        assert!(r.matter.economy.ledger.balanced());
+        assert!(r.matter.spent_mj <= r.matter.supplied_mj);
+        results.push((radius, max_speed, r.upheaval.raised));
+    }
+    eprintln!("buried uplift 1x, 10x, 100x: {results:?}");
+    for pair in results.windows(2) {
+        assert!(pair[1].0 > pair[0].0, "radius did not expand: {results:?}");
+        assert!(pair[1].1 > pair[0].1, "uplift did not accelerate: {results:?}");
+        assert!(pair[1].2 > pair[0].2, "uplift did not grow: {results:?}");
+    }
+}
+
+#[test]
+fn buried_heave_uses_edited_ground_above_the_original_surface() {
+    let mut r=lab();r.set_physics_workers(1);r.set_navigation_workers(1);
+    for x in 56..72 {for z in 56..72 {for y in 16..32 {
+        r.world.queue_transfer(voxel::Edit::put(x,y,z,1));
+    }}}
+    r.world.flush_transfers();
+    assert!(r.execute_command(Command::Gun(battle::commands::GunCommand::Detonate{at:[64,24,64]})).admitted());
+    for _ in 0..16 {r.step();}
+    assert!(r.upheaval.raised>0,"charge inside an authored mound must lift the current surface");
+    assert!(r.matter.economy.ledger.balanced());
+    assert!(r.matter.spent_mj<=r.matter.supplied_mj);
+}
+
+#[test]
+fn buried_heave_bounds_for_weak_and_deep_charges() {
+    for power in [0u32, 1, 1000, 4000] {
+        for y in [1, 48, 94, 96] {
+            let mut l=modding::laboratory::Definition::stock().layout;
+            l.size=[128,128,128];l.ground_level=96;l.clear_min=[1,1];l.clear_max=[127,127];
+            l.gun_point=true;l.gun=[32,100,32];l.target=[64,96,64];l.laboratory=true;
+            let c=ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap().at_power(power);
+            let mut r=BlastRange::with_layout(c,l).unwrap();r.set_physics_workers(1);r.set_navigation_workers(1);
+            r.matter.begin(c.material_energy_j,c.fragment_box);
+            let reserved=r.upheaval.reserve(&r.world,[64,y,64],&c,u64::from(c.material_energy_j)*1000);
+            if power==0 || y==96 {assert_eq!(reserved,0,"power={power} y={y}");}
+            else {assert!(reserved>0,"power={power} y={y}");}
+            r.matter.remaining_mj-=reserved;
+            for _ in 0..4 {r.step();}
+            assert!(r.matter.spent_mj<=r.matter.supplied_mj);
+            assert!(r.matter.economy.ledger.balanced());
+            let back=BlastRange::restore(r.config,&r.snapshot()).unwrap();
+            assert_eq!(r.state_hash(),back.state_hash());
+        }
+    }
+}
+
+#[test]
+fn underground_lift_moves_mobile_unit_kinds_and_keeps_a_base_anchored() {
+    use modding::range::{RangeUnitDef, RangeUnitKind};
+    for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider, RangeUnitKind::Spider, RangeUnitKind::Crawler, RangeUnitKind::Base] {
+        let mut l=modding::laboratory::Definition::stock().layout;
+        l.size=[256,128,256];l.clear_min=[1,1];l.clear_max=[255,255];l.gun_point=true;l.gun=[32,32,32];l.target=[128,16,128];l.laboratory=true;
+        l.units=vec![RangeUnitDef{allied:true,kind,at:[128,16,128],weapon:None}];
+        let c=ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+        let mut r=BlastRange::with_layout(c,l).unwrap();r.control();r.set_physics_workers(1);r.set_navigation_workers(1);
+        r.matter.begin(c.material_energy_j,c.fragment_box);
+        let reserved=r.upheaval.reserve(&r.world,[128,8,128],&c,u64::from(c.material_energy_j)*1000);
+        r.matter.remaining_mj-=reserved;
+        let initial=r.units[0].motion.pos[1];let mut peak=initial;
+        for _ in 0..25 {r.step();peak=peak.max(r.units[0].motion.pos[1]);}
+        if kind==RangeUnitKind::Base {assert_eq!(peak,initial,"base moved under heave");}
+        else {assert!(peak>initial,"{kind:?} was not lifted");}
+        assert!(r.matter.economy.ledger.balanced());
+        assert!(r.matter.spent_mj<=r.matter.supplied_mj);
+        let copy=BlastRange::restore(r.config,&r.snapshot()).unwrap();
+        assert_eq!(r.state_hash(),copy.state_hash());
+    }
 }
 
 #[test]

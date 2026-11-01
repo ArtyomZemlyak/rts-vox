@@ -9,11 +9,20 @@
             fracture_milli: (3000,3000,3000,3000,2000)),
         (name: "T3 composite steel", ablation_milli: (2000,1500,1500,2000,1500),
             fracture_milli: (8000,8000,8000,48000,4000)),
+        // Keep T3 fracture strength while reducing local resistance by about
+        // 10%, including the barrel, from the previous protected grade.
+        (name: "T3 spider composite", ablation_milli: (4000,2700,2250,18000,1800),
+            fracture_milli: (8000,8000,8000,48000,4000)),
+        (name: "Eidolon T1 armour", ablation_milli: (1600,1800,1600,1800,1400),
+            fracture_milli: (1600,1800,1600,1800,1400)),
+        // The electric vehicle trades armour for its stronger ranged attack.
+        (name: "Electric tank light armour", ablation_milli: (1050,1100,1050,1100,1000),
+            fracture_milli: (1800,1800,1800,1800,1200)),
     ],
     units: [
-        (Tank, 0), (Strider, 1), (Spider, 2), (Artillery, 0),
+        (Tank, 0), (Strider, 1), (Spider, 3), (Artillery, 0),
         (TurretT1, 0), (TurretT2, 1), (Base, 0), (ArtilleryT2, 1),
         (ArtilleryTurretT2, 1), (ArtilleryTurretT3, 2), (NuclearSilo, 2),
-        (Crawler, 0),
+        (Crawler, 0), (LightningTank, 5), (EidolonTank, 4),
     ],
 )

@@ -1,0 +1,16 @@
+(
+ title: "Эйдолоны: танковый бой",
+ briefing: "Танки «Скат» фракции эйдолонов против обычных танков. Используйте местность и совместные атаки. На старте ваши машины удерживают огонь; ПКМ по земле задаёт движение, по противнику — атаку.",
+ zone: (name: "Эйдолоны: танковый бой", min: (2800,1800), max: (6800,3700), spawn: (3000,16,2600), target: (6300,16,2600)),
+ units: [
+  (kind: EidolonTank, allied: true, at: (3180,16,2450)),
+  (kind: EidolonTank, allied: true, at: (3180,16,2750)),
+  (kind: Tank, allied: false, at: (6210,16,2450)),
+  (kind: Tank, allied: false, at: (6210,16,2750)),
+ ],
+ blocks: [(min: (5320,16,2510), max: (5370,50,2700), material: 2)],
+ mission: Some((focus: EidolonTank, protect: [], steps: [
+  (text: "Подведите оба «Ската» к укрытию", goal: Reach(actors: [0, 1], count: 2, point: (5050,2600), radius: 250)),
+  (text: "Уничтожьте танки противника", goal: Destroy(actors: [2, 3])),
+ ])),
+)

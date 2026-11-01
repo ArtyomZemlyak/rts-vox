@@ -5,7 +5,8 @@
     charge_ticks: 30,
     half_cells: 20,
     cell_units: 2,
-    energy: 1800,
+    // Tank energy shot: stronger than the previous 1550-unit setting.
+    energy: 2200,
     // No fracture budget: the burst annihilates what it takes.
     material_energy_j: 0,
     air_cost: 100,

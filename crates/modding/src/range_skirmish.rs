@@ -167,6 +167,8 @@ pub const STOCK: &[&str] = &[
     include_str!("../../../data/mission-siege-defense.ron"),
     include_str!("../../../data/mission-base.ron"),
     include_str!("../../../data/mission-nuclear.ron"),
+    include_str!("../../../data/mission-lightning.ron"),
+    include_str!("../../../data/mission-eidolon-tank.ron"),
 ];
 pub fn stock(id: usize) -> Result<Skirmish, String> {
     Skirmish::from_ron(STOCK.get(id).ok_or("Unknown encounter")?)
@@ -237,6 +239,8 @@ mod tests {
                         let reach = |u: &RangeUnitDef| match u.kind {
                             RangeUnitKind::Base | RangeUnitKind::Crawler => 0,
                             RangeUnitKind::Tank
+                            | RangeUnitKind::LightningTank
+                            | RangeUnitKind::EidolonTank
                             | RangeUnitKind::TurretT1
                             | RangeUnitKind::TurretT2 => ranges.energy,
                             RangeUnitKind::Strider => ranges.machine_gun,
@@ -258,7 +262,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(focus.len(), 13);
+        assert_eq!(focus.len(), 15);
         assert!(RangeUnitKind::ALL.iter().filter(|kind| **kind != RangeUnitKind::Crawler).all(|kind| focus.contains(kind)));
         assert!(stock(STOCK.len()).is_err());
     }
@@ -308,7 +312,7 @@ mod tests {
             assert_eq!(army.len(), 31);
             for kind in RangeUnitKind::ALL
                 .into_iter()
-                .filter(|k| !matches!(k, RangeUnitKind::NuclearSilo | RangeUnitKind::Crawler))
+                .filter(|k| !matches!(k, RangeUnitKind::NuclearSilo | RangeUnitKind::Crawler | RangeUnitKind::LightningTank | RangeUnitKind::EidolonTank))
             {
                 assert!(
                     army.iter().any(|u| u.kind == kind),

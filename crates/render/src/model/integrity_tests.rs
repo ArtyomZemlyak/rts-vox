@@ -13,6 +13,10 @@ fn templates() -> Vec<(&'static str, UnitBody)> {
             "range artillery turret T2",
             voxel::unit::artillery_turret_t2(),
         ),
+        (
+            "range artillery turret T3",
+            voxel::unit::artillery_turret_t3(),
+        ),
         ("range turret T1", voxel::unit::turret_t1()),
         ("range turret T2", voxel::unit::turret_t2()),
         ("range command base", voxel::unit::command_base()),

@@ -23,7 +23,7 @@ impl Armour {
             || c.grades.len() > RangeUnitKind::COUNT
             || c.grades.iter().any(|g| {
                 g.name.trim().is_empty()
-                    || g.ablation_milli.iter().any(|v| !(1..=10000).contains(v))
+                    || g.ablation_milli.iter().any(|v| !(1..=20000).contains(v))
                     || g.fracture_milli.iter().any(|v| !(1..=100000).contains(v))
             })
             || c.units.len() != RangeUnitKind::COUNT
@@ -59,9 +59,10 @@ mod tests {
                 > c.grade(RangeUnitKind::Strider).fracture_milli[0]
         );
         for bad in [
-            text.replace("(Spider, 2)", "(Tank, 2)"),
-            text.replace("(Spider, 2)", "(Spider, 99)"),
+            text.replace("(Spider, 3)", "(Tank, 3)"),
+            text.replace("(Spider, 3)", "(Spider, 99)"),
             text.replace("8000", "100001"),
+            text.replace("18000", "20001"),
         ] {
             assert!(Armour::from_ron(&bad).is_err());
         }

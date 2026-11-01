@@ -848,15 +848,14 @@ fn setup(
     // (ADR-211).
     let finish_mat = |f: look::Finish, powered: bool, m: &mut Assets<StandardMaterial>| {
         let (rough, metal) = look::finish_surface(f);
+        let glow = look::finish_glow(f);
         m.add(StandardMaterial {
             base_color: Color::WHITE,
             perceptual_roughness: rough,
             metallic: metal,
-            // Обнажённое ядро светится само: увидеть его надо сразу,
-            // а отражённого света внутри разбитого корпуса нет.
-            emissive: if powered && f == look::Finish::Core {
-                let g = look::CORE_GLOW;
-                LinearRgba::rgb(g[0], g[1], g[2])
+            // Обнажённое ядро и энергетические элементы видны и в тени.
+            emissive: if powered {
+                LinearRgba::rgb(glow[0], glow[1], glow[2])
             } else {
                 LinearRgba::BLACK
             },

@@ -42,6 +42,29 @@ fn dispatch(g: &Gpu, pipe: &wgpu::ComputePipeline, group: &wgpu::BindGroup, n: u
 }
 
 #[test]
+fn sparse_coarse_reduction_updates_only_selected_parents_and_lowers_removed_ceiling() {
+    let Some(g) = Gpu::new(wgpu::Backends::VULKAN) else {
+        eprintln!("no Vulkan device");
+        return;
+    };
+    let count = 8 * 4 * 8;
+    let bricks = g.storage(((count + 4) * 4) as u64, "bricks");
+    let dirty = g.storage(16, "dirty coarse bricks");
+    let config = uniform(&g, &[64, 32, 64, 1]);
+    let pipe = g.pipeline(include_str!("../../render/src/terrain_bricks.wgsl"), "reduce", "sparse coarse");
+    let group = group(&g, &pipe, &[(0, &config), (3, &bricks), (4, &dirty)]);
+    let mut values = vec![0u32; count + 4];
+    // Parent 3 has a remaining low voxel and a previously higher ceiling.
+    values[4 + 8 * (1 + 4 * 4)] = 3;
+    values[count..].copy_from_slice(&[11, 12, 13, 32]);
+    g.queue.write_buffer(&bricks, 0, as_bytes(&values));
+    g.queue.write_buffer(&dirty, 0, as_bytes(&[3]));
+    dispatch(&g, &pipe, &group, 1);
+    let got = g.read_u32(&bricks, count + 4);
+    assert_eq!(&got[count..], &[11, 12, 13, 11]);
+}
+
+#[test]
 fn prewrapped_origin_matches_integer_modulo_on_gpu() {
     let Some(g) = Gpu::new(wgpu::Backends::VULKAN) else {
         eprintln!("no Vulkan device: toroidal address oracle skipped");
@@ -118,6 +141,7 @@ fn bricks_rebuild_after_removal_and_rays_preserve_thin_walls_in_wrapped_windows(
     let terrain = g.storage((count * 64 * 4) as u64, "packed terrain");
     let bricks = g.storage(((count + count / 64) * 4) as u64, "occupied bricks");
     let dirty = g.storage((count * 4) as u64, "dirty bricks");
+    let dirty_coarse = g.storage(((count / 64) * 4) as u64, "dirty coarse bricks");
     let config = uniform(&g, &[64, 32, 64, count as u32 | 0x80000000]);
     let build = g.pipeline(
         include_str!("../../render/src/terrain_bricks.wgsl"),
@@ -134,7 +158,7 @@ fn bricks_rebuild_after_removal_and_rays_preserve_thin_walls_in_wrapped_windows(
         "reduce",
         "coarse bricks",
     );
-    let reduce_group = group(&g, &reduce, &[(0, &config), (3, &bricks)]);
+    let reduce_group = group(&g, &reduce, &[(0, &config), (3, &bricks), (4, &dirty_coarse)]);
     let query = r#"
 struct Ray { origin:vec4<f32>, direction:vec4<f32> };
 @group(0) @binding(0) var<storage,read> rays:array<Ray>;
@@ -331,10 +355,12 @@ fn query(@builtin(global_invocation_id) gid:vec3<u32>) {
         }
         g.queue.write_buffer(&terrain, 0, as_bytes(&words));
         g.queue.write_buffer(&dirty, 0, as_bytes(&[index as u32]));
+        let parent = b[0] / 4 + 2 * (b[2] / 4);
+        g.queue.write_buffer(&dirty_coarse, 0, as_bytes(&[parent as u32]));
         g.queue.write_buffer(&config, 0, as_bytes(&[64, 32, 64, 1]));
         dispatch(&g, &build, &build_group, 1);
         expected[index] = 0;
-        dispatch(&g, &reduce, &reduce_group, (count / 64) as u32);
+        dispatch(&g, &reduce, &reduce_group, 1);
         let got = g.read_u32(&bricks, count + count / 64);
         assert_eq!(&got[..count], expected);
         for coarse in 0..count / 64 {

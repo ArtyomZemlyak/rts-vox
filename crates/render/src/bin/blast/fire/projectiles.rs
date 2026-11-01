@@ -100,7 +100,7 @@ pub(super) fn append(
                 BattleWeapon::Blast | BattleWeapon::Kinetic => 2.0,
                 BattleWeapon::Energy => 4.0,
                 BattleWeapon::Annihilation => 6.0,
-                BattleWeapon::Laser => continue,
+                BattleWeapon::Laser | BattleWeapon::Lightning => continue,
             };
             view.dot(
                 mesh,

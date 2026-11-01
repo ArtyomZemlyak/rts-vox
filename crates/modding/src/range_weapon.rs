@@ -24,6 +24,8 @@ pub struct Tuning {
     pub flame: Stream,
     pub machine_gun: Stream,
     pub laser: Stream,
+    #[serde(default)]
+    pub lightning: Option<Stream>,
     pub dust: Dust,
     pub smoke_engine_milli: i32,
     pub smoke_core_milli: i32,
@@ -68,7 +70,7 @@ impl Tuning {
         {
             return Err("kinetic continuation limits outside bounded limits".into());
         }
-        for s in [&t.flame, &t.machine_gun, &t.laser] {
+        for s in [&t.flame, &t.machine_gun, &t.laser].into_iter().chain(t.lightning.iter()) {
             if !(1..=300).contains(&s.burst_ticks)
                 || !(1..=30).contains(&s.interval_ticks)
                 || !(1..=3000).contains(&s.range)

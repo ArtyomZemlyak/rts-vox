@@ -509,7 +509,7 @@ impl RangeUnit {
     pub(crate) fn apply_course(&mut self, c: &modding::range::RangeCourse) {
         let tracked = matches!(
             self.kind,
-            RangeUnitKind::Tank | RangeUnitKind::Crawler | RangeUnitKind::Artillery | RangeUnitKind::ArtilleryT2
+            RangeUnitKind::Tank | RangeUnitKind::LightningTank | RangeUnitKind::EidolonTank | RangeUnitKind::Crawler | RangeUnitKind::Artillery | RangeUnitKind::ArtilleryT2
         );
         self.motion.speed = if self.kind.emplacement() {
             0
@@ -538,6 +538,8 @@ impl RangeUnit {
         // instance. Copy their prepared voxel data instead of redrawing the
         // same shapes for every placement and battle reset.
         static TANK: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static LIGHTNING_TANK: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static EIDOLON_TANK: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static CRAWLER: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static ARTILLERY_T2: std::sync::OnceLock<voxel::unit::UnitBody> =
             std::sync::OnceLock::new();
@@ -552,6 +554,8 @@ impl RangeUnit {
         static STRIDER: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         let mut body = match kind {
             RangeUnitKind::Tank => TANK.get_or_init(voxel::unit::tank).clone(),
+            RangeUnitKind::LightningTank => LIGHTNING_TANK.get_or_init(voxel::unit::lightning_tank).clone(),
+            RangeUnitKind::EidolonTank => EIDOLON_TANK.get_or_init(voxel::unit::eidolon_tank).clone(),
             RangeUnitKind::Crawler => CRAWLER.get_or_init(voxel::unit::crawler).clone(),
             RangeUnitKind::Artillery => ARTILLERY.get_or_init(voxel::unit::artillery).clone(),
             RangeUnitKind::ArtilleryT2 => {
@@ -1034,9 +1038,16 @@ pub fn unit_work(body: &UnitBody, p: [usize; 3], c: &ExplosionConfig) -> u32 {
     role_work(body, body.part_at(p[0], p[1], p[2]) as usize, c)
 }
 fn role_work(body: &UnitBody, role: usize, c: &ExplosionConfig) -> u32 {
+    // Strategic crater-forming warheads saturate the benefit of extra
+    // composite reinforcement. Ordinary blast and energy weapons still
+    // encounter the full grade; the original T1/T2/T3 nuclear resistance
+    // remains unchanged, including the spider's reactor and weapon.
+    let ablation = if c.soil_crater.is_some() {
+        body.ablation_milli[role].min([2000, 1500, 1500, 2000, 1500][role])
+    } else { body.ablation_milli[role] };
     (u64::from(c.unit_ablation_resistance)
         * u64::from(c.unit_role_resistance_milli[role])
-        * u64::from(body.ablation_milli[role])
+        * u64::from(ablation)
         / 1_000_000)
         .clamp(1, 1_000_000) as u32
 }
@@ -5445,6 +5456,7 @@ impl BlastRange {
         // also identifies the clock used by velocities and deadlines.
         b.u32(67);
         b.u32(crate::TICKS_PER_SECOND as u32);
+        if self.upheaval.has_state() { b.u32(74); }
         let water_thermal=self.water.has_thermal_remainder();
         if water_thermal {b.u32(73);}
         let water_motion=self.water.has_motion();
@@ -5883,6 +5895,8 @@ impl BlastRange {
         } else if crate::TICKS_PER_SECOND != modding::clock::STREAM_HZ as i32 {
             return None;
         }
+        let upheaval_scaled = version == 74;
+        if upheaval_scaled { version = s.u32(); }
         let water_thermal=version==73;
         if water_thermal {version=s.u32();}
         let water_motion=version==72;
@@ -6453,12 +6467,15 @@ impl BlastRange {
         }
         if version >= 49 {
             observe("kinetic_jobs", bytes.len() - s.left(), None);
+            // Already accepted jobs can exceed the current budget after AI
+            // control changes. The encoded size still bounds the allocation.
+            let max_kinetic_jobs = r.streams.tuning.kinetic.max_jobs.max(s.left() / 100);
             r.kinetic = kinetic::Pending::load(
                 &mut s,
                 &r.config,
                 &r.units,
                 r.size,
-                r.streams.tuning.kinetic.max_jobs,
+                max_kinetic_jobs,
                 version,
             )?;
             let outstanding = r
@@ -6466,23 +6483,7 @@ impl BlastRange {
                 .jobs
                 .iter()
                 .try_fold(0u64, |n, j| n.checked_add(j.remaining_energy()))?;
-            if outstanding > r.matter.supplied_mj - r.matter.spent_mj
-                || r.kinetic.jobs.len() - r.pending_machine_gun_contacts()
-                    + r.battle
-                        .rounds
-                        .iter()
-                        .filter(|p| p.weapon == battle::Weapon::Kinetic)
-                        .count()
-                    > r.streams.tuning.kinetic.max_jobs
-                || r.pending_machine_gun_contacts()
-                    + r.streams.rounds.len()
-                    + r.battle
-                        .rounds
-                        .iter()
-                        .filter(|p| p.weapon == battle::Weapon::MachineGun)
-                        .count()
-                    > r.streams.tuning.kinetic.max_jobs
-            {
+            if outstanding > r.matter.supplied_mj - r.matter.spent_mj {
                 return None;
             }
         }
@@ -6525,7 +6526,8 @@ impl BlastRange {
         if flow { r.granular.load_legacy(&mut s, r.size)?; }
         else { r.granular = granular::Flow::new(); }
         if water {r.water.load_legacy(&mut s,r.size)?;} else {r.water=water::Water::new();}
-        if upheaval {r.upheaval.load(&mut s,r.size)?;}
+        if upheaval {r.upheaval.load(&mut s,r.size,upheaval_scaled)?;}
+        else if upheaval_scaled { return None; }
         if grain_motion {
             if !flow { return None; }
             r.granular.load_motion(&mut s, r.size)?;
@@ -7080,6 +7082,7 @@ impl BlastRange {
         // Retain fields that may retire during this tick, including their
         // final confirmed trunk cuts. Newly arrived waves join after stepping.
         let mut nuclear_fields: Vec<_> = self.battle.nuclear_domains().collect();
+        self.relieve_autonomous_damage_pressure();
         self.reserve_pending_damage();
         self.reserve_thermal_fragments();
         let changed = self.refresh_rubble(&physics_detail, &mut detail);
@@ -7592,8 +7595,12 @@ impl BlastRange {
             .chain(self.physical_gun().then_some(&self.gun))
             .filter(|u| u.status.alive && !u.motion.cut.is_empty())
             .map(|u| (u.motion.cut.as_slice(), u.at));
-        self.matter
-            .felling_phase(&mut self.world, cuts, &self.navigation.fell);
+        let mut felling = self.navigation.fell;
+        if battle_mode && self.battle.autonomous {
+            let backlog = self.matter.felling_pending().div_ceil(crate::TICKS_PER_SECOND as usize);
+            felling.cells_per_tick = felling.cells_per_tick.max(backlog.min(u32::MAX as usize) as u32);
+        }
+        self.matter.felling_phase(&mut self.world, cuts, &felling);
         detail("motion_felling");
         if battle_mode {
             completed("motion");
@@ -7768,6 +7775,11 @@ impl BlastRange {
                 }
             }
             completed("flight");
+        }
+        // Authored charges also use the single-explosion pipeline during
+        // free-control battle scenes. Ordinary combat rounds have their own
+        // bounded processing and do not populate this slot.
+        if !battle_mode || self.explosion.is_some() {
             {
                 // The grid of resistance is captured under a ceiling per tick
                 // (ADR-311): a charge that reaches further costs the burst
@@ -7898,8 +7910,15 @@ impl BlastRange {
         // drain's removals are credited before anything else reads them.
         self.step_lab_devices();
         self.dig_phase();
+        let normal_edit_budget = self.world.max_edits_per_tick;
+        if battle_mode && self.battle.autonomous {
+            // Pending edits own matter and must not be trapped indefinitely
+            // behind a fixed drain quota while an AI battle keeps firing.
+            self.world.max_edits_per_tick = normal_edit_budget.max(self.world.queued().div_ceil(10));
+        }
         self.build_drain_chunks();
         self.world.flush();
+        self.world.max_edits_per_tick = normal_edit_budget;
         self.credit_digs();
         self.credit_lab_edits();
         nuclear_fields.extend(self.battle.nuclear_domains());
@@ -8224,9 +8243,30 @@ impl BlastRange {
                     lo.map(|v|v.raw()>>32),hi.map(|v|(v.raw()>>32)+1))
             }));
         }
+        // Reserve enough of the shared budget for one grounded candidate.
+        // Otherwise small bodies processed first can indefinitely defer a
+        // large one, leaving it suspended at first contact. Rotate priority
+        // by simulation tick, without exceeding the existing phase limit.
+        let candidates: Vec<_> = if slopes {
+            self.bodies.list.iter().filter(|b| self.granular.slope_candidate(b) && !b.can_fall(&self.world))
+                .filter_map(|b| {
+                    let cost = self.granular.slope_query_budget(b, occupied.len());
+                    (cost <= slope_checks).then_some((b.id, cost))
+                }).collect()
+        } else { Vec::new() };
+        let mut priority = if candidates.is_empty() { None }
+            else { Some(candidates[self.tick as usize % candidates.len()]) };
         let granular=&mut self.granular;
         let earlier = self.world.edits().len();
         self.bodies.step_contact(&mut self.world,|b,w|water.support_body(b,w,materials),|b,w| {
+            if let Some((id, reserved)) = priority {
+                if id != b.id && granular.slope_candidate(b)
+                    && granular.slope_query_budget(b, occupied.len()).saturating_add(reserved) > slope_checks
+                {
+                    return true;
+                }
+                if id == b.id { priority = None; }
+            }
             let held=slopes && granular.slide_body(b,w,&mut slope_checks,&occupied);
             if let Some((_,lo,hi))=occupied.iter_mut().find(|(id,_,_)|*id==b.id) {
                 (*lo,*hi)=b.bounds();

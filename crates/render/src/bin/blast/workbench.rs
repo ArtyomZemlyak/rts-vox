@@ -33,6 +33,8 @@ pub enum Tool {
     Tank,
     Strider,
     Spider,
+    LightningTank,
+    EidolonTank,
     Artillery,
     ArtilleryT2,
     ArtilleryTurretT2,
@@ -295,8 +297,9 @@ impl Workshop {
         self.pitch = 0.0;
         Ok(())
     }
-    pub fn crawler_field(&mut self, config: ExplosionConfig) -> Result<(), String> {
+    pub fn crawler_field(&mut self, _config: ExplosionConfig) -> Result<(), String> {
         let layout = RangeLayout::from_ron(include_str!("../../../../../data/range-crawler-field.ron"))?;
+        let config = ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron"))?;
         self.commit(layout, config)?;
         self.zone = 0;
         self.editing = false;
@@ -660,6 +663,8 @@ impl Workshop {
             Tool::Tank
             | Tool::Strider
             | Tool::Spider
+            | Tool::LightningTank
+            | Tool::EidolonTank
             | Tool::Artillery
             | Tool::ArtilleryT2
             | Tool::ArtilleryTurretT2
@@ -675,6 +680,10 @@ impl Workshop {
                         RangeUnitKind::Tank
                     } else if self.tool == Tool::Spider {
                         RangeUnitKind::Spider
+                    } else if self.tool == Tool::LightningTank {
+                        RangeUnitKind::LightningTank
+                    } else if self.tool == Tool::EidolonTank {
+                        RangeUnitKind::EidolonTank
                     } else if self.tool == Tool::NuclearSilo {
                         RangeUnitKind::NuclearSilo
                     } else if self.tool == Tool::ArtilleryTurretT3 {
@@ -1327,12 +1336,50 @@ pub fn input(
                                 let ids = edit.battle_selected_ids(&scene.sim);
                                 if !ids.is_empty() {
                                     use sim_core::blast::battle::Order;
+                                    if !fire && panel.as_ref().is_some_and(|p| p.electric_support_target) {
+                                        if let Some(Selection::Unit(target)) = selection {
+                                            let mut accepted = 0;
+                                            for &id in &ids {
+                                                if scene.sim.units[id].kind == RangeUnitKind::LightningTank
+                                                    && scene.sim.battle_order(id, Order::Support(target), None) { accepted += 1; }
+                                            }
+                                            if accepted > 0 {
+                                                if let Some(panel) = panel.as_mut() { panel.electric_support_target = false; }
+                                                scene.notice = format!("Поддержку получили {accepted} электротанков");
+                                            } else {
+                                                scene.notice = "Выберите другой живой союзный электротанк".into();
+                                            }
+                                        } else {
+                                            scene.notice = "Укажите союзный электротанк ПКМ".into();
+                                        }
+                                        return;
+                                    }
+                                    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+                                    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+                                    let mode = panel.as_ref().map_or(panel::CrawlerMode::Move, |p| p.crawler_mode);
+                                    let salvage = if ctrl { shift } else { mode == panel::CrawlerMode::Reclaim };
                                     let dig = !fire
-                                        && (keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight))
-                                        && !matches!(selection, Some(Selection::Unit(_)))
+                                        && (ctrl || mode != panel::CrawlerMode::Move)
+                                        && (salvage || !ctrl || !matches!(selection, Some(Selection::Unit(_))))
                                         && ids.iter().any(|&id| scene.sim.units[id].kind == RangeUnitKind::Crawler);
+                                    // Pick the actual rendered fragment on the click,
+                                    // rather than the ground behind it.
+                                    let reclaim_point = if dig && salvage {
+                                        let limit = Vec3::from(hit.map(|v| v as f32)).distance(ray.origin) + 1.0;
+                                        fragments::picking::pick(&scene, ray, limit)
+                                            .and_then(|picked| scene.sim.matter.debris.fragments.iter()
+                                                .find(|f| f.id == picked.id && f.resting))
+                                            .map(|f| [f.position.x, f.position.y, f.position.z].map(fx::Fx::to_int_trunc))
+                                            .or_else(|| match selection {
+                                                Some(Selection::Unit(id)) if !scene.sim.units[id].status.alive =>
+                                                    Some(scene.sim.units[id].motion.pos.map(fx::Fx::to_int_trunc)),
+                                                _ => None,
+                                            }).unwrap_or(hit)
+                                    } else { hit };
                                     let order = if fire {
                                         Order::Ground(hit)
+                                    } else if dig && salvage {
+                                        Order::Reclaim(reclaim_point)
                                     } else if dig {
                                         Order::Dig(hit)
                                     } else if let Some(Selection::Unit(enemy)) = selection {
@@ -1349,7 +1396,7 @@ pub fn input(
                                     };
                                     if scene.sim.battle.phase
                                         == sim_core::blast::battle::Phase::Setup
-                                        && !matches!(order, Order::Move | Order::Hold | Order::Dig(_))
+                                        && !matches!(order, Order::Move | Order::Hold | Order::Dig(_) | Order::Reclaim(_))
                                     {
                                         scene.notice = if dig {
                                             "Для добычи сначала начните бой или свободное управление."
@@ -1358,7 +1405,7 @@ pub fn input(
                                         }.into();
                                         return;
                                     }
-                                    let eligible = if matches!(order, Order::Dig(_)) {
+                                    let eligible = if matches!(order, Order::Dig(_) | Order::Reclaim(_)) {
                                         ids.iter().filter(|&&id| scene.sim.units[id].kind == RangeUnitKind::Crawler).count()
                                     } else if order == Order::Move {
                                         ids.iter()
@@ -1396,7 +1443,7 @@ pub fn input(
                                     if eligible == 0 && order == Order::Move {
                                         scene.notice = "В выделении нет подвижных юнитов".into();
                                     } else if accepted == eligible && accepted > 0 && dig {
-                                        scene.notice = "Краулер: добыча и сбор обломков у отмеченной точки".into();
+                                        scene.notice = if salvage { "Краулер: выбранный обломок, затем сбор в радиусе 16 м" } else { "Краулер: бурение" }.into();
                                     } else if accepted == eligible && accepted > 0 {
                                         if autonomous && !scene.sim.battle.autonomous {
                                             scene.notice = "Ручное управление: союзный ИИ передал вам управление. ЛКМ — выбор, ПКМ — приказ.".into();
@@ -2076,21 +2123,93 @@ mod tests {
         assert!(matches!(scene.sim.battle.actors[0].order, Order::Dig(_)), "{}", scene.notice);
     }
     #[test]
+    fn crawler_mode_changes_ordinary_right_click_order() {
+        use super::*;
+        use bevy::camera::{CameraProjection, RenderTargetInfo};
+        use sim_core::blast::battle::Order;
+        for mode in [panel::CrawlerMode::Move, panel::CrawlerMode::Reclaim, panel::CrawlerMode::Drill] {
+            let layout = RangeLayout::from_ron(include_str!("../../../../../data/range-crawler-field.ron")).unwrap();
+            let config = ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
+            let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
+            sim.start_free_control().unwrap();
+            let mut workshop = Workshop::new(Some(layout), false);
+            workshop.editing = false; workshop.controlled = Some(0); workshop.selected_units = vec![0];
+            let mut app = panel::hud::tests::app_with_scene(sim, workshop);
+            app.world_mut().resource_mut::<panel::Panel>().crawler_mode = mode;
+            app.init_resource::<ButtonInput<MouseButton>>().add_message::<MouseWheel>().add_systems(Update, input);
+            let projection = OrthographicProjection { area: Rect::from_corners(Vec2::new(-320.0, -240.0), Vec2::new(320.0, 240.0)), near: 1.0, far: 1200.0, ..OrthographicProjection::default_3d() };
+            let mut camera = Camera::default();
+            camera.computed.clip_from_view = projection.get_clip_from_view();
+            camera.computed.target_info = Some(RenderTargetInfo { physical_size: UVec2::new(1600, 900), scale_factor: 1.0 });
+            let gt = GlobalTransform::from(Transform::from_xyz(320.0, 300.0, 320.0).looking_at(Vec3::new(320.0, 0.0, 320.0), Vec3::NEG_Z));
+            let screen = camera.world_to_viewport(&gt, Vec3::new(416.0, 28.0, 248.0)).unwrap();
+            let mut window = Window { resolution: bevy::window::WindowResolution::new(1600, 900).with_scale_factor_override(1.0), focused: true, ..default() };
+            window.set_cursor_position(Some(screen));
+            app.world_mut().spawn(window); app.world_mut().spawn((camera, gt, GasCamera));
+            app.world_mut().resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Right);
+            app.update();
+            let scene = app.world().resource::<Scene>();
+            let order = scene.sim.battle.actors[0].order;
+            assert!(match mode {
+                panel::CrawlerMode::Move => matches!(order, Order::Move),
+                panel::CrawlerMode::Reclaim => matches!(order, Order::Reclaim(_)),
+                panel::CrawlerMode::Drill => matches!(order, Order::Dig(_)),
+            }, "mode {mode:?}, order {order:?}: {}", scene.notice);
+        }
+    }
+    #[test]
+    fn electric_support_button_target_click_orders_allied_helper() {
+        use super::*;
+        use bevy::camera::{CameraProjection, RenderTargetInfo};
+        use sim_core::blast::battle::Order;
+        let mut layout = RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        layout.battle = true;
+        layout.blocks.clear(); layout.shields.clear(); layout.course = None;
+        layout.clear_min = [1, 1]; layout.clear_max = [639, 639];
+        layout.units = vec![
+            modding::range::RangeUnitDef { kind: RangeUnitKind::LightningTank, at: [200,16,300], allied: true, weapon: None },
+            modding::range::RangeUnitDef { kind: RangeUnitKind::LightningTank, at: [200,16,450], allied: true, weapon: None },
+            modding::range::RangeUnitDef { kind: RangeUnitKind::Tank, at: [500,16,400], allied: false, weapon: None },
+        ];
+        let config = ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
+        let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
+        sim.start_free_control().unwrap();
+        let mut workshop = Workshop::new(Some(layout), false);
+        workshop.editing = false; workshop.controlled = Some(0); workshop.selected_units = vec![0];
+        let mut app = panel::hud::tests::app_with_scene(sim, workshop);
+        app.world_mut().resource_mut::<panel::Panel>().electric_support_target = true;
+        app.init_resource::<ButtonInput<MouseButton>>().add_message::<MouseWheel>().add_systems(Update, input);
+        let projection = OrthographicProjection { area: Rect::from_corners(Vec2::new(-320.0, -240.0), Vec2::new(320.0, 240.0)), near: 1.0, far: 1200.0, ..OrthographicProjection::default_3d() };
+        let mut camera = Camera::default();
+        camera.computed.clip_from_view = projection.get_clip_from_view();
+        camera.computed.target_info = Some(RenderTargetInfo { physical_size: UVec2::new(1600, 900), scale_factor: 1.0 });
+        let gt = GlobalTransform::from(Transform::from_xyz(320.0, 300.0, 320.0).looking_at(Vec3::new(320.0, 0.0, 320.0), Vec3::NEG_Z));
+        let screen = camera.world_to_viewport(&gt, Vec3::new(200.0, 40.0, 450.0)).unwrap();
+        let mut window = Window { resolution: bevy::window::WindowResolution::new(1600, 900).with_scale_factor_override(1.0), focused: true, ..default() };
+        window.set_cursor_position(Some(screen));
+        app.world_mut().spawn(window); app.world_mut().spawn((camera, gt, GasCamera));
+        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Right);
+        app.update();
+        let scene = app.world().resource::<Scene>();
+        assert_eq!(scene.sim.battle.actors[0].order, Order::Support(1), "{}", scene.notice);
+        assert!(!app.world().resource::<panel::Panel>().electric_support_target);
+    }
+    #[test]
     fn group_dig_command_reaches_a_real_crawler() {
         use super::*;
         use sim_core::blast::battle::Order;
         let e = modding::laboratory::experiments::stock().into_iter()
             .find(|e| e.id == "crawler-base").unwrap();
         let mut layout = e.layout;
-        layout.size = [256, 128, 256];
-        layout.clear_min = [1, 1]; layout.clear_max = [255, 255];
-        layout.gun = [96, 24, 128]; layout.target = [190, 18, 128];
-        layout.units[0].at = [120, 16, 128]; layout.units[1].at = [48, 16, 128];
-        layout.blocks[0].min = [180, 1, 120]; layout.blocks[0].max = [202, 16, 136];
+        layout.size = [512, 128, 512];
+        layout.clear_min = [1, 1]; layout.clear_max = [511, 511];
+        layout.gun = [120, 24, 256]; layout.target = [310, 18, 256];
+        layout.units[0].at = [220, 16, 256]; layout.units[1].at = [70, 16, 256];
+        layout.blocks[0].min = [300, 1, 248]; layout.blocks[0].max = [322, 16, 264];
         let config = ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
         let mut sim = BlastRange::with_layout(config, layout).unwrap();
         sim.start_free_control().unwrap();
-        let face = [190, 8, 128];
+        let face = [310, 8, 256];
         assert_eq!(issue_battle_group_order(&mut sim, &[0], Order::Dig(face), None), 1);
         assert_eq!(sim.battle.actors[0].order, Order::Dig(face));
     }

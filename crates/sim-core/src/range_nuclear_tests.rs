@@ -127,7 +127,7 @@ fn nuclear_stock_mission_destroys_fortifications_and_restores_large_wave_budget(
     ] {
         scenario.units.push(modding::range::RangeUnitDef {
             kind,
-            at: [7000, 16, z],
+            at: [6200, 16, z],
             allied: false,
             weapon: None,
         });
@@ -181,7 +181,7 @@ fn nuclear_stock_mission_destroys_fortifications_and_restores_large_wave_budget(
         r.units[distant..]
             .iter()
             .all(|u| u.status.alive && u.revision == 0),
-        "receivers at 180 m suffered remote damage"
+        "receivers beyond 260 m suffered remote damage"
     );
     assert!(
         r.units[1..4].iter().all(|u| !u.status.alive),

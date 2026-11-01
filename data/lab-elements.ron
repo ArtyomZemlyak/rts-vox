@@ -23,6 +23,8 @@
     (id:"tank", name:"Танк T1", category:Unit, units:[(kind:Tank,at:(0,0,0))]),
     (id:"walker", name:"Шагоход T2", category:Unit, units:[(kind:Strider,at:(0,0,0))]),
     (id:"spider", name:"Паук T3", category:Unit, units:[(kind:Spider,at:(0,0,0))]),
+    (id:"lightning_tank", name:"Электротанк T2", category:Unit, units:[(kind:LightningTank,at:(0,0,0))]),
+    (id:"eidolon_tank", name:"Скат · танк эйдолонов T1", category:Unit, units:[(kind:EidolonTank,at:(0,0,0))]),
     (id:"base", name:"База", category:Structure, units:[(kind:Base,at:(0,0,0))]),
     (id:"turret-t2", name:"Турель T2", category:Structure, units:[(kind:TurretT2,at:(0,0,0))]),
     (id:"crawler-unit", name:"Краулер-добытчик", category:Unit, units:[(kind:Crawler,at:(0,0,0))]),

@@ -303,6 +303,8 @@ impl Reader<'_> {
                     3 => Order::Attack(self.size()?),
                     4 => Order::Ground([self.0.i32(), self.0.i32(), self.0.i32()]),
                     5 => Order::Dig([self.0.i32(), self.0.i32(), self.0.i32()]),
+                    7 => Order::Reclaim([self.0.i32(), self.0.i32(), self.0.i32()]),
+                    8 => Order::Support(self.size()?),
                     6 => {
                         let throttle = self.0.u8();
                         let turn = self.0.u8();
@@ -976,6 +978,11 @@ pub(super) fn save_recorded_command(b: &mut Blob, command: Command) {
                             b.i32(x);
                         }
                     }
+                    Order::Reclaim(at) => {
+                        b.u8(7);
+                        for x in at { b.i32(x); }
+                    }
+                    Order::Support(target) => { b.u8(8); b.usize(target); }
                     Order::Pilot {
                         throttle,
                         turn,

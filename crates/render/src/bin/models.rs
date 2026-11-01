@@ -258,6 +258,7 @@ fn setup(
     // Ванильный шагоход — тело боя, а не набора; в смотровой он
     // нужен ради ног: там первые повёрнутые звенья (ADR-231).
     all.push(("шагоход", voxel::unit::strider()));
+    all.push(("осадная турель T3", voxel::unit::artillery_turret_t3()));
     if let Some(mm) = scene.mm {
         all.retain_mut(|(name, b)| match b.resampled(mm) {
             Ok(r) => {
@@ -319,6 +320,14 @@ fn setup(
             );
             for (finish, buf) in bufs.iter_mut().enumerate() {
                 if !buf.is_empty() {
+                    if *name == "осадная турель T3" && finish == usize::from(voxel::unit::FINISH_STEEL - 1) {
+                        let ivory = look::to_linear([0.84, 0.82, 0.77]);
+                        for colour in &mut buf.col {
+                            colour[0] = ivory[0];
+                            colour[1] = ivory[1];
+                            colour[2] = ivory[2];
+                        }
+                    }
                     weather(buf, finish);
                 }
             }

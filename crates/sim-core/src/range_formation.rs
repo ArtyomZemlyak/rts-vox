@@ -35,7 +35,7 @@ impl BlastRange {
         }
         let size = self.size();
         let centre: [i32; 2] = std::array::from_fn(|a| centre[a].clamp(0, size[2 * a] as i32 - 1));
-        let spacing = movers
+        let diameters: Vec<i32> = movers
             .iter()
             .map(|&id| {
                 let o = super::motion::Obstacle::of(&self.units[id].motion, &self.units[id].body);
@@ -44,13 +44,14 @@ impl BlastRange {
                     .add(o.half[1].mul(o.half[1]))
                     .sqrt()
                     .mul(Fx::from_int(2));
-                diameter.to_int_trunc()
+                let d = diameter.to_int_trunc()
                     + 1
                     + 2 * self.navigation.cell_units
-                    + 2 * self.navigation.plan_margin
+                    + 2 * self.navigation.plan_margin;
+                (d + 1) & !1
             })
-            .max()
-            .unwrap();
+            .collect();
+        let spacing = *diameters.iter().max().unwrap();
         let cols = (1..=n).find(|c| c * c >= n).unwrap() as i32;
         let rows = (n as i32 + cols - 1) / cols;
         let average: [i32; 2] = std::array::from_fn(|a| {
@@ -66,25 +67,14 @@ impl BlastRange {
             1
         };
         let lateral = 1 - forward;
-        let mut span = [0; 2];
-        span[lateral] = (cols - 1) * spacing;
-        span[forward] = (rows - 1) * spacing;
-        let margin = (spacing / 2).max(super::motion::EDGE);
-        if (0..2).any(|a| span[a] + 2 * margin >= size[2 * a] as i32) {
-            return Vec::new();
-        }
-        // Translate the whole grid at the edge; clamping each slot merges them.
-        let origin: [i32; 2] = std::array::from_fn(|a| {
-            (centre[a] - span[a] / 2).clamp(
-                margin,
-                (size[2 * a] as i32 - 1 - margin - span[a]).max(margin),
-            )
-        });
+        // Assign on a provisional grid, then pack each row and column to
+        // the size of the units actually assigned there. A large unit no
+        // longer forces every smaller unit to reserve its entire footprint.
         let slots: Vec<[i32; 2]> = (0..n)
             .map(|i| {
-                let mut slot = origin;
-                slot[lateral] += (i as i32 % cols) * spacing;
-                slot[forward] += (i as i32 / cols) * spacing;
+                let mut slot = centre;
+                slot[lateral] += (i as i32 % cols) * spacing - (cols - 1) * spacing / 2;
+                slot[forward] += (i as i32 / cols) * spacing - (rows - 1) * spacing / 2;
                 slot
             })
             .collect();
@@ -103,10 +93,45 @@ impl BlastRange {
             })
             .collect();
         let assignment = assign(&costs);
+        let mut widths = vec![0; cols as usize];
+        let mut heights = vec![0; rows as usize];
+        for (i, &slot) in assignment.iter().enumerate() {
+            widths[slot % cols as usize] = widths[slot % cols as usize].max(diameters[i]);
+            heights[slot / cols as usize] = heights[slot / cols as usize].max(diameters[i]);
+        }
+        let mut extent = [0; 2];
+        extent[lateral] = widths.iter().sum();
+        extent[forward] = heights.iter().sum();
+        let edge = super::motion::EDGE;
+        if (0..2).any(|a| extent[a] + 2 * edge >= size[2 * a] as i32) {
+            return Vec::new();
+        }
+        let origin: [i32; 2] = std::array::from_fn(|a| {
+            (centre[a] - extent[a] / 2).clamp(edge, size[2 * a] as i32 - 1 - edge - extent[a])
+        });
+        let offsets = |sizes: &[i32]| {
+            let mut offset = 0;
+            sizes
+                .iter()
+                .map(|&size| {
+                    let middle = offset + size / 2;
+                    offset += size;
+                    middle
+                })
+                .collect::<Vec<_>>()
+        };
+        let xs = offsets(&widths);
+        let ys = offsets(&heights);
         movers
             .into_iter()
             .enumerate()
-            .map(|(i, id)| (id, slots[assignment[i]]))
+            .map(|(i, id)| {
+                let slot = assignment[i];
+                let mut p = origin;
+                p[lateral] += xs[slot % cols as usize];
+                p[forward] += ys[slot / cols as usize];
+                (id, p)
+            })
             .collect()
     }
 }

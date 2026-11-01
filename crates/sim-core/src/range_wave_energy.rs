@@ -106,6 +106,37 @@ impl Battle {
 }
 
 impl BlastRange {
+    /// Physical debris budgets are soft in autonomous battles. Once a pool
+    /// is saturated while real work is waiting, grow it deterministically;
+    /// parked rubble and live fragments remain intact and round-trip in the
+    /// existing debris-tuning snapshot. The normal path pays no extra scan.
+    pub(crate) fn relieve_autonomous_damage_pressure(&mut self) {
+        if !self.battle_mode() || !self.battle.autonomous || self.tick % 10 != 0
+            || !(self.matter.felling_pending() > 0 || self.pending_kinetic_impacts() > 0
+                || self.battle.has_material_work() || self.thermals.hot() > 0) {
+            return;
+        }
+        let pools = self.matter.debris.fragment_pools(&self.matter.tuning);
+        let fragments = self.matter.debris.fragments.len();
+        let reserved = self.matter.debris.reserved();
+        let claims = self.matter.debris.claims();
+        let t = &mut self.matter.tuning;
+        let grow = |value: u32| value.saturating_add((value / 4).max(256));
+        if pools.parked >= t.max_resting_fragments as usize && fragments > pools.parked {
+            t.max_resting_fragments = grow(t.max_resting_fragments);
+        }
+        if pools.flying.saturating_add(reserved) >= t.max_flying as usize {
+            t.max_flying = grow(t.max_flying);
+        }
+        if pools.working.saturating_add(reserved) >= t.max_fragments as usize {
+            t.max_fragments = grow(t.max_fragments);
+        }
+        if claims >= t.max_claims as usize {
+            t.max_claims = grow(t.max_claims);
+        }
+        t.max_fragments = t.max_fragments.max(t.max_flying);
+        t.max_resting_fragments = t.max_resting_fragments.min(u32::MAX - t.max_fragments);
+    }
     pub(crate) fn reserve_pending_damage(&mut self) {
         let waiting = self.battle.has_material_work()
             || self.pending_kinetic_impacts() > 0

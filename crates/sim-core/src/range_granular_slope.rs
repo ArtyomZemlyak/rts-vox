@@ -4,6 +4,16 @@ use super::*;
 use voxel::bodies::Body;
 
 impl Flow {
+    /// Conservative maximum for one complete slope query, including the
+    /// swept hull, rotation and sand shearing.
+    pub(in crate::blast) fn slope_query_budget(&self, b: &Body, occupied: usize) -> u32 {
+        let t = self.tuning.slope;
+        u32::from(b.sx) * u32::from(b.sz)
+            + b.voxels.len() as u32 * 4
+            + (b.voxels.len() + occupied) as u32 * 4 * t.reach * 2
+            + 2 * (occupied as u32 + 2)
+            + t.scuff_moves_per_step * 8
+    }
     pub fn slope_candidate(&self, b: &Body) -> bool {
         !b.resting && (b.tilt_axis == 0 || b.tilt_axis >= 3)
             && b.fallen > 0
@@ -88,11 +98,7 @@ impl Flow {
         let area = usize::from(b.sx) * usize::from(b.sz);
         // Even an adversarial body cannot restart a query larger than a full
         // phase budget forever. Larger footprints use ordinary vertical motion.
-        let worst = area as u32
-            + b.voxels.len() as u32 * 4
-            + (b.voxels.len() + occupied.len()) as u32 * 4 * t.reach * 2
-            + 2 * (occupied.len() as u32 + 2)
-            + t.scuff_moves_per_step * 8;
+        let worst = self.slope_query_budget(b, occupied.len());
         if worst > t.checks_per_tick {
             return false;
         }

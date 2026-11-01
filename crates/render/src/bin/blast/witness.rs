@@ -24,6 +24,12 @@ pub(super) fn body_tint(allied: Option<bool>, id: usize) -> [f32; 3] {
         None => [0.22, 0.32, 0.27],
     }
 }
+/// The siege turret uses ivory armour and team-coloured stripes, while
+/// retaining the existing steel material and ordinary destructible voxels.
+pub(super) fn siege_steel(buf: &mut MeshBuf) {
+    let ivory = look::to_linear([0.84, 0.82, 0.77]);
+    for c in &mut buf.col { c[0] = ivory[0]; c[1] = ivory[1]; c[2] = ivory[2]; }
+}
 fn build(unit: &Snapshot, pristine: &voxel::unit::UnitBody, skins: &SkinBindings) -> Vec<Built> {
     let config = &unit.config;
     let id = unit.id;
@@ -54,7 +60,9 @@ fn build(unit: &Snapshot, pristine: &voxel::unit::UnitBody, skins: &SkinBindings
             body_tint(unit.allied, id),
             1.0,
             rows,
-            if unit.revision.damage>0 {render::model::DAMAGE_BEVEL}else{0.35},
+            if unit.revision.damage>0 {render::model::DAMAGE_BEVEL}
+            else if unit.revision.kind == RangeUnitKind::ArtilleryTurretT3 {render::model::BEVEL}
+            else {0.35},
             pivot,
             &mut bufs,
         );
@@ -62,6 +70,7 @@ fn build(unit: &Snapshot, pristine: &voxel::unit::UnitBody, skins: &SkinBindings
             if buf.idx.is_empty() {
                 continue;
             }
+            if unit.revision.kind == RangeUnitKind::ArtilleryTurretT3 && k == usize::from(voxel::unit::FINISH_STEEL - 1) { siege_steel(buf); }
             weather(buf, k);
             if unit.revision.damage > 0 {
                 for j in 0..buf.pos.len() {
@@ -337,6 +346,8 @@ pub(super) fn update(
             RangeUnitKind::ArtilleryTurretT3 => 9,
             RangeUnitKind::NuclearSilo => 10,
             RangeUnitKind::Crawler => 11,
+            RangeUnitKind::LightningTank => 12,
+            RangeUnitKind::EidolonTank => 13,
         };
         let pristine = art.pristine.clone();
         let skins = art.skins.clone();

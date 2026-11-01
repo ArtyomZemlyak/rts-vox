@@ -355,7 +355,7 @@ fn spider_live_beam_keeps_melting_armour_while_a_hot_crater_competes_for_slots()
 }
 
 #[test]
-fn spider_direct_beam_damages_new_target_when_heat_field_is_full_of_cold_cells() {
+fn spider_direct_beam_damages_new_target_when_heat_field_is_full_of_hot_cells() {
     let mut r = trial(
         &[
             (RangeUnitKind::Tank, [450, 16, 336]),
@@ -374,7 +374,8 @@ fn spider_direct_beam_damages_new_target_when_heat_field_is_full_of_cold_cells()
     'outer: for x in 0..body.vol.nx {
         for y in 0..body.vol.ny {
             for z in 0..body.vol.nz {
-                if body.vol.get(x as usize, y as usize, z as usize) {
+                if body.vol.get(x as usize, y as usize, z as usize)
+                    && body.part_at(x as usize, y as usize, z as usize) == voxel::Part::Armour {
                     old.push(thermal::Cell {
                         unit: 2,
                         part: 0,
@@ -389,7 +390,7 @@ fn spider_direct_beam_damages_new_target_when_heat_field_is_full_of_cold_cells()
     }
     assert_eq!(old.len(), 64);
     for p in old {
-        r.thermals.deposit(p, 1, &r.thermal_tuning);
+        r.thermals.deposit(p, 300, &r.thermal_tuning);
     }
     assert_eq!(r.thermals.hot(), 64);
     for u in &mut r.units {
@@ -402,9 +403,9 @@ fn spider_direct_beam_damages_new_target_when_heat_field_is_full_of_cold_cells()
     }
     assert!(
         r.thermals.melted > 0,
-        "direct laser heat was rejected by a full field of cold cells"
+        "direct laser heat was rejected by a full field of hot cells"
     );
-    assert!(r.thermals.hot() <= 64);
+    assert!(r.thermals.hot() >= 64, "accepted heat must not evict earlier cells");
     assert!(r.matter.economy.ledger.balanced());
 }
 

@@ -1,10 +1,12 @@
 // 20 Hz, world units = 0.1 m. Same kilometre map, one additional clear sector.
 (
     tank_power_milli: 1000,
-    // Reinforced emplacement capacitor: twice the ordinary energy round.
-    turret_t2_power_milli: 2000,
+    // The emplacement is moderately stronger than a tank, not twice as strong.
+    turret_t2_power_milli: 1200,
     turret_t2_reload_ticks: Some(40),
     tank_reload_ticks: 60,
+    // The lighter twin guns cycle 20% sooner than the ordinary T1 gun.
+    eidolon_reload_ticks: Some(48),
     tank_range: "tank_blast",
     artillery_range: "artillery",
     canister: (pellets: 6, spread_milli: 35, range: "canister", reload_ticks: 100, flight_time_milli: 2500, footprint_radius: 60),

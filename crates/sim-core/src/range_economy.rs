@@ -104,6 +104,94 @@ struct Digger {
     full: bool,
     /// Nearby debris may be claimed, waiting for search, or still in work.
     reclaim_pending: bool,
+    reclaim_only: bool,
+}
+
+/// Cosmetic samples of completed transfers. They are reset each tick and
+/// intentionally excluded from simulation saves and accounting.
+#[derive(Clone, Copy, Debug)]
+pub struct ReclaimVisual {
+    pub from: [i32; 3],
+    pub crawler: usize,
+    pub material: u16,
+}
+const RECLAIM_VISUAL_LIMIT: usize = 32;
+const CRAWLER_RECLAIM_REACH: u32 = 160;
+
+// Disassemble a dead hull directly into the hold. Geometry and the body
+// ledger move together; no temporary fragment pool or loss of material.
+fn reclaim_hulls(m: &mut Mining, units: &mut [RangeUnit], matter: &mut super::matter::Matter, diggers: &mut [Digger]) {
+    let Some(rc) = m.reclaim.as_ref() else { return; };
+    let reach = i64::from(CRAWLER_RECLAIM_REACH.max(m.data.reclaim.as_ref().unwrap().reach));
+    let density = u64::from(matter.source_density(3));
+    if density == 0 { return; }
+    let _ = rc;
+    for d in diggers.iter_mut().filter(|d| d.reclaim_only) {
+        let target = units.iter().enumerate().filter(|(id, u)| {
+            *id != d.id && !u.status.alive && matter.economy.ledger.held(matter.body_container(*id)) > 0
+        }).filter_map(|(id, u)| {
+            let p = u.motion.pos.map(fx::Fx::to_int_trunc);
+            let dist = (0..3).map(|a| i64::from(p[a] - d.face[a]).pow(2)).sum::<i64>();
+            (dist <= reach * reach).then_some((dist, id))
+        }).min();
+        let Some((hull_distance, id)) = target else { continue; };
+        // Respect the clicked point across both types, instead of always
+        // consuming a nearby hull before a closer selected fragment.
+        let capacity = matter.economy.ledger.get(m.tank(d.id).unwrap()).cap;
+        let closer_piece = matter.debris.fragments.iter().filter(|f| f.resting).any(|f| {
+            let p = [f.position.x, f.position.y, f.position.z].map(fx::Fx::to_int_trunc);
+            let dist = (0..3).map(|a| i64::from(p[a] - d.face[a]).pow(2)).sum::<i64>();
+            if dist > reach * reach || dist > hull_distance { return false; }
+            let held = matter.economy.ledger.held(f.held);
+            held > 0 && held <= capacity
+        });
+        if closer_piece { continue; }
+        d.reclaim_pending = true;
+        d.rate = 0;
+        let tank = m.tank(d.id).unwrap();
+        let room = matter.economy.ledger.room(tank).saturating_sub(m.inflight[d.id]);
+        let limit = (room / density).min(1024) as usize;
+        if limit == 0 { d.full = true; m.mark_full(d.id); continue; }
+        let u = &mut units[id];
+        // Existing section/shed jobs own their cells until they complete.
+        if u.section.is_some() || !u.seg_shed.is_empty() || u.seg_sections.iter().any(Option::is_some) { continue; }
+        let mut cells = Vec::with_capacity(limit);
+        for part in 0..=u.body.segments.len() {
+            let b = if part == 0 { &u.body } else { &u.body.segments[part - 1].body };
+            'outer: for z in 0..usize::from(b.vol.nz) { for y in 0..usize::from(b.vol.ny) { for x in 0..usize::from(b.vol.nx) {
+                if b.vol.get(x,y,z) { cells.push((part, [x,y,z])); }
+                if cells.len() == limit { break 'outer; }
+            }}}
+            if cells.len() == limit { break; }
+        }
+        if cells.is_empty() { continue; }
+        let count = cells.len();
+        let samples = count.min(8).min(RECLAIM_VISUAL_LIMIT.saturating_sub(m.reclaim_events.len()));
+        for sample in 0..samples {
+            let (part, cell) = cells[sample * count / samples];
+            let from = if part == 0 { u.world_pos(cell) } else {
+                let v = u.seg_frames[part - 1].world(cell.map(|v| fx::Fx::from_int(v as i32).add(fx::Fx::from_ratio(1, 2))));
+                [v.x, v.y, v.z].map(fx::Fx::to_int_trunc)
+            };
+            m.reclaim_events.push(ReclaimVisual { from, crawler: d.id, material: 3 });
+        }
+        let amount = count as u64 * density;
+        assert_eq!(matter.economy.ledger.transfer(matter.body_container(id), tank, amount), amount);
+        for (part, cell) in cells {
+            let key = cell.map(|v| v as u8);
+            if part == 0 {
+                assert!(u.body.remove(cell[0], cell[1], cell[2]));
+                u.removed.push(key); u.dents.remove(&key); u.detached += 1;
+            } else {
+                assert!(u.body.segments[part - 1].body.remove(cell[0], cell[1], cell[2]));
+                u.seg_removed.push(((part - 1) as u8, key));
+                u.seg_dents.remove(&((part - 1) as u8, key)); u.seg_detached += 1;
+            }
+        }
+        u.revision += 1;
+        u.refresh_damage(id);
+        if let Some(rc) = m.reclaim.as_mut() { rc.reclaimed += amount; }
+    }
 }
 
 /// The economy's state on a range whose layout has an economy section.
@@ -128,6 +216,7 @@ pub struct Mining {
     haul: Option<haul::Haul>,
     /// Reclaim, with a reclaim section (ADR-674).
     reclaim: Option<reclaim::Reclaim>,
+    reclaim_events: Vec<ReclaimVisual>,
     /// Production, with a production section (ADR-675).
     production: Option<produce::Production>,
 }
@@ -178,6 +267,7 @@ impl Mining {
             deferred: 0,
             haul,
             reclaim,
+            reclaim_events: Vec::new(),
             production,
         }
     }
@@ -192,6 +282,9 @@ impl Mining {
         if let Some(rc) = self.reclaim.as_mut() {
             rc.push_unit();
         }
+    }
+    pub fn reclaim_visuals(&self) -> &[ReclaimVisual] {
+        &self.reclaim_events
     }
     pub fn data(&self) -> &RangeEconomy {
         &self.data
@@ -308,7 +401,17 @@ impl BlastRange {
     /// column. The dig phase stops it as soon as the face is in reach.
     pub(super) fn dig_approach(&self, id: usize, face: [i32; 3]) -> Option<[i32; 2]> {
         let u = &self.units[id];
-        (!u.kind.emplacement() && !self.in_dig_reach(u, face)).then_some([face[0], face[2]])
+        if u.kind.emplacement() || self.in_dig_reach(u, face) { return None; }
+        if u.kind == modding::range::RangeUnitKind::Crawler {
+            let reach = self.mining.as_ref().and_then(|m| m.data.kind(u.kind)).map_or(0, |k| k.dig_reach) as i64;
+            let pos = u.motion.pos.map(fx::Fx::to_int_trunc);
+            let dx = i64::from(face[0] - pos[0]);
+            let dz = i64::from(face[2] - pos[2]);
+            let dist = ((dx * dx + dz * dz) as u64).isqrt().max(1) as i64;
+            let back = (reach * 3 / 4).min(dist);
+            return Some([face[0] - (dx * back / dist) as i32, face[2] - (dz * back / dist) as i32]);
+        }
+        Some([face[0], face[2]])
     }
     fn in_dig_reach(&self, u: &RangeUnit, face: [i32; 3]) -> bool {
         let Some(k) = self.mining.as_ref().and_then(|m| m.data.kind(u.kind)) else {
@@ -334,6 +437,7 @@ impl BlastRange {
         let Some(m) = mining.as_mut() else {
             return;
         };
+        m.reclaim_events.clear();
         if !matches!(battle.phase, battle::Phase::Setup | battle::Phase::Fighting) {
             return;
         }
@@ -343,8 +447,10 @@ impl BlastRange {
             let (Some(tank), Some(actor)) = (m.tank(id), battle.actors.get(id)) else {
                 continue;
             };
-            let battle::Order::Dig(face) = actor.order else {
-                continue;
+            let (face, reclaim_only) = match actor.order {
+                battle::Order::Dig(face) => (face, false),
+                battle::Order::Reclaim(face) => (face, true),
+                _ => continue,
             };
             let k = m.data.kind(u.kind).expect("a tank has its kind's entry");
             // A hauler is away from its face, even when it drives past it.
@@ -360,9 +466,10 @@ impl BlastRange {
                     id,
                     face,
                     k: *k,
-                    rate: k.dig_edits_per_tick,
+                    rate: if reclaim_only { 2048 } else { k.dig_edits_per_tick },
                     full: false,
                     reclaim_pending: false,
+                    reclaim_only,
                 });
             } else {
                 m.mark_full(id);
@@ -374,7 +481,19 @@ impl BlastRange {
         let mut left = pool.saturating_sub(m.reserved.len());
         // Debris at the face goes first, from the same rate and sub-pool
         // (ADR-674); a digger away from its face forgets its reclaim.
-        let mut starved = reclaim::reclaim(m, units, matter, *tick, &mut diggers, &mut left);
+        let mut reclaimers: Vec<_> = diggers.iter().copied().filter(|d|
+            d.reclaim_only || d.k.kind != modding::range::RangeUnitKind::Crawler).collect();
+        reclaim_hulls(m, units, matter, &mut reclaimers);
+        let hull_work: Vec<_> = reclaimers.iter().filter(|d| d.reclaim_only && d.reclaim_pending).map(|d| d.id).collect();
+        // Reclaim changes ownership of existing debris, not terrain edits.
+        // Give the crusher its own budget without consuming the dig queue.
+        let mut reclaim_left = if reclaimers.iter().any(|d| d.reclaim_only) { left.max(4096) } else { left };
+        let mut starved = reclaim::reclaim(m, units, matter, *tick, &mut reclaimers, &mut reclaim_left);
+        if !reclaimers.iter().any(|d| d.reclaim_only) { left = reclaim_left; }
+        for d in &mut reclaimers { d.reclaim_pending |= hull_work.contains(&d.id); }
+        for updated in reclaimers {
+            if let Some(d) = diggers.iter_mut().find(|d| d.id == updated.id) { *d = updated; }
+        }
         if diggers.is_empty() {
             return;
         }
@@ -391,7 +510,14 @@ impl BlastRange {
                 rate,
                 full,
                 reclaim_pending,
+                reclaim_only,
             } = diggers[(start + step) % n];
+            if reclaim_only {
+                if !reclaim_pending && m.inflight[id] == 0 && ledger.held(m.tank(id).unwrap()) > 0 {
+                    m.mark_full(id);
+                }
+                continue;
+            }
             if full || rate == 0 {
                 continue;
             }
@@ -419,7 +545,11 @@ impl BlastRange {
                 front
             } else { face };
             let spans = Arc::clone(m.balls.get(&k.dig_radius).expect("dig ball is prepared"));
-            for &span in spans.iter() {
+            // Visit the first solid voxel on the drill axis before scanning
+            // the surrounding ball. Otherwise long rays to peripheral cells
+            // can exhaust the shared ray budget before the actual face.
+            let first = drill_origin.map(|_| [0, 0, 0]);
+            for span in first.into_iter().chain(spans.iter().copied()) {
                 for [x, y, z] in occupied_row(world, cut_face, span) {
                     if m.reserved.contains_key(&[x, y, z]) || matter.debris.claimed([x, y, z]) {
                         // Do not depart while another queued edit or debris
@@ -443,10 +573,12 @@ impl BlastRange {
                             face_pending = true;
                             continue;
                         }
-                        match drill_path_clear(world, drill_origin.expect("crawler drill origin"), [x, y, z], &mut drill_steps) {
-                            Some(true) => {},
-                            Some(false) => { face_pending = true; continue; },
-                            None => { starved = true; break 'diggers; },
+                        if [x as i32, y as i32, z as i32] != cut_face {
+                            match drill_path_clear(world, drill_origin.expect("crawler drill origin"), [x, y, z], &mut drill_steps) {
+                                Some(true) => {},
+                                Some(false) => { face_pending = true; continue; },
+                                None => { starved = true; break 'diggers; },
+                            }
                         }
                     }
                     // The next voxel does not fit: the tank is full.
@@ -600,7 +732,7 @@ impl BlastRange {
             return None;
         }
         for (id, a) in self.battle.actors.iter().enumerate() {
-            if matches!(a.order, battle::Order::Dig(_)) && m.tank(id).is_none() {
+            if matches!(a.order, battle::Order::Dig(_) | battle::Order::Reclaim(_)) && m.tank(id).is_none() {
                 return None;
             }
         }

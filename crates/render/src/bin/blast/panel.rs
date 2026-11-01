@@ -343,6 +343,8 @@ pub struct Panel {
     pub drive: bool,
     pub demo: bool,
     pub ground_fire: bool,
+    pub crawler_mode: CrawlerMode,
+    pub electric_support_target: bool,
     pub blocked: bool,
     pub routes: bool,
     pub scenarios_open: bool,
@@ -351,6 +353,7 @@ pub struct Panel {
     pub projectile_markers: bool,
     pub battle_launch: bool,
     pub free_launch: bool,
+    crawler_charges: Option<usize>,
     pub battle_auto: bool,
     pub battle_name: String,
     pub roster_page: usize,
@@ -372,6 +375,8 @@ impl Panel {
             drive,
             demo,
             ground_fire: false,
+            crawler_mode: CrawlerMode::Move,
+            electric_support_target: false,
             blocked: false,
             routes: true,
             scenarios_open: true,
@@ -380,6 +385,7 @@ impl Panel {
             projectile_markers: true,
             battle_launch: false,
             free_launch: false,
+            crawler_charges: None,
             battle_auto: false,
             battle_name: String::new(),
             roster_page: 0,
@@ -392,6 +398,9 @@ impl Panel {
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrawlerMode { Move, Reclaim, Drill }
+
 #[derive(Component, Clone, Copy, PartialEq)]
 pub enum Action {
     Laboratory,
@@ -421,6 +430,8 @@ pub enum Action {
     Fire,
     NuclearLaunch,
     AutoAttack,
+    CrawlerMode(CrawlerMode),
+    ElectricSupport,
     Stop,
     Reset,
     Patrol,
@@ -525,6 +536,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
         font_size: FontSize::Px(14.0),
         ..default()
     };
+    strategic_icons::setup(&mut commands, camera, &text_font);
     knobs::build(&mut commands, camera, &text_font);
     hud::build(&mut commands, camera, &text_font);
     pilot::build(&mut commands, camera, &text_font);
@@ -694,6 +706,8 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                     ("Танк", Action::Tool(Tool::Tank)),
                     ("Шагоход", Action::Tool(Tool::Strider)),
                     ("Паук", Action::Tool(Tool::Spider)),
+                    ("Электротанк T2", Action::Tool(Tool::LightningTank)),
+                    ("Скат · эйдолоны", Action::Tool(Tool::EidolonTank)),
                 ],
             ),
             (
@@ -922,6 +936,7 @@ pub fn actions(
                 | Action::ProjectileMarkers
                 | Action::Settings
                 | Action::SelectUnit(_)
+                | Action::CrawlerMode(_)
                 | Action::SelectAllOwn
                 | Action::RosterPage(_)
                 | Action::NextOwn
@@ -974,6 +989,7 @@ pub fn actions(
                 | Action::Scenario(_)
         ) {
             panel.free_launch = false;
+            panel.crawler_charges = None;
         }
         match action {
             Action::Laboratory => {},
@@ -1039,9 +1055,11 @@ pub fn actions(
             Action::CrawlerField => match edit.crawler_field(scene.sim.config.clone()) {
                 Ok(()) => {
                     panel.battle_name = "Полигон краулера".into();
-                    panel.briefing = "Выберите краулер. Ctrl+ПКМ — добыча или сбор у точки; ПКМ — движение. Груз и запас базы видны в панели выбранного юнита.".into();
+                    panel.crawler_mode = CrawlerMode::Reclaim;
+                    panel.briefing = "Краулер автоматически собирает обломки. Выберите режим «Движение», «Сбор» или «Бурение» в панели приказов и укажите точку ПКМ. Груз и запас базы видны в панели выбранного юнита.".into();
                     panel.mission = None;
                     panel.free_launch = true;
+                    panel.crawler_charges = Some(0);
                     panel.battle_launch = false;
                     panel.battle_auto = false;
                     panel.drawer = 0;
@@ -1332,6 +1350,25 @@ pub fn actions(
                 edit.editing = false;
                 scene.paused = false;
             }
+            Action::CrawlerMode(mode) => {
+                panel.crawler_mode = mode;
+                panel.ground_fire = false;
+                scene.notice = match mode {
+                    CrawlerMode::Move => "Движение краулера: укажите точку ПКМ",
+                    CrawlerMode::Reclaim => "Сбор краулером: укажите обломок ПКМ; затем сбор в радиусе 16 м",
+                    CrawlerMode::Drill => "Бурение краулером: укажите точку ПКМ",
+                }.into();
+            }
+            Action::ElectricSupport => {
+                if !edit.battle_selected_ids(&scene.sim).iter().any(|&id|
+                    scene.sim.units[id].kind == RangeUnitKind::LightningTank) {
+                    scene.notice = "Выберите союзные электротанки".into();
+                    continue;
+                }
+                panel.ground_fire = false;
+                panel.electric_support_target = true;
+                scene.notice = "Поддержка: щёлкните ПКМ по союзному электротанку".into();
+            }
             Action::Stop => {
                 if scene.sim.battle_mode() {
                     for id in edit.battle_selected_ids(&scene.sim) {
@@ -1343,6 +1380,7 @@ pub fn actions(
                     scene.sim.order_stop();
                 }
                 panel.ground_fire = false;
+                panel.electric_support_target = false;
             }
             Action::Patrol => scene.sim.toggle_patrols(),
             Action::Routes => panel.routes = !panel.routes,
@@ -1354,6 +1392,8 @@ pub fn actions(
                         RangeUnitKind::Strider => 4,
                         RangeUnitKind::Spider => 6,
                         RangeUnitKind::Tank => 5,
+                        RangeUnitKind::LightningTank => 6,
+                        RangeUnitKind::EidolonTank => 5,
                         RangeUnitKind::Artillery => 0,
                         RangeUnitKind::ArtilleryT2
                         | RangeUnitKind::ArtilleryTurretT2
@@ -1751,6 +1791,17 @@ pub fn scenario_progress(
     if panel.free_launch && edit.pending.is_none() && scene.sim.battle_mode() {
         enter_free_control(&mut panel, &mut scene, &mut edit);
         panel.free_launch = false;
+        if panel.crawler_charges.is_some() && scene.sim.patrols_running {
+            let _ = scene.sim.battle_order(0, sim_core::blast::battle::Order::Reclaim([314, 17, 282]), None);
+        }
+    }
+    if !scene.paused && edit.pending.is_none() && scene.sim.patrols_running {
+        if let Some(index) = panel.crawler_charges {
+            const CHARGES: [[i32; 3]; 2] = [[368, 21, 292], [464, 21, 376]];
+            if index < CHARGES.len() && scene.sim.scenario_charge(CHARGES[index], 20000) {
+                panel.crawler_charges = (index + 1 < CHARGES.len()).then_some(index + 1);
+            }
+        }
     }
     if panel.battle_launch && edit.pending.is_none() && scene.sim.battle_mode() {
         if panel.battle_auto {
@@ -1913,6 +1964,8 @@ pub fn refresh(
             Action::Edit => edit.editing,
             Action::Pause => scene.paused,
             Action::Fire | Action::NuclearLaunch => panel.ground_fire,
+            Action::CrawlerMode(mode) => panel.crawler_mode == mode,
+            Action::ElectricSupport => panel.electric_support_target,
             Action::AutoAttack => {
                 if view.battle {
                     edit.controlled

@@ -91,6 +91,8 @@ pub fn setup(
     let mut templates = Templates::default();
     for (kind, body) in [
         (RangeUnitKind::Tank, voxel::unit::tank()),
+        (RangeUnitKind::LightningTank, voxel::unit::lightning_tank()),
+        (RangeUnitKind::EidolonTank, voxel::unit::eidolon_tank()),
         (RangeUnitKind::Crawler, voxel::unit::crawler()),
         (RangeUnitKind::Strider, voxel::unit::strider()),
         (RangeUnitKind::Spider, voxel::unit::spider()),

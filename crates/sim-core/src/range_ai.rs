@@ -408,6 +408,8 @@ impl Policy for Rules<'_> {
                         && matches!(
                             u.kind,
                             RangeUnitKind::Tank
+                                | RangeUnitKind::LightningTank
+                                | RangeUnitKind::EidolonTank
                                 | RangeUnitKind::Artillery
                                 | RangeUnitKind::ArtilleryT2
                                 | RangeUnitKind::Strider

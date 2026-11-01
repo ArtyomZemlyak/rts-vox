@@ -1414,6 +1414,47 @@ mod tests {
         );
     }
     #[test]
+    fn spider_laser_delivers_ten_times_the_previous_heat_on_first_contact() {
+        let block=modding::range::RangeBlock {min:[230,100,330],max:[231,101,342],material:3};
+        let mut heat=[0;2];
+        for (i, old) in [true,false].into_iter().enumerate() {
+            let mut r=laser_range(vec![block.clone()]);
+            r.set_physics_workers(1);r.set_navigation_workers(1);
+            let mut tuning=super::super::motion::spider_tuning().laser.clone();
+            if old {tuning.work=1200000;tuning.heat=32000000;tuning.fracture_j=2000;}
+            tuning.heat_radius=0;
+            let config=r.config;
+            let trace=r.laser_ray([200,100,336].map(Fx::from_int),[280,100,336],None,&tuning,&config,(&mut |_|{},&|_,_|{}));
+            assert!(trace.hit);
+            heat[i]=r.heat.cell([230,100,336]).heat;
+            assert!(r.matter.economy.ledger.balanced());
+            if !old {
+                let restored = BlastRange::restore(r.config, &r.snapshot()).expect("high heat snapshot");
+                assert_eq!(restored.state_hash(), r.state_hash());
+            }
+        }
+        assert!(heat[0]>0);
+        assert_eq!(heat[1],heat[0]*10,"first-contact heat: {heat:?}");
+    }
+    #[test]
+    fn electric_laser_deposits_ten_times_previous_contact_heat() {
+        let block = modding::range::RangeBlock { min: [230,100,330], max: [231,101,342], material: 3 };
+        let mut heat = [0; 2];
+        for (i, old) in [true, false].into_iter().enumerate() {
+            let mut r = laser_range(vec![block.clone()]);
+            r.set_physics_workers(1); r.set_navigation_workers(1);
+            let mut tuning = r.streams.tuning.lightning.clone().unwrap();
+            if old { tuning.work = 500; tuning.heat = 3000; tuning.fracture_j = 1; }
+            tuning.heat_radius = 0;
+            let config = r.config;
+            assert!(r.laser_ray([200,100,336].map(Fx::from_int), [280,100,336], None,
+                &tuning, &config, (&mut |_| {}, &|_,_| {})).hit);
+            heat[i] = r.heat.cell([230,100,336]).heat;
+        }
+        assert!(heat[0] > 0);
+        assert_eq!(heat[1], heat[0] * 10);
+    }
+    #[test]
     fn spider_laser_melts_armour_while_the_contact_sweeps() {
         let mut r = laser_range(vec![]);
         r.streams.tuning.laser = super::super::motion::spider_tuning().laser.clone();

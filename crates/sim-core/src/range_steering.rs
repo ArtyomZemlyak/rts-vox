@@ -76,6 +76,16 @@ mod tests {
     }
 
     #[test]
+    fn checked_corner_brakes_for_continuation_but_final_point_still_stops() {
+        let at = [Fx::from_int(280), Fx::from_int(180)];
+        let corner = [Fx::from_int(20), Fx::ZERO];
+        assert_eq!(braking_distance(at, corner, Some([300, 460]), true), Fx::from_int(28));
+        assert_eq!(braking_distance(at, corner, Some([300, 460]), false), Fx::from_int(20));
+        assert_eq!(braking_distance(at, corner, None, true), Fx::from_int(20));
+        assert_eq!(braking_distance([Fx::from_int(300), Fx::from_int(455)], [Fx::ZERO, Fx::from_int(5)], None, false), Fx::from_int(5));
+    }
+
+    #[test]
     fn open_corners_finish_sooner_without_raising_speed_or_stopping_to_turn() {
         let w = world();
         for (kind, body) in [
@@ -96,11 +106,100 @@ mod tests {
                 let after = finish(&mut flowing, &w, &body);
                 assert!(after.0 < before.0, "{kind:?}: {before:?} -> {after:?}");
                 assert!(
-                    after.1 < before.1,
-                    "{kind:?} still turns standing: {before:?} -> {after:?}"
+                    after.1 <= before.1,
+                    "{kind:?} rounded turn introduced stops: {before:?} -> {after:?}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn nearby_unit_outside_turn_corridor_does_not_cancel_rolling_turn() {
+        let w = world();
+        let body = voxel::unit::tank();
+        let mut m = motion(RangeUnitKind::Tank, &body, vec![[300, 180], [300, 460]]);
+        m.pos[0] = Fx::from_int(280);
+        m.drive.vel = Fx::from_int(20);
+        let neighbour = Obstacle {
+            pos: [Fx::from_int(245), Fx::from_int(16), Fx::from_int(230)],
+            head: 0, half: [Fx::from_int(8); 2],
+        };
+        assert!(m.moving_steering(&w, &body, &[neighbour], &nav::vehicle::Rubble::new(), 0, Fx::ONE).is_some(),
+            "a neighbour away from the actual turn should not force a pivot");
+    }
+
+    #[test]
+    fn close_tank_column_turns_on_the_move_without_excess_overlap() {
+        let w = world();
+        let body = voxel::unit::tank();
+        let mut group: Vec<_> = (0..3).map(|i| {
+            let z = 140 + i * 80;
+            let x = 300 + i * 80;
+            let mut m = motion(RangeUnitKind::Tank, &body, vec![[x, z], [x, z + 200]]);
+            m.pos[2] = Fx::from_int(z);
+            m
+        }).collect();
+        let mut moving_turn = [false; 3];
+        let mut stopped_in_turn = [0; 3];
+        let rubble = nav::vehicle::Rubble::new();
+        for tick in 0..600 {
+            let traffic: Vec<_> = group.iter().map(|m| Traffic::of(m, &body, true)).collect();
+            for id in 0..group.len() {
+                let others: Vec<_> = group.iter().enumerate().filter(|(j, _)| *j != id)
+                    .map(|(_, m)| Obstacle::of(m, &body)).collect();
+                let m = &mut group[id];
+                let head = m.drive.head;
+                m.set_traffic_hint(m.traffic_hint(&body, id, &traffic, crate::mobility::Mobility::intact(true)));
+                m.allow_start(false);
+                m.step(&w, &body, true, true, crate::mobility::Mobility::intact(true),
+                    &others, tick, 98, &rubble, &Default::default());
+                moving_turn[id] |= m.drive.head != head && m.drive.vel > Fx::ONE;
+                let angle = angle::diff(m.drive.head, 0).abs();
+                if angle > angle::FULL / 36 && angle < angle::FULL * 2 / 9 && m.drive.vel <= Fx::ONE {
+                    stopped_in_turn[id] += 1;
+                }
+                assert!(m.drive.vel.abs() <= Fx::from_int(m.speed));
+                for other in &others {
+                    assert!(Obstacle::of(m, &body).penetration(other) <= HULL_CONTACT_SLOP);
+                }
+            }
+            if group.iter().all(|m| m.destination.is_none()) { break; }
+        }
+        assert!(group.iter().all(|m| m.destination.is_none()), "group did not finish its turn");
+        assert!(moving_turn.into_iter().all(|v| v), "some tanks did not turn while moving");
+        assert!(stopped_in_turn.into_iter().all(|v| v <= 2), "tanks stopped during the turn: {stopped_in_turn:?}");
+    }
+
+    #[test]
+    fn a_single_voxel_surface_variation_keeps_rolling_preview() {
+        struct ShallowStep;
+        impl voxel::Generator for ShallowStep {
+            fn material(&self, x: u32, y: u32, _: u32) -> u16 {
+                if y < 16 || (x >= 304 && y == 16) { 2 } else { 0 }
+            }
+        }
+        let w = World::new(640, 64, 640, 100000, Box::new(ShallowStep));
+        w.prepare_navigation([4, 5]);
+        let body = voxel::unit::tank();
+        let mut m = motion(RangeUnitKind::Tank, &body, vec![[300, 180], [300, 460]]);
+        m.pos[0] = Fx::from_int(280);
+        m.drive.vel = Fx::from_int(20);
+        assert!(m.moving_steering(&w, &body, &[], &nav::vehicle::Rubble::new(), 0, Fx::ONE).is_some());
+    }
+
+    #[test]
+    fn modest_course_correction_keeps_existing_forward_momentum() {
+        let w = world();
+        let body = voxel::unit::tank();
+        let mut m = motion(RangeUnitKind::Tank, &body, vec![[300, 250]]);
+        m.navigation.corner_lookahead_units = 0;
+        m.drive.vel = Fx::from_int(20);
+        let before = m.pos;
+        step(&mut m, &w, &body, 0);
+        assert!(!m.blocked);
+        assert!(m.pos[0] > before[0]);
+        assert!(m.drive.vel > Fx::from_int(20), "small turn caused braking: {:?}", m.drive);
+        assert!(m.drive.vel <= Fx::from_int(m.speed));
     }
 
     #[test]
@@ -258,6 +357,33 @@ mod tests {
     }
 }
 
+/// A rounded waypoint has a verified continuation. Allow a short distance
+/// beyond the preview, capped by the conservative bound to the next point.
+pub(super) fn braking_distance(position: [Fx; 2], delta: [Fx; 2], next: Option<[i32; 2]>, rounded: bool) -> Fx {
+    let preview = delta[0].abs().max(delta[1].abs());
+    if !rounded { return preview; }
+    next.map_or(preview, |p| {
+        let next = Fx::from_int(p[0]).sub(position[0]).abs()
+            .max(Fx::from_int(p[1]).sub(position[1]).abs());
+        next.min(preview.add(Fx::from_int(8)))
+    })
+}
+
+/// Conservative capsule around a preview leg. Only a neighbour close to
+/// the actual leg can force a stop; the broad bounding rectangle alone is
+/// far too large for a column of units driving in parallel.
+fn near_preview_leg(p: [Fx; 2], a: [Fx; 2], b: [Fx; 2], radius: Fx) -> bool {
+    let d = [b[0].sub(a[0]), b[1].sub(a[1])];
+    let v = [p[0].sub(a[0]), p[1].sub(a[1])];
+    let length2 = d[0].mul(d[0]).add(d[1].mul(d[1]));
+    let t = if length2 <= Fx::ZERO { Fx::ZERO } else {
+        v[0].mul(d[0]).add(v[1].mul(d[1])).div(length2).max(Fx::ZERO).min(Fx::ONE)
+    };
+    let dx = v[0].sub(d[0].mul(t));
+    let dz = v[1].sub(d[1].mul(t));
+    dx.mul(dx).add(dz.mul(dz)) <= radius.mul(radius)
+}
+
 impl Motion {
     pub(super) fn moving_steering(
         &self,
@@ -364,26 +490,38 @@ impl Motion {
         if (0..2).any(|a| lo[a] < 0 || hi[a] >= [world.nx, world.nz][a] as i32) {
             return None;
         }
-        let mut floor = None;
+        // A uniform tile may lie 10 cm above its neighbour. A mixed tile
+        // still forces the exact route because it may contain an obstacle.
+        let mut floor: Option<[u16; 2]> = None;
         for z in lo[1] as u32 / 8..=hi[1] as u32 / 8 {
             for x in lo[0] as u32 / 8..=hi[0] as u32 / 8 {
                 let [low, high] =
                     world.prepared_floor_tile(x, z, self.navigation.fell.materials)?;
-                if low != high || floor.is_some_and(|level| level != low) {
-                    return None;
-                }
-                floor = Some(low);
+                let [min, max] = floor.map_or([low, high], |[a, b]| [a.min(low), b.max(high)]);
+                if low != high || max.saturating_sub(min) > 1 { return None; }
+                floor = Some([min, max]);
             }
         }
-        if rubble.touches(lo, hi)
-            || others.iter().any(|o| {
-                let r = o.half[0].add(o.half[1]);
-                (0..2).all(|a| {
-                    let center = o.pos[a * 2];
-                    center.add(r) >= Fx::from_int(lo[a]) && center.sub(r) <= Fx::from_int(hi[a])
-                })
-            })
-        {
+        if rubble.touches(lo, hi) {
+            return None;
+        }
+        let own = Obstacle::of(self, body);
+        let radius = |half: [Fx; 2]| half[0].mul(half[0]).add(half[1].mul(half[1])).sqrt();
+        let own_radius = radius(own.half).add(Fx::from_int(self.navigation.plan_margin));
+        if others.iter().any(|o| {
+            let broad_radius = o.half[0].add(o.half[1]);
+            if !(0..2).all(|a| {
+                let center = o.pos[a * 2];
+                center.add(broad_radius) >= Fx::from_int(lo[a])
+                    && center.sub(broad_radius) <= Fx::from_int(hi[a])
+            }) { return false; }
+            let center = [o.pos[0], o.pos[2]];
+            let clearance = own_radius.add(radius(o.half));
+            near_preview_leg(center, p, end, clearance)
+                || near_preview_leg(center, p, coast, clearance)
+                || ((rounded || passed) && (near_preview_leg(center, p, corner, clearance)
+                    || near_preview_leg(center, corner, end, clearance)))
+        }) {
             return None;
         }
         Some(Steering {

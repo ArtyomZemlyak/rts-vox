@@ -14,8 +14,9 @@ pub(super) struct UiSnapshot {
     pub weapon: u8,
     pub step_us: u128,
     pub notice: String,
-    pub crawler_cargo: Vec<Option<(u64, u64, bool, bool, u64, u64)>>,
+    pub crawler_cargo: Vec<Option<(u64, u64, bool, bool, u64, u64, &'static str)>>,
     pub base_cargo: Vec<Option<(u64, u64)>>,
+    pub electric_support: Vec<u32>,
 }
 
 pub(super) fn publish(
@@ -77,11 +78,18 @@ pub(super) fn publish(
     output.crawler_cargo.extend(scene.sim.units.iter().enumerate().map(|(i, u)| {
         (u.kind == RangeUnitKind::Crawler).then(|| scene.sim.tank_fill(i).map(|(held, cap)| {
             let (stored, limit) = scene.sim.side_store(scene.sim.allied(i)).unwrap_or((0, 0));
-            (held, cap, scene.sim.hauling(i), u.status.weapon && u.status.engine, stored, limit)
+            let mode = match scene.sim.battle.actors.get(i).map(|a| a.order) {
+                Some(sim_core::blast::battle::Order::Dig(_)) => "БУРЕНИЕ",
+                Some(sim_core::blast::battle::Order::Reclaim(_)) => "СБОР ОБЛОМКОВ",
+                _ => "ОЖИДАНИЕ",
+            };
+            (held, cap, scene.sim.hauling(i), u.status.weapon && u.status.engine, stored, limit, mode)
         })).flatten()
     }));
     output.base_cargo.clear();
     output.base_cargo.extend(scene.sim.units.iter().enumerate().map(|(i, u)| {
         (u.kind == RangeUnitKind::Base).then(|| scene.sim.side_store(scene.sim.allied(i))).flatten()
     }));
+    output.electric_support.clear();
+    output.electric_support.extend((0..scene.sim.units.len()).map(|i| scene.sim.electric_support_count(i)));
 }

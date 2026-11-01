@@ -14,6 +14,12 @@ use modding::range_fire::Tuning;
 use std::collections::BTreeSet;
 use voxel::unit::{Part, WORLD_MM};
 
+fn fuel_cell(kind: modding::range::RangeUnitKind, at: [u8; 3]) -> [u8; 3] {
+    if kind == modding::range::RangeUnitKind::Crawler { at.map(|v| v * 3 + 1) }
+    else if kind == modding::range::RangeUnitKind::LightningTank { at.map(|v| v * 3 / 2) }
+    else { at }
+}
+
 #[derive(Clone)]
 struct Spill {
     at: [Fx; 3],
@@ -80,7 +86,7 @@ impl Combustion {
                 continue;
             }
             let def = f.tuning.reservoir(u.kind);
-            let [x, y, z] = def.at.map(usize::from);
+            let [x, y, z] = fuel_cell(u.kind, def.at).map(usize::from);
             assert!(
                 x < u.body.vol.nx as usize
                     && y < u.body.vol.ny as usize
@@ -117,7 +123,7 @@ impl Combustion {
                     (p.at, None)
                 } else {
                     (
-                        anchor(&units[id], self.tuning.reservoir(units[id].kind).at),
+                        anchor(&units[id], fuel_cell(units[id].kind, self.tuning.reservoir(units[id].kind).at)),
                         Some(id),
                     )
                 };
@@ -248,7 +254,7 @@ impl BlastRange {
                 continue;
             }
             let u = &self.units[id];
-            let at = tuning.reservoir(u.kind).at;
+            let at = fuel_cell(u.kind, tuning.reservoir(u.kind).at);
             if stock.spill.is_none() {
                 let c = Cell {
                     unit: id as u16,

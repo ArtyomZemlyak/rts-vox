@@ -33,6 +33,7 @@ pub fn spawn(
             if buf.idx.is_empty() {
                 continue;
             }
+            if scene.sim.gun.kind == RangeUnitKind::ArtilleryTurretT3 && k == usize::from(voxel::unit::FINISH_STEEL - 1) { witness::siege_steel(buf); }
             weather(buf, k);
             let base = Transform::from_translation(
                 Vec3::new(GUN[0] as f32, GUN[1] as f32, GUN[2] as f32) + pos,
@@ -101,7 +102,7 @@ pub fn emitters(
     let origin = Vec3::from(GUN.map(|v| v as f32));
     let radius = match scene.sim.gun.kind {
         RangeUnitKind::Strider => 2.35,
-        RangeUnitKind::Tank | RangeUnitKind::Crawler => 3.0,
+        RangeUnitKind::Tank | RangeUnitKind::Crawler | RangeUnitKind::LightningTank | RangeUnitKind::EidolonTank => 3.0,
         RangeUnitKind::Spider => 12.0,
         RangeUnitKind::Artillery => 3.0,
         RangeUnitKind::ArtilleryT2 => 6.0,

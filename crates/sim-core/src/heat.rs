@@ -49,7 +49,7 @@ pub struct Heat {
     pub melted_total: u64,
 }
 
-const HEAT_CAP: u32 = 1_000_000;
+pub(crate) const HEAT_CAP: u32 = 640_000_000;
 
 /// Transient neighbour sums are queried while cooling the source slice;
 /// only the unconsumed gains are committed, in canonical cell order.
@@ -494,7 +494,7 @@ impl Heat {
                     }
                 }
                 if c.heat > 0 {
-                    let lost = (c.heat * t.cooling_milli / 1000).max(1);
+                    let lost = (u64::from(c.heat) * u64::from(t.cooling_milli) / 1000).max(1) as u32;
                     c.heat = c.heat.saturating_sub(lost);
                 }
                 if c.heat == 0 && c.burn == 0 && !t.melt_flow.iter().flatten().any(|f| f.liquid == m) {
@@ -570,7 +570,7 @@ impl Heat {
                 }
             }
             if c.heat > 0 {
-                let lost = (c.heat * t.cooling_milli / 1000).max(1);
+                let lost = (u64::from(c.heat) * u64::from(t.cooling_milli) / 1000).max(1) as u32;
                 c.heat = c.heat.saturating_sub(lost);
             }
             if c.heat == 0 && c.burn == 0 && !t.melt_flow.iter().flatten().any(|f| f.liquid == m) {

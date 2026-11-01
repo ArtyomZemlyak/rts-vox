@@ -44,9 +44,10 @@ pub enum Weapon {
     Canister = 6,
     Siege = 7,
     Nuclear = 8,
+    Lightning = 9,
 }
 impl Weapon {
-    pub const COUNT: usize = 9;
+    pub const COUNT: usize = 10;
     pub fn from_code(code: u8) -> Option<Self> {
         Some(match code {
             0 => Self::MachineGun,
@@ -58,6 +59,7 @@ impl Weapon {
             6 => Self::Canister,
             7 => Self::Siege,
             8 => Self::Nuclear,
+            9 => Self::Lightning,
             _ => return None,
         })
     }
@@ -102,6 +104,10 @@ pub enum Order {
     /// Dig the ball around this face into the unit's tank (ADR-672). The
     /// unit holds its fire, and the rules AI leaves the order alone.
     Dig([i32; 3]),
+    /// Collect wreckage without drilling the ground.
+    Reclaim([i32; 3]),
+    /// Transfer charge to another allied electric tank.
+    Support(usize),
     /// Persistent direct control; axes are -1, 0, 1. Uses ordinary hull physics.
     Pilot {
         throttle: i8,
@@ -248,6 +254,7 @@ pub struct Battle {
     pub impacts: Vec<Impact>,
     pub traces: Vec<weapons::Trace>,
     pub lasers: Vec<weapons::Trace>,
+    pub lightning: Vec<weapons::Trace>,
     pub laser_config: ExplosionConfig,
     pub tuning: std::sync::Arc<Tuning>,
     pub shell_config: ExplosionConfig,
@@ -292,7 +299,24 @@ pub(super) fn attack_range(
         Weapon::Siege => tuning.siege.range,
         Weapon::Nuclear => tuning.nuclear.range,
         Weapon::Laser => motion::spider_tuning().laser.range,
+        Weapon::Lightning => lightning_tuning().range,
     }
+}
+
+fn lightning_tuning() -> &'static modding::range_weapon::Stream {
+    static TUNING: std::sync::OnceLock<modding::range_weapon::Stream> = std::sync::OnceLock::new();
+    TUNING.get_or_init(|| modding::range_weapon::Tuning::from_ron(include_str!("../../../data/range-weapons.ron"))
+        .expect("range weapon tuning").lightning.expect("stock lightning tuning"))
+}
+fn supported_lightning(helpers: u32) -> modding::range_weapon::Stream {
+    let mut stream = lightning_tuning().clone();
+    let factor = 1 + helpers.min(4);
+    stream.range = stream.range.saturating_mul(factor as i32);
+    stream.work = stream.work.saturating_mul(factor);
+    stream.heat = stream.heat.saturating_mul(factor);
+    stream.fracture_j = stream.fracture_j.saturating_mul(factor);
+    stream.reload_ticks = (stream.reload_ticks / factor).max(1);
+    stream
 }
 
 fn loft(t: &Tuning, weapon: Weapon) -> i32 {
@@ -317,6 +341,12 @@ fn effective_weapon(
     }
     if matches!(kind, RangeUnitKind::Base | RangeUnitKind::Crawler) {
         return None;
+    }
+    if kind == RangeUnitKind::LightningTank {
+        return Some(Weapon::Lightning);
+    }
+    if kind == RangeUnitKind::EidolonTank {
+        return Some(Weapon::Kinetic);
     }
     if kind == RangeUnitKind::Spider {
         return Some(Weapon::Laser);
@@ -347,6 +377,7 @@ fn effective_weapon(
                 _,
                 Some(
                     RangeUnitKind::Tank
+                    | RangeUnitKind::EidolonTank
                     | RangeUnitKind::Artillery
                     | RangeUnitKind::ArtilleryT2
                     | RangeUnitKind::Base,
@@ -455,6 +486,7 @@ impl Battle {
             impacts: Vec::new(),
             traces: Vec::new(),
             lasers: Vec::new(),
+            lightning: Vec::new(),
             laser_config: ExplosionConfig::from_ron(include_str!("../../../data/laser.ron"))
                 .expect("laser"),
             tuning,
@@ -522,7 +554,7 @@ impl Battle {
             Weapon::Energy => &self.energy_config,
             Weapon::Annihilation => &self.anni_config,
             Weapon::MachineGun => &self.bullet_config,
-            Weapon::Laser => &self.laser_config,
+            Weapon::Laser | Weapon::Lightning => &self.laser_config,
         }
     }
     fn material_energy_mj(&self, weapon: Weapon) -> u64 {
@@ -534,6 +566,9 @@ impl Battle {
     }
     pub(super) fn shot_config(&self, weapon: Weapon, kind: RangeUnitKind) -> ExplosionConfig {
         let mut config = *self.config(weapon);
+        if kind == RangeUnitKind::EidolonTank && weapon == Weapon::Kinetic {
+            config = config.at_power(500);
+        }
         if kind == RangeUnitKind::TurretT2 && weapon == Weapon::Energy {
             config.energy = (u64::from(config.energy)
                 * u64::from(self.tuning.turret_t2_power_milli)
@@ -690,6 +725,11 @@ impl Battle {
                         b.i32(v);
                     }
                 }
+                Order::Reclaim(p) => {
+                    b.u8(7);
+                    for v in p { b.i32(v); }
+                }
+                Order::Support(id) => { b.u8(8); b.usize(id); }
                 Order::Pilot {
                     throttle,
                     turn,
@@ -748,7 +788,7 @@ impl Battle {
             4 => Phase::Draw,
             _ => return None,
         };
-        for a in &mut self.actors {
+        for (id, a) in self.actors.iter_mut().enumerate() {
             a.turret = crate::turret::Traverse::load(s, limits)?;
             a.order = match s.u8() {
                 0 => Order::Auto,
@@ -775,6 +815,19 @@ impl Battle {
                         return None;
                     }
                     Order::Dig(p)
+                }
+                7 if version >= 62 => {
+                    let p = std::array::from_fn(|_| s.i32());
+                    if (0..3).any(|k| p[k] < 0 || p[k] >= size[k] as i32) { return None; }
+                    Order::Reclaim(p)
+                }
+                8 => {
+                    let target = s.usize();
+                    if target >= units.len() || target == id
+                        || units[id].kind != RangeUnitKind::LightningTank
+                        || units[target].kind != RangeUnitKind::LightningTank
+                        || allied[id] != allied[target] { return None; }
+                    Order::Support(target)
                 }
                 6 => {
                     let throttle = s.u8();
@@ -812,13 +865,15 @@ impl Battle {
             }
         }
         let n = s.usize();
-        if n > self.tuning.max_rounds {
+        // Admission limits differ for autonomous battles; its flag follows
+        // this section in the snapshot. Bound allocation by encoded bytes.
+        if n > s.left() / 65 {
             return None;
         }
         for _ in 0..n {
             let owner = s.usize();
             let weapon = Weapon::from_code(s.u8())?;
-            if weapon == Weapon::Laser
+            if matches!(weapon, Weapon::Laser | Weapon::Lightning)
                 || (version < 43 && weapon.energetic())
                 || (version < 51 && weapon == Weapon::Canister)
             {
@@ -855,9 +910,7 @@ impl Battle {
             });
         }
         let n = s.usize();
-        if n.saturating_add(self.rounds.iter().filter(|r| r.bursts()).count())
-            > self.tuning.max_waves
-        {
+        if n > s.left() / 8 {
             return None;
         }
         for _ in 0..n {
@@ -892,11 +945,16 @@ impl Battle {
     }
 }
 /// Cancellation consumes the current pulse; retargeting never calls this.
-fn stop_spider_beam(a: &mut Actor, kind: RangeUnitKind, tick: u32) {
-    if kind == RangeUnitKind::Spider && a.burst > 0 {
+fn stop_active_beam(a: &mut Actor, kind: RangeUnitKind, tick: u32) {
+    if matches!(kind, RangeUnitKind::Spider | RangeUnitKind::LightningTank) && a.burst > 0 {
+        let reload = if kind == RangeUnitKind::LightningTank {
+            lightning_tuning().reload_ticks
+        } else {
+            motion::spider_tuning().laser.reload_ticks
+        };
         a.next = a
             .next
-            .max(tick.saturating_add(motion::spider_tuning().laser.reload_ticks));
+            .max(tick.saturating_add(reload));
         a.burst = 0;
         a.charge = None;
     }
@@ -1087,12 +1145,30 @@ impl BlastRange {
         }
     }
     pub fn battle_attack_range(&self, id: usize) -> Option<i32> {
+        let weapon = self.battle_weapon(id)?;
+        if weapon == Weapon::Lightning {
+            return Some(supported_lightning(self.electric_support_count(id)).range);
+        }
         Some(attack_range(
             &self.battle.tuning,
             self.units.get(id)?.kind,
-            self.battle_weapon(id)?,
+            weapon,
             self.streams.tuning.machine_gun.range,
         ))
+    }
+    /// Active, in-range allied links; the visual readout uses the same rules
+    /// as the combat pass, and never grants the bonus by itself.
+    pub fn electric_support_count(&self, id: usize) -> u32 {
+        let Some(target) = self.units.get(id) else { return 0; };
+        if target.kind != RangeUnitKind::LightningTank || !target.status.alive || !target.status.weapon { return 0; }
+        self.battle.actors.iter().enumerate().filter(|(other, actor)| {
+            let u = &self.units[*other];
+            if actor.order != Order::Support(id) || !u.status.alive || !u.status.weapon || !u.status.engine
+                || self.allied(*other) != self.allied(id) { return false; }
+            let dx = i64::from(u.motion.pos[0].to_int_trunc() - target.motion.pos[0].to_int_trunc());
+            let dz = i64::from(u.motion.pos[2].to_int_trunc() - target.motion.pos[2].to_int_trunc());
+            dx * dx + dz * dz <= 160i64.pow(2)
+        }).count().min(4) as u32
     }
 
     /// Switching ammunition keeps the current order and reload deadline.
@@ -1112,6 +1188,7 @@ impl BlastRange {
                 Some(
                     Weapon::MachineGun
                         | Weapon::Laser
+                        | Weapon::Lightning
                         | Weapon::Canister
                         | Weapon::Siege
                         | Weapon::Nuclear
@@ -1598,7 +1675,7 @@ impl BlastRange {
                         request.order,
                         Order::Move
                             | Order::Hold
-                            | Order::Dig(_)
+                            | Order::Dig(_) | Order::Reclaim(_) | Order::Support(_)
                             | Order::Pilot { fire: false, .. }
                     ))
         {
@@ -1713,7 +1790,7 @@ impl BlastRange {
                 // A digger out of reach drives to its face; the route
                 // is derived, never part of the command (ADR-672).
                 let request = match order {
-                    Order::Dig(face) => orders::Request {
+                    Order::Dig(face) | Order::Reclaim(face) => orders::Request {
                         destination: self.dig_approach(id, face),
                         ..request
                     },
@@ -1721,7 +1798,7 @@ impl BlastRange {
                 };
                 // Between ticks, a manual Move uses the current physical rubble.
                 let routed = order == Order::Move
-                    || matches!(order, Order::Dig(_)) && request.destination.is_some();
+                    || matches!(order, Order::Dig(_) | Order::Reclaim(_)) && request.destination.is_some();
                 let current = (routed && fallback.is_none()).then(|| self.current_rubble());
                 let mut executor = orders::Executor {
                     units: &mut self.units,
@@ -2021,6 +2098,7 @@ impl BlastRange {
             impacts: Vec::new(),
             traces: Vec::new(),
             lasers: Vec::new(),
+            lightning: Vec::new(),
             laser_config: self.battle.laser_config,
             tuning: self.battle.tuning.clone(),
             shell_config: self.battle.shell_config,
@@ -2043,10 +2121,11 @@ impl BlastRange {
         battle.impacts.clear();
         battle.traces.clear();
         battle.lasers.clear();
+        battle.lightning.clear();
         // A surviving siege head carries its current pulse to the next target.
         for (id, actor) in battle.actors.iter_mut().enumerate() {
             if !self.units[id].status.alive || !self.units[id].status.weapon {
-                stop_spider_beam(actor, self.units[id].kind, self.tick);
+                stop_active_beam(actor, self.units[id].kind, self.tick);
                 actor.target = None;
                 actor.charge = None;
                 actor.burst = 0;
@@ -2056,6 +2135,9 @@ impl BlastRange {
             {
                 actor.target = None;
                 if self.units[id].kind != RangeUnitKind::Spider || actor.burst == 0 {
+                    if self.units[id].kind == RangeUnitKind::LightningTank {
+                        stop_active_beam(actor, self.units[id].kind, self.tick);
+                    }
                     actor.charge = None;
                     actor.burst = 0;
                 }
@@ -2073,7 +2155,7 @@ impl BlastRange {
                 && battle
                     .actors
                     .iter()
-                    .any(|a| matches!(a.order, Order::Pilot { .. }))
+                    .any(|a| matches!(a.order, Order::Pilot { .. } | Order::Support(_)))
         {
             self.battle_orders(&mut battle, &mut completed, physics);
         }
@@ -2115,6 +2197,8 @@ impl BlastRange {
                         let weapon = match u.kind {
                             RangeUnitKind::Base => None,
                             RangeUnitKind::Spider => Some(Weapon::Laser),
+                            RangeUnitKind::LightningTank => Some(Weapon::Lightning),
+                            RangeUnitKind::EidolonTank => Some(Weapon::Kinetic),
                             RangeUnitKind::Strider => Some(Weapon::MachineGun),
                             RangeUnitKind::TurretT1 => Some(Weapon::Kinetic),
                             RangeUnitKind::TurretT2 => Some(Weapon::Energy),
@@ -2219,12 +2303,26 @@ impl BlastRange {
         physics: &(impl Fn(usize, &'static str) + Sync),
     ) {
         let stream = self.streams.tuning.machine_gun.clone();
+        const LINK_RANGE: i32 = 160;
+        let mut support = vec![0u32; self.units.len()];
+        for (id, actor) in b.actors.iter().enumerate() {
+            let Order::Support(target) = actor.order else { continue; };
+            if target >= self.units.len() || target == id { continue; }
+            let a = &self.units[id]; let t = &self.units[target];
+            if !a.status.alive || !a.status.weapon || !a.status.engine || !t.status.alive
+                || !t.status.weapon || self.allied(id) != self.allied(target) { continue; }
+            let dx = i64::from(a.motion.pos[0].to_int_trunc() - t.motion.pos[0].to_int_trunc());
+            let dz = i64::from(a.motion.pos[2].to_int_trunc() - t.motion.pos[2].to_int_trunc());
+            if dx * dx + dz * dz <= i64::from(LINK_RANGE).pow(2) {
+                support[target] = (support[target] + 1).min(4);
+            }
+        }
         if let Some(trace) = &mut b.fire_trace {
             trace.fill(FireGate::NoTarget);
         }
         let mut bursts = Vec::new();
         for id in 0..self.units.len() {
-            if b.phase == Phase::Setup && !matches!(b.actors[id].order, Order::Pilot { .. }) {
+            if b.phase == Phase::Setup && !matches!(b.actors[id].order, Order::Pilot { .. } | Order::Support(_)) {
                 continue;
             }
             if !self.units[id].status.alive || !self.units[id].status.weapon {
@@ -2235,6 +2333,39 @@ impl BlastRange {
                 continue;
             }
             let kind = self.units[id].kind;
+            if let Order::Support(target) = b.actors[id].order {
+                let valid = target < self.units.len() && target != id
+                    && self.units[target].status.alive && self.units[target].kind == RangeUnitKind::LightningTank
+                    && self.allied(id) == self.allied(target);
+                if !valid { b.actors[id].order = Order::Hold; self.units[id].motion.stop(); continue; }
+                let from = self.units[id].motion.pos.map(Fx::to_int_trunc);
+                let to = self.units[target].motion.pos.map(Fx::to_int_trunc);
+                let dx = i64::from(to[0] - from[0]); let dz = i64::from(to[2] - from[2]);
+                let distance = ((dx * dx + dz * dz) as u64).isqrt().max(1) as i64;
+                if distance > i64::from(LINK_RANGE) {
+                    if self.tick % 20 == 0 || self.units[id].motion.destination.is_none() {
+                        let back = 120i64.min(distance);
+                        self.units[id].motion.queue_move(&self.world, [to[0] - (dx * back / distance) as i32, to[2] - (dz * back / distance) as i32]);
+                    }
+                } else {
+                    if self.units[id].motion.destination.is_some() { self.units[id].motion.stop(); }
+                    if self.units[id].status.engine && self.units[target].status.weapon && self.tick % 2 == 0 {
+                        let angle = fx::angle::atan2(Fx::from_int(to[2] - from[2]).raw(), Fx::from_int(to[0] - from[0]).raw());
+                        b.actors[id].turret.step(angle, self.turret_limits);
+                        self.units[id].update_pose(b.actors[id].turret.angle);
+                        let muzzle = weapons::muzzles(&self.units[id], b.actors[id].turret.angle)
+                            .first().copied().unwrap_or_else(|| aim_point(&self.units[id]).map(Fx::from_int));
+                        b.lightning.push(weapons::Trace {
+                            from: muzzle,
+                            to: aim_point(&self.units[target]).map(Fx::from_int),
+                            hit: true, serial: self.tick.wrapping_mul(31).wrapping_add(id as u32),
+                        });
+                    }
+                }
+                stop_active_beam(&mut b.actors[id], kind, self.tick);
+                b.actors[id].target = None;
+                continue;
+            }
             let from = self.units[id].motion.pos;
             let distance = |other: usize| {
                 let p = self.units[other].motion.pos;
@@ -2261,8 +2392,11 @@ impl BlastRange {
             {
                 a.order = Order::Auto;
             }
-            if matches!(a.order, Order::Hold | Order::Dig(_)) {
+            if matches!(a.order, Order::Hold | Order::Dig(_) | Order::Reclaim(_)) {
                 record_gate(&mut b.fire_trace, id, FireGate::Hold);
+                if kind == RangeUnitKind::LightningTank {
+                    stop_active_beam(a, kind, self.tick);
+                }
                 a.target = None;
                 continue;
             }
@@ -2294,7 +2428,8 @@ impl BlastRange {
                 &b.tuning,
             )
             .expect("armed actor has a weapon");
-            let range = attack_range(&b.tuning, kind, weapon, stream.range);
+            let mut range = attack_range(&b.tuning, kind, weapon, stream.range);
+            if weapon == Weapon::Lightning { range = supported_lightning(support[id]).range; }
             // Borrow individual config fields independently of the mutable actor.
             let config = match weapon {
                 Weapon::Blast => &b.shell_config,
@@ -2305,19 +2440,19 @@ impl BlastRange {
                 Weapon::Energy => &b.energy_config,
                 Weapon::Annihilation => &b.anni_config,
                 Weapon::MachineGun => &b.bullet_config,
-                Weapon::Laser => &b.laser_config,
+                Weapon::Laser | Weapon::Lightning => &b.laser_config,
             };
             let mut p = if let Some(p) = a.order.point() {
                 p
             } else if let Some(other) = target {
                 aim_point(&self.units[other])
             } else {
-                stop_spider_beam(a, kind, self.tick);
+                stop_active_beam(a, kind, self.tick);
                 continue;
             };
             let mut target_velocity = [Fx::ZERO; 3];
             if let Some(other) =
-                target.filter(|_| weapon != Weapon::Laser && a.order.point().is_none())
+                target.filter(|_| !matches!(weapon, Weapon::Laser | Weapon::Lightning) && a.order.point().is_none())
             {
                 let u = &self.units[other];
                 target_velocity = [
@@ -2399,7 +2534,7 @@ impl BlastRange {
             // Explicit point orders retain their ordinary physical contacts.
             completed("orders_misc");
             let blocked_direct = in_range
-                && matches!(weapon, Weapon::MachineGun | Weapon::Kinetic | Weapon::Laser)
+                && matches!(weapon, Weapon::MachineGun | Weapon::Kinetic | Weapon::Laser | Weapon::Lightning)
                 && !kind.emplacement()
                 && a.order.point().is_none()
                 && weapons::muzzles(&self.units[id], a.turret.angle)
@@ -2427,7 +2562,7 @@ impl BlastRange {
             completed("orders_los");
             if !in_range || blocked_direct {
                 record_gate(&mut b.fire_trace, id, FireGate::Approach);
-                stop_spider_beam(a, kind, self.tick);
+                stop_active_beam(a, kind, self.tick);
                 a.charge = None;
                 if kind.emplacement() {
                     continue;
@@ -2671,7 +2806,7 @@ impl BlastRange {
             };
             if matches!(a.order, Order::Pilot { fire: false, .. }) {
                 record_gate(&mut b.fire_trace, id, FireGate::Hold);
-                stop_spider_beam(a, kind, self.tick);
+                stop_active_beam(a, kind, self.tick);
                 a.charge = None;
                 continue;
             }
@@ -2689,6 +2824,60 @@ impl BlastRange {
                     }))
             {
                 record_gate(&mut b.fire_trace, id, FireGate::Aiming);
+                continue;
+            }
+            if weapon == Weapon::Lightning {
+                record_gate(&mut b.fire_trace, id, FireGate::Beam);
+                if let Some(from) = weapons::muzzles(&self.units[id], a.turret.angle).first().copied() {
+                    let electric = supported_lightning(support[id]);
+                    let trace = self.laser_ray(from, p, Some(id), &electric, config, (&mut completed, physics));
+                    b.lightning.push(trace);
+                    // At most three secondary contacts, on four ticks per
+                    // burst. Every arc uses ordinary occlusion and shields.
+                    if trace.hit && a.burst % 4 == 0 {
+                        let mut end = trace.to;
+                        let at = end.map(Fx::to_int_trunc);
+                        let mut source = self.units.iter().enumerate().find_map(|(other, unit)| {
+                            (other != id && unit.status.alive && self.allied(other) != self.allied(id) && unit.solid(at)).then_some(other)
+                        });
+                        let mut visited = vec![id];
+                        let mut secondary = electric.clone();
+                        // Secondary contacts reach 32 m; the primary weapon
+                        // range remains independently authored in the tuning.
+                        secondary.range = 320;
+                        secondary.heat = electric.heat / 2;
+                        secondary.work = electric.work / 2;
+                        for _ in 0..3 {
+                            let Some(previous) = source else { break; };
+                            visited.push(previous);
+                            let origin = end.map(Fx::to_int_trunc);
+                            let next = self.units.iter().enumerate().filter(|(other, unit)| {
+                                unit.status.alive && !visited.contains(other) && self.allied(*other) != self.allied(id)
+                            }).filter_map(|(other, unit)| {
+                                let target = aim_point(unit);
+                                let d = (0..3).map(|axis| { let v = i64::from(target[axis] - origin[axis]); v * v }).sum::<i64>();
+                                (d <= i64::from(secondary.range).pow(2)).then_some((d, other, target))
+                            }).min_by_key(|(distance, other, _)| (*distance, *other));
+                            let Some((_, _, target)) = next else { break; };
+                            let arc = self.laser_ray(end, target, Some(previous), &secondary, config, (&mut completed, physics));
+                            end = arc.to;
+                            b.lightning.push(arc);
+                            if !arc.hit { break; }
+                            let at = end.map(Fx::to_int_trunc);
+                            source = self.units.iter().enumerate().find_map(|(other, unit)| {
+                                (unit.status.alive && !visited.contains(&other) && self.allied(other) != self.allied(id) && unit.solid(at)).then_some(other)
+                            });
+                        }
+                    }
+                    a.fired = a.fired.wrapping_add(1);
+                    a.burst += 1;
+                    if a.burst >= electric.burst_ticks {
+                        a.burst = 0;
+                        a.next = self.tick.saturating_add(electric.reload_ticks);
+                    } else {
+                        a.next = self.tick.saturating_add(1);
+                    }
+                }
                 continue;
             }
             if weapon == Weapon::Laser {
@@ -2765,6 +2954,7 @@ impl BlastRange {
             let shell = matches!(
                 kind,
                 RangeUnitKind::Tank
+                    | RangeUnitKind::EidolonTank
                     | RangeUnitKind::Artillery
                     | RangeUnitKind::ArtilleryT2
                     | RangeUnitKind::ArtilleryTurretT2
@@ -2773,14 +2963,15 @@ impl BlastRange {
                     | RangeUnitKind::TurretT1
                     | RangeUnitKind::TurretT2
             );
+            let muzzles = weapons::muzzles(&self.units[id], a.turret.angle);
             let count = if weapon == Weapon::Canister {
                 b.tuning.canister.pellets
+            } else if kind == RangeUnitKind::EidolonTank {
+                muzzles.len().min(2)
             } else if shell {
                 1
             } else {
-                weapons::muzzles(&self.units[id], a.turret.angle)
-                    .len()
-                    .min(2)
+                muzzles.len().min(2)
             };
             if shell {
                 let charge = *a.charge.get_or_insert(self.tick + config.charge_ticks);
@@ -2789,14 +2980,13 @@ impl BlastRange {
                     continue;
                 }
             }
-            let muzzles = weapons::muzzles(&self.units[id], a.turret.angle);
             let pending_full = matches!(weapon, Weapon::Kinetic | Weapon::MachineGun)
                 && !self.solid_flight_room(&b.rounds, count);
             if muzzles.is_empty() {
                 record_gate(&mut b.fire_trace, id, FireGate::NoMuzzle);
                 continue;
             }
-            if !weapon.bursts() && b.rounds.len() + count > b.tuning.max_rounds {
+            if !b.autonomous && !weapon.bursts() && b.rounds.len() + count > b.tuning.max_rounds {
                 record_gate(&mut b.fire_trace, id, FireGate::RoundCapacity);
                 continue;
             }
@@ -2870,7 +3060,9 @@ impl BlastRange {
         let mut blocked = [false; 2];
         for shot in bursts {
             let side = side_of(shot.owner);
-            let gate = if blocked[side] {
+            let gate = if b.autonomous {
+                None
+            } else if blocked[side] {
                 Some(FireGate::BurstQueue)
             } else if reserved + shot.count > b.tuning.max_waves
                 || (battle_sides && by_side[side] + shot.count > half)
@@ -2922,13 +3114,13 @@ impl BlastRange {
             Weapon::Energy => &b.energy_config,
             Weapon::Annihilation => &b.anni_config,
             Weapon::MachineGun => &b.bullet_config,
-            Weapon::Laser => unreachable!("beam is not a projectile"),
+            Weapon::Laser | Weapon::Lightning => unreachable!("beam is not a projectile"),
         };
         let a = &mut b.actors[id];
         record_gate(&mut b.fire_trace, id, FireGate::Fired);
         let speed = config.shell_speed;
         for barrel in 0..count {
-            let muzzle = muzzles[if shell { 0 } else { barrel }];
+            let muzzle = muzzles[if shell && kind != RangeUnitKind::EidolonTank { 0 } else { barrel }];
             let mut delta: [Fx; 3] = std::array::from_fn(|k| Fx::from_int(p[k]).sub(muzzle[k]));
             if weapon == Weapon::Canister && barrel > 0 {
                 // One central round and a rotated ring. A finite authored
@@ -3036,6 +3228,8 @@ impl BlastRange {
                     b.tuning.nuclear.reload_ticks
                 } else if weapon == Weapon::Siege {
                     b.tuning.siege.reload_ticks
+                } else if kind == RangeUnitKind::EidolonTank {
+                    b.tuning.eidolon_reload_ticks.unwrap_or(b.tuning.tank_reload_ticks)
                 } else if kind == RangeUnitKind::TurretT2 {
                     b.tuning
                         .turret_t2_reload_ticks
@@ -3248,6 +3442,7 @@ impl BlastRange {
         physics: &(impl Fn(usize, &'static str) + Sync),
     ) {
         use rayon::prelude::*;
+        let autonomous = b.autonomous;
         let n = b.waves.len().max(1);
         // A growing old crater must not consume every newly freed fragment
         // slot before a newer hit reaches its hull. Rotate service, not the
@@ -3280,6 +3475,19 @@ impl BlastRange {
         // A wave past a ceiling waits for the next tick.
         *wave_held = [0; 2];
         let mut capture_left = tuning.wave_capture_ceiling;
+        let mut work_left = tuning.wave_work_ceiling;
+        let mut contact_left = tuning.wave_contact_ceiling;
+        if autonomous {
+            // Every admitted AI-battle wave gets its authored share. Backlog
+            // may cost a frame, but a full wave queue cannot starve new hits.
+            let capture = waves.iter().filter(|w| w.wave.capturing()).fold(0usize, |n,w|
+                n.saturating_add(config_of(w.weapon).capture_cells_per_tick));
+            let work = waves.iter().filter(|w| !w.wave.capturing()).fold(0usize, |n,w|
+                n.saturating_add(config_of(w.weapon).wave_work_per_tick));
+            capture_left = capture_left.max(capture);
+            work_left = work_left.max(work);
+            contact_left = contact_left.max(work);
+        }
         let mut slices = vec![0; waves.len()];
         for &i in &order {
             let w = &waves[i];
@@ -3308,8 +3516,6 @@ impl BlastRange {
                 });
             completed("battle_capture");
         }
-        let mut work_left = tuning.wave_work_ceiling;
-        let mut contact_left = tuning.wave_contact_ceiling;
         let mut pops = vec![0; waves.len()];
         let mut budgets = vec![0; waves.len()];
         for &i in &order {

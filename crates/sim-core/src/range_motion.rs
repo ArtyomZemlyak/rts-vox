@@ -39,8 +39,7 @@ impl Traffic {
                 && m.destination.is_some()
                 && m.escape_left == 0
                 && !m.blocked
-                && !m.partial_path
-                && (m.path.is_empty() || m.cursor + 1 == m.path.len()),
+                && (m.cursor < m.path.len() || m.drive.vel > Fx::ZERO),
         }
     }
 }
@@ -206,6 +205,13 @@ impl Obstacle {
         let reach = radius.add(self.half[0].max(self.half[1]));
         self.pos[0].sub(from[0]).abs() <= reach && self.pos[2].sub(from[1]).abs() <= reach
     }
+}
+// A 20 cm margin lets corners graze instead of halting a whole column.
+// Beyond it, movement may only decrease an existing penetration.
+const HULL_CONTACT_SLOP: Fx = Fx::from_int(2);
+fn hull_contact_blocks(previous: &Obstacle, candidate: &Obstacle, other: &Obstacle) -> bool {
+    let penetration = candidate.penetration(other);
+    penetration > HULL_CONTACT_SLOP && penetration >= previous.penetration(other)
 }
 /// Manoeuvres in one escape cycle: astern, ahead, then each turning both ways.
 const ESCAPES: u32 = 6;
@@ -485,8 +491,7 @@ impl Motion {
             || self.escape_left != 0
             || self.destination.is_none()
             || !self.can_drive(response)
-            || self.partial_path
-            || self.cursor + 1 != self.path.len()
+            || self.cursor >= self.path.len()
         {
             return None;
         }
@@ -496,9 +501,14 @@ impl Motion {
             Fx::from_int(goal[0]).sub(self.pos[0]).raw(),
         );
         let limits = Limits::of(&self.chassis, TICKS);
-        if angle::diff(want, self.drive.head).abs() > limits.turn {
+        // During a gentle turn, traffic is still closing along the current
+        // heading, not the future waypoint's direction. Large turns keep
+        // the collision/replanning path instead of braking for another lane.
+        let follow_angle = (self.navigation.recovery_turn_deg * angle::FULL / 360).max(limits.turn);
+        if angle::diff(want, self.drive.head).abs() > follow_angle {
             return None;
         }
+        let want = self.drive.head;
         let forward = [angle::cos(want), angle::sin(want)];
         let dot = |a: [Fx; 2], b: [Fx; 2]| a[0].mul(b[0]).add(a[1].mul(b[1]));
         let own = Obstacle::of(self, b);
@@ -520,7 +530,6 @@ impl Motion {
             if other_id == id
                 || !other.moving
                 || other.velocity < Fx::ZERO
-                || other.velocity >= hint.speed
                 || !other.obstacle.within([self.pos[0], self.pos[2]], reach)
             {
                 continue;
@@ -533,6 +542,36 @@ impl Motion {
             if ahead <= Fx::ZERO {
                 continue;
             }
+            // Predict crossings only for the higher slot. A stable priority
+            // prevents both vehicles from yielding indefinitely. This is a
+            // bounded velocity-obstacle approximation, not a path search.
+            if id > other_id && other.velocity > Fx::ZERO {
+                let cross = |a: [Fx; 2], b: [Fx; 2]| a[0].mul(b[1]).sub(a[1].mul(b[0]));
+                let determinant = cross(forward, other.direction);
+                if determinant.abs() >= Fx::from_ratio(1, 2) {
+                    let own_distance = cross(delta, other.direction).div(determinant);
+                    let other_distance = cross(delta, forward).div(determinant);
+                    let desired = Fx::from_int(self.speed).mul(response.engine).mul(response.traction);
+                    let horizon = Fx::from_int(3);
+                    // Compare distances first: a nearly stationary neighbour
+                    // would otherwise overflow fixed-point time division.
+                    if own_distance > Fx::ZERO && other_distance > Fx::ZERO && desired > Fx::ZERO
+                        && own_distance <= desired.mul(horizon)
+                        && other_distance <= other.velocity.mul(horizon) {
+                        let own_time = own_distance.div(desired);
+                        let other_time = other_distance.div(other.velocity);
+                        let clearance = own_radius.add(other.obstacle.half[0].max(other.obstacle.half[1])).add(margin);
+                        let slower = desired.min(other.velocity);
+                        let two = Fx::from_int(2);
+                        let window = if clearance >= slower.mul(two) { two } else { clearance.div(slower) };
+                        if own_time.sub(other_time).abs() <= window {
+                            let gap = own_distance.sub(clearance);
+                            hint.speed = hint.speed.min(drive::stopping_speed(gap, brake, TICKS, hint.speed));
+                        }
+                    }
+                }
+            }
+            if other.velocity >= hint.speed { continue; }
             let across = delta[1].mul(forward[0]).sub(delta[0].mul(forward[1])).abs();
             let facing = dot(forward, other.direction);
             let side = forward[0]
@@ -576,6 +615,8 @@ impl Motion {
         let t = &packs.sim;
         let chassis = match kind {
             modding::range::RangeUnitKind::Tank
+            | modding::range::RangeUnitKind::LightningTank
+            | modding::range::RangeUnitKind::EidolonTank
             | modding::range::RangeUnitKind::Crawler
             | modding::range::RangeUnitKind::Artillery
             | modding::range::RangeUnitKind::ArtilleryT2
@@ -628,6 +669,8 @@ impl Motion {
             } else if matches!(
                 kind,
                 modding::range::RangeUnitKind::Tank
+                    | modding::range::RangeUnitKind::LightningTank
+                    | modding::range::RangeUnitKind::EidolonTank
                     | modding::range::RangeUnitKind::Crawler
                     | modding::range::RangeUnitKind::Artillery
                     | modding::range::RangeUnitKind::ArtilleryT2
@@ -643,6 +686,8 @@ impl Motion {
             } else if matches!(
                 kind,
                 modding::range::RangeUnitKind::Tank
+                    | modding::range::RangeUnitKind::LightningTank
+                    | modding::range::RangeUnitKind::EidolonTank
                     | modding::range::RangeUnitKind::Crawler
                     | modding::range::RangeUnitKind::Artillery
                     | modding::range::RangeUnitKind::ArtilleryT2
@@ -654,6 +699,8 @@ impl Motion {
             terrain_tilt_pct: if matches!(
                 kind,
                 modding::range::RangeUnitKind::Tank
+                    | modding::range::RangeUnitKind::LightningTank
+                    | modding::range::RangeUnitKind::EidolonTank
                     | modding::range::RangeUnitKind::Crawler
                     | modding::range::RangeUnitKind::Artillery
                     | modding::range::RangeUnitKind::ArtilleryT2
@@ -665,6 +712,8 @@ impl Motion {
             terrain_approach_pct: if matches!(
                 kind,
                 modding::range::RangeUnitKind::Tank
+                    | modding::range::RangeUnitKind::LightningTank
+                    | modding::range::RangeUnitKind::EidolonTank
                     | modding::range::RangeUnitKind::Crawler
                     | modding::range::RangeUnitKind::Artillery
                     | modding::range::RangeUnitKind::ArtilleryT2
@@ -2835,15 +2884,23 @@ impl Motion {
                         speed = speed.min(hint.speed);
                     }
                     let alignment = steering.map_or(original_alignment, |s| s.alignment);
-                    // Keep the existing conservative axis-distance bound on
-                    // diagonals. Braking includes this tick and the full tail.
-                    let distance = if steering.is_some_and(|s| s.rounded) {
-                        aim[0].abs().max(aim[1].abs())
-                    } else {
-                        dx.abs().max(dz.abs())
-                    };
+                    // A checked, rounded corner is not a stop. Brake for the
+                    // a little beyond the short steering preview, capped by
+                    // the conservative distance to the following waypoint.
+                    // Real terrain and hull contact are still checked each tick.
+                    let distance = steering::braking_distance(
+                        [self.pos[0], self.pos[2]], if steering.is_some_and(|s| s.rounded) { aim } else { [dx, dz] },
+                        self.path.get(self.cursor + 1).copied(),
+                        steering.is_some_and(|s| s.rounded),
+                    );
                     speed = drive::stopping_speed(distance, brake, crate::TICKS_PER_SECOND, speed);
-                    if steering.is_some() {
+                    // On a checked route, keep rolling through a modest
+                    // forward-facing correction even when the large rounded
+                    // preview is unavailable. The live pose and hull checks still run
+                    // on every step and refuse any unsafe move.
+                    let rolling_correction = steering.is_none()
+                        && alignment > Fx::from_ratio(25, 100);
+                    if steering.is_some() || rolling_correction {
                         speed = drive::corner_speed(
                             aim,
                             angle::diff(want, self.drive.head),
@@ -2854,12 +2911,15 @@ impl Motion {
                     }
                     let threshold = if steering.is_some() {
                         self.navigation.moving_turn_alignment_pct
+                    } else if rolling_correction {
+                        25
                     } else {
                         self.alignment
                     };
                     if alignment > Fx::from_ratio(threshold, 100)
                         && (self.drive.vel > Fx::ZERO
                             || steering.is_some()
+                            || rolling_correction
                             || angle::diff(want, self.drive.head).abs() <= base_limits.turn)
                     {
                         speed = speed.mul(alignment);
@@ -3018,8 +3078,7 @@ impl Motion {
         candidate.pos[0] = nx;
         candidate.pos[2] = nz;
         let collision = others.iter().position(|p| {
-            let penetration = candidate.penetration(p);
-            penetration > Fx::ZERO && penetration >= previous.penetration(p)
+            hull_contact_blocks(&previous, &candidate, p)
         });
         // A hull never enters a pose that leans it past its limit or
         // grounds more of its belly. The contact grade is a softer rule: a
@@ -3677,6 +3736,148 @@ mod tests {
     }
 
     #[test]
+    fn crossing_yield_has_stable_priority_and_ignores_nonconflicting_traffic() {
+        let body = voxel::unit::tank();
+        let mut a = Motion::new([240, 16, 300], RangeUnitKind::Tank, &body);
+        let mut b = Motion::new([300, 16, 240], RangeUnitKind::Tank, &body);
+        b.drive.head = angle::QUARTER;
+        for (m, goal) in [(&mut a, [500, 300]), (&mut b, [300, 500])] {
+            m.enabled = true; m.destination = Some(goal); m.path = vec![goal];
+            m.drive.vel = Fx::from_int(40);
+        }
+        let response = crate::mobility::Mobility::intact(true);
+        let hints = |a: &Motion, b: &Motion| {
+            let traffic = [Traffic::of(a, &body, true), Traffic::of(b, &body, true)];
+            (a.traffic_hint(&body, 0, &traffic, response).unwrap().speed,
+             b.traffic_hint(&body, 1, &traffic, response).unwrap().speed)
+        };
+        let (priority, yielding) = hints(&a, &b);
+        assert_eq!(priority, Fx::from_int(a.speed));
+        assert!(yielding < Fx::from_int(b.speed), "approaching intersection did not yield");
+        a.drive.vel = Fx::from_int(8);
+        assert_eq!(hints(&a, &b).1, Fx::from_int(b.speed), "widely separated arrival times slowed traffic");
+        a.drive.vel = Fx::ZERO;
+        assert_eq!(hints(&a, &b).1, Fx::from_int(b.speed), "stationary obstruction caused a predictive deadlock");
+        a.drive.vel = Fx(1);
+        assert_eq!(hints(&a, &b).1, Fx::from_int(b.speed), "near-zero velocity caused overflow or false yield");
+    }
+
+    #[test]
+    fn predictive_crossing_replays_identically_after_restore() {
+        let w = ground(0);
+        w.prepare_navigation([4, 5]);
+        let body = voxel::unit::tank();
+        let mut a = Motion::new([220, 16, 300], RangeUnitKind::Tank, &body);
+        let mut b = Motion::new([300, 16, 220], RangeUnitKind::Tank, &body);
+        b.drive.head = angle::QUARTER;
+        for (m, goal) in [(&mut a, [500, 300]), (&mut b, [300, 500])] {
+            m.enabled = true; m.destination = Some(goal); m.path = vec![goal];
+        }
+        let advance = |a: &mut Motion, b: &mut Motion, tick| {
+            let traffic = [Traffic::of(a, &body, true), Traffic::of(b, &body, true)];
+            a.set_traffic_hint(a.traffic_hint(&body, 0, &traffic, crate::mobility::Mobility::intact(true)));
+            b.set_traffic_hint(b.traffic_hint(&body, 1, &traffic, crate::mobility::Mobility::intact(true)));
+            a.allow_start(false);
+            step(a, &w, &body, &[Obstacle::of(b, &body)], tick);
+            b.allow_start(false);
+            step(b, &w, &body, &[Obstacle::of(a, &body)], tick);
+        };
+        for tick in 0..25 { advance(&mut a, &mut b, tick); }
+        let restore = |m: &Motion| {
+            let mut blob = Blob::new(); m.save(&mut blob);
+            let mut copy = Motion::new([1, 16, 1], RangeUnitKind::Tank, &body);
+            assert!(copy.load(&mut Scan::new(&blob.v))); copy
+        };
+        let mut a_copy = restore(&a);
+        let mut b_copy = restore(&b);
+        for tick in 25..160 {
+            advance(&mut a, &mut b, tick);
+            advance(&mut a_copy, &mut b_copy, tick);
+            for (original, copy) in [(&a, &a_copy), (&b, &b_copy)] {
+                let (mut left, mut right) = (Blob::new(), Blob::new());
+                original.save(&mut left); copy.save(&mut right);
+                assert_eq!(left.v, right.v, "crossing diverged after restoring at tick {tick}");
+            }
+        }
+    }
+
+    #[test]
+    fn crossing_traffic_yields_before_collision_and_both_continue() {
+        fn run(with_hint: bool) -> (u32, [Fx; 2]) {
+            let w = ground(0);
+            w.prepare_navigation([4, 5]);
+            let body = voxel::unit::tank();
+            let mut a = Motion::new([220, 16, 300], RangeUnitKind::Tank, &body);
+            let mut b = Motion::new([300, 16, 220], RangeUnitKind::Tank, &body);
+            b.drive.head = angle::QUARTER;
+            for (m, goal) in [(&mut a, [500, 300]), (&mut b, [300, 500])] {
+                m.enabled = true;
+                m.destination = Some(goal);
+                m.path = vec![goal];
+            }
+            let mut blocked = 0;
+            for tick in 0..180 {
+                let traffic = [Traffic::of(&a, &body, true), Traffic::of(&b, &body, true)];
+                if with_hint {
+                    a.set_traffic_hint(a.traffic_hint(&body, 0, &traffic, crate::mobility::Mobility::intact(true)));
+                    b.set_traffic_hint(b.traffic_hint(&body, 1, &traffic, crate::mobility::Mobility::intact(true)));
+                }
+                a.allow_start(false);
+                step(&mut a, &w, &body, &[Obstacle::of(&b, &body)], tick);
+                b.allow_start(false);
+                step(&mut b, &w, &body, &[Obstacle::of(&a, &body)], tick);
+                blocked += u32::from(a.blocked) + u32::from(b.blocked);
+                assert!(Obstacle::of(&a, &body).penetration(&Obstacle::of(&b, &body)) <= HULL_CONTACT_SLOP);
+                assert!(a.drive.vel.abs() <= Fx::from_int(a.speed));
+                assert!(b.drive.vel.abs() <= Fx::from_int(b.speed));
+            }
+            (blocked, [a.pos[0], b.pos[2]])
+        }
+        let old = run(false);
+        let improved = run(true);
+        eprintln!("crossing: without={old:?}, with={improved:?}");
+        assert!(improved.0 < old.0, "crossing did not improve");
+        assert!(improved.1.iter().all(|p| *p > Fx::from_int(350)), "crossing did not clear: {improved:?}");
+    }
+
+    #[test]
+    fn traffic_following_remains_smooth_on_intermediate_route_legs() {
+        fn run(with_hint: bool) -> (u32, Fx) {
+            let w = ground(0);
+            w.prepare_navigation([4, 5]);
+            let body = voxel::unit::tank();
+            let mut follower = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
+            let mut leader = Motion::new([262, 16, 300], RangeUnitKind::Tank, &body);
+            for m in [&mut follower, &mut leader] {
+                m.enabled = true;
+                m.destination = Some([590, 300]);
+                m.path = vec![[560, 300], [590, 300]];
+                m.partial_path = true;
+            }
+            leader.speed = 16;
+            let mut blocked = 0;
+            for tick in 0..160 {
+                let traffic = [Traffic::of(&follower, &body, true), Traffic::of(&leader, &body, true)];
+                let hint = with_hint.then(|| follower.traffic_hint(&body, 0, &traffic, crate::mobility::Mobility::intact(true))).flatten();
+                follower.set_traffic_hint(hint);
+                leader.allow_start(false);
+                step(&mut leader, &w, &body, &[Obstacle::of(&follower, &body)], tick);
+                follower.allow_start(false);
+                step(&mut follower, &w, &body, &[Obstacle::of(&leader, &body)], tick);
+                blocked += u32::from(follower.blocked);
+                assert!(Obstacle::of(&follower, &body).penetration(&Obstacle::of(&leader, &body)) <= HULL_CONTACT_SLOP);
+                assert!(follower.drive.vel.abs() <= Fx::from_int(follower.speed));
+            }
+            (blocked, follower.pos[0])
+        }
+        let old = run(false);
+        let improved = run(true);
+        eprintln!("intermediate convoy: without={old:?}, with={improved:?}");
+        assert!(improved.0 < old.0, "without traffic={old:?}, with traffic={improved:?}");
+        assert!(improved.1 > Fx::from_int(250), "follower made no progress: {improved:?}");
+    }
+
+    #[test]
     fn traffic_following_avoids_waiting_on_static_or_turning_blockers() {
         let body = voxel::unit::tank();
         let mut follower = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
@@ -3719,8 +3920,15 @@ mod tests {
             Fx::from_int(follower.speed)
         );
         follower.partial_path = true;
-        assert!(hint(&follower, &leader).is_none());
+        assert!(hint(&follower, &leader).unwrap() < Fx::from_int(follower.speed));
         follower.partial_path = false;
+        follower.path = vec![[300, 300], [500, 300]];
+        assert!(hint(&follower, &leader).unwrap() < Fx::from_int(follower.speed));
+        follower.path = vec![[300, 320], [500, 300]];
+        assert!(hint(&follower, &leader).unwrap() < Fx::from_int(follower.speed), "gentle turn lost traffic advice");
+        let mut side_leader = leader.clone();
+        side_leader.pos[2] = side_leader.pos[2].add(Fx::from_int(100));
+        assert_eq!(hint(&follower, &side_leader), Some(Fx::from_int(follower.speed)), "other lane slowed the follower");
         follower.path = vec![[300, 350], [500, 300]];
         assert!(hint(&follower, &leader).is_none());
         follower.path = vec![[300, 300]];
@@ -4771,6 +4979,8 @@ mod tests {
                 RangeUnitKind::Crawler => voxel::unit::crawler(),
                 RangeUnitKind::Strider => voxel::unit::strider(),
                 RangeUnitKind::Spider => voxel::unit::spider(),
+                RangeUnitKind::LightningTank => voxel::unit::lightning_tank(),
+                RangeUnitKind::EidolonTank => voxel::unit::eidolon_tank(),
                 RangeUnitKind::Artillery => voxel::unit::artillery(),
                 RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
                 RangeUnitKind::ArtilleryTurretT2 => voxel::unit::artillery_turret_t2(),
@@ -4896,6 +5106,19 @@ mod tests {
             "tank did not land: {:?}",
             m.pos
         );
+    }
+    #[test]
+    fn hull_contact_tolerates_two_cells_but_blocks_deepening_and_allows_escape() {
+        let obstacle = |x| Obstacle {
+            pos: [Fx::from_int(x), Fx::ZERO, Fx::ZERO],
+            head: 0,
+            half: [Fx::from_int(10), Fx::from_int(10)],
+        };
+        let other = obstacle(20);
+        assert!(!hull_contact_blocks(&obstacle(0), &obstacle(2), &other));
+        assert!(hull_contact_blocks(&obstacle(2), &obstacle(3), &other));
+        assert!(!hull_contact_blocks(&obstacle(5), &obstacle(4), &other));
+        assert!(hull_contact_blocks(&obstacle(4), &obstacle(5), &other));
     }
     #[test]
     fn early_separation_matches_all_four_contact_axes() {
@@ -5043,6 +5266,8 @@ mod tests {
                 RangeUnitKind::Crawler => voxel::unit::crawler(),
                 RangeUnitKind::Strider => voxel::unit::strider(),
                 RangeUnitKind::Spider => voxel::unit::spider(),
+                RangeUnitKind::LightningTank => voxel::unit::lightning_tank(),
+                RangeUnitKind::EidolonTank => voxel::unit::eidolon_tank(),
                 RangeUnitKind::Artillery => voxel::unit::artillery(),
                 RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
                 RangeUnitKind::ArtilleryTurretT2 => voxel::unit::artillery_turret_t2(),
@@ -5502,7 +5727,7 @@ mod tests {
             step(&mut b, &w, &body, &[Obstacle::of(&a, &body)], tick);
             reversed |= a.drive.vel < Fx::ZERO || b.drive.vel < Fx::ZERO;
             let overlap = Obstacle::of(&a, &body).penetration(&Obstacle::of(&b, &body));
-            assert!(overlap <= old, "penetration increased at {tick}");
+            assert!(overlap <= old.max(HULL_CONTACT_SLOP), "penetration increased beyond contact tolerance at {tick}");
             old = overlap;
             if a.destination.is_none() && b.destination.is_none() {
                 break;
@@ -5555,7 +5780,7 @@ mod tests {
             mover.save(&mut a);
             restored.save(&mut b);
             assert_eq!(a.v, b.v, "route diverged after loading at {tick}");
-            assert_eq!(Obstacle::of(&mover, &body).penetration(&other), Fx::ZERO);
+            assert!(Obstacle::of(&mover, &body).penetration(&other) <= HULL_CONTACT_SLOP);
             if mover.destination.is_none() {
                 arrived = true;
                 break;
@@ -5579,7 +5804,7 @@ mod tests {
         let mut tick = 0;
         while !mover.searching() && tick < 100 {
             step(&mut mover, &w, &body, &[other], tick);
-            assert_eq!(Obstacle::of(&mover, &body).penetration(&other), Fx::ZERO);
+            assert!(Obstacle::of(&mover, &body).penetration(&other) <= HULL_CONTACT_SLOP);
             tick += 1;
         }
         assert!(
@@ -5597,7 +5822,7 @@ mod tests {
             let before = mover.pos;
             step(&mut mover, &w, &body, &[other], tick);
             tick += 1;
-            assert_eq!(Obstacle::of(&mover, &body).penetration(&other), Fx::ZERO);
+            assert!(Obstacle::of(&mover, &body).penetration(&other) <= HULL_CONTACT_SLOP);
             if mover.searching() && mover.pos[0] == before[0] && mover.pos[2] == before[2] {
                 break;
             }
@@ -5614,7 +5839,7 @@ mod tests {
         for current in tick..release {
             for m in [&mut mover, &mut restored] {
                 step(m, &w, &body, &[other], current);
-                assert_eq!(Obstacle::of(m, &body).penetration(&other), Fx::ZERO);
+                assert!(Obstacle::of(m, &body).penetration(&other) <= HULL_CONTACT_SLOP);
                 assert!(m.searching());
                 assert_eq!(m.escape_left, 0, "recovery interrupted the pending search");
             }
@@ -5918,6 +6143,8 @@ mod tests {
                         RangeUnitKind::Crawler => voxel::unit::crawler(),
                         RangeUnitKind::Strider => voxel::unit::strider(),
                         RangeUnitKind::Spider => voxel::unit::spider(),
+                RangeUnitKind::LightningTank => voxel::unit::lightning_tank(),
+                RangeUnitKind::EidolonTank => voxel::unit::eidolon_tank(),
                         RangeUnitKind::Artillery => voxel::unit::artillery(),
                         RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
                         RangeUnitKind::ArtilleryTurretT2 => voxel::unit::artillery_turret_t2(),

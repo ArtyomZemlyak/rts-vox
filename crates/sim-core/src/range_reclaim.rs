@@ -270,8 +270,8 @@ impl Near {
             .filter_map(|c| self.cells.get(&c))
             .flatten()
     }
-    fn within(&self, face: [i32; 3], p: [i32; 3]) -> bool {
-        distance2(face, p) <= self.reach * self.reach
+    fn within(&self, face: [i32; 3], p: [i32; 3], reach: u32) -> bool {
+        distance2(face, p) <= i64::from(reach).pow(2)
     }
 }
 
@@ -291,6 +291,7 @@ pub(super) fn reclaim(
         tanks,
         inflight,
         reclaim: state,
+        reclaim_events,
         haul,
         production,
         ..
@@ -321,7 +322,7 @@ pub(super) fn reclaim(
             .map(|&(_, c)| c)
     };
     let near = Near::build(
-        rc.data.reach,
+        rc.data.reach.max(if diggers.iter().any(|d| d.reclaim_only) { super::CRAWLER_RECLAIM_REACH } else { 0 }),
         fragments,
         units,
         tanks,
@@ -335,23 +336,25 @@ pub(super) fn reclaim(
         d.reclaim_pending = rc.work[d.id].is_some();
     }
     // Work still there, still in reach and still fitting the tank.
+    let configured_reach = rc.data.reach;
+    let reach = |d: &Digger| if d.reclaim_only { configured_reach.max(super::CRAWLER_RECLAIM_REACH) } else { configured_reach };
     for d in diggers.iter() {
         let valid = match rc.work[d.id] {
             None => continue,
             Some(Work::Piece { id, .. }) => near.pieces.get(&id).is_some_and(|&i| {
                 let f = &fragments[i];
-                near.within(d.face, point([f.position.x, f.position.y, f.position.z]))
+                near.within(d.face, point([f.position.x, f.position.y, f.position.z]), reach(d))
                     && ledger.held(f.held) <= cap(d.id)
             }),
             Some(Work::Tank(slot)) => {
                 let slot = usize::from(slot);
                 rc.breached[slot]
                     && ledger.held(tanks[slot].expect("a breached slot has a tank")) > 0
-                    && near.within(d.face, point(units[slot].motion.pos))
+                    && near.within(d.face, point(units[slot].motion.pos), reach(d))
             }
             Some(Work::Blank(slot)) => blank_of(slot).is_some_and(|c| {
                 ledger.held(c) > 0
-                    && near.within(d.face, point(units[usize::from(slot)].motion.pos))
+                    && near.within(d.face, point(units[usize::from(slot)].motion.pos), reach(d))
             }),
         };
         if !valid {
@@ -389,7 +392,7 @@ pub(super) fn reclaim(
             rc.searches += 1;
             let mut best: Option<((i64, u8, u64), Work)> = None;
             for &(t, p) in near.around(d.face) {
-                if !near.within(d.face, p) {
+                if !near.within(d.face, p, reach(&d)) {
                     continue;
                 }
                 let d2 = distance2(d.face, p);
@@ -460,6 +463,13 @@ pub(super) fn reclaim(
                     let need = ledger.held(f.held);
                     assert_eq!(ledger.transfer(f.held, tank, need), need);
                     taken.insert(f.held);
+                    if d.reclaim_only && reclaim_events.len() < super::RECLAIM_VISUAL_LIMIT {
+                        reclaim_events.push(super::ReclaimVisual {
+                            from: point([f.position.x, f.position.y, f.position.z]),
+                            crawler: d.id,
+                            material: f.material,
+                        });
+                    }
                     rc.reclaimed += need;
                     rc.pieces += 1;
                     rc.work[d.id] = None;
@@ -595,7 +605,7 @@ impl BlastRange {
             // Only a living digger with a dig order works at its face.
             let digs = matches!(
                 self.battle.actors.get(id).map(|a| a.order),
-                Some(super::battle::Order::Dig(_))
+                Some(super::battle::Order::Dig(_) | super::battle::Order::Reclaim(_))
             );
             if m.tanks[id].is_none() || !self.units[id].status.alive || !digs {
                 return None;

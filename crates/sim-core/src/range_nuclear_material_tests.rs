@@ -108,7 +108,7 @@ fn nuclear_equal_receivers_follow_material_strength_with_modest_hull_advantage()
         let steel = material_work(3, &c);
         assert!(work >= steel && u64::from(work) * 2 <= u64::from(steel) * 3);
     }
-    for distance in [400, 800, 1000, 1200, 1600, 1800] {
+    for distance in [400, 800, 1000, 1200, 1600, 2240] {
         let wood = matched_receiver(distance, Some(5));
         let concrete = matched_receiver(distance, Some(2));
         let steel = matched_receiver(distance, Some(3));
@@ -118,7 +118,7 @@ fn nuclear_equal_receivers_follow_material_strength_with_modest_hull_advantage()
         if distance == 400 {
             assert_eq!(hull, 64);
         }
-        if distance >= 1200 {
+        if distance >= 2240 {
             assert_eq!(hull, 0);
         }
     }

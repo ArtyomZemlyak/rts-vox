@@ -6,6 +6,7 @@
 @group(0) @binding(1) var<storage, read> terrain: array<u32>;
 @group(0) @binding(2) var<storage, read> dirty: array<u32>;
 @group(0) @binding(3) var<storage, read_write> bricks: array<u32>;
+@group(0) @binding(4) var<storage, read> dirty_coarse: array<u32>;
 var<workgroup> ceiling: atomic<u32>;
 @compute @workgroup_size(64)
 fn build(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
@@ -28,7 +29,8 @@ fn build(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_inde
 // dispatch runs after all fine writes, so removals lower both ceilings.
 @compute @workgroup_size(64)
 fn reduce(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
-    let dims=config.xyz/32u;let index=group.x;
+    let dims=config.xyz/32u;var index=group.x;
+    if (config.w&0x80000000u)==0u {index=dirty_coarse[group.x];}
     if index>=dims.x*dims.y*dims.z {return;}
     let b=vec3(index%dims.x,index/dims.x%dims.y,index/(dims.x*dims.y));
     let local=vec3(lane%4u,lane/4u%4u,lane/16u);

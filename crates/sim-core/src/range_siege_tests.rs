@@ -209,9 +209,9 @@ fn siege_stationary_ai_uses_its_actual_weapon_reach() {
 #[test]
 fn siege_large_tilted_barrel_remains_hittable_beyond_old_eight_metre_cutoff() {
     let mut u = RangeUnit::of_kind(RangeUnitKind::ArtilleryTurretT3, [200, 24, 200]);
-    u.motion.hull.up = phys::V3::new(Fx::ONE, Fx::ONE, Fx::ZERO);
+    u.motion.hull.up = phys::V3::new(Fx::from_ratio(1, 4), Fx::ONE, Fx::ZERO);
     u.update_pose(0);
-    let p = u.world_pos([79, 39, 28]);
+    let p = u.world_pos([111, 10, 28]);
     assert!(
         (p[0] - 200).abs() > 80,
         "fixture must expose old clipping: {p:?}"

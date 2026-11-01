@@ -153,6 +153,57 @@ fn deferred_contact_waits_without_repaying_and_follows_original_local_cells() {
     assert_eq!(r.matter.supplied_mj, supplied);
     assert_eq!(r.matter.spent_mj, reference.matter.spent_mj);
 }
+
+#[test]
+fn autonomous_battle_resumes_accepted_kinetic_hit_when_fragment_pool_is_full() {
+    let mut r=range();
+    let layout=r.layout.as_mut().unwrap();
+    layout.battle=true;
+    layout.units[0].allied=true;
+    layout.units[1].allied=false;
+    r.set_physics_workers(1); r.set_navigation_workers(1);
+    assert!(r.set_ai_vs_ai(true)); r.start_battle().unwrap();
+    r.battle.actors[0].order=battle::Order::Hold;
+    r.battle.actors[1].order=battle::Order::Hold;
+    occupy(&mut r);
+    let before=r.units[0].revision;
+    shot(&mut r);
+    assert_eq!(r.pending_kinetic_impacts(),1);
+    let paid=r.matter.supplied_mj;
+    let mut restored=BlastRange::restore(r.config,&r.snapshot()).expect("restore pending impact");
+    for _ in 0..40 {
+        for sim in [&mut r,&mut restored] {
+            sim.battle.ai.next_tick=sim.tick+sim.battle.ai.tuning.decision_ticks;
+            sim.step();
+        }
+        assert_eq!(r.state_hash(),restored.state_hash());
+        if r.pending_kinetic_impacts()==0 {break;}
+    }
+    assert_eq!(r.pending_kinetic_impacts(),0,"admitted impact stayed stuck behind the full pool");
+    assert!(r.units[0].revision>before,"impact did not damage the original target");
+    assert_eq!(r.matter.supplied_mj,paid,"retry charged the same impact twice");
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn autonomous_overflow_contacts_survive_save_and_manual_takeover() {
+    let mut r=range();
+    let layout=r.layout.as_mut().unwrap();
+    layout.battle=true; layout.units[0].allied=true; layout.units[1].allied=false;
+    r.set_physics_workers(1); r.set_navigation_workers(1);
+    assert!(r.set_ai_vs_ai(true)); r.start_battle().unwrap();
+    occupy(&mut r);
+    let count=r.streams.tuning.kinetic.max_jobs+2;
+    for _ in 0..count {shot(&mut r);}
+    assert_eq!(r.pending_kinetic_impacts(),count);
+    let restored=BlastRange::restore(r.config,&r.snapshot()).expect("restore over-cap impacts");
+    assert_eq!(restored.pending_kinetic_impacts(),count);
+    // Taking control cannot discard contacts or make their snapshot invalid.
+    r.battle.autonomous=false;
+    let restored=BlastRange::restore(r.config,&r.snapshot()).expect("restore contacts after takeover");
+    assert_eq!(restored.pending_kinetic_impacts(),count);
+    assert!(r.matter.economy.ledger.balanced());
+}
 #[test]
 fn partially_applied_channel_survives_save_and_matches_unconstrained_damage() {
     let mut r = range();
@@ -304,6 +355,36 @@ fn bullet(r: &mut BlastRange, cell: [usize; 3]) {
     let mut tuning = r.streams.tuning.machine_gun.clone();
     tuning.work = 1_000_000;
     r.stream_contact(p, &tuning, false, r.gun.at, &r.config.clone());
+}
+
+#[test]
+fn blocked_direct_hit_retries_preserve_bystanders_in_a_large_roster() {
+    let seed=range();
+    let mut layout=seed.layout.clone().unwrap();
+    layout.size = [1024, 128, 1024];
+    layout.clear_min = [0, 0];
+    layout.clear_max = [1024, 1024];
+    for i in 0..30 {
+        layout.units.push(modding::range::RangeUnitDef {
+            kind:RangeUnitKind::Tank, at:[100+(i%6)*100,16,500+(i/6)*100], allied:true, weapon:None,
+        });
+    }
+    let mut r=BlastRange::with_layout(seed.config,layout).unwrap();
+    r.set_physics_workers(1); r.set_navigation_workers(1);
+    occupy(&mut r);
+    bullet(&mut r,[30,11,0]);
+    let mut job=r.kinetic.jobs.pop_front().expect("blocked direct contact");
+    assert!(job.direct.is_some());
+    let before:Vec<_>=r.units.iter().map(|u|(u.revision,u.removed.len(),u.seg_removed.len())).collect();
+    let start=std::time::Instant::now();
+    for _ in 0..4096 {
+        let mut budget=1;
+        let mut room=0;
+        assert!(!r.run_kinetic_job(&mut job,&mut budget,Some(&mut room)));
+    }
+    eprintln!("4096 deferred direct retries, 32 units: {} us",start.elapsed().as_micros());
+    assert_eq!(before,r.units.iter().map(|u|(u.revision,u.removed.len(),u.seg_removed.len())).collect::<Vec<_>>());
+    assert!(r.matter.economy.ledger.balanced());
 }
 
 #[test]

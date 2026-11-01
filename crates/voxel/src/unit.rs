@@ -207,6 +207,8 @@ pub const FINISH_RUBBER: u8 = 4;
 pub const FINISH_CORE: u8 = 5;
 /// Голая сталь: катки, суставы, шарниры.
 pub const FINISH_STEEL: u8 = 6;
+/// Зелёно-бирюзовый световой элемент энергетического оружия.
+pub const FINISH_ENERGY: u8 = 7;
 
 /// Полный оборот двоичного угла крепления — тот же, что у курса
 /// (`fx::angle::FULL`): один оборот, одна единица.
@@ -1033,9 +1035,8 @@ fn subsystem_slot(p: Part) -> Option<usize> {
 pub const BODY_MM: u16 = 100;
 
 /// Local voxel at the front of the crawler's fixed drill.
-pub const CRAWLER_DRILL_TIP: [usize; 3] = [47, 12, 14];
-/// Tracked utility vehicle: a protected engine and core, an open cargo
-/// hopper, and a broad low salvage blade. All parts are damageable voxels.
+pub const CRAWLER_DRILL_TIP: [usize; 3] = [143, 37, 43];
+/// Heavy tracked recycler with a closed hold, intake jaws and a separate drill.
 pub fn crawler() -> UnitBody {
     let mut u = UnitBody::new_scaled(48, 25, 28, 4, BODY_MM);
     let a = Part::Armour;
@@ -1066,8 +1067,7 @@ pub fn crawler() -> UnitBody {
         mark(&mut u, (x, x + 1), (12, 19), (7, 9), FINISH_STEEL);
         mark(&mut u, (x, x + 1), (12, 19), (19, 21), FINISH_STEEL);
     }
-    // Opposite cab window, cooling louvers and front work lights are actual
-    // cells, not detached effects; the hopper stays visibly open.
+    // Opposite cab window, cooling louvers and front work lights are actual cells.
     fill_f(&mut u, (9, 14), (19, 21), (20, 21), Part::Sensor, FINISH_OPTIC);
     for x in [8, 10, 12, 14] {
         mark(&mut u, (x, x + 1), (20, 21), (10, 18), FINISH_GUN);
@@ -1082,10 +1082,41 @@ pub fn crawler() -> UnitBody {
         mark_cyl(&mut u, 0, (x, x + 1), (12, 14), 3, FINISH_STEEL);
     }
     mark_cyl(&mut u, 0, (47, 48), (12, 14), 2, FINISH_OPTIC);
-    let mut u = seat(u, "краулер");
+    // Armoured closed cargo compartment with a raised roof and rear door.
+    fill_f(&mut u, (20, 40), (19, 22), (7, 21), a, FINISH_PLATE);
+    fill_f(&mut u, (20, 22), (12, 19), (9, 19), a, FINISH_PLATE);
+    for x in [23, 28, 33, 38] {
+        fill_f(&mut u, (x, x + 1), (19, 23), (7, 21), a, FINISH_STEEL);
+    }
+    // Wide opposed jaws feed the front intake; these are real destructible
+    // cells joined to the lower frame, not floating visual-only meshes.
+    for x in 40..48 {
+        let inset = (x - 40) / 3;
+        fill_f(&mut u, (x, x + 1), (2, 5), (4 + inset, 7 + inset), a, FINISH_GUN);
+        fill_f(&mut u, (x, x + 1), (2, 5), (21 - inset, 24 - inset), a, FINISH_GUN);
+    }
+    let u = seat(u, "краулер");
+    // Retain the engine's 10 cm cells and enlarge the entire machine, rather
+    // than enlarging individual voxels. This also preserves damage geometry.
+    let mut large = UnitBody::new_scaled(144, 75, 84, u.core_size * 3, BODY_MM);
+    for z in 0..usize::from(u.vol.nz) {
+        for y in 0..usize::from(u.vol.ny) {
+            for x in 0..usize::from(u.vol.nx) {
+                if !u.vol.get(x, y, z) { continue; }
+                let part = u.part_at(x, y, z);
+                let finish = u.finish_at(x, y, z);
+                for dz in 0..3 { for dy in 0..3 { for dx in 0..3 {
+                    let (x, y, z) = (x * 3 + dx, y * 3 + dy, z * 3 + dz);
+                    large.set(x, y, z, part);
+                    large.set_finish(x, y, z, finish);
+                }}}
+            }
+        }
+    }
+    large.core = (u.core.0 * 3, u.core.1 * 3, u.core.2 * 3);
     // The drill is fixed to the hull; this chassis has no traversing turret.
-    u.turret_y = u.vol.ny;
-    u
+    large.turret_y = large.vol.ny;
+    large
 }
 
 /// Танк: 6.0 × 3.0 × 3.0 м при вокселе 100 мм — том 60×30×30.
@@ -1370,6 +1401,91 @@ pub fn tank() -> UnitBody {
 /// Tracked self-propelled artillery. It shares the tank's 6×3 m footprint,
 /// but the tall rear ammunition bustle and elevated howitzer distinguish it
 /// at the RTS camera distance. Every visible part is damageable geometry.
+/// T2 electrical assault vehicle: low broad carrier, raised generator and
+/// split discharge prongs. Geometry and subsystems are physically damageable.
+pub fn lightning_tank() -> UnitBody {
+    let mut u = UnitBody::new_scaled(64, 40, 36, 4, BODY_MM);
+    let a = Part::Armour;
+    running_gear(&mut u, (3, 57), 10, (1, 8), a);
+    running_gear(&mut u, (3, 57), 10, (28, 35), a);
+    fill_f(&mut u, (4, 54), (2, 12), (8, 28), a, FINISH_STEEL);
+    fill_f(&mut u, (7, 50), (11, 15), (4, 32), a, FINISH_PLATE);
+    for z in [0, 31] {
+        fill_f(&mut u, (9, 47), (9, 14), (z, z + 5), a, FINISH_GUN);
+        for x in [12, 25, 38] {
+            fill_f(&mut u, (x, x + 8), (14, 16), (z, z + 5), a, FINISH_STEEL);
+        }
+    }
+    fill(&mut u, (7, 19), (4, 12), (11, 25), Part::Engine);
+    fill(&mut u, (27, 34), (5, 12), (15, 21), Part::Core);
+    pack(&mut u, (20, 43), (14, 16), (9, 27));
+    plated_turret(&mut u, (18, 44), (16, 24), (8, 28), (9, 3), TURN / 16, 10, 2, true, a, FINISH_PLATE);
+    // Stacked exposed transformer coils and an armoured central conductor.
+    cyl_f(&mut u, 1, (24, 36), (28, 18), 4, 0, Part::Weapon, FINISH_STEEL);
+    for y in [25, 29, 33] {
+        ring(&mut u, (28, 18), 7, 5, (y, y + 2), Part::Weapon);
+        mark_cyl(&mut u, 1, (y, y + 2), (28, 18), 7, FINISH_OPTIC);
+    }
+    disc(&mut u, (28, 18), 6, (36, 38), Part::Weapon);
+    fill_f(&mut u, (24, 32), (38, 40), (14, 22), Part::Sensor, FINISH_OPTIC);
+    // A central conductor carries the shot; paired prongs surround its muzzle.
+    fill_f(&mut u, (36, 64), (19, 23), (16, 20), Part::Weapon, FINISH_GUN);
+    for z in [11, 23] {
+        fill_f(&mut u, (39, 61), (18, 21), (z, z + 2), Part::Weapon, FINISH_STEEL);
+        fill_f(&mut u, (57, 64), (20, 23), (z, z + 2), Part::Weapon, FINISH_OPTIC);
+    }
+    let mut u = seat(u, "электротанк");
+    u.turret_y = 16;
+    u.push_weapon_path(WeaponPath { min: [36, 19, 16], max: [64, 23, 20], axis: 0 });
+    // Enlarge geometry, including turret segments and weapon mounts, while
+    // keeping the final damageable cells at the world's 100 mm scale.
+    u.mm = 150;
+    for segment in &mut u.segments { segment.body.mm = 150; }
+    u.resampled(BODY_MM).expect("enlarged electrical vehicle")
+}
+
+/// Eidolon T1: a wide, swept twin-gun craft with recessed tracked pods.
+pub fn eidolon_tank() -> UnitBody {
+    let mut u = UnitBody::new_scaled(72, 28, 54, 4, BODY_MM);
+    let a = Part::Armour;
+    // Two short, recessed drive pods beneath broad wings, instead of a
+    // rectangular tank hull with full-length exposed tracks.
+    running_gear(&mut u, (12, 49), 8, (4, 10), a);
+    running_gear(&mut u, (12, 49), 8, (44, 50), a);
+    fill_f(&mut u, (12, 50), (3, 10), (17, 37), a, FINISH_STEEL);
+    for x in 4..61 {
+        let width = if x < 20 { 9 + (x - 4) } else if x < 40 { 25 } else { (25usize).saturating_sub((x - 40) * 3 / 4).max(5) };
+        fill_f(&mut u, (x, x + 1), (9, 12), (27 - width, 27 + width), a, FINISH_PLATE);
+    }
+    for z in [2, 46] {
+        fill_f(&mut u, (17, 46), (10, 14), (z, z + 6), a, FINISH_GUN);
+        fill_f(&mut u, (20, 40), (14, 16), (z + 1, z + 5), a, FINISH_STEEL);
+        fill_f(&mut u, (23, 35), (16, 17), (z + 2, z + 4), a, FINISH_OPTIC);
+    }
+    fill(&mut u, (12, 23), (4, 11), (14, 34), Part::Engine);
+    fill(&mut u, (29, 36), (4, 11), (24, 30), Part::Core);
+    // A low, arrow-shaped rotating weapons deck with two separate breeches.
+    pack(&mut u, (24, 43), (11, 14), (18, 36));
+    for x in 18..48 {
+        let width = if x < 28 { 8 + (x - 18) / 2 } else { 13usize.saturating_sub((x - 28) / 3).max(5) };
+        fill_f(&mut u, (x, x + 1), (14, 18), (27 - width, 27 + width), a, FINISH_STEEL);
+    }
+    fill_f(&mut u, (23, 37), (18, 21), (21, 33), a, FINISH_PLATE);
+    fill_f(&mut u, (27, 33), (21, 24), (24, 30), Part::Sensor, FINISH_OPTIC);
+    for z in [17, 33] {
+        fill_f(&mut u, (30, 69), (15, 19), (z, z + 4), Part::Weapon, FINISH_GUN);
+        fill_f(&mut u, (63, 71), (14, 20), (z - 1, z + 5), Part::Weapon, FINISH_STEEL);
+        carve(&mut u, (69, 71), (16, 18), (z + 1, z + 3));
+        fill_f(&mut u, (34, 50), (19, 20), (z, z + 4), a, FINISH_OPTIC);
+    }
+    let mut u = seat(u, "танк эйдолонов");
+    u.turret_y = 14;
+    for z in [17, 33] {
+        u.push_weapon_path(WeaponPath { min: [30, 14, z], max: [71, 20, z + 4], axis: 0 });
+    }
+    u
+}
+
 pub fn artillery() -> UnitBody {
     artillery_scaled(BODY_MM)
 }
@@ -1645,57 +1761,95 @@ pub fn nuclear_silo() -> UnitBody {
     u
 }
 
-/// Fixed T3 siege gun: broad plinth, heavy single barrel and recoil rails.
-/// All silhouettes are connected, damageable voxels; the engine supplies its footing.
+/// Fixed T3 siege gun: a low, faceted rotating head with three recessed
+/// energy ports and a long single barrel. All armour remains real voxels.
 pub fn artillery_turret_t3() -> UnitBody {
-    let mut u = UnitBody::new_scaled(80, 52, 56, 16, 150);
+    // The concept uses W=64. W=40 here keeps the existing 56-voxel
+    // footprint, 150 mm scale and 112-voxel barrel extent unchanged.
+    let mut u = UnitBody::new_scaled(112, 52, 56, 16, 150);
     let a = Part::Armour;
-    fill_f(&mut u, (2, 78), (1, 7), (2, 54), a, FINISH_STEEL);
-    fill_f(&mut u, (7, 65), (7, 20), (6, 50), a, FINISH_PLATE);
-    fill(&mut u, (28, 48), (3, 19), (18, 38), Part::Core);
-    ring(&mut u, (40, 28), 21, 15, (19, 23), a);
-    fill_f(&mut u, (17, 65), (22, 39), (12, 44), a, FINISH_PLATE);
-    fill_f(&mut u, (19, 49), (39, 44), (15, 41), a, FINISH_STEEL);
-    fill_f(
-        &mut u,
-        (43, 80),
-        (33, 41),
-        (24, 32),
-        Part::Weapon,
-        FINISH_GUN,
-    );
-    fill_f(&mut u, (75, 80), (32, 42), (23, 33), a, FINISH_STEEL);
-    fill_f(
-        &mut u,
-        (75, 80),
-        (34, 40),
-        (25, 31),
-        Part::Weapon,
-        FINISH_GUN,
-    );
-    carve(&mut u, (78, 80), (36, 38), (27, 29));
-    for z in [20, 33] {
-        fill_f(&mut u, (35, 73), (30, 35), (z, z + 3), a, FINISH_STEEL);
+    // Low fixed pedestal and four broad feet, with a dark traversing belt.
+    fill_f(&mut u, (36, 76), (0, 5), (8, 48), a, FINISH_STEEL);
+    for x in [(30, 47), (65, 82)] {
+        for z in [(2, 19), (37, 54)] {
+            fill_f(&mut u, x, (0, 3), z, a, FINISH_GUN);
+            fill_f(&mut u, (x.0 + 1, x.1 - 1), (3, 5), (z.0 + 1, z.1 - 1), a, FINISH_STEEL);
+            mark(&mut u, (x.0 + 3, x.1 - 3), (4, 5), (z.0 + 2, z.0 + 5), FINISH_PLATE);
+        }
     }
-    for z in [8, 40] {
-        crate_box(&mut u, (10, 23), (18, 33), (z, z + 8), a);
+    fill_f(&mut u, (38, 74), (5, 8), (10, 46), a, FINISH_GUN);
+    // Four large octagonal tiers; corners are clipped symmetrically.
+    for (ys, radius) in [((8, 11), 20isize), ((11, 14), 19), ((14, 16), 16), ((16, 19), 14)] {
+        for dx in -radius..radius {
+            for dz in -radius..radius {
+                if dx.abs().max((dx + 1).abs()) + dz.abs().max((dz + 1).abs()) > radius * 3 / 2 { continue; }
+                let x = (56 + dx) as usize; let z = (28 + dz) as usize;
+                fill_f(&mut u, (x, x + 1), ys, (z, z + 1), a, FINISH_STEEL);
+            }
+        }
     }
-    fill_f(
-        &mut u,
-        (21, 27),
-        (44, 50),
-        (24, 32),
-        Part::Sensor,
-        FINISH_OPTIC,
-    );
-    pack(&mut u, (24, 56), (20, 22), (12, 44));
+    // Restrained team-colour strips on the shoulders, not the whole shell.
+    for x in [(44, 47), (65, 68)] {
+        mark(&mut u, x, (14, 19), (17, 39), FINISH_PLATE);
+    }
+    // Shared, physically identical radial socket module. Its inner window
+    // is cut through real voxels; its back wall stays at radial distance 14.
+    for r in 15isize..23 {
+        for t in -8isize..8 {
+            let cells = [(56+r,28+t), (55-t,28+r), (55-r,27-t), (56+t,27-r)];
+            for (x,z) in cells {
+                let (x,z) = (x as usize,z as usize);
+                fill_f(&mut u, (x,x+1), (9,18), (z,z+1), a, FINISH_STEEL);
+                if t >= -6 && t < 6 {
+                    carve(&mut u, (x,x+1), (11,16), (z,z+1));
+                }
+            }
+        }
+    }
+    // Dark back walls are real, damageable armour, recessed from each rim.
+    for t in -6isize..6 {
+        for (x,z) in [(70,28+t),(55-t,42),(41,27-t),(56+t,13)] {
+            fill_f(&mut u, (x as usize,x as usize+1), (11,16), (z as usize,z as usize+1), a, FINISH_GUN);
+        }
+    }
+    // Two nested luminous frames stand at different depths in each of the
+    // three charging chambers. The outer frame touches the socket lining;
+    // graphite struts join the inner one to the back wall.
+    let port_cells = |r, t| [(55-t,28+r), (55-r,27-t), (56+t,27-r)];
+    for r in 15isize..17 {
+        for t in [-4isize, 3] {
+            for (x,z) in port_cells(r,t) {
+                fill_f(&mut u, (x as usize,x as usize+1), (13,14), (z as usize,z as usize+1), a, FINISH_GUN);
+            }
+        }
+    }
+    for (r, half, bottom, top) in [(20isize, 6isize, 11usize, 16usize), (17, 4, 12, 15)] {
+        for t in -half..half {
+            for y in bottom..top {
+                if y != bottom && y + 1 != top && t != -half && t + 1 != half { continue; }
+                for (x,z) in port_cells(r,t) {
+                    fill_f(&mut u, (x as usize,x as usize+1), (y,y+1), (z as usize,z as usize+1), a, FINISH_ENERGY);
+                }
+            }
+        }
+    }
+    for t in -2isize..2 {
+        for (x,z) in port_cells(14,t) {
+            mark(&mut u, (x as usize,x as usize+1), (13,14), (z as usize,z as usize+1), FINISH_ENERGY);
+        }
+    }
+    // The front socket receives the neck. The flat light jacket is continuous
+    // and gently expands near the muzzle, instead of a separate dark beam.
+    fill_f(&mut u, (71, 78), (12, 16), (23, 33), Part::Weapon, FINISH_STEEL);
+    fill_f(&mut u, (78, 106), (11, 16), (22, 34), Part::Weapon, FINISH_STEEL);
+    fill_f(&mut u, (106, 112), (10, 17), (20, 36), Part::Weapon, FINISH_STEEL);
+    carve(&mut u, (110, 112), (11, 16), (22, 34));
+    // Core is sheltered centrally and connects the pedestal to the head.
+    fill(&mut u, (48, 64), (1, 17), (20, 36), Part::Core);
+    fill_f(&mut u, (53, 59), (17, 19), (25, 31), Part::Sensor, FINISH_STEEL);
     let mut u = seat(u, "осадная артиллерийская турель T3");
-    u.turret_y = 21;
-    u.push_weapon_path(WeaponPath {
-        min: [43, 33, 24],
-        max: [80, 41, 32],
-        axis: 0,
-    });
+    u.turret_y = 8;
+    u.push_weapon_path(WeaponPath { min: [71, 10, 20], max: [112, 17, 36], axis: 0 });
     u
 }
 
@@ -1892,6 +2046,49 @@ pub fn command_base() -> UnitBody {
 mod command_base_tests {
     use super::*;
     #[test]
+    fn siege_turret_has_three_recesses_and_a_connected_gun() {
+        let b = artillery_turret_t3();
+        for p in [[37,14,27],[55,14,9],[55,14,46]] {
+            assert!(!b.vol.get(p[0],p[1],p[2]), "dark gap between port frames {p:?} was filled");
+        }
+        for p in [[41,14,27],[55,14,13],[55,14,42]] {
+            assert!(b.vol.get(p[0],p[1],p[2]), "port backing {p:?} is missing");
+        }
+        let s = b.status(&mut CoreBufs::new());
+        assert!(s.alive && s.weapon && s.sensor && s.detached == 0, "{s:?}");
+        assert_eq!(b.weapon_paths().len(),1);
+    }
+    #[test]
+    fn siege_chambers_have_nested_emissive_frames() {
+        let b = artillery_turret_t3();
+        let port_cells = |r, t| [(55-t,28+r), (55-r,27-t), (56+t,27-r)];
+        for (r, t, y) in [(20isize,-6isize,13usize),(17,-4,13),(14,-2,13)] {
+            for (x,z) in port_cells(r,t) {
+                assert_eq!(b.finish_at(x as usize,y,z as usize), FINISH_ENERGY, "r={r}, t={t}");
+            }
+        }
+        for (x,z) in port_cells(18,0) {
+            assert!(!b.vol.get(x as usize,13,z as usize), "frames need a dark gap");
+        }
+    }
+    #[test]
+    fn siege_cameras_share_one_rotated_socket_and_low_profile() {
+        let b = artillery_turret_t3();
+        for r in 15isize..23 {
+            for t in -8isize..8 {
+                for y in 9..18 {
+                    let cells = [(55-r,27-t),(55-t,28+r),(56+t,27-r)];
+                    let sample = cells.map(|(x,z)| b.vol.get(x as usize,y,z as usize));
+                    assert!(sample[0] == sample[1] && sample[1] == sample[2], "r={r}, t={t}, y={y}");
+                }
+            }
+        }
+        assert_eq!(b.turret_y, 8);
+        assert!(!b.vol.get(56, 20, 28), "roof must stay low");
+        assert!(b.vol.get(100, 13, 23), "flat barrel jacket is missing");
+        assert!(!b.vol.get(111, 13, 28), "muzzle must remain open");
+    }
+    #[test]
     fn battle_templates_begin_with_supported_root_voxels() {
         for (name, body) in [
             ("tank", tank()),
@@ -1925,6 +2122,15 @@ mod command_base_tests {
             }
         }
         assert!(!unit.status(&mut CoreBufs::new()).alive);
+    }
+    #[test]
+    fn enlarged_lightning_tank_retains_ten_centimetre_cells_and_connected_weapon() {
+        let unit = lightning_tank();
+        assert_eq!((unit.vol.nx, unit.vol.ny, unit.vol.nz, unit.mm), (96, 60, 54, 100));
+        let status = unit.status(&mut CoreBufs::new());
+        assert!(status.alive && status.engine && status.weapon);
+        assert_eq!(status.detached, 0);
+        assert!(unit.weapon_paths().iter().any(|p| p.max[0] == 96));
     }
     #[test]
     fn crawler_drill_is_a_connected_destructible_subsystem() {

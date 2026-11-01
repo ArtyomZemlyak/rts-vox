@@ -73,6 +73,15 @@ pub(super) fn validate(
             return Admission::Rejected;
         }
     }
+    if let Order::Support(target) = order {
+        if target == id || destination.is_some()
+            || range.units[id].kind != RangeUnitKind::LightningTank
+            || !range.units.get(target).is_some_and(|u| u.kind == RangeUnitKind::LightningTank && u.status.alive)
+            || range.allied(target) != side
+            || matches!(actors[target].order, Order::Support(_))
+            || actors.iter().any(|actor| actor.order == Order::Support(id))
+        { return Admission::Rejected; }
+    }
     if let Order::Ground(p) = order {
         if (0..3).any(|a| p[a] < 0 || p[a] >= range.size[a] as i32) {
             return Admission::Rejected;
@@ -89,7 +98,7 @@ pub(super) fn validate(
     }
     // A face inside the map, for a kind with a tank; the approach is the
     // range's to derive, not the caller's to give (ADR-672).
-    if let Order::Dig(p) = order {
+    if let Order::Dig(p) | Order::Reclaim(p) = order {
         if (0..3).any(|a| p[a] < 0 || p[a] >= range.size[a] as i32)
             || destination.is_some()
             || !range.mining().is_some_and(|m| m.digs(range.units[id].kind))
@@ -99,7 +108,7 @@ pub(super) fn validate(
     }
     // The rules AI maintains orders; it never replaces a dig (ADR-672).
     if replacement == Replacement::Maintain
-        && matches!(actors[id].order, Order::Dig(_) | Order::Pilot { .. })
+        && matches!(actors[id].order, Order::Dig(_) | Order::Reclaim(_) | Order::Support(_) | Order::Pilot { .. })
     {
         return Admission::Unchanged;
     }
@@ -145,7 +154,7 @@ impl Executor<'_> {
             order,
             destination,
         } = request;
-        let digging = matches!(order, Order::Dig(_));
+        let digging = matches!(order, Order::Dig(_) | Order::Reclaim(_));
         if matches!(order, Order::Pilot { .. })
             && !matches!(self.actors[id].order, Order::Pilot { .. })
         {
@@ -182,7 +191,7 @@ impl Executor<'_> {
             if !accepted {
                 return commands::Outcome::PathFailed;
             }
-        } else if order == Order::Hold || digging {
+        } else if order == Order::Hold || digging || matches!(order, Order::Support(_)) {
             self.units[id].motion.stop();
         }
         commit(&mut self.actors[id], self.units[id].kind, order, self.tick);
@@ -220,7 +229,7 @@ pub(super) fn commit(actor: &mut Actor, kind: RangeUnitKind, order: Order, tick:
     }
     actor.target = None;
     if !(kind == RangeUnitKind::Spider && actor.burst > 0 && order != Order::Hold) {
-        stop_spider_beam(actor, kind, tick);
+        stop_active_beam(actor, kind, tick);
         actor.charge = None;
         actor.burst = 0;
     }

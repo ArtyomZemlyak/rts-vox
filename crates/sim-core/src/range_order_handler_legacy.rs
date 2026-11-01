@@ -70,7 +70,7 @@ impl BlastRange {
             && actor.burst > 0
             && order != Order::Hold)
         {
-            stop_spider_beam(actor, self.units[id].kind, self.tick);
+            stop_active_beam(actor, self.units[id].kind, self.tick);
             actor.charge = None;
             actor.burst = 0;
         }
@@ -133,7 +133,7 @@ impl BlastRange {
         a.order = order;
         a.target = None;
         if !(self.units[id].kind == RangeUnitKind::Spider && a.burst > 0 && order != Order::Hold) {
-            stop_spider_beam(a, self.units[id].kind, self.tick);
+            stop_active_beam(a, self.units[id].kind, self.tick);
             a.charge = None;
             a.burst = 0;
         }

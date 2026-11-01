@@ -76,6 +76,8 @@ pub struct Tuning {
     pub turret_t2_power_milli: u32,
     #[serde(default)]
     pub turret_t2_reload_ticks: Option<u32>,
+    #[serde(default)]
+    pub eidolon_reload_ticks: Option<u32>,
     pub tank_reload_ticks: u32,
     #[serde(deserialize_with = "crate::attack_ranges::deserialize")]
     pub tank_range: i32,
@@ -152,6 +154,8 @@ impl Tuning {
             || !(100..=4000).contains(&t.turret_t2_power_milli)
             || t.turret_t2_reload_ticks
                 .is_some_and(|n| !(1..=1800).contains(&n))
+            || t.eidolon_reload_ticks
+                .is_some_and(|n| !(1..=1800).contains(&n))
             || !(1..=1800).contains(&t.tank_reload_ticks)
             || !(100..=3000).contains(&t.tank_range)
             || !(100..=3000).contains(&t.artillery_range)
@@ -207,7 +211,7 @@ mod tests {
     fn nuclear_payload_is_finite_and_rejects_invalid_budgets() {
         let source = include_str!("../../../data/range-battle.ron");
         let stock = Tuning::from_ron(source).unwrap();
-        assert_eq!(stock.nuclear.material_energy_j, 20_000_000_000 * 100);
+        assert_eq!(stock.nuclear.material_energy_j, 20_000_000_000 * 200);
         assert_eq!(stock.nuclear.range, crate::attack_ranges::stock().nuclear);
         let nuke = include_str!("../../../data/range-nuclear.ron");
         let explicit = nuke
@@ -222,8 +226,8 @@ mod tests {
         ))
         .unwrap();
         for bad in [
-            nuke.replace("2000000000000", "0"),
-            nuke.replace("2000000000000", "4000000000001"),
+            nuke.replace("4000000000000", "0"),
+            nuke.replace("4000000000000", "4000000000001"),
             nuke.replace("body_energy_pct: 25", "body_energy_pct: 101"),
             nuke.replace("reload_ticks: 1200", "reload_ticks: 1801"),
         ] {
@@ -304,11 +308,11 @@ mod tests {
         assert_eq!(Tuning::from_ron(&old).unwrap().turret_t2_power_milli, 1000);
         assert_eq!(
             Tuning::from_ron(shipped).unwrap().turret_t2_power_milli,
-            2000
+            1200
         );
         for n in [0, 99, 4001, u32::MAX] {
             let bad = shipped.replace(
-                "turret_t2_power_milli: 2000",
+                "turret_t2_power_milli: 1200",
                 &format!("turret_t2_power_milli: {n}"),
             );
             assert!(Tuning::from_ron(&bad).is_err());
@@ -332,6 +336,17 @@ mod tests {
                 "turret_t2_reload_ticks: Some(40)",
                 &format!("turret_t2_reload_ticks: Some({n})"),
             );
+            assert!(Tuning::from_ron(&bad).is_err());
+        }
+    }
+    #[test]
+    fn eidolon_reload_is_bounded_and_optional_for_older_data() {
+        let shipped = include_str!("../../../data/range-battle.ron");
+        let old = shipped.lines().filter(|l| !l.contains("eidolon_reload_ticks:")).collect::<Vec<_>>().join("\n");
+        assert_eq!(Tuning::from_ron(&old).unwrap().eidolon_reload_ticks, None);
+        assert_eq!(Tuning::from_ron(shipped).unwrap().eidolon_reload_ticks, Some(48));
+        for n in [0, 1801, u32::MAX] {
+            let bad = shipped.replace("eidolon_reload_ticks: Some(48)", &format!("eidolon_reload_ticks: Some({n})"));
             assert!(Tuning::from_ron(&bad).is_err());
         }
     }

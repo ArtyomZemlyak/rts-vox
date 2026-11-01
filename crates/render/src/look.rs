@@ -846,10 +846,13 @@ pub enum Finish {
     /// и грубее — её не полируют. Без неё каток сливался с траком
     /// в одну чёрную ленту.
     Steel = 5,
+    /// Световой элемент энергетического оружия: зелёно-бирюзовый,
+    /// самосветящийся, отдельный от тёплого ядра юнита.
+    Energy = 6,
 }
 
 /// Сколько отделок — столько мешей на тело и столько материалов.
-pub const FINISHES: usize = 6;
+pub const FINISHES: usize = 7;
 
 /// Все отделки по порядку номеров. Массивы мешей и материалов
 /// индексируются номером, и перечень обязан идти тем же порядком.
@@ -860,6 +863,7 @@ pub const FINISH_ALL: [Finish; FINISHES] = [
     Finish::Rubber,
     Finish::Core,
     Finish::Steel,
+    Finish::Energy,
 ];
 
 /// Отделка воксела: явный код тела, а если его нет — по роли.
@@ -888,6 +892,7 @@ pub fn finish_srgb(f: Finish, tint: [f32; 3]) -> [f32; 3] {
         // Голая сталь светлая, чуть холодная: каток и сустав обязаны
         // отделяться и от резины, и от воронёного ствола.
         Finish::Steel => [0.52, 0.53, 0.55],
+        Finish::Energy => [0.08, 0.88, 0.66],
     }
 }
 
@@ -964,11 +969,22 @@ pub fn finish_surface_of(l: Look, f: Finish) -> (f32, f32) {
         (Look::Vangers, Finish::Rubber) => (0.95, 0.00),
         (Look::Vangers, Finish::Core) => (0.42, 0.00),
         (Look::Vangers, Finish::Steel) => (0.48, 0.90),
+        (_, Finish::Energy) => (0.32, 0.00),
     }
 }
 
 /// Насколько ярко светится обнажённое ядро, линейный RGB.
 pub const CORE_GLOW: [f32; 3] = [7.0, 4.6, 1.2];
+/// Свет зелёно-бирюзовых рамок энергетического оружия, линейный RGB.
+pub const ENERGY_GLOW: [f32; 3] = [0.35, 5.0, 3.2];
+
+pub fn finish_glow(f: Finish) -> [f32; 3] {
+    match f {
+        Finish::Core => CORE_GLOW,
+        Finish::Energy => ENERGY_GLOW,
+        _ => [0.0; 3],
+    }
+}
 
 // --- Бой: вспышка, трассер, обломок ----------------------------------
 //
@@ -2467,7 +2483,8 @@ mod tests {
     #[test]
     fn finish_codes_follow_the_list() {
         use voxel::unit::{
-            Part, FINISH_CORE, FINISH_GUN, FINISH_OPTIC, FINISH_PLATE, FINISH_RUBBER, FINISH_STEEL,
+            Part, FINISH_CORE, FINISH_ENERGY, FINISH_GUN, FINISH_OPTIC, FINISH_PLATE, FINISH_RUBBER,
+            FINISH_STEEL,
         };
         assert_eq!(finish_of(FINISH_PLATE, Part::Sensor), Finish::Plate);
         assert_eq!(finish_of(FINISH_GUN, Part::Armour), Finish::Gun);
@@ -2475,6 +2492,7 @@ mod tests {
         assert_eq!(finish_of(FINISH_RUBBER, Part::Armour), Finish::Rubber);
         assert_eq!(finish_of(FINISH_CORE, Part::Armour), Finish::Core);
         assert_eq!(finish_of(FINISH_STEEL, Part::Armour), Finish::Steel);
+        assert_eq!(finish_of(FINISH_ENERGY, Part::Armour), Finish::Energy);
         // Сталь светлее резины и воронёного ствола: иначе каток
         // не отделить от трака.
         let (s, r, g) = (
@@ -2554,16 +2572,14 @@ mod tests {
             assert!(!seen[k], "две роли делят отделку {k}");
             seen[k] = true;
         }
-        // Без роли — только голая сталь катков и суставов, и её
-        // даёт код тела (ADR-231).
+        // Сталь и световые элементы назначаются явным кодом тела.
         for (k, s) in seen.iter().enumerate() {
             if !s {
-                assert_eq!(
-                    FINISH_ALL[k],
-                    Finish::Steel,
+                assert!(
+                    matches!(FINISH_ALL[k], Finish::Steel | Finish::Energy),
                     "отделка {k} без роли — лишний материал"
                 );
-                assert_eq!(finish_of(k as u8 + 1, Part::Armour), Finish::Steel);
+                assert_eq!(finish_of(k as u8 + 1, Part::Armour), FINISH_ALL[k]);
             }
         }
     }

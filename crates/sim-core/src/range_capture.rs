@@ -110,7 +110,7 @@ pub(super) fn capture(
     budget: usize,
     parallel: bool,
 ) -> bool {
-    capture_inner::<true>(e, w, c, units, dents, budget, parallel)
+    capture_inner::<true>(e, w, c, units, dents, budget, parallel, true)
 }
 
 // The previous ground reader is instantiated only by the test probe.
@@ -122,6 +122,7 @@ fn capture_inner<const COLUMNS: bool>(
     dents: &SurfaceWork,
     budget: usize,
     parallel: bool,
+    split_short_slices: bool,
 ) -> bool {
     let n = e.wave.size();
     let cells = n * n * n;
@@ -525,11 +526,21 @@ fn capture_inner<const COLUMNS: bool>(
     // Large reads use the existing physics pool. Indexed, disjoint chunks
     // retain cell order; a single-thread pool and small slices stay local.
     if parallel && spent >= 1024 && rayon::current_num_threads() > 1 {
+        let plane = n * n;
+        let workers = rayon::current_num_threads();
+        // Split short prefixes on whole rows: a fixed one-plane task leaves
+        // most workers idle when the capture quota covers less than a plane.
+        // Keep larger prefixes plane-sized to reuse the local height caches.
+        let chunk = if split_short_slices && resistance.len() < plane * workers {
+            resistance.len().div_ceil(workers).max(512).div_ceil(n) * n
+        } else {
+            plane
+        }.min(plane);
         resistance
-            .par_chunks_mut(n * n)
+            .par_chunks_mut(chunk)
             .enumerate()
             .for_each(|(i, out)| {
-                fill(e.captured + i * n * n, out);
+                fill(e.captured + i * chunk, out);
             });
     } else if !resistance.is_empty() {
         fill(e.captured, &mut resistance);
@@ -836,6 +847,41 @@ mod tests {
     }
 
     #[test]
+    fn short_capture_slices_match_plane_tasks_with_multiple_workers() {
+        let mut c = ExplosionConfig::from_ron(include_str!("../../../data/siege-shell.ron")).unwrap();
+        c.half_cells = 32;
+        c.cell_units = 2;
+        let w = World::new(192, 64, 192, 100, Box::new(Ground));
+        let units = vec![RangeUnit::of_kind(RangeUnitKind::Tank, [96, 16, 96])];
+        let dents = SurfaceWork::from([([96, 15, 96], 100)]);
+        for workers in [2, 4] {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(workers).build().unwrap();
+            for budget in [1024, 1536] {
+                let mut reference = Explosion::begin([96, 28, 96], &c, &units);
+                let n = reference.wave.size();
+                reference.captured = n * n * (n / 2) + n * (n / 2 - 8);
+                let mut actual = Explosion::begin([96, 28, 96], &c, &units);
+                actual.captured = reference.captured;
+                let start = std::time::Instant::now();
+                let before = pool.install(|| capture_inner::<true>(
+                    &mut reference, &w, &c, &units, &dents, budget, true, false,
+                ));
+                let baseline = start.elapsed();
+                let start = std::time::Instant::now();
+                let after = pool.install(|| capture_inner::<true>(
+                    &mut actual, &w, &c, &units, &dents, budget, true, true,
+                ));
+                eprintln!("capture workers={workers} budget={budget} plane_us={} split_us={}", baseline.as_micros(), start.elapsed().as_micros());
+                let (mut a, mut b) = (Blob::new(), Blob::new());
+                reference.save(&mut a);
+                actual.save(&mut b);
+                assert_eq!(before, after);
+                assert_eq!(a.v, b.v, "workers={workers} budget={budget}");
+            }
+        }
+    }
+
+    #[test]
     #[ignore = "manual exact coarse capture comparison; run alone in release"]
     fn measure_coarse_column_capture() {
         use std::{hint::black_box, time::Instant};
@@ -863,9 +909,9 @@ mod tests {
                     let start = Instant::now();
                     pool.install(|| {
                         if columns {
-                            capture_inner::<true>(&mut e, &w, &c, &[], &dents, budget, true)
+                            capture_inner::<true>(&mut e, &w, &c, &[], &dents, budget, true, true)
                         } else {
-                            capture_inner::<false>(&mut e, &w, &c, &[], &dents, budget, true)
+                            capture_inner::<false>(&mut e, &w, &c, &[], &dents, budget, true, true)
                         }
                     });
                     let elapsed = start.elapsed().as_nanos();

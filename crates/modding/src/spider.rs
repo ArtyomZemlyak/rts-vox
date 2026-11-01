@@ -40,9 +40,9 @@ impl Tuning {
             || !(1..=3000).contains(&t.laser.range)
             || !(100..=950).contains(&t.laser.standoff_milli)
             || !(0..=150).contains(&t.laser.spread_milli)
-            || !(1..=10000).contains(&t.laser.work)
+            || !(1..=12000000).contains(&t.laser.work)
             || !(1..=1000000).contains(&t.laser.fracture_j)
-            || !(1..=100000).contains(&t.laser.heat)
+            || !(1..=320000000).contains(&t.laser.heat)
             || !(0..=4).contains(&t.laser.heat_radius)
             || !(1..=300).contains(&t.laser.reload_ticks)
             || t.laser_sweep.is_some_and(|s| {
@@ -106,6 +106,18 @@ mod tests {
             assert_ne!(source, source.replace(from, to));
             assert!(Tuning::from_ron(&source.replace(from, to)).is_err());
         }
+    }
+    #[test]
+    fn spider_laser_has_ten_times_the_previous_contact_power() {
+        let source=include_str!("../../../data/spider.ron");
+        let t=Tuning::from_ron(source).unwrap();
+        assert_eq!((t.laser.work,t.laser.heat,t.laser.fracture_j),(1200000*10,32000000*10,20000));
+        assert_eq!((t.laser.heat_radius,t.laser.interval_ticks),(4,1));
+        for (from,to) in [("work: 12000000","work: 12000001"),("heat: 320000000","heat: 320000001")] {
+            assert!(Tuning::from_ron(&source.replace(from,to)).is_err());
+        }
+        let common=crate::range_weapon::Tuning::from_ron(include_str!("../../../data/range-weapons.ron")).unwrap();
+        assert_eq!((common.laser.work,common.laser.heat,common.laser.fracture_j),(120,400,1));
     }
 }
 

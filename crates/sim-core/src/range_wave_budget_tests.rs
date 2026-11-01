@@ -76,6 +76,27 @@ fn crowded_waves_capture_even_when_the_legal_budget_is_smaller_than_the_queue() 
 }
 
 #[test]
+fn autonomous_battle_services_every_admitted_wave_under_a_tiny_shared_budget() {
+    let mut r=crowded_waves(4,1,1);
+    r.battle.autonomous=true;
+    apply(&mut r);
+    assert!(r.battle.waves.iter().all(|w| w.wave.captured>0), "an accepted wave was held behind the shared limit");
+    assert_eq!(r.battle.wave_held[0],0);
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn accepted_waves_above_the_old_admission_limit_survive_a_snapshot() {
+    let mut r=crowded_waves(20,1,1);
+    r.battle.autonomous=true;
+    assert!(r.battle.waves.len()>r.battle.tuning.max_waves);
+    let saved=r.snapshot();
+    let restored=BlastRange::restore(r.config,&saved).expect("restore all accepted waves");
+    assert_eq!(restored.battle.waves.len(),20);
+    assert_eq!(restored.snapshot(),saved);
+}
+
+#[test]
 fn crowded_waves_propagate_and_release_capacity_with_a_small_legal_budget() {
     let mut r = crowded_waves(16, 40000, 1);
     for _ in 0..32 {

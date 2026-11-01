@@ -362,7 +362,7 @@ impl BlastRange {
         // connected barrels enter this thermal field. Two barrels may heat
         // the same victim, but duplicate samples of one barrel never stack.
         for (cell, heat) in doses {
-            self.thermals.deposit(cell, heat, &self.thermal_tuning);
+            self.thermals.deposit_direct(cell, heat, &self.thermal_tuning);
         }
     }
 }
@@ -433,7 +433,7 @@ mod tests {
                 for owner in [None, Some(0)] {
                     let mut serial = BlastRange::restore(seed.config, &snapshot).unwrap();
                     // Tuning is authored rather than stored in the snapshot.
-                    // Exercise the cap that makes unit deposit order significant.
+                    // Force accepted weapon heat beyond the passive budget.
                     serial.thermal_tuning.max_cells = 7;
                     let mut tuning = serial.streams.tuning.laser.clone();
                     tuning.heat = 900_000; // repeated deposits exercise heat saturation
@@ -452,10 +452,7 @@ mod tests {
                     }
                     if case == 7 && owner.is_none() {
                         assert!(serial.thermals.hot() > 0, "fixture did not heat armour");
-                        assert!(
-                            serial.thermals.rejected_heat > 0,
-                            "fixture did not reach the admission cap"
-                        );
+                        assert!(serial.thermals.hot() > 7, "weapon heat was lost at the passive budget");
                     }
                     for pool in &pools {
                         let mut parallel = BlastRange::restore(seed.config, &snapshot).unwrap();

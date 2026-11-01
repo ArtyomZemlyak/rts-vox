@@ -20,6 +20,10 @@
         standoff_milli: 800,
         spread_milli: 0, work: 120, heat: 400, heat_radius: 4,
         fracture_j: 1, reload_ticks: 20),
+    // Sixteen simulation ticks (0.8 s), with bounded secondary discharges.
+    lightning: Some((burst_ticks: 16, interval_ticks: 1, range: "laser",
+        standoff_milli: 750, spread_milli: 0, work: 5000, heat: 30000,
+        heat_radius: 1, fracture_j: 10, reload_ticks: 30)),
     // Large, short-lived cubic puffs from moving tank tracks. Visual only;
     // the separate cap leaves room in the shared pool for impacts and fire.
     dust: (interval_ticks: 3, min_speed: 5, full_speed: 40,

@@ -59,6 +59,8 @@ mod pilot;
 mod profile;
 #[path = "blast/status_log.rs"]
 mod status_log;
+#[path = "blast/strategic_icons.rs"]
+mod strategic_icons;
 #[path = "blast/frame_limit.rs"]
 mod frame_limit;
 #[path = "blast/streaming.rs"]
@@ -1155,7 +1157,7 @@ fn main() {
                     laboratory::first_person_draw,
                     laboratory::collectors_draw,
                     workbench::ghost::update,
-                    workbench::overlay,
+                    (workbench::overlay, strategic_icons::update).chain(),
                     (
                         ui_snapshot::publish,
                         panel::refresh,
@@ -1416,7 +1418,6 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
     let unit_boxes: Vec<_> = sim.units.iter().map(|u| u.bounds()).collect();
     let mut unit_candidates = terrain_units::Candidates::new(&unit_boxes);
     let window = gas.window;
-    let words = Arc::make_mut(&mut gas.terrain_words);
     let mut dirty = Vec::new();
     let edits = sim
         .world
@@ -1425,23 +1426,44 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
         .map(|e| ([e.x as i32, e.y as i32, e.z as i32], Some(e.mat)))
         .chain(sim.surface_changed.iter().map(|p| (*p, None)))
         .chain(unit_edits.iter().map(|p| (*p, None)));
+    let resolve = |p: [i32; 3], mat: Option<u16>, candidates: &mut terrain_units::Candidates| {
+        if candidates.at(p).iter().any(|&id| {
+            let (lo, hi) = unit_boxes[id];
+            (0..3).all(|a| p[a] >= lo[a] && p[a] <= hi[a]) && sim.units[id].solid(p)
+        }) { 15 } else {
+            surface_material(sim, p, mat.unwrap_or_else(|| sim_core::blast::material(&sim.world, p)))
+        }
+    };
+    // Arc::make_mut copies the full GPU upload while the render world still
+    // shares it. Check first: repeated or off-window edits must not copy it.
+    let mut changed = false;
+    for (p, mat) in edits.clone() {
+        let Some(i) = window.index(p) else { continue; };
+        let m = resolve(p, mat, &mut unit_candidates);
+        if m != 0 {
+            gas.params.terrain_origin.w = gas.params.terrain_origin.w.max((p[1] + 1) as f32);
+            let slot = (p[0] as u32 % window.dims[0]
+                + window.dims[0] * (p[2] as u32 % window.dims[2])) as usize;
+            gas.terrain_column_top[slot] = gas.terrain_column_top[slot].max((p[1] + 1) as u16);
+        }
+        let shift = (i % 8) * 4;
+        let word = gas.terrain_words[i / 8];
+        if (word & !(15 << shift)) | (m << shift) != word {
+            changed = true;
+            break;
+        }
+    }
+    if !changed {
+        gas.terrain_revision += 1;
+        return;
+    }
+    let words = Arc::make_mut(&mut gas.terrain_words);
     for (p, mat) in edits {
         let Some(i) = window.index(p) else {
             continue;
         };
         let shift = (i % 8) * 4;
-        let m = if unit_candidates.at(p).iter().any(|&id| {
-            let (lo, hi) = unit_boxes[id];
-            (0..3).all(|a| p[a] >= lo[a] && p[a] <= hi[a]) && sim.units[id].solid(p)
-        }) {
-            15
-        } else {
-            surface_material(
-                sim,
-                p,
-                mat.unwrap_or_else(|| sim_core::blast::material(&sim.world, p)),
-            )
-        };
+        let m = resolve(p, mat, &mut unit_candidates);
         if m != 0 {
             gas.params.terrain_origin.w = gas.params.terrain_origin.w.max((p[1] + 1) as f32);
             let slot = (p[0] as u32 % window.dims[0]
@@ -1513,6 +1535,8 @@ fn setup(
             SkinBindings::new(&voxel::unit::artillery_turret_t3()),
             SkinBindings::new(&voxel::unit::nuclear_silo()),
             SkinBindings::new(&voxel::unit::crawler()),
+            SkinBindings::new(&voxel::unit::lightning_tank()),
+            SkinBindings::new(&voxel::unit::eidolon_tank()),
         ]),
         pristine: Arc::new([
             voxel::unit::tank(),
@@ -1527,6 +1551,8 @@ fn setup(
             voxel::unit::artillery_turret_t3(),
             voxel::unit::nuclear_silo(),
             voxel::unit::crawler(),
+            voxel::unit::lightning_tank(),
+            voxel::unit::eidolon_tank(),
         ]),
         seen: Vec::new(),
         pending: Vec::new(),

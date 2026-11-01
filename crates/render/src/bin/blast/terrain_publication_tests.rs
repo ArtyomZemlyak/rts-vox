@@ -87,12 +87,36 @@ fn crater_publication_matches_full_rebuild_and_uploads_every_changed_word() {
         .collect();
     assert_eq!(gas.distant_edits, expected);
     gas.terrain_dirty.clear();
+    let shared_upload = Arc::clone(&gas.terrain_words);
     apply_terrain(&sim, &mut gas, &starts);
     assert!(
         gas.terrain_dirty.is_empty(),
         "unchanged words were published again"
     );
     assert_eq!(gas.terrain_words, full.terrain_words);
+    assert!(Arc::ptr_eq(&shared_upload, &gas.terrain_words), "an unchanged publication copied the shared GPU upload");
+}
+
+#[test]
+fn off_window_edits_keep_shared_upload_and_update_distant_columns() {
+    let layout = RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+    let mut sim = BlastRange::with_layout(config(false, false), layout).unwrap();
+    let window = TerrainWindow { origin: [128, 0, 128], dims: [256, 96, 256] };
+    let mut gas = GasInput::default();
+    gas.terrain_words = Arc::new(vec![0; window.words()]);
+    write_window(&sim, &mut gas, window, None);
+    gas.params.distant.z = 4.0;
+    gas.terrain_dirty.clear();
+    gas.distant_edits.clear();
+    let shared = Arc::clone(&gas.terrain_words);
+    sim.surface_changed.push([500, 20, 500]);
+    let starts = sim.units.iter().map(|u| u.removed.len()).collect::<Vec<_>>();
+    let revision = gas.terrain_revision;
+    apply_terrain(&sim, &mut gas, &starts);
+    assert!(Arc::ptr_eq(&shared, &gas.terrain_words));
+    assert!(gas.terrain_dirty.is_empty());
+    assert!(gas.distant_edits.contains(&[125, 125]));
+    assert_eq!(gas.terrain_revision, revision + 1);
 }
 
 #[test]

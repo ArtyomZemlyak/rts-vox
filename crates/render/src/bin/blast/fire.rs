@@ -37,6 +37,7 @@ struct Particle {
     seed: u32,
     smoke: bool,
     steam: bool,
+    trail_smoke: bool,
     burst_dust: bool,
     burst_flame: bool,
     burst_flash: bool,
@@ -50,6 +51,16 @@ struct Tracer {
     head: Vec3,
     born: f32,
 }
+#[derive(Clone, Copy)]
+struct ReclaimFlight {
+    from: Vec3,
+    crawler: usize,
+    born: f32,
+    material: u16,
+    seed: u32,
+}
+const RECLAIM_FLIGHTS_CAP: usize = 256;
+const RECLAIM_FLIGHT_LIFE: f32 = 0.7;
 #[derive(Resource, Default, Clone)]
 pub struct Effects {
     alive: Vec<bool>,
@@ -57,6 +68,7 @@ pub struct Effects {
     deaths: Vec<(Vec3, f32)>,
     particles: Vec<Particle>,
     tracers: Vec<Tracer>,
+    reclaim_flights: Vec<ReclaimFlight>,
     nuclear: Vec<(Vec3, f32)>,
     nuclear_fronts: Vec<nuclear::ShockFront>,
     /// Presentation resolution; zero keeps the closest view's full detail.
@@ -186,6 +198,7 @@ impl Effects {
         self.deaths.clear();
         self.particles.clear();
         self.tracers.clear();
+        self.reclaim_flights.clear();
         self.energy_impacts.clear();
         self.nuclear.clear();
         self.nuclear_fronts.clear();
@@ -282,6 +295,7 @@ impl Effects {
             seed,
             smoke,
             steam: false,
+            trail_smoke: false,
             burst_dust: false,
             burst_flame: false,
             burst_flash: false,
@@ -289,6 +303,44 @@ impl Effects {
             dust_material: 0,
             contact: None,
         });
+    }
+    /// Small, presentation-only smoke; keep room for impacts and explosions.
+    fn light_smoke(&mut self, at: Vec3, velocity: Vec3, now: f32, life: f32, edge: f32) {
+        if self.particles.len() >= CAP - 128 { return; }
+        let index = self.particles.len();
+        self.add(at, velocity, now, life, edge, true);
+        if let Some(p) = self.particles.get_mut(index) { p.trail_smoke = true; }
+    }
+    fn muzzle_flash(&mut self, at: Vec3, direction: Vec3, now: f32, scale: f32) {
+        if self.particles.len() >= CAP - 128 { return; }
+        let axis = direction.normalize_or(Vec3::X);
+        let before = self.particles.len();
+        self.add(at + axis, Vec3::ZERO, now, 0.13, 4.0 * scale, false);
+        if let Some(p) = self.particles.get_mut(before) { p.contact = Some(ContactKind::Flash); }
+        for i in 0..3u32 {
+            let seed = self.serial.wrapping_add(i * 31);
+            let scatter = Vec3::new(noise(seed) - 0.5, noise(seed + 3) - 0.5, noise(seed + 7) - 0.5);
+            let before = self.particles.len();
+            self.add(at + axis * 1.5, axis * (14.0 + noise(seed + 11) * 18.0) + scatter * 9.0,
+                now, 0.16 + noise(seed + 17) * 0.08, 0.6 * scale, false);
+            if let Some(p) = self.particles.get_mut(before) { p.contact = Some(ContactKind::Spark); }
+        }
+        for i in 0..2u32 {
+            let seed = self.serial.wrapping_add(i * 17);
+            self.light_smoke(at + axis * (1.0 + i as f32),
+                axis * (2.0 + noise(seed) * 3.0) + Vec3::Y * 3.0,
+                now, 0.55 + noise(seed + 1) * 0.3, (2.4 + noise(seed + 2)) * scale);
+        }
+    }
+    fn laser_smoke(&mut self, trace: &sim_core::blast::weapons::Trace, now: f32) {
+        let from = point(trace.from);
+        let to = point(trace.to);
+        let axis = (to - from).normalize_or(Vec3::X);
+        self.light_smoke(from + axis * 1.5, Vec3::Y * 2.5 + axis, now, 0.42, 1.3);
+        if trace.hit {
+            // Stay on the incoming side of the struck surface.
+            self.light_smoke(to - axis * 0.8, Vec3::Y * 4.0 - axis * 1.5, now, 0.75, 2.1);
+        }
     }
     fn add_dust(&mut self, at: Vec3, velocity: Vec3, now: f32, life: f32, edge: f32, mat: u16) {
         // Track dust has its own budget and never fills the slots reserved
@@ -559,6 +611,17 @@ impl Effects {
         self.nuclear_fronts.retain(|f| now - f.born < nuclear::LIFE);
         self.deaths.retain(|(_, born)| now - born < 0.45);
         self.tracers.retain(|p| now - p.born < TRACER_LIFE);
+        self.reclaim_flights.retain(|p| now - p.born < RECLAIM_FLIGHT_LIFE);
+        if let Some(mining) = sim.mining() {
+            for event in mining.reclaim_visuals() {
+                if self.reclaim_flights.len() == RECLAIM_FLIGHTS_CAP { break; }
+                self.reclaim_flights.push(ReclaimFlight {
+                    from: Vec3::from(event.from.map(|v| v as f32)),
+                    crawler: event.crawler, born: now, material: event.material, seed: self.serial,
+                });
+                self.serial = self.serial.wrapping_add(1);
+            }
+        }
         for &(p, amount) in sim.water.vapor_events.iter().take(8) {
             let before=self.particles.len();
             let edge=0.9+(amount as f32/64.0).sqrt().min(1.6);
@@ -736,6 +799,7 @@ impl Effects {
         {
             self.plume(Vec3::from(p.map(|v| v as f32)) + Vec3::Y, now, true, 0.9);
         }
+        let mut laser_smoke_count = 0;
         for trace in &sim.streams.traces {
             let (a, b) = (point(trace.from), point(trace.to));
             if sim.config.delivery == Delivery::Flame {
@@ -784,8 +848,16 @@ impl Effects {
                 if trace.hit && axis {
                     self.plume(b, now, true, 0.9);
                 }
-            } else {
+            } else if sim.config.delivery == Delivery::MachineGun {
                 self.capture_bullet(trace, now);
+            } else if sim.config.delivery == Delivery::Laser && sim.tick.is_multiple_of(4) && laser_smoke_count < 8 {
+                self.laser_smoke(trace, now);
+                laser_smoke_count += 1;
+            }
+        }
+        if sim.tick.is_multiple_of(4) {
+            for trace in sim.battle.lasers.iter().take(8) {
+                self.laser_smoke(trace, now);
             }
         }
         if sim.config.delivery == Delivery::MachineGun && !sim.battle_mode() {
@@ -801,15 +873,19 @@ impl Effects {
         }
         if sim.battle_mode() {
             for (id, unit) in sim.units.iter().enumerate() {
-                if matches!(
-                    sim.battle_weapon(id),
-                    Some(BattleWeapon::Canister | BattleWeapon::Siege)
-                ) {
-                    let fired = sim.battle.actors[id].fired;
-                    if self.shell_fired.get(id).copied().unwrap_or(fired) != fired {
-                        if let Some(at) = sim.battle_muzzles(id).first() {
-                            self.add(point(*at), Vec3::ZERO, now, 0.11, 6.5, false);
-                        }
+                let fired = sim.battle.actors[id].fired;
+                let launched = self.shell_fired.get(id).is_some_and(|&old| old != fired);
+                if launched && matches!(sim.battle_weapon(id), Some(
+                    BattleWeapon::Blast | BattleWeapon::Kinetic | BattleWeapon::Canister
+                    | BattleWeapon::Siege | BattleWeapon::Nuclear | BattleWeapon::Energy
+                    | BattleWeapon::Annihilation
+                )) {
+                    let frame = unit.root_frame(usize::from(unit.body.turret_y));
+                    let axis = point([frame.x.x, frame.x.y, frame.x.z]);
+                    let scale = if matches!(sim.battle_weapon(id), Some(BattleWeapon::Siege | BattleWeapon::Nuclear)) { 1.5 } else { 1.0 };
+                    let barrels = if unit.kind == RangeUnitKind::EidolonTank { 2 } else { 1 };
+                    for muzzle in sim.battle_muzzles(id).into_iter().take(barrels) {
+                        self.muzzle_flash(point(muzzle), axis, now, scale);
                     }
                 }
                 if unit.kind != RangeUnitKind::Strider {
@@ -831,6 +907,34 @@ impl Effects {
         self.shell_fired
             .extend(sim.battle.actors.iter().map(|a| a.fired));
         self.capture_dust(sim, now);
+        if sim.tick.is_multiple_of(3) {
+            let rounds = &sim.battle.rounds;
+            let start = if rounds.is_empty() { 0 } else { (sim.tick as usize * 7) % rounds.len() };
+            for offset in 0..rounds.len().min(12) {
+                let r = &rounds[(start + offset) % rounds.len()];
+                if !matches!(r.weapon, BattleWeapon::Blast | BattleWeapon::Kinetic | BattleWeapon::Canister | BattleWeapon::Siege | BattleWeapon::Nuclear) { continue; }
+                let a = point(r.previous); let b = point(r.pos);
+                let axis = (b - a).normalize_or_zero();
+                let scale = if r.weapon == BattleWeapon::Nuclear { 2.4 } else { 1.0 };
+                self.light_smoke(a.lerp(b, 0.5), Vec3::Y * 1.0 - axis * 0.6,
+                    now, 0.55, 1.5 * scale);
+            }
+            if !sim.battle_mode() && matches!(sim.config.delivery, Delivery::Blast | Delivery::Kinetic) {
+                if let Some(shell) = sim.shell {
+                    let head = point(shell);
+                    let movement = self.last_kinetic_shell.map_or_else(|| point(sim.heading()) * 2.0, |p| head - p);
+                    self.light_smoke(head - movement * 0.5,
+                        Vec3::Y - movement.normalize_or_zero() * 0.6, now, 0.55, 1.5);
+                }
+            }
+        }
+        if !sim.battle_mode() && matches!(sim.config.delivery, Delivery::Blast | Delivery::Kinetic)
+            && sim.tick == sim.fire_tick.saturating_add(1) && sim.shell.is_some()
+        {
+            let from = point(sim.muzzle());
+            let direction = point(sim.shell.unwrap()) - from;
+            self.muzzle_flash(from, direction, now, 1.0);
+        }
         self.kinetic_paths.clear();
         self.kinetic_paths.extend(
             sim.battle
@@ -843,12 +947,14 @@ impl Effects {
                     (at, at + at - point(r.previous))
                 }),
         );
-        let shell = (!sim.battle_mode() && sim.config.delivery == Delivery::Kinetic)
+        let shell = (!sim.battle_mode() && matches!(sim.config.delivery, Delivery::Blast | Delivery::Kinetic))
             .then_some(sim.shell)
             .flatten()
             .map(point);
-        if let (Some(at), Some(before)) = (shell, self.last_kinetic_shell) {
-            self.kinetic_paths.push((at, at + at - before));
+        if sim.config.delivery == Delivery::Kinetic {
+            if let (Some(at), Some(before)) = (shell, self.last_kinetic_shell) {
+                self.kinetic_paths.push((at, at + at - before));
+            }
         }
         self.last_kinetic_shell = shell;
     }
@@ -1347,6 +1453,26 @@ fn fire_mesh(mut buf: MeshBuf) -> Mesh {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn muzzle_and_laser_smoke_use_the_actual_endpoints_and_a_bounded_pool() {
+        let mut fx = Effects::default();
+        let from = Vec3::new(10.0, 20.0, 30.0);
+        let to = Vec3::new(40.0, 20.0, 30.0);
+        fx.muzzle_flash(from, Vec3::X, 0.0, 1.0);
+        assert_eq!(fx.particles.iter().filter(|p| p.contact == Some(ContactKind::Flash)).count(), 1);
+        assert!(fx.particles.iter().any(|p| p.trail_smoke && p.at.distance(from) < 3.0));
+        let trace = sim_core::blast::weapons::Trace {
+            from: [fx::Fx::from_int(10), fx::Fx::from_int(20), fx::Fx::from_int(30)],
+            to: [fx::Fx::from_int(40), fx::Fx::from_int(20), fx::Fx::from_int(30)],
+            hit: true, serial: 7,
+        };
+        fx.laser_smoke(&trace, 0.0);
+        assert!(fx.particles.iter().any(|p| p.trail_smoke && p.at.distance(to) < 2.0));
+        for _ in 0..CAP { fx.laser_smoke(&trace, 0.0); }
+        assert!(fx.particles.len() <= CAP - 128);
+        fx.clear();
+        assert!(fx.particles.is_empty());
+    }
     #[test]
     fn vapor_contacts_emit_a_bounded_light_steam_layer() {
         let mut sim=BlastRange::new(config(false,false));
@@ -1873,10 +1999,10 @@ mod tests {
             }
         }
         assert_eq!(sim.battle.actors[0].fired, 1);
-        assert_eq!(
-            effects.particles.iter().filter(|p| p.edge == 6.5).count(),
-            1
-        );
+        let muzzle = point(sim.battle_muzzles(0)[0]);
+        let count_flashes = |fx: &Effects| fx.particles.iter().filter(|p|
+            p.contact == Some(ContactKind::Flash) && p.at.distance(muzzle) < 2.0).count();
+        assert_eq!(count_flashes(&effects), 1);
         let pellets: Vec<_> = sim
             .battle
             .rounds
@@ -1892,15 +2018,12 @@ mod tests {
                 .contains(&(at, at + at - point(round.previous))));
         }
         effects.capture(&sim);
-        assert_eq!(
-            effects.particles.iter().filter(|p| p.edge == 6.5).count(),
-            1
-        );
+        assert_eq!(count_flashes(&effects), 1);
         effects.clear();
         effects.before(&sim);
         effects.capture(&sim);
         assert!(
-            !effects.particles.iter().any(|p| p.edge == 6.5),
+            count_flashes(&effects) == 0,
             "load replayed muzzle flash"
         );
     }

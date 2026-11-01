@@ -8,12 +8,14 @@ const MAX_BRICKS: usize = TERRAIN_WORDS / 64;
 pub(super) struct Bricks {
     pub buffer: Buffer,
     indices: Buffer,
+    coarse_indices: Buffer,
     config: UniformBuffer<UVec4>,
     group: Option<BindGroup>,
     layout: BindGroupLayoutDescriptor,
     build: CachedComputePipelineId,
     reduce: CachedComputePipelineId,
     pending: u32,
+    coarse_pending: u32,
     dirty: Vec<u64>,
     full: bool,
     dims: [u32; 3],
@@ -30,6 +32,7 @@ impl Bricks {
                     storage_buffer_read_only::<Vec<u32>>(false),
                     storage_buffer_read_only::<Vec<u32>>(false),
                     storage_buffer::<Vec<u32>>(false),
+                    storage_buffer_read_only::<Vec<u32>>(false),
                 ),
             ),
         );
@@ -58,12 +61,14 @@ impl Bricks {
         Self {
             buffer: buffer("terrain occupied bricks"),
             indices: buffer("terrain dirty bricks"),
+            coarse_indices: buffer("terrain dirty coarse bricks"),
             config: UniformBuffer::from(UVec4::ZERO),
             group: None,
             layout,
             build,
             reduce,
             pending: 0,
+            coarse_pending: 0,
             dirty: vec![],
             full: false,
             dims: [0; 3],
@@ -85,6 +90,7 @@ impl Bricks {
         {
             self.dims = [0; 3];
             self.pending = 0;
+            self.coarse_pending = 0;
             return;
         }
         let count = window.words() / 64;
@@ -136,6 +142,18 @@ impl Bricks {
             let bytes: Vec<u8> = indices.iter().flat_map(|v| v.to_le_bytes()).collect();
             queue.write_buffer(&self.indices, 0, &bytes);
         }
+        self.coarse_pending = 0;
+        if self.dims.iter().all(|n| n % 32 == 0) {
+            let count = self.dims.iter().map(|n| n / 32).product::<u32>();
+            if self.full {
+                self.coarse_pending = count;
+            } else {
+                let coarse = coarse_dirty(&indices, self.dims);
+                self.coarse_pending = coarse.len() as u32;
+                let bytes: Vec<u8> = coarse.iter().flat_map(|v| v.to_le_bytes()).collect();
+                queue.write_buffer(&self.coarse_indices, 0, &bytes);
+            }
+        }
         self.config.set(UVec4::new(
             window.dims[0],
             window.dims[1],
@@ -151,6 +169,7 @@ impl Bricks {
                 terrain.as_entire_binding(),
                 self.indices.as_entire_binding(),
                 self.buffer.as_entire_binding(),
+                self.coarse_indices.as_entire_binding(),
             )),
         ));
     }
@@ -175,21 +194,46 @@ impl Bricks {
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(self.pending.min(65535), self.pending.div_ceil(65535), 1);
         }
-        if self.dims.iter().all(|n| n % 32 == 0) {
-            let count = self.dims.iter().map(|n| n / 32).product::<u32>();
+        if self.coarse_pending != 0 {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("terrain coarse brick build"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(reduce);
             pass.set_bind_group(0, group, &[]);
-            pass.dispatch_workgroups(count, 1, 1);
+            pass.dispatch_workgroups(self.coarse_pending, 1, 1);
         }
         self.pending = 0;
+        self.coarse_pending = 0;
         self.full = false;
         self.dirty.fill(0);
         true
     }
+}
+
+// Map changed 8³ bricks to their containing 32³ brick once each. The GPU
+// reduces all 64 children, including removals, for every affected parent.
+fn coarse_dirty(fine_indices: &[u32], dims: [u32; 3]) -> Vec<u32> {
+    let fine = dims.map(|n| n / 8);
+    let coarse = dims.map(|n| n / 32);
+    let count = coarse.iter().product::<u32>() as usize;
+    let mut marked = vec![0u64; count.div_ceil(64)];
+    for &i in fine_indices {
+        let x = i % fine[0];
+        let y = i / fine[0] % fine[1];
+        let z = i / (fine[0] * fine[1]);
+        let parent = x / 4 + coarse[0] * (y / 4 + coarse[1] * (z / 4));
+        marked[parent as usize / 64] |= 1u64 << (parent % 64);
+    }
+    marked.iter().enumerate().flat_map(|(i, &bits)| {
+        let mut bits = bits;
+        std::iter::from_fn(move || {
+            if bits == 0 { return None; }
+            let bit = bits.trailing_zeros();
+            bits &= bits - 1;
+            Some(i as u32 * 64 + bit)
+        })
+    }).collect()
 }
 
 // A word is eight consecutive x voxels. Visit rows, not individual words;
@@ -215,6 +259,23 @@ fn mark(bits: &mut [u64], dims: [u32; 3], mut words: Range<usize>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sparse_coarse_bricks_cover_every_changed_child_once() {
+        for dims in [[32, 32, 32], [96, 64, 160], [1280, 192, 1280]] {
+            let fine = dims.map(|n| n / 8);
+            let coarse = dims.map(|n| n / 32);
+            let count = fine.iter().product::<u32>();
+            let changed: Vec<u32> = (0..count).filter(|i| i % 113 == 0 || i % 127 == 3).collect();
+            let got = coarse_dirty(&changed, dims);
+            let mut expected = std::collections::BTreeSet::new();
+            for i in changed {
+                let (x, y, z) = (i % fine[0], i / fine[0] % fine[1], i / (fine[0] * fine[1]));
+                expected.insert(x / 4 + coarse[0] * (y / 4 + coarse[1] * (z / 4)));
+            }
+            assert_eq!(got, expected.into_iter().collect::<Vec<_>>());
+            assert!(coarse_dirty(&[], dims).is_empty());
+        }
+    }
     #[test]
     fn dirty_rows_match_every_patched_voxel_including_wrap_and_partial_words() {
         for dims in [[24, 16, 40], [1280, 192, 1280]] {

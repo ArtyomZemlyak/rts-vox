@@ -117,9 +117,9 @@ fn environment_with_middle(middle: bool) -> (BlastRange, Vec<Sample>) {
     .collect();
     let mut boxes = Vec::new();
     let sites = if middle {
-        vec![(true, 1400), (true, 1800), (false, 2820)]
+        vec![(true, 1400), (true, 1800), (false, 3500)]
     } else {
-        vec![(true, 1400), (false, 2820)]
+        vec![(true, 1400), (false, 3500)]
     };
     for (near, x) in sites {
         for (name, mat, z) in [("wood", 5, 820), ("concrete", 2, 1040), ("steel", 3, 1130)] {
@@ -156,7 +156,7 @@ fn environment_with_middle(middle: bool) -> (BlastRange, Vec<Sample>) {
     // Both stems and crowns come from RangeTerrain; no decorative tree props.
     for (near, min, max) in [
         (true, [850, 16, 500], [1350, 128, 750]),
-        (false, [2800, 16, 500], [3000, 128, 750]),
+        (false, [3400, 16, 500], [3600, 128, 750]),
     ] {
         samples.push(sample(&r, "foliage", near, min, max, 4));
         samples.push(sample(&r, "trunks", near, min, max, 5));

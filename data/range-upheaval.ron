@@ -1,5 +1,5 @@
 (
- minimum_burial:2, radius_per_depth:3, radius:32,
+ minimum_burial:2, radius_per_depth:3, radius:128,
  side:8, layers:6, checks:8192, pieces:16, jobs:8,
  energy_milli:150, speed:60, edge_speed:20, fracture_j_per_strength:1,
 )

@@ -248,15 +248,23 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                         ("Запустить ядерную ракету", Action::NuclearLaunch),
                         ("Стоп", Action::Stop),
                         ("Автоатака", Action::AutoAttack),
+                        ("Поддержать электротанк", Action::ElectricSupport),
                         ("Радиусы выбранных", Action::Ranges),
                     ] {
                         button(p, font, name, a);
                     }
                 });
+                p.spawn(row()).with_children(|p| {
+                    for (name, mode) in [
+                        ("Движение", CrawlerMode::Move),
+                        ("Сбор", CrawlerMode::Reclaim),
+                        ("Бурение", CrawlerMode::Drill),
+                    ] { button(p, font, name, Action::CrawlerMode(mode)); }
+                });
                 label(
                     p,
                     font,
-                    "ЛКМ: выбрать  /  ПКМ: приказ  /  Ctrl+ПКМ: добыча краулером",
+                    "ЛКМ: выбрать / ПКМ: приказ в выбранном режиме",
                     12.0,
                     theme::MUTED,
                 );
@@ -416,6 +424,7 @@ fn weapon_name(w: BattleWeapon) -> &'static str {
         BattleWeapon::Energy => "Энергопушка",
         BattleWeapon::Annihilation => "Аннигиляционная пушка",
         BattleWeapon::Laser => "Тяжёлый лазер",
+        BattleWeapon::Lightning => "Электрический разряд",
         BattleWeapon::Canister => "Картечь",
         BattleWeapon::Siege => "Осадный фугас T3",
         BattleWeapon::Nuclear => "Ядерная ракета · ручной запуск",
@@ -580,6 +589,12 @@ pub fn refresh(
                         })
                     }),
             )
+        } else if matches!(action, Some(Action::CrawlerMode(_))) {
+            Some(battle && !edit.editing && selected_ids.iter().any(|&id|
+                view.units.get(id).is_some_and(|u| u.kind == RangeUnitKind::Crawler && u.status.alive)))
+        } else if matches!(action, Some(Action::ElectricSupport)) {
+            Some(battle && !edit.editing && selected_ids.iter().any(|&id|
+                view.units.get(id).is_some_and(|u| u.kind == RangeUnitKind::LightningTank && u.status.alive)))
         } else if matches!(action, Some(Action::Fire | Action::AutoAttack)) {
             Some(
                 !battle
@@ -665,6 +680,10 @@ pub fn refresh(
                             "П"
                         } else if u.kind == RangeUnitKind::Tank {
                             "Т"
+                        } else if u.kind == RangeUnitKind::LightningTank {
+                            "ЭТ"
+                        } else if u.kind == RangeUnitKind::EidolonTank {
+                            "СК"
                         } else if u.kind == RangeUnitKind::NuclearSilo {
                             "ЯДЕРНАЯ ШАХТА"
                         } else if u.kind == RangeUnitKind::ArtilleryTurretT3 {
@@ -797,11 +816,19 @@ pub fn refresh(
                     }
                     if u.kind == RangeUnitKind::Crawler {
                         let cargo = scene.crawler_cargo.get(id).copied().flatten();
-                        let detail = cargo.map_or_else(|| "Бак недоступен: экономика сцены выключена".to_string(), |(held, cap, hauling, drill, stored, capacity)| {
-                            format!("Груз {held} / {cap} · база {stored} / {capacity}\n{} · бур: {}", if hauling { "ДОСТАВКА" } else { "НА ЗАДАНИИ / ОЖИДАНИЕ" }, if drill { "ГОТОВ" } else { "ПОВРЕЖДЁН" })
+                        let detail = cargo.map_or_else(|| "Бак недоступен: экономика сцены выключена".to_string(), |(held, cap, hauling, drill, stored, capacity, mode)| {
+                            format!("Груз {held} / {cap} · база {stored} / {capacity}\n{} · бур: {}", if hauling { "ДОСТАВКА" } else { mode }, if drill { "ГОТОВ" } else { "ПОВРЕЖДЁН" })
                         });
                         let number = if id == usize::MAX { String::new() } else { format!(" {:02}", id + 1) };
                         return format!("КРАУЛЕР{number} · {}\n{}", if u.status.alive { "В СТРОЮ" } else { "УНИЧТОЖЕН" }, detail);
+                    }
+                    if u.kind == RangeUnitKind::LightningTank {
+                        let detail = match u.order {
+                            Some(sim_core::blast::battle::Order::Support(target)) => format!("ПОДДЕРЖИВАЕТ ЭЛЕКТРОТАНК {:02}", target + 1),
+                            _ => format!("АКТИВНЫХ ПОМОЩНИКОВ: {}", scene.electric_support.get(id).copied().unwrap_or(0)),
+                        };
+                        let number = if id == usize::MAX { String::new() } else { format!(" {:02}", id + 1) };
+                        return format!("ЭЛЕКТРОТАНК T2{number} · {}\n{}", if u.status.alive { "В СТРОЮ" } else { "УНИЧТОЖЕН" }, detail);
                     }
                     if matches!(
                         u.kind,
@@ -829,6 +856,10 @@ pub fn refresh(
                             "ПАУК"
                         } else if u.kind == RangeUnitKind::Tank {
                             "ТАНК"
+                        } else if u.kind == RangeUnitKind::LightningTank {
+                            "ЭЛЕКТРОТАНК T2"
+                        } else if u.kind == RangeUnitKind::EidolonTank {
+                            "СКАТ · ЭЙДОЛОНЫ"
                         } else if u.kind == RangeUnitKind::ArtilleryTurretT3 {
                             "ОСАДНАЯ ТУРЕЛЬ T3"
                         } else if u.kind == RangeUnitKind::ArtilleryTurretT2 {
@@ -1383,11 +1414,49 @@ pub(crate) mod tests {
         let text = app.world_mut().spawn((HudText(1), Text::new(""))).id();
         app.update();
         let label = &app.world().get::<Text>(text).unwrap().0;
-        assert!(label.contains("Груз 0 / 120000") && label.contains("база 0 / 1100000"), "{label}");
+        assert!(label.contains("Груз 0 / 100000000") && label.contains("база 0 / 100100000"), "{label}");
         app.world_mut().resource_mut::<Workshop>().controlled = Some(1);
         app.update();
         let label = &app.world().get::<Text>(text).unwrap().0;
-        assert!(label.contains("БАЗА") && label.contains("Запас стороны 0 / 1100000"), "{label}");
+        assert!(label.contains("БАЗА") && label.contains("Запас стороны 0 / 100100000"), "{label}");
+    }
+    #[test]
+    fn crawler_mode_buttons_select_a_mode_without_issuing_an_order() {
+        let layout = RangeLayout::from_ron(include_str!("../../../../../../data/range-crawler-field.ron")).unwrap();
+        let config = ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron")).unwrap();
+        let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
+        sim.start_free_control().unwrap();
+        let mut workshop = Workshop::new(Some(layout), false);
+        workshop.controlled = Some(0);
+        let mut app = app_with_scene(sim, workshop);
+        let before = app.world().resource::<Scene>().sim.battle.actors[0].order;
+        for mode in [CrawlerMode::Reclaim, CrawlerMode::Drill, CrawlerMode::Move] {
+            click(&mut app, Action::CrawlerMode(mode));
+            assert_eq!(app.world().resource::<Panel>().crawler_mode, mode);
+            assert_eq!(app.world().resource::<Scene>().sim.battle.actors[0].order, before);
+            assert!(!app.world().resource::<Panel>().ground_fire);
+        }
+    }
+    #[test]
+    fn electric_support_button_waits_for_an_allied_target() {
+        let mut layout = RangeLayout::from_ron(include_str!("../../../../../../data/range-cover.ron")).unwrap();
+        layout.battle = true;
+        layout.blocks.clear(); layout.shields.clear(); layout.course = None;
+        layout.clear_min = [64, 64]; layout.clear_max = [600, 600];
+        layout.units[0].kind = RangeUnitKind::LightningTank;
+        layout.units[0].allied = true;
+        let config = ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron")).unwrap();
+        let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
+        sim.start_free_control().unwrap();
+        let mut workshop = Workshop::new(Some(layout), false);
+        workshop.editing = false; workshop.controlled = Some(0); workshop.selected_units = vec![0];
+        let mut app = app_with_scene(sim, workshop);
+        let before = app.world().resource::<Scene>().sim.battle.actors[0].order;
+        click(&mut app, Action::ElectricSupport);
+        assert!(app.world().resource::<Panel>().electric_support_target);
+        assert_eq!(app.world().resource::<Scene>().sim.battle.actors[0].order, before);
+        click(&mut app, Action::Stop);
+        assert!(!app.world().resource::<Panel>().electric_support_target);
     }
     #[test]
     fn crawler_field_menu_enters_free_control_without_enemies() {
@@ -1403,6 +1472,8 @@ pub(crate) mod tests {
         let scene = app.world().resource::<Scene>();
         assert!(scene.sim.battle_mode() && scene.sim.player && !scene.paused);
         assert!(scene.sim.units.iter().enumerate().all(|(i, _)| scene.sim.allied(i)));
+        assert_eq!(scene.sim.battle.actors[0].order, sim_core::blast::battle::Order::Reclaim([314, 17, 282]));
+        assert!(scene.sim.explosion.is_some(), "the first tank charge must start automatically");
         assert_eq!(app.world().resource::<Workshop>().controlled, Some(0));
         assert!(!app.world().resource::<Panel>().free_launch);
     }
