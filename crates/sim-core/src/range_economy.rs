@@ -402,7 +402,7 @@ impl BlastRange {
     pub(super) fn dig_approach(&self, id: usize, face: [i32; 3]) -> Option<[i32; 2]> {
         let u = &self.units[id];
         if u.kind.emplacement() || self.in_dig_reach(u, face) { return None; }
-        if u.kind == modding::range::RangeUnitKind::Crawler {
+        if matches!(u.kind, modding::range::RangeUnitKind::Crawler) {
             let reach = self.mining.as_ref().and_then(|m| m.data.kind(u.kind)).map_or(0, |k| k.dig_reach) as i64;
             let pos = u.motion.pos.map(fx::Fx::to_int_trunc);
             let dx = i64::from(face[0] - pos[0]);
@@ -482,7 +482,7 @@ impl BlastRange {
         // Debris at the face goes first, from the same rate and sub-pool
         // (ADR-674); a digger away from its face forgets its reclaim.
         let mut reclaimers: Vec<_> = diggers.iter().copied().filter(|d|
-            d.reclaim_only || d.k.kind != modding::range::RangeUnitKind::Crawler).collect();
+            d.reclaim_only || (d.k.kind != modding::range::RangeUnitKind::Crawler && d.k.kind != modding::range::RangeUnitKind::Crawler)).collect();
         reclaim_hulls(m, units, matter, &mut reclaimers);
         let hull_work: Vec<_> = reclaimers.iter().filter(|d| d.reclaim_only && d.reclaim_pending).map(|d| d.id).collect();
         // Reclaim changes ownership of existing debris, not terrain edits.
@@ -524,7 +524,7 @@ impl BlastRange {
             let tank = m.tank(id).expect("digger has a tank");
             // Reclaim can still run above when the drill is damaged, but
             // solid terrain needs both its connected drive and its motor.
-            if k.kind == modding::range::RangeUnitKind::Crawler
+            if matches!(k.kind, modding::range::RangeUnitKind::Crawler)
                 && (!units[id].status.weapon || !units[id].status.engine)
             {
                 if !reclaim_pending && m.inflight[id] == 0 && ledger.held(tank) > 0 {
@@ -535,8 +535,10 @@ impl BlastRange {
             let mut room = ledger.room(tank) - m.inflight[id];
             let mut rate = rate;
             let mut face_pending = false;
-            let drill_origin = (k.kind == modding::range::RangeUnitKind::Crawler)
-                .then(|| units[id].world_pos(voxel::unit::CRAWLER_DRILL_TIP));
+            let drill_origin = match k.kind {
+                modding::range::RangeUnitKind::Crawler => Some(units[id].world_pos(voxel::unit::CRAWLER_DRILL_TIP)),
+                _ => None,
+            };
             let cut_face = if let Some(origin) = drill_origin {
                 let Some(front) = drill_front(world, origin, face, &mut drill_steps) else {
                     starved = true;
@@ -562,7 +564,7 @@ impl BlastRange {
                     if material == AIR || amount == 0 {
                         continue;
                     }
-                    if k.kind == modding::range::RangeUnitKind::Crawler {
+                    if matches!(k.kind, modding::range::RangeUnitKind::Crawler) {
                         // Fixed, bounded work approximation: harder material
                         // accepts fewer cuts over time. A spatial phase spreads
                         // work across ticks and needs no per-voxel save state.
@@ -611,7 +613,7 @@ impl BlastRange {
             // A small salvage job may end long before the tank is full. Send
             // the real crawler home once this face is exhausted, but never
             // while a reclaim search, claimed cell or dig edit is pending.
-            if k.kind == modding::range::RangeUnitKind::Crawler
+            if matches!(k.kind, modding::range::RangeUnitKind::Crawler)
                 && !reclaim_pending && !face_pending && m.inflight[id] == 0
                 && rate == k.dig_edits_per_tick && ledger.held(tank) > 0
             {

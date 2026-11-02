@@ -722,6 +722,9 @@ pub fn animate(
             voxel::unit::crawler(),
             voxel::unit::lightning_tank(),
             voxel::unit::eidolon_tank(),
+            voxel::unit::walker04(),
+            voxel::unit::razlom_t3(),
+            voxel::unit::greben_storage(),
         ]
         .iter()
         .map(|b| gait::rigs_of(b, 0.01, &render::model::segment_frames(b, 0.01)))

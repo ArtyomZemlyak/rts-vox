@@ -160,6 +160,24 @@ fn laser_emission(buf: &mut MeshBuf, from: Vec3, to: Vec3, hit: bool, scale: f32
     }
 }
 
+fn walker_laser_emission(buf: &mut MeshBuf, from: Vec3, to: Vec3, hit: bool, scale: f32, now: f32) {
+    let axis = (to - from).normalize_or(Vec3::X);
+    let pulse = 0.88 + 0.12 * (now * 17.0).sin();
+    let origin = from + axis * (0.8 * scale);
+    cube(buf, origin, 2.4 * scale * pulse, [0.35, 2.4, 8.0, 0.9]);
+    cube(buf, origin, 5.0 * scale, [0.04, 0.35, 2.0, 0.14]);
+    if !hit { return; }
+    let at = to - axis * (0.25 * scale);
+    cube(buf, at, 3.2 * scale * pulse, [0.55, 4.0, 11.0, 0.95]);
+    cube(buf, at, 7.0 * scale, [0.08, 0.5, 2.8, 0.16]);
+    let side = axis.any_orthonormal_vector();
+    let up = axis.cross(side).normalize_or_zero();
+    for vector in [side, -side, up, -up] {
+        beam(buf, at - axis * (0.4 * scale), at + vector * (4.0 * scale) - axis * (1.5 * scale),
+            0.35 * scale, [0.2, 1.8, 7.5, 0.65]);
+    }
+}
+
 fn hot(input: Input<'_>) -> MeshBuf {
     let Input {
         sim,
@@ -176,7 +194,8 @@ fn hot(input: Input<'_>) -> MeshBuf {
     for flight in &fx.reclaim_flights {
         let t = ((now - flight.born) / RECLAIM_FLIGHT_LIFE).clamp(0.0, 1.0);
         let Some(unit) = sim.units.get(flight.crawler) else { continue; };
-        let end = Vec3::from(unit.world_pos([180, 20, 56]).map(|v| v as f32));
+        let hold = if unit.kind == RangeUnitKind::Crawler { [90, 30, 40] } else { [180, 20, 56] };
+        let end = Vec3::from(unit.world_pos(hold).map(|v| v as f32));
         let arc = (std::f32::consts::PI * t).sin();
         let jitter = Vec3::new(noise(flight.seed) - 0.5, 0.0, noise(flight.seed.wrapping_add(17)) - 0.5);
         let at = flight.from.lerp(end, smooth01(t)) + Vec3::Y * arc * 6.0 + jitter * arc * 3.0;
@@ -208,6 +227,30 @@ fn hot(input: Input<'_>) -> MeshBuf {
         beam(&mut hot, from, to, 4.8, [5.0, 0.12, 0.04, 0.30]);
         beam(&mut hot, from, to, 1.9, [12.0, 2.8, 0.8, 0.95]);
         laser_emission(&mut hot, from, to, trace.hit, 2.0, now);
+    }
+    for trace in &sim.battle.walker_lasers {
+        let from = point(trace.from);
+        let to = point(trace.to);
+        beam(&mut hot, from, to, 10.0, [0.02, 0.08, 1.8, 0.09]);
+        beam(&mut hot, from, to, 4.8, [0.08, 0.55, 5.0, 0.30]);
+        beam(&mut hot, from, to, 1.9, [0.45, 2.2, 12.0, 0.95]);
+        walker_laser_emission(&mut hot, from, to, trace.hit, 2.0, now);
+    }
+    for trace in &sim.battle.razlom_lasers {
+        let from = point(trace.from);
+        let to = point(trace.to);
+        beam(&mut hot, from, to, 30.0, [0.01, 0.65, 0.75, 0.12]);
+        beam(&mut hot, from, to, 12.0, [0.02, 2.4, 2.8, 0.36]);
+        beam(&mut hot, from, to, 4.0, [0.55, 9.0, 10.0, 0.96]);
+        if trace.hit { cube(&mut hot, to, 6.0, [0.3, 5.0, 6.0, 0.75]); }
+    }
+    if let (Some(first), Some(last)) = (sim.battle.razlom_lasers.first(), sim.battle.razlom_lasers.last()) {
+        let left = point(first.from);
+        let right = point(last.from);
+        beam(&mut hot, left, right, 12.0, [0.08, 3.0, 3.6, 0.42]);
+        beam(&mut hot, left, right, 3.0, [0.65, 10.0, 12.0, 0.96]);
+        beam(&mut hot, left, point(first.to), 5.0, [0.08, 2.0, 2.8, 0.30]);
+        beam(&mut hot, right, point(last.to), 5.0, [0.08, 2.0, 2.8, 0.30]);
     }
     for trace in &sim.battle.lightning {
         let from = point(trace.from);

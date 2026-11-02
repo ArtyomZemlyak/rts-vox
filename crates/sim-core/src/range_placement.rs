@@ -37,6 +37,23 @@ impl Footprint {
         let mut columns = BTreeMap::new();
         let mut min = [i32::MAX; 3];
         let mut max = [i32::MIN; 3];
+        if kind == RangeUnitKind::GrebenStorage {
+            for x in 0..usize::from(unit.body.vol.nx) {
+                for y in 0..usize::from(unit.body.vol.ny) {
+                    for z in 0..usize::from(unit.body.vol.nz) {
+                        if !unit.body.vol.get(x, y, z) { continue; }
+                        let p = unit.world_pos([x, y, z]);
+                        let p = [p[0] - GUN[0], p[1] - GUN[1], p[2] - GUN[2]];
+                        for a in 0..3 {
+                            min[a] = min[a].min(p[a]);
+                            max[a] = max[a].max(p[a] + 1);
+                        }
+                        columns.entry([p[0], p[2]]).or_insert_with(Vec::new).push(p[1]);
+                    }
+                }
+            }
+            return Self { columns, min, max };
+        }
         // The same world-cell centres used by damage/hit queries. Mapping
         // only segment voxel centres can leave holes in a rotated segment.
         for z in lo[2]..hi[2] {
@@ -169,10 +186,12 @@ impl Validator {
             for (p, ys) in &shape.columns {
                 let (x, z) = ((at[0] + p[0]) as u32, (at[2] + p[1]) as u32);
                 let column = terrain.column_of(x, z);
-                if ys
+                if let Some(_y) = ys
                     .iter()
-                    .any(|y| terrain.at(&column, x, (at[1] + y) as u32, z) != 0)
+                    .find(|y| terrain.at(&column, x, (at[1] + **y) as u32, z) != 0)
                 {
+                    #[cfg(test)]
+                    eprintln!("placement collision {:?} at {:?}: cell [{x}, {}, {z}], material {}", layout.units[i].kind, at, at[1] + _y, terrain.at(&column, x, (at[1] + _y) as u32, z));
                     return Err(Rejection::Terrain);
                 }
             }
@@ -182,10 +201,14 @@ impl Validator {
                 for x in piece.min[0]..piece.max[0] {
                     let column = terrain.column_of(x as u32, z as u32);
                     if terrain.at(&column, x as u32, (piece.min[1] - 1) as u32, z as u32) == 0 {
+                        #[cfg(test)]
+                        eprintln!("debris has no support at [{x}, {}, {z}]", piece.min[1] - 1);
                         return Err(Rejection::Terrain);
                     }
                     for y in piece.min[1]..piece.max[1] {
                         if terrain.at(&column, x as u32, y as u32, z as u32) != 0 {
+                            #[cfg(test)]
+                            eprintln!("debris intersects at [{x}, {y}, {z}]: {}", terrain.at(&column, x as u32, y as u32, z as u32));
                             return Err(Rejection::Terrain);
                         }
                         if units.iter().any(|(shape, at)| shape.columns.get(&[x - at[0], z - at[2]])

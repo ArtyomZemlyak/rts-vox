@@ -254,6 +254,8 @@ pub struct Battle {
     pub impacts: Vec<Impact>,
     pub traces: Vec<weapons::Trace>,
     pub lasers: Vec<weapons::Trace>,
+    pub walker_lasers: Vec<weapons::Trace>,
+    pub razlom_lasers: Vec<weapons::Trace>,
     pub lightning: Vec<weapons::Trace>,
     pub laser_config: ExplosionConfig,
     pub tuning: std::sync::Arc<Tuning>,
@@ -339,8 +341,11 @@ fn effective_weapon(
     if kind == RangeUnitKind::NuclearSilo {
         return Some(Weapon::Nuclear);
     }
-    if matches!(kind, RangeUnitKind::Base | RangeUnitKind::Crawler) {
+    if matches!(kind, RangeUnitKind::Base | RangeUnitKind::Crawler | RangeUnitKind::GrebenStorage) {
         return None;
+    }
+    if kind == RangeUnitKind::Walker04 || kind == RangeUnitKind::RazlomT3 {
+        return Some(Weapon::Laser);
     }
     if kind == RangeUnitKind::LightningTank {
         return Some(Weapon::Lightning);
@@ -486,6 +491,8 @@ impl Battle {
             impacts: Vec::new(),
             traces: Vec::new(),
             lasers: Vec::new(),
+            walker_lasers: Vec::new(),
+            razlom_lasers: Vec::new(),
             lightning: Vec::new(),
             laser_config: ExplosionConfig::from_ron(include_str!("../../../data/laser.ron"))
                 .expect("laser"),
@@ -873,7 +880,8 @@ impl Battle {
         for _ in 0..n {
             let owner = s.usize();
             let weapon = Weapon::from_code(s.u8())?;
-            if matches!(weapon, Weapon::Laser | Weapon::Lightning)
+            if (weapon == Weapon::Lightning
+                || (weapon == Weapon::Laser && (owner >= units.len() || units[owner].kind != RangeUnitKind::RazlomT3)))
                 || (version < 43 && weapon.energetic())
                 || (version < 51 && weapon == Weapon::Canister)
             {
@@ -2098,6 +2106,8 @@ impl BlastRange {
             impacts: Vec::new(),
             traces: Vec::new(),
             lasers: Vec::new(),
+            walker_lasers: Vec::new(),
+            razlom_lasers: Vec::new(),
             lightning: Vec::new(),
             laser_config: self.battle.laser_config,
             tuning: self.battle.tuning.clone(),
@@ -2121,6 +2131,8 @@ impl BlastRange {
         battle.impacts.clear();
         battle.traces.clear();
         battle.lasers.clear();
+        battle.walker_lasers.clear();
+        battle.razlom_lasers.clear();
         battle.lightning.clear();
         // A surviving siege head carries its current pulse to the next target.
         for (id, actor) in battle.actors.iter_mut().enumerate() {
@@ -2195,7 +2207,7 @@ impl BlastRange {
                 let stationary_target_in_range = !mobile_gun && {
                     self.units.iter().enumerate().any(|(id, u)| {
                         let weapon = match u.kind {
-                            RangeUnitKind::Base => None,
+                            RangeUnitKind::Base | RangeUnitKind::GrebenStorage => None,
                             RangeUnitKind::Spider => Some(Weapon::Laser),
                             RangeUnitKind::LightningTank => Some(Weapon::Lightning),
                             RangeUnitKind::EidolonTank => Some(Weapon::Kinetic),
@@ -2210,6 +2222,7 @@ impl BlastRange {
                             RangeUnitKind::Artillery => {
                                 Some(battle.actors[id].weapon.unwrap_or(Weapon::Blast))
                             }
+                            RangeUnitKind::Walker04 | RangeUnitKind::RazlomT3 => Some(Weapon::Laser),
                             // An immobilized tank may still switch ammunition.
                             RangeUnitKind::Tank | RangeUnitKind::Crawler => None,
                         };
@@ -2420,14 +2433,17 @@ impl BlastRange {
             }
             a.target = target;
             // A tank loads for what it aims at (ADR-456).
-            let weapon = effective_weapon(
+            let Some(weapon) = effective_weapon(
                 kind,
                 a.weapon,
                 a.order.point().is_some(),
                 target.map(|id| self.units[id].kind),
                 &b.tuning,
-            )
-            .expect("armed actor has a weapon");
+            ) else {
+                record_gate(&mut b.fire_trace, id, FireGate::Hold);
+                a.target = None;
+                continue;
+            };
             let mut range = attack_range(&b.tuning, kind, weapon, stream.range);
             if weapon == Weapon::Lightning { range = supported_lightning(support[id]).range; }
             // Borrow individual config fields independently of the mutable actor.
@@ -2815,7 +2831,8 @@ impl BlastRange {
                 record_gate(&mut b.fire_trace, id, FireGate::Reload);
                 continue;
             }
-            if tracking.is_none()
+            if kind != RangeUnitKind::Walker04
+                && tracking.is_none()
                 && (!a.turret.aligned(angle, yaw_limits)
                     || artillery_aim.as_ref().is_some_and(|aim| {
                         !a.elevation.aligned(aim.pitch, self.turret_limits)
@@ -2877,6 +2894,98 @@ impl BlastRange {
                     } else {
                         a.next = self.tick.saturating_add(1);
                     }
+                }
+                continue;
+            }
+            if kind == RangeUnitKind::RazlomT3 {
+                record_gate(&mut b.fire_trace, id, FireGate::Beam);
+                let tuning = motion::spider_tuning();
+                let ready = *a.charge.get_or_insert(self.tick + tuning.charge_ticks);
+                if self.tick < ready {
+                    continue;
+                }
+                let muzzles = weapons::razlom_muzzles(&self.units[id], a.turret.angle);
+                let Some(centre) = muzzles.get(3).copied() else {
+                    record_gate(&mut b.fire_trace, id, FireGate::NoMuzzle);
+                    continue;
+                };
+                let centre = [centre[0], Fx::from_int(p[1]), centre[2]];
+                let direction = [
+                    Fx::from_int(p[0]).sub(centre[0]),
+                    Fx::ZERO,
+                    Fx::from_int(p[2]).sub(centre[2]),
+                ];
+                let length = direction.iter().fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v))).sqrt().max(Fx::ONE);
+                let velocity = direction.map(|v| v.div(length).mul(Fx::from_int(20)));
+                completed("orders_misc");
+                b.rounds.push(Round {
+                    owner: id,
+                    weapon: Weapon::Laser,
+                    pos: centre,
+                    previous: centre,
+                    velocity,
+                    distance: Fx::from_int(range),
+                });
+                a.fired = a.fired.wrapping_add(1);
+                a.burst = 0;
+                a.charge = None;
+                a.next = self.tick + tuning.laser.reload_ticks;
+                continue;
+            }
+            if kind == RangeUnitKind::Walker04 {
+                record_gate(&mut b.fire_trace, id, FireGate::Beam);
+                let tuning = motion::spider_tuning();
+                let ready = *a.charge.get_or_insert(self.tick + tuning.charge_ticks);
+                if self.tick < ready {
+                    continue;
+                }
+                let focus = matches!(a.order, Order::Attack(_));
+                let mut targets = [p; 4];
+                if !focus {
+                    let alternatives: Vec<[i32; 3]> = self
+                        .units
+                        .iter()
+                        .enumerate()
+                        .filter(|(other, unit)| {
+                            unit.status.alive
+                                && Some(*other) != target
+                                && self.allied(*other) != self.allied(id)
+                        })
+                        .map(|(_, unit)| aim_point(unit))
+                        .collect();
+                    for (arm, target) in targets.iter_mut().enumerate().skip(1) {
+                        if !alternatives.is_empty() {
+                            *target = alternatives[(arm - 1) % alternatives.len()];
+                        }
+                    }
+                }
+                self.units[id].turret_pitch = if focus { fx::angle::QUARTER } else { 0 };
+                self.units[id].set_arm_targets(targets, a.turret.angle);
+                let muzzles = weapons::muzzles(&self.units[id], a.turret.angle);
+                if muzzles.is_empty() {
+                    record_gate(&mut b.fire_trace, id, FireGate::NoMuzzle);
+                    continue;
+                }
+                completed("orders_misc");
+                for (arm, from) in muzzles.into_iter().enumerate() {
+                    let trace = self.laser_ray(
+                        from,
+                        targets[arm],
+                        Some(id),
+                        &tuning.laser,
+                        config,
+                        (&mut completed, physics),
+                    );
+                    b.walker_lasers.push(trace);
+                }
+                a.fired = a.fired.wrapping_add(1);
+                a.burst += 1;
+                if a.burst >= tuning.laser.burst_ticks {
+                    a.burst = 0;
+                    a.charge = None;
+                    a.next = self.tick + tuning.laser.reload_ticks;
+                } else {
+                    a.next = self.tick + tuning.laser.interval_ticks.max(1);
                 }
                 continue;
             }
@@ -3258,6 +3367,89 @@ impl BlastRange {
         let boxes: Vec<_> = self.units.iter().map(|u| u.bounds()).collect();
         for mut r in std::mem::take(&mut b.rounds) {
             r.previous = r.pos;
+            if r.weapon == Weapon::Laser && self.units[r.owner].kind == RangeUnitKind::RazlomT3 {
+                let mut delta = r.velocity.map(|v| v.mul(dt));
+                let length = delta.iter().fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v))).sqrt();
+                if length <= Fx::ZERO || r.distance <= Fx::ZERO {
+                    continue;
+                }
+                if length > r.distance {
+                    delta = delta.map(|v| v.mul(r.distance.div(length)));
+                }
+                let mut tuning = motion::spider_tuning().laser.clone();
+                tuning.work = tuning.work.saturating_mul(128);
+                tuning.heat = tuning.heat.saturating_mul(128);
+                tuning.fracture_j = tuning.fracture_j.saturating_mul(128);
+                let flat = r.velocity[0].mul(r.velocity[0]).add(r.velocity[2].mul(r.velocity[2])).sqrt().max(Fx::ONE);
+                let side = [Fx::ZERO.sub(r.velocity[2]).div(flat), Fx::ZERO, r.velocity[0].div(flat)];
+                let spacing = Fx::from_ratio(i32::from(self.units[r.owner].body.mm) * 12, 100);
+                let config = b.laser_config;
+                let mut centre = r.pos;
+                for channel in -3i32..=3 {
+                    let offset = side.map(|v| v.mul(spacing).mul(Fx::from_int(channel)));
+                    for vertical in [-4i32, 0, 4] {
+                        let from = std::array::from_fn(|axis| r.pos[axis].add(offset[axis]).add(if axis == 1 { Fx::from_int(vertical) } else { Fx::ZERO }));
+                        let mut end = from;
+                        let mut previous = from.map(Fx::to_int_trunc);
+                        let mut hit = false;
+                        for step in 1..=4 {
+                            let point = std::array::from_fn(|axis| from[axis].add(delta[axis].mul(Fx::from_ratio(step, 4))));
+                            let p = point.map(Fx::to_int_trunc);
+                            if (0..3).any(|axis| p[axis] < 0 || p[axis] >= self.size[axis] as i32) {
+                                break;
+                            }
+                            end = point;
+                            if let Some(shield) = self.dome_crossed(previous, p) {
+                                self.absorb_work(shield, p, tuning.work);
+                                hit = true;
+                                break;
+                            }
+                            let body_hit = self.units.iter().enumerate().any(|(id, unit)| {
+                                id != r.owner && unit.solid(p)
+                            });
+                            if body_hit || material(&self.world, p) != 0 {
+                                if body_hit {
+                                    let id = self.units.iter().position(|unit| unit.solid(p)).expect("contact unit");
+                                    if self.units[id].kind == RangeUnitKind::Tank {
+                                        let origin = [self.units[id].body.core.0, self.units[id].body.core.1, self.units[id].body.core.2].map(usize::from);
+                                        let size = usize::from(self.units[id].body.core_size);
+                                        for z in origin[2]..origin[2] + size {
+                                            for y in origin[1]..origin[1] + size {
+                                                for x in origin[0]..origin[0] + size {
+                                                    if self.units[id].body.part_at(x, y, z) == voxel::Part::Core {
+                                                        self.units[id].receive_cell([x, y, z], u32::MAX, &config);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                self.stream_contact_owned(p, &tuning, false, from.map(Fx::to_int_trunc), &config, Some(r.owner));
+                                hit = true;
+                                break;
+                            }
+                            previous = p;
+                        }
+                        if vertical == 0 {
+                            let serial = self.streams.serial;
+                            self.streams.serial = serial.wrapping_add(1);
+                            let trace = weapons::Trace { from, to: end, hit, serial };
+                            if channel == 0 {
+                                centre = trace.to;
+                            }
+                            b.razlom_lasers.push(trace);
+                        }
+                    }
+                }
+                let advanced = std::array::from_fn::<_, 3, _>(|axis| centre[axis].sub(r.pos[axis]));
+                let advanced = advanced.iter().fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v))).sqrt();
+                r.distance = r.distance.sub(advanced.min(r.distance));
+                r.pos = centre;
+                if r.distance > Fx::ZERO {
+                    b.rounds.push(r);
+                }
+                continue;
+            }
             // Stable owner kind survives its destruction; already flying rounds
             // retain their emplacement identity, including after restore.
             let config = b.shot_config(r.weapon, self.units[r.owner].kind);

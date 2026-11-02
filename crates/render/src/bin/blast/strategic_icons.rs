@@ -28,6 +28,7 @@ fn designation(kind: RangeUnitKind) -> &'static str {
         TurretT1 => "⊕ 1", TurretT2 => "⊕ 2", ArtilleryTurretT2 => "▴ 2",
         ArtilleryTurretT3 => "▴ 3", Base => "▣", NuclearSilo => "☢",
         Crawler => "⚙", LightningTank => "ϟ 2",
+        Walker04 => "✣ 4", RazlomT3 => "▴ 4", GrebenStorage => "▥",
     }
 }
 

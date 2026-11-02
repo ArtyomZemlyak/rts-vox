@@ -348,6 +348,9 @@ pub(super) fn update(
             RangeUnitKind::Crawler => 11,
             RangeUnitKind::LightningTank => 12,
             RangeUnitKind::EidolonTank => 13,
+            RangeUnitKind::Walker04 => 14,
+            RangeUnitKind::RazlomT3 => 15,
+            RangeUnitKind::GrebenStorage => 16,
         };
         let pristine = art.pristine.clone();
         let skins = art.skins.clone();

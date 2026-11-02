@@ -149,14 +149,18 @@ fn passable(t: Terrain, kind: RangeUnitKind, eighth: i32) -> bool {
     let grade_pct = match kind {
         RangeUnitKind::Tank
         | RangeUnitKind::Crawler
+        | RangeUnitKind::Crawler
+        | RangeUnitKind::LightningTank
+        | RangeUnitKind::EidolonTank
         | RangeUnitKind::Artillery
         | RangeUnitKind::ArtilleryT2
         | RangeUnitKind::TurretT1
         | RangeUnitKind::TurretT2 => 45,
-        RangeUnitKind::Strider | RangeUnitKind::Spider => 65,
+        RangeUnitKind::Strider | RangeUnitKind::Spider | RangeUnitKind::Walker04 => 65,
         RangeUnitKind::Base
         | RangeUnitKind::ArtilleryTurretT2
         | RangeUnitKind::ArtilleryTurretT3
+        | RangeUnitKind::RazlomT3
         | RangeUnitKind::NuclearSilo => 0,
     };
     match t {
@@ -210,6 +214,12 @@ fn run(t: Terrain, kind: RangeUnitKind, heading: i32, back: bool) -> Run {
         RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
         RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
         RangeUnitKind::Base => voxel::unit::command_base(),
+        RangeUnitKind::LightningTank => voxel::unit::lightning_tank(),
+        RangeUnitKind::EidolonTank => voxel::unit::eidolon_tank(),
+        RangeUnitKind::Walker04 => voxel::unit::walker04(),
+        RangeUnitKind::Crawler => voxel::unit::crawler(),
+        RangeUnitKind::RazlomT3 => voxel::unit::razlom_t3(),
+        RangeUnitKind::GrebenStorage => voxel::unit::greben_storage(),
     };
     let yaw = angle::norm(heading + if back { angle::FULL / 2 } else { 0 });
     let dir = [angle::cos(yaw), angle::sin(yaw)];
@@ -331,6 +341,12 @@ fn probe_poses_along_the_run() {
             RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
             RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
             RangeUnitKind::Base => voxel::unit::command_base(),
+        RangeUnitKind::LightningTank => voxel::unit::lightning_tank(),
+        RangeUnitKind::EidolonTank => voxel::unit::eidolon_tank(),
+        RangeUnitKind::Walker04 => voxel::unit::walker04(),
+        RangeUnitKind::Crawler => voxel::unit::crawler(),
+        RangeUnitKind::RazlomT3 => voxel::unit::razlom_t3(),
+        RangeUnitKind::GrebenStorage => voxel::unit::greben_storage(),
         };
         let m = Motion::new([210, settle(t, [210, 320]), 320], kind, &body);
         let shape = m.probe_shape(&body);

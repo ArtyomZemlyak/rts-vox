@@ -346,11 +346,286 @@ fn arena_of(kinds: [RangeUnitKind; 2]) -> BlastRange {
             allied: false,
         },
     ];
+    if kinds[0] == RangeUnitKind::Walker04 {
+        l.size = [2400, 768, 1600];
+        l.clear_min = [64, 64];
+        l.clear_max = [2300, 1500];
+        l.units[0].at = [500, 16, 800];
+        l.units[1].at = [1500, 16, 800];
+    }
     BlastRange::with_layout(
         ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
         l,
     )
     .unwrap()
+}
+
+fn walker_arena(order: Order) -> BlastRange {
+    let mut layout = arena_of([RangeUnitKind::Walker04, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
+    layout.units[1].at = [1500, 16, 600];
+    layout.units.extend([
+        RangeUnitDef { kind: RangeUnitKind::Tank, at: [1500, 16, 733], allied: false, weapon: None },
+        RangeUnitDef { kind: RangeUnitKind::Tank, at: [1500, 16, 866], allied: false, weapon: None },
+        RangeUnitDef { kind: RangeUnitKind::Tank, at: [1500, 16, 1000], allied: false, weapon: None },
+    ]);
+    let mut r = BlastRange::with_layout(
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
+        layout,
+    )
+    .unwrap();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    r.start_battle().unwrap();
+    for actor in &mut r.battle.actors[1..] {
+        actor.order = Order::Hold;
+    }
+    r.battle.actors[0].order = order;
+    r.battle.actors[0].target = Some(1);
+    r
+}
+
+fn step_until_walker_beams(r: &mut BlastRange) {
+    for _ in 0..180 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        if !r.battle.walker_lasers.is_empty() {
+            return;
+        }
+    }
+    panic!("Walker 04 never fired");
+}
+
+#[test]
+fn walker04_aims_four_independent_arms_at_four_enemies_without_moving_their_mounts() {
+    let mut r = walker_arena(Order::Auto);
+    let mounts: Vec<_> = (0..4)
+        .map(|arm| r.units[0].body.segments[10 + arm * 4].attach.at)
+        .collect();
+    step_until_walker_beams(&mut r);
+    assert_eq!(r.battle.walker_lasers.len(), 4);
+    assert_eq!(r.units[0].turret_pitch, 0);
+    let targets = r.units[0].arm_targets.expect("four independent targets");
+    let unique: std::collections::BTreeSet<_> = targets.into_iter().collect();
+    assert_eq!(unique.len(), 4);
+    for target in targets {
+        assert!((1..r.units.len()).any(|id| aim_point(&r.units[id]) == target));
+    }
+    let origins: std::collections::BTreeSet<_> = r
+        .battle
+        .walker_lasers
+        .iter()
+        .map(|trace| trace.from.map(|v| v.raw()))
+        .collect();
+    assert_eq!(origins.len(), 4);
+    assert_eq!(r.battle_muzzles(0).len(), 4);
+    for (arm, mount) in mounts.into_iter().enumerate() {
+        assert_eq!(r.units[0].body.segments[10 + arm * 4].attach.at, mount);
+    }
+    assert!(r.units[1..].iter().any(|unit| unit.revision > 0));
+}
+
+#[test]
+fn walker04_focus_tilts_ninety_degrees_and_uses_the_spider_power_on_all_four_arms() {
+    let mut r = walker_arena(Order::Attack(1));
+    step_until_walker_beams(&mut r);
+    assert_eq!(r.battle.walker_lasers.len(), 4);
+    assert_eq!(r.units[0].turret_pitch, fx::angle::QUARTER);
+    let target = aim_point(&r.units[1]);
+    assert_eq!(r.units[0].arm_targets, Some([target; 4]));
+    assert_eq!(r.battle_weapon(0), Some(Weapon::Laser));
+    assert_eq!(r.battle_attack_range(0), Some(motion::spider_tuning().laser.range));
+    assert!(r.units[1].revision > 0, "focused beams did no physical work");
+    let before = r.battle_muzzles(0);
+    r.units[0].set_arm_targets([target; 4], r.battle.actors[0].turret.angle);
+    assert_eq!(r.battle_muzzles(0), before, "repeated aiming moved the mounts");
+}
+
+#[test]
+fn razlom_fires_seven_parallel_rays_and_does_not_replace_the_old_t3_artillery() {
+    let mut r = arena_of([RangeUnitKind::RazlomT3, RangeUnitKind::Tank]);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    r.start_battle().unwrap();
+    r.battle.actors[1].order = Order::Hold;
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    for _ in 0..180 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        if !r.battle.razlom_lasers.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(r.battle.razlom_lasers.len(), 7);
+    assert!(r.battle.lasers.is_empty());
+    let direction = |trace: &weapons::Trace| {
+        let delta = std::array::from_fn::<_, 3, _>(|axis| trace.to[axis].sub(trace.from[axis]));
+        let length = delta.iter().fold(0.0f64, |sum, v| {
+            let v = v.to_f64_lossy();
+            sum + v * v
+        }).sqrt();
+        delta.map(|v| v.to_f64_lossy() / length)
+    };
+    let central = direction(&r.battle.razlom_lasers[3]);
+    for trace in &r.battle.razlom_lasers {
+        let other = direction(trace);
+        let dot: f64 = (0..3).map(|axis| central[axis] * other[axis]).sum();
+        assert!(dot > 0.999, "rays converged instead of forming a front: {dot}");
+    }
+    let old = arena_of([RangeUnitKind::ArtilleryTurretT3, RangeUnitKind::Tank]);
+    assert_eq!(old.battle_weapon(0), Some(Weapon::Siege));
+    assert_eq!(r.battle_weapon(0), Some(Weapon::Laser));
+}
+
+#[test]
+fn razlom_wave_kills_t1_keeps_travelling_and_restores_exactly() {
+    let mut r = arena_of([RangeUnitKind::RazlomT3, RangeUnitKind::Tank]);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    r.start_battle().unwrap();
+    r.battle.actors[1].order = Order::Hold;
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    let mut restored = None;
+    let mut reset = false;
+    let mut beyond = false;
+    for _ in 0..600 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        if restored.is_none() && !r.battle.rounds.is_empty() {
+            let mut replay = BlastRange::restore(r.config, &r.snapshot()).expect("wave snapshot");
+            for point in [[224, 56, 333], [224, 55, 333], [254, 51, 333]] {
+                assert_eq!(r.units[1].solid(point), replay.units[1].solid(point), "contact changed at {point:?}");
+            }
+            assert_eq!(r.state_hash(), replay.state_hash(), "state changed by wave snapshot");
+            let snapshot = r.snapshot();
+            let from = r.battle.rounds[0].pos;
+            let target = std::array::from_fn(|axis| {
+                from[axis].add(r.battle.rounds[0].velocity[axis].mul(Fx::from_ratio(1, crate::TICKS_PER_SECOND))).to_int_trunc()
+            });
+            let mut tuning = motion::spider_tuning().laser.clone();
+            tuning.range = 31;
+            let config = r.battle.laser_config;
+            let actual = r.laser_ray(from, target, Some(0), &tuning, &config, (&mut |_| {}, &|_, _| {}));
+            let expected = replay.laser_ray(from, target, Some(0), &tuning, &config, (&mut |_| {}, &|_, _| {}));
+            assert_eq!(actual.to, expected.to, "same saved ray produced different contacts");
+            r = BlastRange::restore(r.config, &snapshot).unwrap();
+            r.set_physics_workers(1);
+            r.set_navigation_workers(1);
+            replay = BlastRange::restore(replay.config, &snapshot).unwrap();
+            replay.set_physics_workers(1);
+            replay.set_navigation_workers(1);
+            restored = Some(replay);
+            reset = true;
+        }
+        if let Some(replay) = &mut restored {
+            if reset {
+                r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+                r.step();
+                reset = false;
+            }
+            replay.battle.ai.next_tick = replay.tick + replay.battle.ai.tuning.decision_ticks;
+            replay.step();
+            assert_eq!(r.tick, replay.tick);
+            assert_eq!(r.units[1].motion.pos, replay.units[1].motion.pos);
+            assert_eq!(r.units[1].pose, replay.units[1].pose);
+            assert_eq!(r.units[1].turret_delta, replay.units[1].turret_delta);
+            assert_eq!(r.units[1].seg_frames, replay.units[1].seg_frames);
+            assert_eq!(r.battle.rounds.len(), replay.battle.rounds.len());
+            let differences: Vec<_> = r.battle.rounds.iter().zip(&replay.battle.rounds).map(|(a, b)| {
+                (a.pos.map(|v| v.raw()), b.pos.map(|v| v.raw()), a.distance.raw(), b.distance.raw())
+            }).collect();
+            assert!(r.battle.rounds.iter().zip(&replay.battle.rounds).all(|(a, b)| {
+                a.owner == b.owner && a.weapon == b.weapon && a.pos == b.pos
+                    && a.velocity == b.velocity && a.distance == b.distance
+            }), "{differences:?}");
+            assert_eq!(r.state_hash(), replay.state_hash());
+        }
+        beyond |= r.battle.razlom_lasers.iter().any(|trace| trace.to[0] > Fx::from_int(460));
+        if !r.units[1].status.alive && beyond {
+            break;
+        }
+    }
+    if let Some(trace) = r.battle.razlom_lasers.get(3) {
+        let at = trace.to.map(Fx::to_int_trunc);
+        eprintln!("wave end={at:?} material={} from={:?} to={:?}", material(&r.world, at), trace.from, trace.to);
+    }
+    if let Some(trace) = r.battle.razlom_lasers.get(3) {
+        eprintln!("last trace hit={} serial={}", trace.hit, trace.serial);
+    }
+    for round in &r.battle.rounds {
+        eprintln!("active wave owner={} pos={:?} velocity={:?} distance={:?}", round.owner, round.pos, round.velocity, round.distance);
+    }
+    eprintln!("target alive={} core={:?} removed={} wave rounds={} phase={:?}", r.units[1].status.alive, r.units[1].integrity.core, r.units[1].removed.len(), r.battle.rounds.len(), r.battle.phase);
+    assert!(!r.units[1].status.alive, "T1 survived the wave");
+    assert!(beyond, "wave died with its first target");
+    assert!(restored.is_some(), "no persistent wave was produced");
+}
+
+#[test]
+fn staratel_drill_is_not_processed_as_a_ballistic_weapon() {
+    let mut r = arena_of([RangeUnitKind::Crawler, RangeUnitKind::Tank]);
+    r.start_battle().unwrap();
+    r.battle.actors[0].order = Order::Auto;
+    r.battle.actors[1].order = Order::Hold;
+    for _ in 0..4 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+    }
+    assert_eq!(r.battle_weapon(0), None);
+    assert!(r.battle.rounds.is_empty());
+    assert!(r.battle.lasers.is_empty());
+}
+
+#[test]
+fn staratel_scenario_collects_mines_and_unloads_at_its_base() {
+    let preset = modding::range_skirmish::stock(23).unwrap();
+    let layout = modding::range::RangeLayout::from_ron(include_str!("../../../data/range-km.ron"))
+        .unwrap();
+    let layout = preset.apply_to(layout).unwrap();
+    for unit in &layout.units {
+        let mut isolated = layout.clone();
+        isolated.units = vec![unit.clone()];
+        isolated.initial_debris.clear();
+        let result = BlastRange::with_layout(
+            ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
+            isolated,
+        );
+        assert!(result.is_ok(), "placement of {:?} failed: {:?}", unit.kind, result.err());
+    }
+    let mut r = BlastRange::with_layout(
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
+        layout,
+    )
+    .unwrap();
+    r.start_battle().unwrap();
+    let mut collected = false;
+    let mut unloaded = false;
+    let mut script = preset.script;
+    for _ in 0..2400 {
+        while script.first().is_some_and(|next| next.tick <= r.tick) {
+            let next = script.remove(0);
+            let order = match next.order {
+                modding::range_skirmish::ScriptedOrder::Attack(target) => Order::Attack(target),
+                modding::range_skirmish::ScriptedOrder::Dig(face) => Order::Dig(face),
+                modding::range_skirmish::ScriptedOrder::Reclaim(face) => Order::Reclaim(face),
+            };
+            let accepted = r.battle_order(next.actor, order, None);
+            assert!(accepted, "script tick={} order={order:?} phase={:?} actor={} alive={} at={:?} digs={:?}",
+                next.tick, r.battle.phase, next.actor, r.units[next.actor].status.alive,
+                r.units[next.actor].at, r.mining().map(|m| m.digs(r.units[next.actor].kind)));
+        }
+        r.step();
+        collected |= r.tank_held(0).is_some_and(|held| held > 0);
+        unloaded |= r.side_store(true).is_some_and(|(amount, _)| amount > 0);
+        if unloaded {
+            break;
+        }
+    }
+    eprintln!("crawler at={:?} destination={:?} tank={:?} store={:?} leg={:?}", r.units[0].at, r.units[0].motion.destination, r.tank_held(0), r.side_store(true), r.hauling(0));
+    assert!(collected, "Staratel collected no debris or rock");
+    assert!(unloaded, "Staratel never unloaded at the base");
+    assert!(r.matter.economy.ledger.balanced());
 }
 
 #[test]

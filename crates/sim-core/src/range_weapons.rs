@@ -456,6 +456,21 @@ impl BlastRange {
             &(impl Fn(usize, &'static str) + Sync),
         ),
     ) -> Trace {
+        self.laser_ray_mode(from, target, owner, tuning, config, true, observers)
+    }
+    pub(super) fn laser_ray_mode(
+        &mut self,
+        from: [Fx; 3],
+        target: [i32; 3],
+        owner: Option<usize>,
+        tuning: &Stream,
+        config: &ExplosionConfig,
+        flame: bool,
+        observers: (
+            &mut impl FnMut(&'static str),
+            &(impl Fn(usize, &'static str) + Sync),
+        ),
+    ) -> Trace {
         let (completed, physics) = observers;
         let task = |_, event| physics(2, event);
         let beam_task =
@@ -573,7 +588,7 @@ impl BlastRange {
                 self.stream_contact_owned(
                     p,
                     &effective,
-                    true,
+                    flame,
                     from.map(Fx::to_int_trunc),
                     config,
                     owner,
@@ -656,7 +671,7 @@ impl BlastRange {
     ) {
         self.stream_contact_owned(p, tuning, flame, at, config, None);
     }
-    fn stream_contact_owned(
+    pub(super) fn stream_contact_owned(
         &mut self,
         p: [i32; 3],
         tuning: &Stream,
@@ -918,6 +933,20 @@ pub(super) fn flight_velocity(delta: [Fx; 3], speed: i32) -> [Fx; 3] {
 }
 
 pub(super) fn muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
+    if u.kind == RangeUnitKind::Walker04 {
+        return u.body
+            .weapon_paths()
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| u.body.barrel_connected(p, u.connectivity.reached_cols()))
+            .take(4)
+            .map(|(arm, _)| {
+                let frame = &u.seg_frames[13 + arm * 4];
+                let v = frame.world([Fx::from_int(6), Fx::from_int(3), Fx::from_int(3)]);
+                [v.x, v.y, v.z]
+            })
+            .collect();
+    }
     let f = u.aimed_frame(
         &u.pose,
         fx::angle::diff(angle, u.motion.drive.head),
@@ -930,6 +959,22 @@ pub(super) fn muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
         .take(2)
         .map(|p| {
             let v = f.world(muzzle_cell(p));
+            [v.x, v.y, v.z]
+        })
+        .collect()
+}
+
+pub(super) fn razlom_muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
+    let frame = u.aimed_frame(&u.pose, fx::angle::diff(angle, u.motion.drive.head), u.turret_pitch);
+    let Some(path) = u.body.weapon_paths().first() else { return Vec::new(); };
+    if !u.body.barrel_connected(path, u.connectivity.reached_cols()) {
+        return Vec::new();
+    }
+    [11usize, 15, 19, 23, 27, 31, 35]
+        .into_iter()
+        .map(|z| {
+            let cell = [Fx::from_int(i32::from(path.max[0]) + 1), Fx::from_ratio(i32::from(path.min[1]) + i32::from(path.max[1]), 2), Fx::from_int(z as i32)];
+            let v = frame.world(cell);
             [v.x, v.y, v.z]
         })
         .collect()

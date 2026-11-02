@@ -134,6 +134,18 @@ pub fn elevated(root: &Frame, pitch: i32, mount: Fx) -> Frame {
     }
 }
 
+/// Rotate an existing frame around an arbitrary pivot without moving the pivot.
+pub fn aimed_about(root: &Frame, pivot: [Fx; 3], yaw: i32, pitch: i32, head: i32) -> Frame {
+    let turned = turned(root, yaw, head);
+    let elevated = elevated(&turned, pitch, Fx::ZERO);
+    let world = root.world(pivot);
+    let base = world
+        .sub(elevated.x.scale(pivot[0].div(elevated.scale)))
+        .sub(elevated.y.scale(pivot[1].div(elevated.scale)))
+        .sub(elevated.z.scale(pivot[2].div(elevated.scale)));
+    Frame { base, ..elevated }
+}
+
 /// Rest-pose frames of a body's segments in world space, composed along
 /// the parent chain exactly as the renderer places them: pivot on the
 /// parent's attachment point, roll then pitch then yaw about the pivot.

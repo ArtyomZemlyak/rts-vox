@@ -1639,6 +1639,9 @@ impl Matter {
                         voxel::unit::artillery_turret_t3()
                     }
                     modding::range::RangeUnitKind::NuclearSilo => voxel::unit::nuclear_silo(),
+                    modding::range::RangeUnitKind::Walker04 => voxel::unit::walker04(),
+                    modding::range::RangeUnitKind::RazlomT3 => voxel::unit::razlom_t3(),
+                    modding::range::RangeUnitKind::GrebenStorage => voxel::unit::greben_storage(),
                     modding::range::RangeUnitKind::Strider => voxel::unit::strider(),
                     modding::range::RangeUnitKind::Spider => voxel::unit::spider(),
                     modding::range::RangeUnitKind::LightningTank => voxel::unit::lightning_tank(),

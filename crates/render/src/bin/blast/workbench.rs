@@ -1361,7 +1361,7 @@ pub fn input(
                                     let dig = !fire
                                         && (ctrl || mode != panel::CrawlerMode::Move)
                                         && (salvage || !ctrl || !matches!(selection, Some(Selection::Unit(_))))
-                                        && ids.iter().any(|&id| scene.sim.units[id].kind == RangeUnitKind::Crawler);
+                                        && ids.iter().any(|&id| matches!(scene.sim.units[id].kind, RangeUnitKind::Crawler));
                                     // Pick the actual rendered fragment on the click,
                                     // rather than the ground behind it.
                                     let reclaim_point = if dig && salvage {
@@ -1406,7 +1406,7 @@ pub fn input(
                                         return;
                                     }
                                     let eligible = if matches!(order, Order::Dig(_) | Order::Reclaim(_)) {
-                                        ids.iter().filter(|&&id| scene.sim.units[id].kind == RangeUnitKind::Crawler).count()
+                                        ids.iter().filter(|&&id| matches!(scene.sim.units[id].kind, RangeUnitKind::Crawler)).count()
                                     } else if order == Order::Move {
                                         ids.iter()
                                             .filter(|&&id| {
@@ -1422,7 +1422,7 @@ pub fn input(
                                     };
                                     let autonomous = scene.sim.battle.autonomous;
                                     let diggers: Vec<_> = if dig {
-                                        ids.iter().copied().filter(|&id| scene.sim.units[id].kind == RangeUnitKind::Crawler).collect()
+                                        ids.iter().copied().filter(|&id| matches!(scene.sim.units[id].kind, RangeUnitKind::Crawler)).collect()
                                     } else { Vec::new() };
                                     let accepted = issue_battle_group_order(
                                         &mut scene.sim,
@@ -1430,6 +1430,11 @@ pub fn input(
                                         order,
                                         if dig { None } else { Some([hit[0], hit[2]]) },
                                     );
+                                    if accepted > 0 {
+                                        if let Some(panel) = panel.as_mut() {
+                                            panel.script.clear();
+                                        }
+                                    }
                                     if accepted > 0
                                         && fire
                                         && ids.iter().all(|&id| {

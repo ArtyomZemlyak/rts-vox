@@ -142,6 +142,9 @@ pub struct RangeUnit {
     section: Option<crate::damage::SectionJob>,
     /// Rest-pose frames of the segments, refreshed with the pose (ADR-278).
     pub seg_frames: Vec<crate::damage::Frame>,
+    /// Derived independent arm targets for Walker 04; rebuilt from orders,
+    /// not authoritative state and therefore not part of snapshot/hash.
+    pub arm_targets: Option<[[i32; 3]; 4]>,
     /// Segment cells removed by damage or separation: index and cell. Saved.
     pub seg_removed: Vec<(u8, [u8; 3])>,
     seg_dents: BTreeMap<(u8, [u8; 3]), u32>,
@@ -552,6 +555,9 @@ impl RangeUnit {
         static BASE: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static SPIDER: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static STRIDER: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static WALKER04: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static RAZLOM: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static GREBEN: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         let mut body = match kind {
             RangeUnitKind::Tank => TANK.get_or_init(voxel::unit::tank).clone(),
             RangeUnitKind::LightningTank => LIGHTNING_TANK.get_or_init(voxel::unit::lightning_tank).clone(),
@@ -573,6 +579,9 @@ impl RangeUnit {
             RangeUnitKind::Base => BASE.get_or_init(voxel::unit::command_base).clone(),
             RangeUnitKind::Strider => STRIDER.get_or_init(voxel::unit::strider).clone(),
             RangeUnitKind::Spider => SPIDER.get_or_init(voxel::unit::spider).clone(),
+            RangeUnitKind::Walker04 => WALKER04.get_or_init(voxel::unit::walker04).clone(),
+            RangeUnitKind::RazlomT3 => RAZLOM.get_or_init(voxel::unit::razlom_t3).clone(),
+            RangeUnitKind::GrebenStorage => GREBEN.get_or_init(voxel::unit::greben_storage).clone(),
         };
         static ARMOUR: OnceLock<modding::unit_armour::Armour> = OnceLock::new();
         let grade = ARMOUR
@@ -623,6 +632,7 @@ impl RangeUnit {
             connectivity,
             section: None,
             seg_frames,
+            arm_targets: None,
             seg_removed: Vec::new(),
             seg_dents: BTreeMap::new(),
             seg_detached: 0,
@@ -762,6 +772,36 @@ impl RangeUnit {
                 crate::gait::leg_frames(rig, &self.pose, c, &mut self.seg_frames);
             }
         }
+        if let Some(targets) = self.arm_targets {
+            for (arm, target) in targets.into_iter().enumerate() {
+                let muzzle = 13 + arm * 4;
+                let from = self.seg_frames[muzzle].world([Fx::from_int(6), Fx::from_int(3), Fx::from_int(3)]);
+                let delta = [
+                    Fx::from_int(target[0]).sub(from.x),
+                    Fx::from_int(target[1]).sub(from.y),
+                    Fx::from_int(target[2]).sub(from.z),
+                ];
+                let flat = delta[0].mul(delta[0]).add(delta[2].mul(delta[2])).sqrt();
+                let yaw = fx::angle::atan2(delta[2].raw(), delta[0].raw());
+                let pitch = fx::angle::atan2(delta[1].raw(), flat.raw());
+                for index in 10 + arm * 4..=muzzle {
+                    let attach = self.body.segments[index].attach;
+                    let pivot = [attach.at.0, attach.at.1, attach.at.2]
+                        .map(|v| Fx::from_int(i32::from(v)));
+                    self.seg_frames[index] = crate::damage::aimed_about(
+                        &self.seg_frames[index],
+                        pivot,
+                        yaw,
+                        pitch,
+                        self.motion.drive.head,
+                    );
+                }
+            }
+        }
+    }
+    pub fn set_arm_targets(&mut self, targets: [[i32; 3]; 4], turret_yaw: i32) {
+        self.arm_targets = Some(targets);
+        self.update_pose(turret_yaw);
     }
     /// Where a world point lands on this body: `0` the root, `i + 1` the
     /// segment `i`, with the cell there. Segments are tested in the given
@@ -7223,13 +7263,16 @@ impl BlastRange {
                     // No hull has committed motion yet. Only a fine fallback
                     // reads this exact snapshot, with the same slot order.
                     let others = || {
-                        positions
-                            .iter()
-                            .enumerate()
-                            .filter(|(i, _)| *i != id)
-                            .map(|(_, p)| *p)
-                            .chain(gun_obstacle.filter(|_| id != gun_id))
-                            .collect()
+                        let mut others = Vec::with_capacity(positions.len() + 1);
+                        others.extend(
+                            positions
+                                .iter()
+                                .enumerate()
+                                .filter(|(i, _)| *i != id)
+                                .map(|(_, p)| *p)
+                                .chain(gun_obstacle.filter(|_| id != gun_id)),
+                        );
+                        others
                     };
                     let u = if id == gun_id {
                         &mut self.gun
@@ -7343,13 +7386,15 @@ impl BlastRange {
                                 task_detail(id, "route_end");
                                 return None;
                             }
-                            let others: Vec<_> = positions
-                                .iter()
-                                .enumerate()
-                                .filter(|(i, _)| *i != id)
-                                .map(|(_, p)| *p)
-                                .chain(gun_obstacle)
-                                .collect();
+                            let mut others = Vec::with_capacity(positions.len() + 1);
+                            others.extend(
+                                positions
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(i, _)| *i != id)
+                                    .map(|(_, p)| *p)
+                                    .chain(gun_obstacle),
+                            );
                             let prepared = u.motion.prepare_local_hunt_tasks(
                                 world,
                                 &u.body,
@@ -7408,16 +7453,18 @@ impl BlastRange {
                 coarse_left.min(self.navigation.global_work_per_search),
             ));
             {
-                let others: Vec<_> = positions
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i != id)
-                    .map(|(_, p)| *p)
-                    .chain(
-                        physical_gun
-                            .then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body)),
-                    )
-                    .collect();
+                let mut others = Vec::with_capacity(positions.len() + 1);
+                others.extend(
+                    positions
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != id)
+                        .map(|(_, p)| *p)
+                        .chain(
+                            physical_gun
+                                .then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body)),
+                        ),
+                );
                 if driven {
                     if let Some(prepared) = local_hunts[id].take() {
                         let accepted = u

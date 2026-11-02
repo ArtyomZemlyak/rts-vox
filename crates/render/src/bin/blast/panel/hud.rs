@@ -264,7 +264,14 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 label(
                     p,
                     font,
-                    "ЛКМ: выбрать / ПКМ: приказ в выбранном режиме",
+                    "ПКМ: Сбор — по обломкам · Бурение — по породе",
+                    12.0,
+                    theme::MUTED,
+                );
+                label(
+                    p,
+                    font,
+                    "Бак и склад показаны слева · разгрузка на базе автоматическая",
                     12.0,
                     theme::MUTED,
                 );
@@ -591,7 +598,7 @@ pub fn refresh(
             )
         } else if matches!(action, Some(Action::CrawlerMode(_))) {
             Some(battle && !edit.editing && selected_ids.iter().any(|&id|
-                view.units.get(id).is_some_and(|u| u.kind == RangeUnitKind::Crawler && u.status.alive)))
+                view.units.get(id).is_some_and(|u| matches!(u.kind, RangeUnitKind::Crawler) && u.status.alive)))
         } else if matches!(action, Some(Action::ElectricSupport)) {
             Some(battle && !edit.editing && selected_ids.iter().any(|&id|
                 view.units.get(id).is_some_and(|u| u.kind == RangeUnitKind::LightningTank && u.status.alive)))
@@ -700,7 +707,7 @@ pub fn refresh(
                             "2"
                         } else if u.kind == RangeUnitKind::Base {
                             "Б"
-                        } else if u.kind == RangeUnitKind::Crawler {
+                        } else if matches!(u.kind, RangeUnitKind::Crawler) {
                             "КР"
                         } else {
                             "Ш"
@@ -798,7 +805,7 @@ pub fn refresh(
                             u.integrity.core.mul(fx::Fx::from_int(100)).to_int_trunc()
                         );
                     }
-                    if u.kind == RangeUnitKind::Base {
+                    if matches!(u.kind, RangeUnitKind::Base | RangeUnitKind::GrebenStorage) {
                         if let Some((stored, capacity)) = scene.base_cargo.get(id).copied().flatten() {
                             return format!("БАЗА {:02} · {}\nЗапас стороны {stored} / {capacity}", id + 1,
                                 if u.status.alive { "В СТРОЮ" } else { "УНИЧТОЖЕНА" });
@@ -814,7 +821,7 @@ pub fn refresh(
                             u.integrity.core.mul(fx::Fx::from_int(100)).to_int_trunc()
                         );
                     }
-                    if u.kind == RangeUnitKind::Crawler {
+                    if matches!(u.kind, RangeUnitKind::Crawler) {
                         let cargo = scene.crawler_cargo.get(id).copied().flatten();
                         let detail = cargo.map_or_else(|| "Бак недоступен: экономика сцены выключена".to_string(), |(held, cap, hauling, drill, stored, capacity, mode)| {
                             format!("Груз {held} / {cap} · база {stored} / {capacity}\n{} · бур: {}", if hauling { "ДОСТАВКА" } else { mode }, if drill { "ГОТОВ" } else { "ПОВРЕЖДЁН" })
@@ -872,6 +879,16 @@ pub fn refresh(
                             "ТУРЕЛЬ T1"
                         } else if u.kind == RangeUnitKind::TurretT2 {
                             "ТУРЕЛЬ T2"
+                        } else if u.kind == RangeUnitKind::Walker04 {
+                            "WALKER 04"
+                        } else if u.kind == RangeUnitKind::RazlomT3 {
+                            "РАЗЛОМ T3"
+                        } else if u.kind == RangeUnitKind::Crawler {
+                            "СТАРАТЕЛЬ"
+                        } else if matches!(u.kind, RangeUnitKind::Crawler) {
+                            "КРАУЛЕР"
+                        } else if u.kind == RangeUnitKind::Base {
+                            "КОМАНДНАЯ БАЗА"
                         } else {
                             "ШАГОХОД"
                         },
@@ -903,7 +920,7 @@ pub fn refresh(
                             |(_, u)| {
                                 format!(
                                     "{} · дальность {} м\n{}",
-                                    weapon_name(u.weapon.unwrap_or(BattleWeapon::Blast)),
+                                    if u.kind == RangeUnitKind::RazlomT3 { "Разрушительная волна" } else { weapon_name(u.weapon.unwrap_or(BattleWeapon::Blast)) },
                                     u.attack_range.unwrap_or(0) / 10,
                                     if matches!(
                                         u.kind,
@@ -1419,6 +1436,39 @@ pub(crate) mod tests {
         app.update();
         let label = &app.world().get::<Text>(text).unwrap().0;
         assert!(label.contains("БАЗА") && label.contains("Запас стороны 0 / 100100000"), "{label}");
+    }
+    #[test]
+    fn staratel_hud_shows_cargo_and_the_current_reclaim_order() {
+        let preset = modding::range_skirmish::stock(23).unwrap();
+        let layout = RangeLayout::from_ron(include_str!("../../../../../../data/range-km.ron")).unwrap();
+        let layout = preset.apply_to(layout).unwrap();
+        let config = ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron")).unwrap();
+        let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
+        sim.start_battle().unwrap();
+        let mut workshop = Workshop::new(Some(layout), false);
+        workshop.controlled = Some(0);
+        let mut app = app_with_scene(sim, workshop);
+        app.world_mut().resource_mut::<Panel>().script = preset.script;
+        app.add_systems(PostUpdate, refresh.after(super::super::super::ui_snapshot::publish));
+        let text = app.world_mut().spawn((HudText(1), Text::new(""))).id();
+        app.update();
+        let label = &app.world().get::<Text>(text).unwrap().0;
+        assert!(label.contains("КРАУЛЕР"), "{label}");
+        assert!(label.contains("Груз 0 / 100000000"), "{label}");
+        assert!(label.contains("СБОР ОБЛОМКОВ"), "{label}");
+    }
+    #[test]
+    fn walker04_menu_scenario_starts_and_applies_its_focus_order() {
+        let mut app = app();
+        click(&mut app, Action::Skirmish(21));
+        let (config, layout) = app.world_mut().resource_mut::<Workshop>().pending.take().unwrap();
+        assert_eq!(layout.size[1], 768);
+        app.world_mut().resource_mut::<Scene>().sim = BlastRange::with_layout(config, layout).unwrap();
+        app.update();
+        let scene = app.world().resource::<Scene>();
+        assert_eq!(scene.sim.battle.phase, sim_core::blast::battle::Phase::Fighting);
+        assert_eq!(scene.sim.units.len(), 6);
+        assert!(matches!(scene.sim.battle.actors[1].order, sim_core::blast::battle::Order::Attack(2)));
     }
     #[test]
     fn crawler_mode_buttons_select_a_mode_without_issuing_an_order() {

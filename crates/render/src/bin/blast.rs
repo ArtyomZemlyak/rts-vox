@@ -811,6 +811,9 @@ fn main() {
         view = 1;
     }
     let mut hud = panel::Panel::new(drive, demo);
+    hud.script = skirmish
+        .and_then(|id| modding::range_skirmish::stock(id as usize).ok())
+        .map_or_else(Vec::new, |preset| preset.script);
     hud.briefing = battle_briefing;
     hud.mission = skirmish
         .and_then(|id| modding::range_skirmish::stock(id as usize).ok())
@@ -897,6 +900,16 @@ fn main() {
             sim.order_attack(id),
             "--attack-unit: target cannot be attacked"
         );
+    }
+    if let Some(id) = skirmish {
+        if let Some(focus) = modding::range_skirmish::stock(id as usize)
+            .ok()
+            .and_then(|preset| preset.focus)
+        {
+            if let Some(target) = (0..sim.units.len()).find(|&unit| !sim.allied(unit)) {
+                let _ = sim.battle_order(focus, sim_core::blast::battle::Order::Attack(target), None);
+            }
+        }
     }
     if edit {
         repeat = false;
@@ -1537,6 +1550,9 @@ fn setup(
             SkinBindings::new(&voxel::unit::crawler()),
             SkinBindings::new(&voxel::unit::lightning_tank()),
             SkinBindings::new(&voxel::unit::eidolon_tank()),
+            SkinBindings::new(&voxel::unit::walker04()),
+            SkinBindings::new(&voxel::unit::razlom_t3()),
+            SkinBindings::new(&voxel::unit::greben_storage()),
         ]),
         pristine: Arc::new([
             voxel::unit::tank(),
@@ -1553,6 +1569,9 @@ fn setup(
             voxel::unit::crawler(),
             voxel::unit::lightning_tank(),
             voxel::unit::eidolon_tank(),
+            voxel::unit::walker04(),
+            voxel::unit::razlom_t3(),
+            voxel::unit::greben_storage(),
         ]),
         seen: Vec::new(),
         pending: Vec::new(),
@@ -2532,7 +2551,12 @@ fn overview_frame(sim: &BlastRange, aim: Vec3, offset: Vec3, aspect: f32) -> (Ve
 }
 
 /// Fit only the selected sector, never all objects across a kilometre.
+#[cfg(test)]
 fn sector_frame(z: &modding::range::RangeZone, offset: Vec3, aspect: f32) -> (Vec3, f32) {
+    sector_frame_with_top(z, offset, aspect, 110)
+}
+
+fn sector_frame_with_top(z: &modding::range::RangeZone, offset: Vec3, aspect: f32, top: i32) -> (Vec3, f32) {
     let aim = Vec3::new(
         (z.min[0] + z.max[0]) as f32 * 0.5,
         z.spawn[1] as f32 + 18.0,
@@ -2543,7 +2567,7 @@ fn sector_frame(z: &modding::range::RangeZone, offset: Vec3, aspect: f32) -> (Ve
         .rotation;
     let mut extent = Vec2::ZERO;
     for x in [z.min[0], z.max[0]] {
-        for y in [0, 110] {
+        for y in [0, top] {
             for zz in [z.min[1], z.max[1]] {
                 let p = Vec3::new(x as f32, y as f32 + (z.spawn[1] - 16) as f32, zz as f32) - aim;
                 extent = extent
@@ -2704,9 +2728,14 @@ fn framing(
                     offset.y = 420.0;
                 }
                 offset = orbit_offset_mode(offset, workshop.orbit, workshop.pitch, laboratory.as_ref().is_some_and(|l|l.editor_camera()));
+                let sector_top = scene.sim.units.iter()
+                    .map(|unit| (unit.body.extent_mm().1 / 100) as i32)
+                    .max()
+                    .unwrap_or(110)
+                    .max(110);
                 let (fitted, mut height) = workshop.sector().map_or_else(
                     || overview_frame(&scene.sim, aim, offset, aspect),
-                    |z| sector_frame(z, offset, aspect),
+                    |z| sector_frame_with_top(z, offset, aspect, sector_top),
                 );
                 aim = fitted;
                 if scene.view == 6 {
@@ -2715,14 +2744,17 @@ fn framing(
                 }
                 if scene.view == 2 || scene.view == 3 {
                     let id = if scene.view == 3 { 1 } else { 0 };
+                    let unit_top = scene.sim.units.get(id)
+                        .map(|unit| (unit.body.extent_mm().1 / 100) as i32)
+                        .unwrap_or(100);
                     aim = scene
                         .sim
                         .units
                         .get(id)
                         .map_or(centre, |u| Vec3::from(u.at.map(|v| v as f32)))
-                        + Vec3::Y * 14.0;
+                        + Vec3::Y * (unit_top / 2).max(14) as f32;
                     offset = Vec3::new(if id == 1 { 190.0 } else { -190.0 }, 170.0, 245.0);
-                    height = 100.0;
+                    height = (unit_top + 30).max(100) as f32;
                 } else if scene.view == 0 {
                     let v = ((age - 2.1) / 2.4).clamp(0.0, 1.0);
                     let zoom = v * v * (3.0 - 2.0 * v);

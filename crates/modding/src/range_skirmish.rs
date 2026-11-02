@@ -2,12 +2,32 @@
 use crate::range::{RangeBlock, RangeLayout, RangeUnitDef, RangeUnitKind, RangeZone};
 use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize)]
+pub struct ScriptOrder {
+    pub actor: usize,
+    pub tick: u32,
+    pub order: ScriptedOrder,
+}
+#[derive(Clone, Debug, Deserialize)]
+pub enum ScriptedOrder {
+    Attack(usize),
+    Dig([i32; 3]),
+    Reclaim([i32; 3]),
+}
+#[derive(Clone, Debug, Deserialize)]
 pub struct Skirmish {
     pub title: String,
     pub briefing: String,
     pub zone: RangeZone,
     pub units: Vec<RangeUnitDef>,
     pub blocks: Vec<RangeBlock>,
+    #[serde(default)]
+    pub world_height: Option<u32>,
+    #[serde(default)]
+    pub initial_debris: Vec<crate::range::RangeDebris>,
+    #[serde(default)]
+    pub focus: Option<usize>,
+    #[serde(default)]
+    pub script: Vec<ScriptOrder>,
     #[serde(default)]
     pub idle_enemies: bool,
     #[serde(default)]
@@ -22,6 +42,8 @@ impl Skirmish {
             || s.units.iter().any(|u| !u.valid_loadout())
             || !s.units.iter().any(|u| u.allied)
             || !s.units.iter().any(|u| !u.allied)
+            || s.script.iter().any(|order| order.actor >= s.units.len())
+            || s.script.windows(2).any(|orders| orders[0].tick > orders[1].tick)
         {
             return Err("skirmish needs a briefing and two bounded armies".into());
         }
@@ -48,6 +70,12 @@ impl Skirmish {
             });
         }
         layout.battle = true;
+        if self.script.iter().any(|order| matches!(order.order, ScriptedOrder::Dig(_) | ScriptedOrder::Reclaim(_))) {
+            layout.economy.get_or_insert_with(crate::range_economy::RangeEconomy::stock);
+        }
+        if let Some(height) = self.world_height {
+            layout.size[1] = height;
+        }
         layout.idle_enemies = self.idle_enemies;
         layout.units = self.units.clone();
         layout.unit_yaws.clear();
@@ -55,6 +83,7 @@ impl Skirmish {
         layout.target = self.zone.target;
         layout.zones[zone] = self.zone.clone();
         layout.blocks.extend(self.blocks.clone());
+        layout.initial_debris.extend(self.initial_debris.clone());
         if let Some(course) = &mut layout.course {
             course.patrols.clear();
         }
@@ -169,6 +198,9 @@ pub const STOCK: &[&str] = &[
     include_str!("../../../data/mission-nuclear.ron"),
     include_str!("../../../data/mission-lightning.ron"),
     include_str!("../../../data/mission-eidolon-tank.ron"),
+    include_str!("../../../data/skirmish-walker04.ron"),
+    include_str!("../../../data/skirmish-razlom.ron"),
+    include_str!("../../../data/skirmish-staratel.ron"),
 ];
 pub fn stock(id: usize) -> Result<Skirmish, String> {
     Skirmish::from_ron(STOCK.get(id).ok_or("Unknown encounter")?)
@@ -237,14 +269,14 @@ mod tests {
                         let dz = i64::from(own.at[2]) - i64::from(enemy.at[2]);
                         let ranges = crate::attack_ranges::stock();
                         let reach = |u: &RangeUnitDef| match u.kind {
-                            RangeUnitKind::Base | RangeUnitKind::Crawler => 0,
+                            RangeUnitKind::Base | RangeUnitKind::Crawler | RangeUnitKind::GrebenStorage => 0,
                             RangeUnitKind::Tank
                             | RangeUnitKind::LightningTank
                             | RangeUnitKind::EidolonTank
                             | RangeUnitKind::TurretT1
                             | RangeUnitKind::TurretT2 => ranges.energy,
                             RangeUnitKind::Strider => ranges.machine_gun,
-                            RangeUnitKind::Spider => ranges.spider_laser,
+                            RangeUnitKind::Spider | RangeUnitKind::Walker04 | RangeUnitKind::RazlomT3 => ranges.spider_laser,
                             RangeUnitKind::Artillery => ranges.artillery,
                             RangeUnitKind::ArtilleryT2 | RangeUnitKind::ArtilleryTurretT2 => {
                                 ranges.canister
@@ -263,7 +295,7 @@ mod tests {
             }
         }
         assert_eq!(focus.len(), 15);
-        assert!(RangeUnitKind::ALL.iter().filter(|kind| **kind != RangeUnitKind::Crawler).all(|kind| focus.contains(kind)));
+        assert!(RangeUnitKind::ALL.iter().filter(|kind| !matches!(kind, RangeUnitKind::Crawler | RangeUnitKind::Walker04 | RangeUnitKind::RazlomT3 | RangeUnitKind::GrebenStorage)).all(|kind| focus.contains(kind)));
         assert!(stock(STOCK.len()).is_err());
     }
     #[test]
@@ -312,7 +344,7 @@ mod tests {
             assert_eq!(army.len(), 31);
             for kind in RangeUnitKind::ALL
                 .into_iter()
-                .filter(|k| !matches!(k, RangeUnitKind::NuclearSilo | RangeUnitKind::Crawler | RangeUnitKind::LightningTank | RangeUnitKind::EidolonTank))
+                .filter(|k| !matches!(k, RangeUnitKind::NuclearSilo | RangeUnitKind::Crawler | RangeUnitKind::LightningTank | RangeUnitKind::EidolonTank | RangeUnitKind::Walker04 | RangeUnitKind::RazlomT3 | RangeUnitKind::GrebenStorage))
             {
                 assert!(
                     army.iter().any(|u| u.kind == kind),

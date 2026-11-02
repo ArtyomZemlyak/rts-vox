@@ -78,10 +78,22 @@ fn caps(data: &RangeEconomy, base: Amount, units: &[RangeUnit], sides: &[bool]) 
     caps
 }
 
+fn dock_position(u: &RangeUnit) -> [i32; 2] {
+    let at = u.motion.pos.map(|v| v.to_int_trunc());
+    if u.kind == modding::range::RangeUnitKind::GrebenStorage {
+        let front = i32::from(u.body.vol.nx) * i32::from(u.body.mm) / 200;
+        [at[0] - front, at[2] - 16]
+    } else {
+        [at[0], at[2]]
+    }
+}
+
 /// Squared horizontal distance between two units.
 fn distance2(a: &RangeUnit, b: &RangeUnit) -> i64 {
-    let dx = i64::from(a.motion.pos[0].to_int_trunc() - b.motion.pos[0].to_int_trunc());
-    let dz = i64::from(a.motion.pos[2].to_int_trunc() - b.motion.pos[2].to_int_trunc());
+    let a = dock_position(a);
+    let b = dock_position(b);
+    let dx = i64::from(a[0] - b[0]);
+    let dz = i64::from(a[1] - b[1]);
     dx * dx + dz * dz
 }
 
@@ -349,8 +361,7 @@ impl BlastRange {
         let (num, den) = (h.bank.refine_num, h.bank.refine_den);
         let reach = i64::from(h.bank.unload_reach);
         for t in trips {
-            let target = units[t.dock].motion.pos.map(|v| v.to_int_trunc());
-            let target = [target[0], target[2]];
+            let target = dock_position(&units[t.dock]);
             let u = &mut units[t.id];
             let dx = i64::from(u.motion.pos[0].to_int_trunc() - target[0]);
             let dz = i64::from(u.motion.pos[2].to_int_trunc() - target[1]);

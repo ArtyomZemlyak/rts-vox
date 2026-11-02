@@ -58,6 +58,12 @@ fn sample(f: Finish, u: f32, v: f32) -> Sample {
         Finish::Rubber => (0.78 + grain * 0.16, 0.90 + grain * 0.08, 0.0, grain * 0.22),
         Finish::Optic => (0.98, 0.09, 0.0, 0.0),
         Finish::Core | Finish::Energy => (1.0, 0.40, 0.0, 0.0),
+        Finish::Ivory => (
+            0.90 + broad * 0.08 - worn * 0.04,
+            0.52 + grain * 0.08,
+            0.65 + worn * 0.20,
+            grain * 0.04 - worn * 0.05,
+        ),
     };
     Sample {
         albedo: [shade; 3],

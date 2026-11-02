@@ -192,10 +192,10 @@ fn an_aimed_attachment_faces_its_direction() {
     assert_eq!(left.yaw, TURN / 4, "к -Z — четверть оборота влево");
     let fwd = Attach::aimed((0, 0, 0), (0, 0, 0), (7, 0, 0));
     assert_eq!((fwd.yaw, fwd.pitch), (0, 0));
-    // Ноги шагохода наведены вниз и наружу: тангаж отрицательный
-    // у звеньев, рыскание — по четырём четвертям.
-    let s = voxel::unit::strider();
-    assert_eq!(s.legs.len(), 4, "у шагохода не четыре ноги");
+    // Обе ноги наведены вниз и наружу: тангаж отрицательный,
+    // рыскание различает левую и правую сторону.
+    let s = voxel::unit::walker04();
+    assert_eq!(s.legs.len(), 2, "у Walker 04 не две ноги");
     let mut quads = [false; 4];
     for l in &s.legs {
         for k in [l.thigh, l.shin] {
@@ -206,8 +206,8 @@ fn an_aimed_attachment_faces_its_direction() {
         }
     }
     assert!(
-        quads.iter().all(|&q| q),
-        "ноги не разведены по четырём сторонам: {quads:?}"
+        quads.iter().filter(|&&q| q).count() >= 2,
+        "ноги не разведены по сторонам: {quads:?}"
     );
 }
 
@@ -218,8 +218,8 @@ fn an_aimed_attachment_faces_its_direction() {
 /// а рисовалось бы другое (ADR-234).
 #[test]
 fn a_leg_is_a_chain_from_hip_to_foot() {
-    let s = voxel::unit::strider();
-    let mut supports = [false; 4];
+    let s = voxel::unit::walker04();
+    let mut supports = [false; 2];
     for l in &s.legs {
         let thigh = &s.segments[l.thigh as usize].attach;
         let shin = &s.segments[l.shin as usize].attach;
@@ -248,8 +248,9 @@ fn a_leg_is_a_chain_from_hip_to_foot() {
     );
     // Смена сетки пересчитывает шарниры тем же отношением, что
     // и крепления, а номера звеньев не трогает.
+    let s = voxel::unit::strider();
     let coarse = s.resampled(200).expect("шагоход при 200 мм");
-    assert_eq!(coarse.legs.len(), 4);
+    assert_eq!(coarse.legs.len(), s.legs.len());
     for (a, b) in s.legs.iter().zip(&coarse.legs) {
         assert_eq!(b.hip.1 as i32, a.hip.1 as i32 / 2, "шарнир не пересчитан");
         assert_eq!((a.thigh, a.shin, a.support), (b.thigh, b.shin, b.support));

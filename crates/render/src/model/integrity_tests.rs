@@ -6,6 +6,10 @@ fn templates() -> Vec<(&'static str, UnitBody)> {
     let mut bodies = voxel::roster::all();
     bodies.extend([
         ("range walker", voxel::unit::strider()),
+        ("range walker04", voxel::unit::walker04()),
+        ("range crawler", voxel::unit::crawler()),
+        ("range razlom", voxel::unit::razlom_t3()),
+        ("greben storage", voxel::unit::greben_storage()),
         ("range spider", voxel::unit::spider()),
         ("range artillery", voxel::unit::artillery()),
         ("range artillery T2", voxel::unit::artillery_t2()),

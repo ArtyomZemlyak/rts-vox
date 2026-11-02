@@ -360,6 +360,7 @@ pub struct Panel {
     pub briefing: String,
     pub scenario_run: Option<ScenarioRun>,
     pub mission: Option<MissionRun>,
+    pub script: Vec<modding::range_skirmish::ScriptOrder>,
     history: BTreeMap<u8, Vec<ShotResult>>,
     keys: Vec<KeyCode>,
     pending: Option<(u8, u32)>,
@@ -392,6 +393,7 @@ impl Panel {
             briefing: String::new(),
             scenario_run: None,
             mission: None,
+            script: Vec::new(),
             history: BTreeMap::new(),
             keys: Vec::new(),
             pending: None,
@@ -609,6 +611,9 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             (false, vec![("Штурм турелей T1/T2", Action::Skirmish(3))]),
             (false, vec![("Артиллерия T2: картечь", Action::Skirmish(4))]),
             (false, vec![("Осадная артиллерия T3", Action::Skirmish(5))]),
+            (false, vec![("Walker 04: четыре лазера", Action::Skirmish(21))]),
+            (false, vec![("T3 Разлом: волновая турель", Action::Skirmish(22))]),
+            (false, vec![("Старатель: сбор и бурение", Action::Skirmish(23))]),
             (false, vec![("Режим испытаний / сброс", Action::RangeMode)]),
             (false, vec![("Сценарии испытаний", Action::ScenarioMenu)]),
             (
@@ -1078,6 +1083,8 @@ pub fn actions(
                         .ok()
                         .and_then(|s| s.mission)
                         .map(MissionRun::new);
+                    panel.script = modding::range_skirmish::stock(id as usize)
+                        .map_or_else(|_| Vec::new(), |preset| preset.script);
                     panel.battle_launch = true;
                     panel.drawer = 0;
                     panel.pending = None;
@@ -1390,7 +1397,9 @@ pub fn actions(
                     layout.gun_kind = kind;
                     let w = match kind {
                         RangeUnitKind::Strider => 4,
-                        RangeUnitKind::Spider => 6,
+                        RangeUnitKind::Spider | RangeUnitKind::Walker04 => 6,
+                        RangeUnitKind::RazlomT3 => 0,
+                        RangeUnitKind::Crawler => 0,
                         RangeUnitKind::Tank => 5,
                         RangeUnitKind::LightningTank => 6,
                         RangeUnitKind::EidolonTank => 5,
@@ -1401,7 +1410,7 @@ pub fn actions(
                         | RangeUnitKind::NuclearSilo => 0,
                         RangeUnitKind::TurretT1 => 5,
                         RangeUnitKind::TurretT2 => 1,
-                        RangeUnitKind::Base | RangeUnitKind::Crawler => 0,
+                        RangeUnitKind::Base | RangeUnitKind::GrebenStorage => 0,
                     };
                     let delivery = match w {
                         3 => Delivery::Flame,
@@ -1827,6 +1836,17 @@ pub fn scenario_progress(
         }
         panel.battle_launch = false;
         panel.battle_auto = false;
+    }
+    if edit.pending.is_none() && scene.sim.battle_mode() {
+        while panel.script.first().is_some_and(|next| next.tick <= scene.sim.tick) {
+            let next = panel.script.remove(0);
+            let order = match next.order {
+                modding::range_skirmish::ScriptedOrder::Attack(target) => sim_core::blast::battle::Order::Attack(target),
+                modding::range_skirmish::ScriptedOrder::Dig(face) => sim_core::blast::battle::Order::Dig(face),
+                modding::range_skirmish::ScriptedOrder::Reclaim(face) => sim_core::blast::battle::Order::Reclaim(face),
+            };
+            let _ = scene.sim.battle_order(next.actor, order, None);
+        }
     }
     if scene.sim.player
         || scene.sim.battle_mode()

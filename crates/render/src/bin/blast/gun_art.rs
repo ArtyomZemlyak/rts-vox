@@ -102,8 +102,11 @@ pub fn emitters(
     let origin = Vec3::from(GUN.map(|v| v as f32));
     let radius = match scene.sim.gun.kind {
         RangeUnitKind::Strider => 2.35,
-        RangeUnitKind::Tank | RangeUnitKind::Crawler | RangeUnitKind::LightningTank | RangeUnitKind::EidolonTank => 3.0,
+        RangeUnitKind::Tank | RangeUnitKind::LightningTank | RangeUnitKind::EidolonTank => 3.0,
         RangeUnitKind::Spider => 12.0,
+        RangeUnitKind::Walker04 => 30.0,
+        RangeUnitKind::Crawler => 8.0,
+        RangeUnitKind::RazlomT3 => 8.0,
         RangeUnitKind::Artillery => 3.0,
         RangeUnitKind::ArtilleryT2 => 6.0,
         RangeUnitKind::ArtilleryTurretT2 => 6.0,
@@ -112,6 +115,7 @@ pub fn emitters(
         RangeUnitKind::TurretT1 => 2.1,
         RangeUnitKind::TurretT2 => 3.5,
         RangeUnitKind::Base => 4.0,
+        RangeUnitKind::GrebenStorage => 60.0,
     };
     for (barrel, path) in body.weapon_paths().iter().enumerate() {
         if path.axis != 0 {

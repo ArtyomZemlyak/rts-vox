@@ -1,0 +1,18 @@
+(
+ title: "Walker 04: четыре лазера",
+ briefing: "Два Walker 04 показывают разные режимы. Первая машина распределяет четыре синих лазера по нескольким целям, вторая наклоняет корпус на 90 градусов и фокусирует все четыре на одном танке. Мощность каждого лазера соответствует пауку.",
+ world_height: Some(768),
+ zone: (name: "Walker 04: четыре лазера", min: (2400,1400), max: (5200,4200), spawn: (3200,16,3000), target: (4500,15,3000)),
+ units: [
+  (kind: Walker04, allied: true, at: (3200,16,2200)),
+  (kind: Walker04, allied: true, at: (3200,16,3200)),
+  (kind: Tank, allied: false, at: (4300,16,3200)),
+  (kind: Tank, allied: false, at: (4300,16,1800)),
+  (kind: Tank, allied: false, at: (4300,16,2400)),
+  (kind: Tank, allied: false, at: (4300,16,4000)),
+ ],
+ blocks: [],
+ script: [
+  (actor: 1, tick: 0, order: Attack(2)),
+ ],
+)

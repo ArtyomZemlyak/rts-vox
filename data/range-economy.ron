@@ -32,6 +32,9 @@
         (kind: Crawler, tank: 100000000, dig_radius: 4, dig_reach: 110, dig_edits_per_tick: 16),
         (kind: LightningTank, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
         (kind: EidolonTank, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+        (kind: Walker04, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+        (kind: RazlomT3, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+        (kind: GrebenStorage, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 1000000),
     ],
     bank: Some((
         // Each side's store with no dock standing.

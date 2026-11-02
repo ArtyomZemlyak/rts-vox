@@ -24,5 +24,6 @@
         (TurretT1, 0), (TurretT2, 1), (Base, 0), (ArtilleryT2, 1),
         (ArtilleryTurretT2, 1), (ArtilleryTurretT3, 2), (NuclearSilo, 2),
         (Crawler, 0), (LightningTank, 5), (EidolonTank, 4),
+        (Walker04, 3), (RazlomT3, 2), (GrebenStorage, 0),
     ],
 )

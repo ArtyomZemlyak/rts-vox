@@ -849,10 +849,12 @@ pub enum Finish {
     /// Световой элемент энергетического оружия: зелёно-бирюзовый,
     /// самосветящийся, отдельный от тёплого ядра юнита.
     Energy = 6,
+    /// Широкие светлые бронеплиты утверждённых машин.
+    Ivory = 7,
 }
 
 /// Сколько отделок — столько мешей на тело и столько материалов.
-pub const FINISHES: usize = 7;
+pub const FINISHES: usize = 8;
 
 /// Все отделки по порядку номеров. Массивы мешей и материалов
 /// индексируются номером, и перечень обязан идти тем же порядком.
@@ -864,6 +866,7 @@ pub const FINISH_ALL: [Finish; FINISHES] = [
     Finish::Core,
     Finish::Steel,
     Finish::Energy,
+    Finish::Ivory,
 ];
 
 /// Отделка воксела: явный код тела, а если его нет — по роли.
@@ -893,6 +896,7 @@ pub fn finish_srgb(f: Finish, tint: [f32; 3]) -> [f32; 3] {
         // отделяться и от резины, и от воронёного ствола.
         Finish::Steel => [0.52, 0.53, 0.55],
         Finish::Energy => [0.08, 0.88, 0.66],
+        Finish::Ivory => [0.85, 0.81, 0.72],
     }
 }
 
@@ -970,6 +974,7 @@ pub fn finish_surface_of(l: Look, f: Finish) -> (f32, f32) {
         (Look::Vangers, Finish::Core) => (0.42, 0.00),
         (Look::Vangers, Finish::Steel) => (0.48, 0.90),
         (_, Finish::Energy) => (0.32, 0.00),
+        (_, Finish::Ivory) => (0.52, 0.65),
     }
 }
 
@@ -2483,8 +2488,8 @@ mod tests {
     #[test]
     fn finish_codes_follow_the_list() {
         use voxel::unit::{
-            Part, FINISH_CORE, FINISH_ENERGY, FINISH_GUN, FINISH_OPTIC, FINISH_PLATE, FINISH_RUBBER,
-            FINISH_STEEL,
+            Part, FINISH_CORE, FINISH_ENERGY, FINISH_GUN, FINISH_IVORY, FINISH_OPTIC, FINISH_PLATE,
+            FINISH_RUBBER, FINISH_STEEL,
         };
         assert_eq!(finish_of(FINISH_PLATE, Part::Sensor), Finish::Plate);
         assert_eq!(finish_of(FINISH_GUN, Part::Armour), Finish::Gun);
@@ -2493,6 +2498,7 @@ mod tests {
         assert_eq!(finish_of(FINISH_CORE, Part::Armour), Finish::Core);
         assert_eq!(finish_of(FINISH_STEEL, Part::Armour), Finish::Steel);
         assert_eq!(finish_of(FINISH_ENERGY, Part::Armour), Finish::Energy);
+        assert_eq!(finish_of(FINISH_IVORY, Part::Armour), Finish::Ivory);
         // Сталь светлее резины и воронёного ствола: иначе каток
         // не отделить от трака.
         let (s, r, g) = (
@@ -2572,11 +2578,11 @@ mod tests {
             assert!(!seen[k], "две роли делят отделку {k}");
             seen[k] = true;
         }
-        // Сталь и световые элементы назначаются явным кодом тела.
+        // Дополнительные покрытия назначаются явным кодом тела.
         for (k, s) in seen.iter().enumerate() {
             if !s {
                 assert!(
-                    matches!(FINISH_ALL[k], Finish::Steel | Finish::Energy),
+                    matches!(FINISH_ALL[k], Finish::Steel | Finish::Energy | Finish::Ivory),
                     "отделка {k} без роли — лишний материал"
                 );
                 assert_eq!(finish_of(k as u8 + 1, Part::Armour), FINISH_ALL[k]);

@@ -258,7 +258,11 @@ fn setup(
     // Ванильный шагоход — тело боя, а не набора; в смотровой он
     // нужен ради ног: там первые повёрнутые звенья (ADR-231).
     all.push(("шагоход", voxel::unit::strider()));
+    all.push(("Walker 04", voxel::unit::walker04()));
     all.push(("осадная турель T3", voxel::unit::artillery_turret_t3()));
+    all.push(("Разлом T3", voxel::unit::razlom_t3()));
+    all.push(("краулер Старатель", voxel::unit::crawler()));
+    all.push(("Гребень · хранилище", voxel::unit::greben_storage()));
     if let Some(mm) = scene.mm {
         all.retain_mut(|(name, b)| match b.resampled(mm) {
             Ok(r) => {

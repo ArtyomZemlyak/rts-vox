@@ -270,7 +270,7 @@ mod tests {
         let e = RangeEconomy::stock();
         for kind in RangeUnitKind::ALL {
             assert!(e.kind(kind).is_some(), "{kind:?}");
-            assert_eq!(e.digs(kind), kind == RangeUnitKind::Crawler);
+            assert_eq!(e.digs(kind), matches!(kind, RangeUnitKind::Crawler));
         }
         // The base is the stock dock (ADR-673).
         assert!(e.bank.is_some());
