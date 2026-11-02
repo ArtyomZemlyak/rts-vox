@@ -201,6 +201,8 @@ pub const STOCK: &[&str] = &[
     include_str!("../../../data/skirmish-walker04.ron"),
     include_str!("../../../data/skirmish-razlom.ron"),
     include_str!("../../../data/skirmish-staratel.ron"),
+    include_str!("../../../data/skirmish-kil.ron"),
+    include_str!("../../../data/skirmish-skoba.ron"),
 ];
 pub fn stock(id: usize) -> Result<Skirmish, String> {
     Skirmish::from_ron(STOCK.get(id).ok_or("Unknown encounter")?)
@@ -269,7 +271,14 @@ mod tests {
                         let dz = i64::from(own.at[2]) - i64::from(enemy.at[2]);
                         let ranges = crate::attack_ranges::stock();
                         let reach = |u: &RangeUnitDef| match u.kind {
-                            RangeUnitKind::Base | RangeUnitKind::Crawler | RangeUnitKind::GrebenStorage => 0,
+                            RangeUnitKind::Base
+                            | RangeUnitKind::Crawler
+                            | RangeUnitKind::GrebenStorage
+                            | RangeUnitKind::KilFactoryT1
+                            | RangeUnitKind::KilFactoryT2
+                            | RangeUnitKind::KilFactoryT3
+                            | RangeUnitKind::KilFactoryT4
+                            | RangeUnitKind::SkobaDrone => 0,
                             RangeUnitKind::Tank
                             | RangeUnitKind::LightningTank
                             | RangeUnitKind::EidolonTank
@@ -294,8 +303,8 @@ mod tests {
                 }
             }
         }
-        assert_eq!(focus.len(), 15);
-        assert!(RangeUnitKind::ALL.iter().filter(|kind| !matches!(kind, RangeUnitKind::Crawler | RangeUnitKind::Walker04 | RangeUnitKind::RazlomT3 | RangeUnitKind::GrebenStorage)).all(|kind| focus.contains(kind)));
+        assert_eq!(focus.len(), 17);
+        assert!(RangeUnitKind::ALL.iter().filter(|kind| !matches!(kind, RangeUnitKind::Crawler | RangeUnitKind::Walker04 | RangeUnitKind::RazlomT3 | RangeUnitKind::GrebenStorage | RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4)).all(|kind| focus.contains(kind)));
         assert!(stock(STOCK.len()).is_err());
     }
     #[test]
@@ -344,7 +353,7 @@ mod tests {
             assert_eq!(army.len(), 31);
             for kind in RangeUnitKind::ALL
                 .into_iter()
-                .filter(|k| !matches!(k, RangeUnitKind::NuclearSilo | RangeUnitKind::Crawler | RangeUnitKind::LightningTank | RangeUnitKind::EidolonTank | RangeUnitKind::Walker04 | RangeUnitKind::RazlomT3 | RangeUnitKind::GrebenStorage))
+                .filter(|k| !matches!(k, RangeUnitKind::NuclearSilo | RangeUnitKind::Crawler | RangeUnitKind::LightningTank | RangeUnitKind::EidolonTank | RangeUnitKind::Walker04 | RangeUnitKind::RazlomT3 | RangeUnitKind::GrebenStorage | RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4 | RangeUnitKind::SkobaDrone))
             {
                 assert!(
                     army.iter().any(|u| u.kind == kind),

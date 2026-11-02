@@ -127,6 +127,11 @@ mod tests {
             voxel::unit::walker04(),
             voxel::unit::razlom_t3(),
             voxel::unit::greben_storage(),
+            voxel::unit::kil_factory(1),
+            voxel::unit::kil_factory(2),
+            voxel::unit::kil_factory(3),
+            voxel::unit::kil_factory(4),
+            voxel::unit::skoba(),
         ];
         let bindings = templates.each_ref().map(SkinBindings::new);
         let lost: Vec<u32> = range
@@ -151,6 +156,11 @@ mod tests {
                     modding::range::RangeUnitKind::Walker04 => 14,
                     modding::range::RangeUnitKind::RazlomT3 => 15,
                     modding::range::RangeUnitKind::GrebenStorage => 16,
+                    modding::range::RangeUnitKind::KilFactoryT1 => 17,
+                    modding::range::RangeUnitKind::KilFactoryT2 => 18,
+                    modding::range::RangeUnitKind::KilFactoryT3 => 19,
+                    modding::range::RangeUnitKind::KilFactoryT4 => 20,
+                    modding::range::RangeUnitKind::SkobaDrone => 21,
                 };
                 let pristine = &templates[kind];
                 pristine

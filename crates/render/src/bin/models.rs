@@ -263,6 +263,13 @@ fn setup(
     all.push(("Разлом T3", voxel::unit::razlom_t3()));
     all.push(("краулер Старатель", voxel::unit::crawler()));
     all.push(("Гребень · хранилище", voxel::unit::greben_storage()));
+    all.push(("Скоба · открытая рама", voxel::unit::skoba_drone(false)));
+    all.push(("Скоба · со стальным грузом", voxel::unit::skoba_with_cargo()));
+    all.push(("Скоба · компактный возврат", voxel::unit::skoba_drone(true)));
+    all.push(("Киль T1", voxel::unit::kil_factory(1)));
+    all.push(("Киль T2", voxel::unit::kil_factory(2)));
+    all.push(("Киль T3", voxel::unit::kil_factory(3)));
+    all.push(("Киль T4", voxel::unit::kil_factory(4)));
     if let Some(mm) = scene.mm {
         all.retain_mut(|(name, b)| match b.resampled(mm) {
             Ok(r) => {

@@ -278,10 +278,16 @@ mod tests {
         assert_eq!(e.store(RangeUnitKind::Tank), 0);
         // Reclaim is on (ADR-674).
         assert!(e.reclaim.is_some());
-        // Production is on, but nothing produces (ADR-675).
+        // Kil builds tanks and Greben replaces construction drones.
         assert!(e.production.is_some());
-        assert!(!e.any_producer());
-        assert!(e.kinds.iter().all(|k| k.build_secs == 0));
+        assert!(e.produces(RangeUnitKind::KilFactoryT1, RangeUnitKind::Tank));
+        assert!(e.produces(RangeUnitKind::GrebenStorage, RangeUnitKind::SkobaDrone));
+        assert_eq!(e.products(RangeUnitKind::KilFactoryT1), &[RangeUnitKind::Tank]);
+        assert!(e.kinds.iter().all(|k| k.build_secs == match k.kind {
+            RangeUnitKind::Tank => 10,
+            RangeUnitKind::SkobaDrone => 2,
+            _ => 0,
+        }));
     }
 
     #[test]
@@ -290,7 +296,10 @@ mod tests {
         e.bank = None;
         e.reclaim = None;
         e.production = None;
-        e.kinds.iter_mut().for_each(|k| k.store = 0);
+        e.kinds.iter_mut().for_each(|k| {
+            k.store = 0;
+            k.build_secs = 0;
+        });
         let text = ron::ser::to_string(&e).unwrap();
         assert!(
             !text.contains("store")

@@ -34,6 +34,8 @@ use voxel::store::AIR;
 pub mod haul;
 #[path = "range_produce.rs"]
 pub mod produce;
+#[path = "range_construction.rs"]
+pub mod construction;
 #[path = "range_reclaim.rs"]
 pub mod reclaim;
 #[cfg(test)]
@@ -219,6 +221,8 @@ pub struct Mining {
     reclaim_events: Vec<ReclaimVisual>,
     /// Production, with a production section (ADR-675).
     production: Option<produce::Production>,
+    /// Typed drone batches and block construction, with stores.
+    construction: Option<construction::Construction>,
 }
 
 impl Mining {
@@ -249,6 +253,7 @@ impl Mining {
                     .map(|k| ledger.create(Kind::Hauler, 0, k.tank))
             })
             .collect();
+        let construction = data.bank.is_some().then(|| construction::Construction::new(units, &sides));
         let haul = data
             .bank
             .is_some()
@@ -269,6 +274,7 @@ impl Mining {
             reclaim,
             reclaim_events: Vec::new(),
             production,
+            construction,
         }
     }
     /// A unit appended to the roster (ADR-675): its tank, if its kind digs,

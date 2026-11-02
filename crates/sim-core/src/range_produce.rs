@@ -70,7 +70,7 @@ pub struct Production {
     /// Sorted by producer slot: ties between producers drawing on one
     /// store go by linear index, not by who ordered first.
     lines: Vec<Line>,
-    /// Blanks of dead producers by slot: they lie with the hull.
+    /// Dead producers' blanks and shot-down drones' cargo by slot: they lie with the hull.
     wrecks: BTreeMap<u16, ContainerId>,
     /// Derived from the data and the body templates; never saved.
     costs: [Amount; RangeUnitKind::COUNT],
@@ -202,6 +202,44 @@ impl Mining {
     }
 }
 
+pub fn starting_crews(layout: &mut modding::range::RangeLayout) {
+    if !layout.battle || layout.economy.is_none() {
+        return;
+    }
+    let stores: Vec<RangeUnitDef> = layout.units.iter()
+        .filter(|u| u.allied && u.kind == RangeUnitKind::GrebenStorage)
+        .cloned()
+        .collect();
+    for store in stores {
+        let near = |u: &RangeUnitDef, kind, reach: i64| {
+            u.allied && u.kind == kind && (0..3).map(|a| {
+                let d = i64::from(u.at[a] - store.at[a]);
+                d * d
+            }).sum::<i64>() <= reach * reach
+        };
+        let drones = layout.units.iter().filter(|u| near(u, RangeUnitKind::SkobaDrone, 1400)).count();
+        for n in drones..8 {
+            if layout.units.len() >= MAX_RANGE_UNITS { break; }
+            layout.units.push(RangeUnitDef {
+                allied: true,
+                kind: RangeUnitKind::SkobaDrone,
+                at: [store.at[0] + 800, 60, store.at[2] - 240 + n as i32 * 70],
+                weapon: None,
+            });
+        }
+        if !layout.units.iter().any(|u| near(u, RangeUnitKind::Crawler, 2000))
+            && layout.units.len() < MAX_RANGE_UNITS
+        {
+            layout.units.push(RangeUnitDef {
+                allied: true,
+                kind: RangeUnitKind::Crawler,
+                at: [store.at[0] + 800, store.at[1], store.at[2] + 500],
+                weapon: None,
+            });
+        }
+    }
+}
+
 impl BlastRange {
     /// The roster's definitions in slot order: the layout's units, then
     /// the produced ones. The authored layout is never changed by
@@ -238,6 +276,12 @@ impl BlastRange {
         let p = self.mining.as_ref()?.production.as_ref()?;
         Some(self.matter.economy.ledger.held(p.line(id)?.blank))
     }
+    /// Cargo left at a dead producer or shot-down drone, before reclaim finds it.
+    pub fn wreck_cargo(&self, id: usize) -> Option<Amount> {
+        let p = self.mining.as_ref()?.production.as_ref()?;
+        let container = p.wrecks.get(&(id as u16))?;
+        Some(self.matter.economy.ledger.held(*container))
+    }
     /// What one unit of this kind costs, matter units; `None` for a kind
     /// nobody produces.
     pub fn production_cost(&self, kind: RangeUnitKind) -> Option<Amount> {
@@ -263,7 +307,7 @@ impl BlastRange {
 
     /// Append a unit to every per-unit list, at the end: the one place the
     /// roster grows, at runtime and when a snapshot is restored.
-    fn append_unit(&mut self, s: Spawned) -> usize {
+    pub(super) fn append_unit(&mut self, s: Spawned) -> usize {
         let id = self.units.len();
         let battle = self.layout.as_ref().is_some_and(|l| l.battle);
         let mut u = RangeUnit::placed(s.def.kind, s.def.allied, s.def.at, battle);
@@ -281,6 +325,10 @@ impl BlastRange {
         }
         self.units.push(u);
         self.spawned.push(s);
+        let sides: Vec<bool> = (0..=id).map(|id| self.allied(id)).collect();
+        if let Some(c) = self.mining.as_mut().and_then(|m| m.construction.as_mut()) {
+            c.push_unit(id, &self.units, &sides);
+        }
         id
     }
 
@@ -311,6 +359,26 @@ impl BlastRange {
             body,
             tank,
         })
+    }
+
+    pub fn upgrade_kil(&mut self, id: usize) -> bool {
+        let next = match self.units.get(id).map(|u| u.kind) {
+            Some(RangeUnitKind::KilFactoryT1) => RangeUnitKind::KilFactoryT2,
+            Some(RangeUnitKind::KilFactoryT2) => RangeUnitKind::KilFactoryT3,
+            Some(RangeUnitKind::KilFactoryT3) => RangeUnitKind::KilFactoryT4,
+            _ => return false,
+        };
+        let at = self.units[id].at;
+        let motion = self.units[id].motion.clone();
+        let mut replacement = RangeUnit::of_kind(next, at);
+        let head = motion.drive.head;
+        replacement.motion = motion;
+        replacement.update_pose(head);
+        self.units[id] = replacement;
+        if let Some(def) = self.layout.as_mut().and_then(|layout| layout.units.get_mut(id)) {
+            def.kind = next;
+        }
+        true
     }
 
     fn production_open(&self) -> bool {
@@ -514,6 +582,14 @@ impl BlastRange {
             .expect("production")
     }
 
+    pub(crate) fn note_construction_spawn(&mut self) {
+        self.production_mut().produced += 1;
+    }
+
+    pub(crate) fn drop_drone_cargo(&mut self, id: usize, container: ContainerId) {
+        self.production_mut().wrecks.insert(id as u16, container);
+    }
+
     /// A free spot beside the producer for a unit of `kind`: positions on
     /// a grid of the unit's own box around the producer, nearest first,
     /// ties by the grid's linear index. A spot is free when its box lies
@@ -608,20 +684,12 @@ impl BlastRange {
         }
         for _ in 0..n {
             let kind = *RangeUnitKind::ALL.get(usize::from(s.u8()))?;
-            let allied = match s.u8() {
-                0 => false,
-                1 => true,
-                _ => return None,
-            };
+            let allied = s.bool();
             let at: [i32; 3] = std::array::from_fn(|_| s.i32());
             let body = s.u32();
-            let tank = match s.u8() {
-                0 => None,
-                1 => Some(s.u32()),
-                _ => return None,
-            };
+            let tank = if s.bool() { Some(s.u32()) } else { None };
             // Something produces it, and it has a tank exactly if it digs.
-            if !data.produced(kind)
+            if !(data.produced(kind) || matches!(kind, RangeUnitKind::TurretT1 | RangeUnitKind::KilFactoryT1 | RangeUnitKind::GrebenStorage | RangeUnitKind::Crawler))
                 || tank.is_some() != data.digs(kind)
                 || (0..3).any(|a| at[a] < 0 || at[a] >= self.size[a] as i32)
                 || !s.ok()
@@ -648,7 +716,7 @@ impl BlastRange {
     }
     /// Version 65 tail: production, after the reclaim's. Units, orders and
     /// the ledger are loaded.
-    pub(crate) fn load_production(&mut self, s: &mut Scan) -> Option<()> {
+    pub(crate) fn load_production(&mut self, s: &mut Scan, construction: bool) -> Option<()> {
         let units = self.units.len();
         let spawned = self.spawned.len();
         let alive: Vec<bool> = self.units.iter().map(|u| u.status.alive).collect();
@@ -722,7 +790,7 @@ impl BlastRange {
             let id = usize::from(slot);
             if id >= units
                 || alive[id]
-                || data.products(kinds[id]).is_empty()
+                || (data.products(kinds[id]).is_empty() && kinds[id] != RangeUnitKind::SkobaDrone)
                 || p.wrecks
                     .last_key_value()
                     .is_some_and(|(&last, _)| last >= slot)
@@ -751,7 +819,7 @@ impl BlastRange {
                 return None;
             }
         }
-        if p.lines.iter().any(|l| p.wrecks.contains_key(&l.slot)) || !p.active() {
+        if p.lines.iter().any(|l| p.wrecks.contains_key(&l.slot)) || (!p.active() && !construction) {
             return None;
         }
         s.ok().then_some(())

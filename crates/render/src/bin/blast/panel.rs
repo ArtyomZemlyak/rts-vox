@@ -344,6 +344,7 @@ pub struct Panel {
     pub demo: bool,
     pub ground_fire: bool,
     pub crawler_mode: CrawlerMode,
+    pub construction_kind: Option<RangeUnitKind>,
     pub electric_support_target: bool,
     pub blocked: bool,
     pub routes: bool,
@@ -377,6 +378,7 @@ impl Panel {
             demo,
             ground_fire: false,
             crawler_mode: CrawlerMode::Move,
+            construction_kind: None,
             electric_support_target: false,
             blocked: false,
             routes: true,
@@ -434,6 +436,10 @@ pub enum Action {
     AutoAttack,
     CrawlerMode(CrawlerMode),
     ElectricSupport,
+    UpgradeKil,
+    BuildSite(RangeUnitKind),
+    SiteQuota(usize, u8),
+    UpgradeCrawler,
     Stop,
     Reset,
     Patrol,
@@ -1091,6 +1097,7 @@ pub fn actions(
                     panel.drive = true;
                     panel.demo = false;
                     panel.ground_fire = false;
+                    panel.construction_kind = None;
                     scene.repeat = false;
                     scene.view = 1;
                 }
@@ -1366,6 +1373,38 @@ pub fn actions(
                     CrawlerMode::Drill => "Бурение краулером: укажите точку ПКМ",
                 }.into();
             }
+            Action::UpgradeKil => {
+                if let Some(id) = edit.controlled {
+                    scene.notice = if scene.sim.upgrade_kil(id) {
+                        "Завод улучшен на месте; очередь производства сохранена".into()
+                    } else {
+                        "Выберите завод Kil уровня T1–T3".into()
+                    };
+                } else {
+                    scene.notice = "Выберите завод Kil уровня T1–T3".into();
+                }
+            }
+            Action::BuildSite(kind) => {
+                panel.construction_kind = Some(kind);
+                panel.ground_fire = false;
+                scene.notice = "Стройка: укажите свободную землю ПКМ. Дроны сами принесут материал со склада.".into();
+            }
+            Action::SiteQuota(site, quota) => {
+                scene.notice = if scene.sim.set_construction_quota(site, quota) {
+                    format!("Площадка {}: назначено дронов {quota}", site + 1)
+                } else {
+                    "Стройплощадка не найдена".into()
+                };
+            }
+            Action::UpgradeCrawler => {
+                if let Some(id) = edit.controlled {
+                    scene.notice = if scene.sim.upgrade_crawler_drones(id) {
+                        "На краулере размещены четыре строительных дрона".into()
+                    } else {
+                        "Выберите краулер без апгрейда; нужны ресурсы на четырёх дронов".into()
+                    };
+                }
+            }
             Action::ElectricSupport => {
                 if !edit.battle_selected_ids(&scene.sim).iter().any(|&id|
                     scene.sim.units[id].kind == RangeUnitKind::LightningTank) {
@@ -1410,7 +1449,7 @@ pub fn actions(
                         | RangeUnitKind::NuclearSilo => 0,
                         RangeUnitKind::TurretT1 => 5,
                         RangeUnitKind::TurretT2 => 1,
-                        RangeUnitKind::Base | RangeUnitKind::GrebenStorage => 0,
+                        RangeUnitKind::Base | RangeUnitKind::GrebenStorage | RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4 | RangeUnitKind::SkobaDrone => 0,
                     };
                     let delivery = match w {
                         3 => Delivery::Flame,

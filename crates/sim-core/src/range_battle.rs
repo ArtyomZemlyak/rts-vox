@@ -341,7 +341,7 @@ fn effective_weapon(
     if kind == RangeUnitKind::NuclearSilo {
         return Some(Weapon::Nuclear);
     }
-    if matches!(kind, RangeUnitKind::Base | RangeUnitKind::Crawler | RangeUnitKind::GrebenStorage) {
+    if matches!(kind, RangeUnitKind::Base | RangeUnitKind::Crawler | RangeUnitKind::GrebenStorage | RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4 | RangeUnitKind::SkobaDrone) {
         return None;
     }
     if kind == RangeUnitKind::Walker04 || kind == RangeUnitKind::RazlomT3 {
@@ -2207,7 +2207,7 @@ impl BlastRange {
                 let stationary_target_in_range = !mobile_gun && {
                     self.units.iter().enumerate().any(|(id, u)| {
                         let weapon = match u.kind {
-                            RangeUnitKind::Base | RangeUnitKind::GrebenStorage => None,
+                            RangeUnitKind::Base | RangeUnitKind::GrebenStorage | RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4 | RangeUnitKind::SkobaDrone => None,
                             RangeUnitKind::Spider => Some(Weapon::Laser),
                             RangeUnitKind::LightningTank => Some(Weapon::Lightning),
                             RangeUnitKind::EidolonTank => Some(Weapon::Kinetic),

@@ -248,11 +248,20 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                         ("Запустить ядерную ракету", Action::NuclearLaunch),
                         ("Стоп", Action::Stop),
                         ("Автоатака", Action::AutoAttack),
+                        ("Улучшить завод", Action::UpgradeKil),
+                        ("4 дрона на краулер", Action::UpgradeCrawler),
                         ("Поддержать электротанк", Action::ElectricSupport),
                         ("Радиусы выбранных", Action::Ranges),
                     ] {
                         button(p, font, name, a);
                     }
+                });
+                p.spawn(row()).with_children(|p| {
+                    for (name, kind) in [
+                        ("Строить турель", RangeUnitKind::TurretT1),
+                        ("Строить Kil", RangeUnitKind::KilFactoryT1),
+                        ("Строить Гребень", RangeUnitKind::GrebenStorage),
+                    ] { button(p, font, name, Action::BuildSite(kind)); }
                 });
                 p.spawn(row()).with_children(|p| {
                     for (name, mode) in [
@@ -275,6 +284,14 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                     12.0,
                     theme::MUTED,
                 );
+                for site in 0..4 {
+                    label(p, font, &format!("Площадка {} · дронов на стройку", site + 1), 11.0, theme::MUTED);
+                    p.spawn(row()).with_children(|p| {
+                        for quota in [2, 4, 6, 8] {
+                            button(p, font, &format!("{quota}"), Action::SiteQuota(site, quota));
+                        }
+                    });
+                }
             });
             p.spawn(Node {
                 width: percent(31),
@@ -599,6 +616,9 @@ pub fn refresh(
         } else if matches!(action, Some(Action::CrawlerMode(_))) {
             Some(battle && !edit.editing && selected_ids.iter().any(|&id|
                 view.units.get(id).is_some_and(|u| matches!(u.kind, RangeUnitKind::Crawler) && u.status.alive)))
+        } else if matches!(action, Some(Action::UpgradeKil)) {
+            Some(battle && !edit.editing && selected_ids.iter().any(|&id|
+                view.units.get(id).is_some_and(|u| matches!(u.kind, RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3) && u.status.alive)))
         } else if matches!(action, Some(Action::ElectricSupport)) {
             Some(battle && !edit.editing && selected_ids.iter().any(|&id|
                 view.units.get(id).is_some_and(|u| u.kind == RangeUnitKind::LightningTank && u.status.alive)))
@@ -805,7 +825,7 @@ pub fn refresh(
                             u.integrity.core.mul(fx::Fx::from_int(100)).to_int_trunc()
                         );
                     }
-                    if matches!(u.kind, RangeUnitKind::Base | RangeUnitKind::GrebenStorage) {
+                    if matches!(u.kind, RangeUnitKind::Base | RangeUnitKind::GrebenStorage | RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4) {
                         if let Some((stored, capacity)) = scene.base_cargo.get(id).copied().flatten() {
                             return format!("БАЗА {:02} · {}\nЗапас стороны {stored} / {capacity}", id + 1,
                                 if u.status.alive { "В СТРОЮ" } else { "УНИЧТОЖЕНА" });

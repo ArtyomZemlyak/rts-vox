@@ -1,0 +1,34 @@
+(
+ title: "Киль: танковый завод T1–T4",
+ briefing: "Выберите «Киль» и закажите танк кнопкой производства. «Улучшить завод» последовательно меняет T1–T4 на том же участке и сохраняет очередь. Краулер автоматически собирает ресурсы и выгружается в «Гребень»; выпущенным танком уничтожьте вражеский танк.",
+ world_height: Some(1024),
+ zone: (name: "Киль: танковый завод T1–T4", min: (4800,6800), max: (7400,8800), spawn: (4900,16,8400), target: (6500,16,8500)),
+ idle_enemies: true,
+ units: [
+  (kind: KilFactoryT1, allied: true, at: (5300,16,8000)),
+  (kind: GrebenStorage, allied: true, at: (6200,16,7600)),
+  (kind: Crawler, allied: true, at: (5000,16,7400)),
+  (kind: Tank, allied: false, at: (6500,16,8500)),
+ ],
+ blocks: [
+  (min: (4900,0,6800), max: (7300,160,8700), material: 0),
+  (min: (4900,0,6800), max: (7300,16,8700), material: 1),
+  (min: (5000,16,7700), max: (5004,24,7704), material: 6),
+ ],
+ initial_debris: [
+  (min: (5050,16,7500), max: (5054,20,7504), material: 3),
+  (min: (5080,16,7500), max: (5084,20,7504), material: 3),
+  (min: (5110,16,7500), max: (5114,20,7504), material: 3),
+ ],
+ script: [
+  (actor: 2, tick: 0, order: Reclaim((5052,18,7502))),
+  (actor: 2, tick: 240, order: Dig((5000,20,7700))),
+ ],
+ mission: Some((
+  focus: KilFactoryT1,
+  protect: [0, 1, 2],
+  steps: [
+   (text: "Дождитесь поставки ресурсов, закажите танк у «Киля» и при необходимости улучшите завод до T4.", goal: Destroy(actors: [3])),
+  ],
+ )),
+)

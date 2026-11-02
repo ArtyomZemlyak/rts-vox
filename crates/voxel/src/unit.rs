@@ -2035,6 +2035,177 @@ pub fn greben_storage() -> UnitBody {
     greben_storage_modules(2)
 }
 
+/// Skoba's two rails carry a typed load in an open frame. The compact pose
+/// keeps every rail and thruster, moving the sides together for the return.
+pub fn skoba_drone(compact: bool) -> UnitBody {
+    let mut u = UnitBody::new_scaled(128, 24, 62, 2, 50);
+    let a = Part::Armour;
+    let rails = if compact { [(26, 30), (32, 36)] } else { [(5, 9), (53, 57)] };
+    for (n, z) in rails.into_iter().enumerate() {
+        fill_f(&mut u, (2, 126), (16, 18), z, a, FINISH_GUN);
+        fill_f(&mut u, (2, 126), (18, 20), z, a, FINISH_IVORY);
+        fill_f(&mut u, (0, 2), (16, 20), z, a, FINISH_STEEL);
+        fill_f(&mut u, (126, 128), (16, 20), z, a, FINISH_GUN);
+        for x in (8..120).step_by(16) {
+            mark(&mut u, (x, x + 8), (19, 20), z, FINISH_PLATE);
+        }
+        for x in [14usize, 62, 106] {
+            let engine_z = if n == 0 {
+                if compact { (22, 27) } else { (0, 5) }
+            } else if compact { (35, 40) } else { (57, 62) };
+            fill_f(&mut u, (x, x + 8), (12, 17), engine_z, a, FINISH_GUN);
+            fill_f(&mut u, (x + 1, x + 7), (14, 16), engine_z, a, FINISH_STEEL);
+            let glow_z = if n == 0 {
+                (engine_z.0 + 1, engine_z.0 + 4)
+            } else {
+                (engine_z.1 - 4, engine_z.1 - 1)
+            };
+            mark(&mut u, (x + 2, x + 6), (12, 13), glow_z, FINISH_OPTIC);
+        }
+        for x in [18usize, 106] {
+            fill_f(&mut u, (x, x + 4), (10, 17), z, a, FINISH_GUN);
+        }
+        if compact {
+            fill_f(&mut u, (8, 34), (12, 17), z, a, FINISH_STEEL);
+            for x in [12usize, 24] {
+                mark(&mut u, (x, x + 3), (11, 12), z, FINISH_PLATE);
+            }
+        } else {
+            let inner = if n == 0 { (8, 12) } else { (50, 54) };
+            fill_f(&mut u, (2, 8), (12, 17), inner, a, FINISH_STEEL);
+            let grip = if n == 0 { (10, 13) } else { (49, 52) };
+            fill_f(&mut u, (8, 12), (10, 13), grip, a, FINISH_GUN);
+            mark(&mut u, (10, 12), (10, 12), grip, FINISH_PLATE);
+        }
+    }
+    let bridge = if compact { (26, 36) } else { (5, 57) };
+    fill_f(&mut u, (124, 128), (16, 20), bridge, a, FINISH_GUN);
+    for z in if compact { vec![26, 32] } else { vec![8, 20, 38, 50] } {
+        mark(&mut u, (122, 126), (18, 20), (z, z + 4), FINISH_STEEL);
+    }
+    fill_f(&mut u, (112, 126), (16, 20), (29, 33), a, FINISH_GUN);
+    fill_f(&mut u, (116, 124), (14, 18), (29, 33), Part::Engine, FINISH_STEEL);
+    fill_f(&mut u, (122, 126), (16, 20), (29, 33), Part::Core, FINISH_CORE);
+    fill_f(&mut u, (0, 4), (18, 22), rails[0], Part::Sensor, FINISH_OPTIC);
+    pack(&mut u, (120, 128), (14, 20), (27, 35));
+    let mut u = seat(u, if compact { "Скоба · компактный возврат" } else { "Скоба · строительный дрон" });
+    u.turret_y = u.vol.ny;
+    u
+}
+
+pub fn skoba() -> UnitBody {
+    skoba_drone(false)
+}
+
+pub fn skoba_with_cargo() -> UnitBody {
+    let mut u = skoba_drone(false);
+    for x in [10usize, 38, 66, 94] {
+        fill_f(&mut u, (x, x + 24), (0, 12), (11, 51), Part::Armour, FINISH_STEEL);
+        mark(&mut u, (x + 4, x + 8), (0, 12), (11, 51), FINISH_PLATE);
+        mark(&mut u, (x + 12, x + 20), (10, 12), (11, 12), FINISH_IVORY);
+    }
+    fill_f(&mut u, (10, 118), (10, 13), (29, 33), Part::Armour, FINISH_GUN);
+    u
+}
+
+/// KIL: one tank factory growing on the same 640×480 U site.
+pub fn kil_factory(tier: u8) -> UnitBody {
+    assert!((1..=4).contains(&tier));
+    let (depth, height, gate_width, gate_height) = match tier {
+        1 => (22, 9, 10, 7),
+        2 => (28, 13, 13, 10),
+        3 => (35, 19, 19, 14),
+        _ => (44, 27, 28, 22),
+    };
+    let mut u = UnitBody::new_scaled(80, 36, 60, 8, 800);
+    let a = Part::Armour;
+    fill_f(&mut u, (0, 80), (0, 2), (0, 60), a, FINISH_GUN);
+    for (x, z, w, d, h) in [
+        (4usize, 4usize, 13usize, 12usize, 4usize),
+        (63, 4, 14, 15, 4),
+        (4, 43, 15, 12, 5),
+        (62, 43, 14, 13, 5),
+        (4, 23, 10, 12, 3),
+        (66, 23, 10, 12, 3),
+    ] {
+        fill_f(&mut u, (x, x + w), (2, 2 + h), (z, z + d), a, FINISH_IVORY);
+        fill_f(&mut u, (x + 1, x + w - 1), (2 + h, 3 + h), (z + 1, z + d - 1), a, FINISH_STEEL);
+        fill_f(&mut u, (x + 2, x + w - 2), (3 + h, 4 + h), (z + 2, z + d - 2), a, FINISH_GUN);
+        for dx in [2usize, 6, 10].into_iter().filter(|dx| *dx + 2 < w) {
+            mark(&mut u, (x + dx, x + dx + 1), (3, 2 + h), (z, z + 1), FINISH_GUN);
+            mark(&mut u, (x + dx, x + dx + 1), (3, 2 + h), (z + d - 1, z + d), FINISH_PLATE);
+        }
+        for zz in (z + 3..z + d - 2).step_by(3) {
+            mark(&mut u, (x, x + 1), (3, 2 + h), (zz, zz + 1), FINISH_GUN);
+            mark(&mut u, (x + w - 1, x + w), (3, 2 + h), (zz, zz + 1), FINISH_PLATE);
+        }
+        mark(&mut u, (x, x + 1), (3, 2 + h), (z + 3, z + 5), FINISH_OPTIC);
+        fill_f(&mut u, (x + w - 4, x + w - 2), (3 + h, 7 + h), (z + 2, z + 4), a, FINISH_GUN);
+        fill_f(&mut u, (x + w - 5, x + w - 1), (7 + h, 8 + h), (z + 1, z + 5), a, FINISH_STEEL);
+        mark(&mut u, (x + w - 4, x + w - 2), (4 + h, 5 + h), (z + 2, z + 3), FINISH_ENERGY);
+    }
+
+    let front = 3usize;
+    let back = front + depth;
+    let wall = if tier == 4 { 3 } else { 2 };
+    fill_f(&mut u, (front, back), (2, 2 + height), (30 - gate_width / 2 - wall, 30 - gate_width / 2), a, FINISH_IVORY);
+    fill_f(&mut u, (front, back), (2, 2 + height), (30 + gate_width / 2, 30 + gate_width / 2 + wall), a, FINISH_IVORY);
+    fill_f(&mut u, (front, back), (2 + gate_height, 2 + height), (30 - gate_width / 2, 30 + gate_width / 2), a, FINISH_IVORY);
+    fill_f(&mut u, (back - wall, back), (2, 2 + height), (30 - gate_width / 2, 30 + gate_width / 2), a, FINISH_GUN);
+    for z in (30 - gate_width / 2..30 + gate_width / 2).step_by(4) {
+        mark(&mut u, (back - 1, back), (4, 2 + height - 1), (z, z + 2), FINISH_IVORY);
+    }
+    for x in (front + 2..back - 2).step_by(4) {
+        mark(&mut u, (x, x + 1), (2 + height - 1, 2 + height), (30 - gate_width / 2, 30 + gate_width / 2), FINISH_STEEL);
+    }
+    let ribs = match tier {
+        1 => vec![front + depth / 2],
+        2 => vec![front + depth / 3, front + depth * 2 / 3],
+        3 => vec![front + depth / 4, front + depth / 2, front + depth * 3 / 4],
+        _ => Vec::new(),
+    };
+    for x in ribs {
+        for z in [30 - gate_width / 2 - 3, 30 + gate_width / 2 + 2] {
+            fill_f(&mut u, (x, x + 2), (2, 2 + height + 2), (z, z + 2), a, FINISH_STEEL);
+            mark(&mut u, (x, x + 1), (4, 2 + height), (z, z + 1), FINISH_IVORY);
+        }
+    }
+    for z in [12usize, 44] {
+        mark(&mut u, (front + 4, back - 4), (2 + height, 2 + height + 1), (z, z + 3), FINISH_PLATE);
+    }
+    for z in [30 - gate_width / 2 - wall - 1, 30 + gate_width / 2 + wall] {
+        fill_f(&mut u, (front + 1, back - 1), (3, 5), (z, z + 1), a, FINISH_GUN);
+        for x in (front + 4..back - 3).step_by(6) {
+            mark(&mut u, (x, x + 2), (4, 5), (z, z + 1), FINISH_ENERGY);
+        }
+    }
+    for z in [30 - gate_width / 2 - wall, 30 + gate_width / 2] {
+        fill_f(&mut u, (1, 5), (2, 3 + gate_height), (z, z + wall), a, FINISH_STEEL);
+        mark(&mut u, (1, 2), (3, 2 + gate_height), (z, z + 1), FINISH_ENERGY);
+    }
+    fill_f(&mut u, (1, 7), (2 + gate_height, 3 + gate_height), (30 - gate_width / 2 - wall, 30 + gate_width / 2 + wall), a, FINISH_GUN);
+    for x in [front + 1, back - 3] {
+        fill_f(&mut u, (x, x + 2), (2 + height, 3 + height), (30 - gate_width / 2 - wall, 30 + gate_width / 2 + wall), a, FINISH_STEEL);
+    }
+    let rotor_y = 2 + height + 3;
+    let rotor_radius = 4 + i32::from(tier) * 2;
+    fill_f(&mut u, (46, 54), (2, rotor_y), (44, 52), a, FINISH_GUN);
+    for y in (5..rotor_y).step_by(4) {
+        mark(&mut u, (46, 54), (y, y + 1), (44, 52), FINISH_ENERGY);
+    }
+    disc(&mut u, (50, 48), rotor_radius, (rotor_y, rotor_y + 1), a);
+    mark_cyl(&mut u, 1, (rotor_y, rotor_y + 1), (50, 48), rotor_radius, FINISH_ENERGY);
+    disc(&mut u, (50, 48), 2 + i32::from(tier), (rotor_y + 1, rotor_y + 2), a);
+    mark_cyl(&mut u, 1, (rotor_y + 1, rotor_y + 2), (50, 48), 2 + i32::from(tier), FINISH_OPTIC);
+    fill_f(&mut u, (22, 30), (2, 10), (26, 34), Part::Core, FINISH_GUN);
+    fill_f(&mut u, (48, 54), (2, 8), (50, 56), Part::Engine, FINISH_GUN);
+    fill_f(&mut u, (4, 8), (4, 8), (27, 33), Part::Sensor, FINISH_OPTIC);
+    pack(&mut u, (back - wall, back), (2, 4), (27, 33));
+    let mut u = seat(u, match tier { 1 => "Киль T1", 2 => "Киль T2", 3 => "Киль T3", _ => "Киль T4" });
+    u.turret_y = u.vol.ny;
+    u
+}
+
 /// T1 point-defence turret: a low armoured socket and one conventional gun.
 /// The base stays fixed; only the upper voxels traverse toward a target.
 pub fn turret_t1() -> UnitBody {
@@ -2261,6 +2432,41 @@ mod command_base_tests {
                 assert!(!body.vol.get(20, 12, z), "dock is blocked at z={z}");
                 assert!(body.vol.get(20, 20, z), "dock roof is missing at z={z}");
             }
+        }
+    }
+    #[test]
+    fn skoba_keeps_an_open_load_bay_and_a_connected_compact_frame() {
+        for compact in [false, true] {
+            let body = skoba_drone(compact);
+            let status = body.status(&mut CoreBufs::new());
+            assert!(status.alive && status.engine && status.sensor && !status.weapon && status.detached == 0, "compact={compact}: {status:?}");
+            assert_eq!((body.vol.nx, body.vol.ny, body.vol.nz), (128, 24, 62));
+            assert!(!body.vol.get(64, 16, 31), "the load bay must stay open");
+            assert!(!body.vol.get(0, 16, 31), "there is no front crossbar");
+        }
+        let open = skoba_drone(false);
+        let closed = skoba_drone(true);
+        assert!(open.vol.get(64, 16, 5) && open.vol.get(64, 16, 53));
+        assert!(closed.vol.get(64, 16, 26) && closed.vol.get(64, 16, 32));
+        assert!(!closed.vol.get(64, 16, 30) && !closed.vol.get(64, 16, 31));
+        let loaded = skoba_with_cargo();
+        let status = loaded.status(&mut CoreBufs::new());
+        assert!(status.alive && status.detached == 0, "{status:?}");
+        assert!(loaded.vol.get(70, 4, 31));
+        assert!(!open.vol.get(64, 4, 31));
+    }
+    #[test]
+    fn kil_factory_keeps_one_site_and_opens_the_gate_on_every_tier() {
+        for tier in 1..=4 {
+            let body = kil_factory(tier);
+            let mut core = CoreBufs::new();
+            let status = body.status(&mut core);
+            assert!(status.alive && status.engine && status.sensor && status.detached == 0, "tier={tier}: {status:?}");
+            assert_eq!((body.vol.nx, body.vol.nz), (80, 60));
+            assert!(!body.vol.get(3, 2, 30), "tier={tier}: gate is solid");
+            let back = match tier { 1 => 25, 2 => 31, 3 => 38, _ => 47 };
+            let wall = if tier == 4 { 3 } else { 2 };
+            assert!(body.vol.get(back - wall, 2, 30), "tier={tier}: rear wall is missing");
         }
     }
     #[test]

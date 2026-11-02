@@ -88,7 +88,7 @@ pub(super) fn publish(
     }));
     output.base_cargo.clear();
     output.base_cargo.extend(scene.sim.units.iter().enumerate().map(|(i, u)| {
-        matches!(u.kind, RangeUnitKind::Base | RangeUnitKind::GrebenStorage).then(|| scene.sim.side_store(scene.sim.allied(i))).flatten()
+        matches!(u.kind, RangeUnitKind::Base | RangeUnitKind::GrebenStorage | RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4).then(|| scene.sim.side_store(scene.sim.allied(i))).flatten()
     }));
     output.electric_support.clear();
     output.electric_support.extend((0..scene.sim.units.len()).map(|i| scene.sim.electric_support_count(i)));

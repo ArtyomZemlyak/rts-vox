@@ -1333,6 +1333,16 @@ pub fn input(
                             || (fire && mouse.just_pressed(MouseButton::Left))
                         {
                             if battle {
+                                let building = panel.as_ref().and_then(|p| p.construction_kind);
+                                if !fire && building.is_some() {
+                                    let kind = building.expect("construction kind");
+                                    scene.notice = if scene.sim.create_construction_site(kind, true, hit).is_some() {
+                                        "Площадка создана: дроны резервируют и везут сталь. Квоты — в панели приказов.".into()
+                                    } else {
+                                        "Здесь строить нельзя: место занято, вне карты или исчерпан лимит юнитов".into()
+                                    };
+                                    return;
+                                }
                                 let ids = edit.battle_selected_ids(&scene.sim);
                                 if !ids.is_empty() {
                                     use sim_core::blast::battle::Order;

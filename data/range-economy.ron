@@ -8,17 +8,17 @@
 // that wants a digger names one in its own `economy` section. The base is
 // the dock: a living one adds its store to its side's.
 //
-// No kind produces: the range's base is a command base, not a factory, and
-// which kind builds what is the owner's choice. A producer kind lists what
-// it builds in `producers` of the production section; a produced kind takes
-// `build_secs` game seconds. A unit costs its template cells times the
-// density of its body material, never a number here.
+// The range's base is a command base, not a factory. Kil T1–T4 builds tanks;
+// Greben replaces Skoba drones. A producer lists products in `producers` of
+// the production
+// section, and a produced kind takes `build_secs` game seconds. A unit costs
+// its template cells times the density of its body material, never a number here.
 (
     // Dig edits of all diggers waiting in the edit queue at once: the dig
     // sub-pool inside the edit ceiling (8192 for the stock weapons).
     dig_edits_in_flight: 512,
     kinds: [
-        (kind: Tank, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+        (kind: Tank, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 10),
         (kind: Strider, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
         (kind: Spider, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
         (kind: Artillery, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
@@ -35,6 +35,11 @@
         (kind: Walker04, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
         (kind: RazlomT3, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
         (kind: GrebenStorage, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 1000000),
+        (kind: KilFactoryT1, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 250000),
+        (kind: KilFactoryT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 250000),
+        (kind: KilFactoryT3, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 250000),
+        (kind: KilFactoryT4, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 250000),
+        (kind: SkobaDrone, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 2),
     ],
     bank: Some((
         // Each side's store with no dock standing.
@@ -65,5 +70,12 @@
     production: Some((
         // Orders one producer holds, as `max_build_queue` of `data/sim.ron`.
         queue: 8,
+        producers: [
+            (kind: KilFactoryT1, produces: [Tank]),
+            (kind: KilFactoryT2, produces: [Tank]),
+            (kind: KilFactoryT3, produces: [Tank]),
+            (kind: KilFactoryT4, produces: [Tank]),
+            (kind: GrebenStorage, produces: [SkobaDrone]),
+        ],
     )),
 )

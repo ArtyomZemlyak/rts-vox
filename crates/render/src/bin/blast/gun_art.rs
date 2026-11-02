@@ -116,6 +116,8 @@ pub fn emitters(
         RangeUnitKind::TurretT2 => 3.5,
         RangeUnitKind::Base => 4.0,
         RangeUnitKind::GrebenStorage => 60.0,
+        RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4 => 60.0,
+        RangeUnitKind::SkobaDrone => 2.0,
     };
     for (barrel, path) in body.weapon_paths().iter().enumerate() {
         if path.axis != 0 {

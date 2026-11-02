@@ -558,6 +558,11 @@ impl RangeUnit {
         static WALKER04: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static RAZLOM: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static GREBEN: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static KIL_T1: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static KIL_T2: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static KIL_T3: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static KIL_T4: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static SKOBA: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         let mut body = match kind {
             RangeUnitKind::Tank => TANK.get_or_init(voxel::unit::tank).clone(),
             RangeUnitKind::LightningTank => LIGHTNING_TANK.get_or_init(voxel::unit::lightning_tank).clone(),
@@ -582,6 +587,11 @@ impl RangeUnit {
             RangeUnitKind::Walker04 => WALKER04.get_or_init(voxel::unit::walker04).clone(),
             RangeUnitKind::RazlomT3 => RAZLOM.get_or_init(voxel::unit::razlom_t3).clone(),
             RangeUnitKind::GrebenStorage => GREBEN.get_or_init(voxel::unit::greben_storage).clone(),
+            RangeUnitKind::KilFactoryT1 => KIL_T1.get_or_init(|| voxel::unit::kil_factory(1)).clone(),
+            RangeUnitKind::KilFactoryT2 => KIL_T2.get_or_init(|| voxel::unit::kil_factory(2)).clone(),
+            RangeUnitKind::KilFactoryT3 => KIL_T3.get_or_init(|| voxel::unit::kil_factory(3)).clone(),
+            RangeUnitKind::KilFactoryT4 => KIL_T4.get_or_init(|| voxel::unit::kil_factory(4)).clone(),
+            RangeUnitKind::SkobaDrone => SKOBA.get_or_init(voxel::unit::skoba).clone(),
         };
         static ARMOUR: OnceLock<modding::unit_armour::Armour> = OnceLock::new();
         let grade = ARMOUR
@@ -5005,7 +5015,8 @@ impl BlastRange {
     pub fn new(config: ExplosionConfig) -> Self {
         Self::build(config, None)
     }
-    pub fn with_layout(mut config: ExplosionConfig, layout: RangeLayout) -> Result<Self, String> {
+    pub fn with_layout(mut config: ExplosionConfig, mut layout: RangeLayout) -> Result<Self, String> {
+        economy::produce::starting_crews(&mut layout);
         placement::Validator::default()
             .validate(&layout)
             .map_err(|e| e.to_string())?;
@@ -5059,10 +5070,11 @@ impl BlastRange {
     pub fn rebuilt_with_layout_observed(
         &mut self,
         mut config: ExplosionConfig,
-        layout: RangeLayout,
+        mut layout: RangeLayout,
         validator: &placement::Validator,
         mut completed: impl FnMut(&'static str),
     ) -> Result<Self, String> {
+        economy::produce::starting_crews(&mut layout);
         config.unit_ablation_resistance = layout.unit_resistance;
         config.validate()?;
         let ai_tuning = self.battle.ai.tuning;
@@ -5509,6 +5521,8 @@ impl BlastRange {
         if water {b.u32(69);}
         let flow = self.granular.has_state();
         if flow { b.u32(68); }
+        let construction = self.has_construction();
+        if construction { b.u32(75); }
         // Whole-map searches in flight wrap the format below in version 66
         // and follow everything else (ADR-680); without one the bytes are
         // those of the version the range otherwise needs.
@@ -5516,7 +5530,9 @@ impl BlastRange {
         if coarse {
             b.u32(66);
         }
-        let version = if self.has_production() {
+        let version = if construction {
+            75
+        } else if self.has_production() {
             65
         } else if self.has_reclaim() {
             64
@@ -5855,8 +5871,12 @@ impl BlastRange {
         }
         // Version 65 holds every section of 62, the haul and the reclaim
         // when the range has them, and then production (ADR-675).
-        if self.has_production() && version < 65 {
+        if (self.has_production() || self.has_construction()) && version < 65 {
             self.save_production(b);
+        }
+        // Version 75 adds drone assignments, typed batches and site progress.
+        if self.has_construction() && version < 75 {
+            self.save_construction(b);
         }
     }
     fn save_laser_tracking(&self, b: &mut fx::blob::Blob) {
@@ -5949,13 +5969,14 @@ impl BlastRange {
         if water {version=s.u32();}
         let flow = version == 68;
         if flow { version = s.u32(); }
+        if version == 75 { version = s.u32(); }
         // Version 66 wraps another with the whole-map searches in flight
         // (ADR-680).
         let coarse = version == 66;
         if coarse {
             version = s.u32();
         }
-        if !(27..=65).contains(&version) {
+        if !(27..=75).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -6556,7 +6577,11 @@ impl BlastRange {
         }
         if version >= 65 {
             observe("production", bytes.len() - s.left(), None);
-            r.load_production(&mut s)?;
+            r.load_production(&mut s, version >= 75)?;
+        }
+        if version >= 75 {
+            observe("construction", bytes.len() - s.left(), None);
+            r.load_construction(&mut s)?;
         }
         r.check_blank_work()?;
         if coarse {
@@ -7465,7 +7490,9 @@ impl BlastRange {
                                 .then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body)),
                         ),
                 );
-                if driven {
+                if u.kind == RangeUnitKind::SkobaDrone && u.status.alive {
+                    // Skoba's construction controller owns its hover and flight.
+                } else if driven {
                     if let Some(prepared) = local_hunts[id].take() {
                         let accepted = u
                             .motion
@@ -8423,6 +8450,7 @@ impl BlastRange {
         // Every death of the tick is in: a dead digger's tank breaches
         // (ADR-674).
         self.breach_dead_tanks();
+        self.construction_phase();
         // Production pays, and finished units join the roster last of all:
         // no phase of the tick sees a half-grown roster (ADR-675).
         self.production_phase();

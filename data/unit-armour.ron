@@ -25,5 +25,7 @@
         (ArtilleryTurretT2, 1), (ArtilleryTurretT3, 2), (NuclearSilo, 2),
         (Crawler, 0), (LightningTank, 5), (EidolonTank, 4),
         (Walker04, 3), (RazlomT3, 2), (GrebenStorage, 0),
+        (KilFactoryT1, 0), (KilFactoryT2, 0), (KilFactoryT3, 0), (KilFactoryT4, 0),
+        (SkobaDrone, 0),
     ],
 )

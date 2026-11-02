@@ -145,6 +145,7 @@ impl Generator for Ground {
 /// a route running along the ditch never meets that wall. A hill steeper
 /// than both tilt limits is a wall across the whole map.
 fn passable(t: Terrain, kind: RangeUnitKind, eighth: i32) -> bool {
+    if kind == RangeUnitKind::SkobaDrone { return true; }
     // tan of the tilt limits in sim.ron: 91 % and 84 % of up.
     let grade_pct = match kind {
         RangeUnitKind::Tank
@@ -156,11 +157,16 @@ fn passable(t: Terrain, kind: RangeUnitKind, eighth: i32) -> bool {
         | RangeUnitKind::ArtilleryT2
         | RangeUnitKind::TurretT1
         | RangeUnitKind::TurretT2 => 45,
-        RangeUnitKind::Strider | RangeUnitKind::Spider | RangeUnitKind::Walker04 => 65,
+        RangeUnitKind::Strider | RangeUnitKind::Spider | RangeUnitKind::Walker04 | RangeUnitKind::SkobaDrone => 65,
         RangeUnitKind::Base
         | RangeUnitKind::ArtilleryTurretT2
         | RangeUnitKind::ArtilleryTurretT3
         | RangeUnitKind::RazlomT3
+        | RangeUnitKind::GrebenStorage
+        | RangeUnitKind::KilFactoryT1
+        | RangeUnitKind::KilFactoryT2
+        | RangeUnitKind::KilFactoryT3
+        | RangeUnitKind::KilFactoryT4
         | RangeUnitKind::NuclearSilo => 0,
     };
     match t {
@@ -220,6 +226,11 @@ fn run(t: Terrain, kind: RangeUnitKind, heading: i32, back: bool) -> Run {
         RangeUnitKind::Crawler => voxel::unit::crawler(),
         RangeUnitKind::RazlomT3 => voxel::unit::razlom_t3(),
         RangeUnitKind::GrebenStorage => voxel::unit::greben_storage(),
+        RangeUnitKind::KilFactoryT1 => voxel::unit::kil_factory(1),
+        RangeUnitKind::KilFactoryT2 => voxel::unit::kil_factory(2),
+        RangeUnitKind::KilFactoryT3 => voxel::unit::kil_factory(3),
+        RangeUnitKind::KilFactoryT4 => voxel::unit::kil_factory(4),
+        RangeUnitKind::SkobaDrone => voxel::unit::skoba(),
     };
     let yaw = angle::norm(heading + if back { angle::FULL / 2 } else { 0 });
     let dir = [angle::cos(yaw), angle::sin(yaw)];
@@ -347,6 +358,11 @@ fn probe_poses_along_the_run() {
         RangeUnitKind::Crawler => voxel::unit::crawler(),
         RangeUnitKind::RazlomT3 => voxel::unit::razlom_t3(),
         RangeUnitKind::GrebenStorage => voxel::unit::greben_storage(),
+        RangeUnitKind::KilFactoryT1 => voxel::unit::kil_factory(1),
+        RangeUnitKind::KilFactoryT2 => voxel::unit::kil_factory(2),
+        RangeUnitKind::KilFactoryT3 => voxel::unit::kil_factory(3),
+        RangeUnitKind::KilFactoryT4 => voxel::unit::kil_factory(4),
+        RangeUnitKind::SkobaDrone => voxel::unit::skoba(),
         };
         let m = Motion::new([210, settle(t, [210, 320]), 320], kind, &body);
         let shape = m.probe_shape(&body);

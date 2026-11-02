@@ -353,6 +353,13 @@ fn arena_of(kinds: [RangeUnitKind; 2]) -> BlastRange {
         l.units[0].at = [500, 16, 800];
         l.units[1].at = [1500, 16, 800];
     }
+    if matches!(kinds[0], RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4) {
+        l.size = [1600, 512, 1600];
+        l.clear_min = [64, 64];
+        l.clear_max = [1536, 1536];
+        l.units[0].at = [500, 16, 800];
+        l.units[1].at = [1300, 16, 800];
+    }
     BlastRange::with_layout(
         ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
         l,
@@ -560,6 +567,61 @@ fn razlom_wave_kills_t1_keeps_travelling_and_restores_exactly() {
     assert!(!r.units[1].status.alive, "T1 survived the wave");
     assert!(beyond, "wave died with its first target");
     assert!(restored.is_some(), "no persistent wave was produced");
+}
+
+#[test]
+fn kil_produces_a_tank_and_upgrades_to_t4_without_losing_its_queue() {
+    let mut layout = arena_of([RangeUnitKind::KilFactoryT1, RangeUnitKind::Tank]).layout.unwrap();
+    layout.size[1] = 512;
+    let mut economy = modding::range_economy::RangeEconomy::stock();
+    economy.bank.as_mut().unwrap().base_store = 1 << 40;
+    layout.economy = Some(economy);
+    let mut r = BlastRange::with_layout(
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
+        layout,
+    )
+    .unwrap();
+    let store = r.mining().unwrap().haul().unwrap().store(true);
+    let seeded = 1 << 30;
+    let economy = &mut r.matter.economy;
+    assert_eq!(economy.ledger.reveal(economy.ground, seeded), seeded);
+    assert_eq!(economy.ledger.transfer(economy.ground, store, seeded), seeded);
+    r.start_battle().unwrap();
+    assert_eq!(r.execute_battle_command(battle::commands::Command::Produce {
+        actor: 0,
+        kind: RangeUnitKind::Tank,
+    }), battle::commands::Outcome::Applied);
+    let queue = r.production_queue(0);
+    for tier in 2..=4 {
+        for _ in 0..20 {
+            r.step();
+        }
+        assert!(r.upgrade_kil(0));
+        let next = match tier {
+            2 => RangeUnitKind::KilFactoryT2,
+            3 => RangeUnitKind::KilFactoryT3,
+            _ => RangeUnitKind::KilFactoryT4,
+        };
+        assert_eq!(r.units[0].kind, next);
+        assert_eq!(r.production_queue(0), queue);
+        assert_eq!(r.units[0].at, [500, 16, 800]);
+    }
+    assert!(!r.upgrade_kil(0));
+    for _ in 0..240 {
+        r.step();
+    }
+    assert_eq!(r.units.len(), 3);
+    assert_eq!(r.units[2].kind, RangeUnitKind::Tank);
+    assert_eq!(r.execute_battle_command(battle::commands::Command::Produce {
+        actor: 0,
+        kind: RangeUnitKind::Tank,
+    }), battle::commands::Outcome::Applied);
+    for _ in 0..300 {
+        r.step();
+    }
+    assert_eq!(r.units.len(), 4);
+    assert_eq!(r.units[3].kind, RangeUnitKind::Tank);
+    assert!(r.matter.economy.ledger.balanced());
 }
 
 #[test]

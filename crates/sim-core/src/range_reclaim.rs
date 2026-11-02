@@ -31,6 +31,8 @@
 //! **A dead producer's blank lies the same way** (ADR-675): the matter
 //! paid into a producer's unfinished order breaches by the same share when
 //! the producer dies, and the rest is reclaimed at its hull as a tank is.
+//! A shot-down construction drone's confirmed batch also lies at its hull,
+//! once, without a warehouse copy or a second container breach.
 //!
 //! **Searches have a ceiling per tick.** A digger without work searches
 //! only when something lies in the grid cells around its face — one with

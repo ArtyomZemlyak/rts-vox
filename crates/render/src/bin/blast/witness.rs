@@ -351,6 +351,11 @@ pub(super) fn update(
             RangeUnitKind::Walker04 => 14,
             RangeUnitKind::RazlomT3 => 15,
             RangeUnitKind::GrebenStorage => 16,
+            RangeUnitKind::KilFactoryT1 => 17,
+            RangeUnitKind::KilFactoryT2 => 18,
+            RangeUnitKind::KilFactoryT3 => 19,
+            RangeUnitKind::KilFactoryT4 => 20,
+            RangeUnitKind::SkobaDrone => 21,
         };
         let pristine = art.pristine.clone();
         let skins = art.skins.clone();
