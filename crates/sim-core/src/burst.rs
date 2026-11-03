@@ -7290,9 +7290,12 @@ impl Bursts {
                 memo.push(i,(pile_grid.at(f.position),f.material,f.paint,f.mm),f,geometry);
             }
         }
-        let unchanged=memo.unchanged();
-        if !unchanged {for input in &memo.current {
+        let changed=memo.changed();
+        if changed.as_ref().is_none_or(|keys| !keys.is_empty()) {for input in &memo.current {
             let key=input.key;
+            if changed.as_ref().is_some_and(|keys| !keys.contains(&key)) {
+                continue;
+            }
             let hash=(key.0[0] as u32).wrapping_mul(0x9e3779b9).rotate_left(13)
                 ^(key.0[1] as u32).wrapping_mul(0xc2b2ae35)^(key.0[2] as u32).wrapping_mul(0x85ebca6b);
             let shard=if parallel {(hash>>29) as usize}else{0};
@@ -7318,14 +7321,14 @@ impl Bursts {
             }
             pairs
         };
-        let groups: Vec<_> = if unchanged {Vec::new()} else if parallel {
+        let groups: Vec<_> = if changed.as_ref().is_some_and(|keys| keys.is_empty()) {Vec::new()} else if parallel {
             shards.par_iter().map(group).collect()
         } else {
             shards[..1].iter().map(group).collect()
         };
         completed("debris_merge_groups");
         let mut transfers: Vec<_> = groups.into_iter().flatten().collect();
-        memo.finish(transfers.is_empty());self.join_memo=memo;
+        memo.finish();self.join_memo=memo;
         let mut moved_heads=BTreeMap::new();
         transfers.sort_unstable_by_key(|&(_, donor,_)| donor);
         for (head, donor,shape) in transfers {

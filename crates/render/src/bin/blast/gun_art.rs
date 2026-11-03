@@ -104,7 +104,7 @@ pub fn emitters(
         RangeUnitKind::Strider => 2.35,
         RangeUnitKind::Tank | RangeUnitKind::LightningTank | RangeUnitKind::EidolonTank => 3.0,
         RangeUnitKind::Spider => 12.0,
-        RangeUnitKind::Walker04 => 30.0,
+        RangeUnitKind::Walker04 => 15.0,
         RangeUnitKind::Crawler => 8.0,
         RangeUnitKind::RazlomT3 => 8.0,
         RangeUnitKind::Artillery => 3.0,

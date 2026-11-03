@@ -267,6 +267,31 @@ pub struct RangeShieldDef {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeConstructionOrder {
+    pub kind: RangeUnitKind,
+    pub at: [i32; 3],
+    #[serde(default = "default_construction_quota")]
+    pub quota: u8,
+}
+fn default_construction_quota() -> u8 { 8 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeProductionOrder {
+    pub actor: usize,
+    pub kind: RangeUnitKind,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeReady {
+    #[serde(default)]
+    pub store: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub construction: Vec<RangeConstructionOrder>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub production: Vec<RangeProductionOrder>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RangeLayout {
     /// Battle actors are the placed roster; the test gun is parked off-scene.
     #[serde(default)]
@@ -330,6 +355,9 @@ pub struct RangeLayout {
     /// tanks and no dig orders, and reads and writes as it did before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub economy: Option<crate::range_economy::RangeEconomy>,
+    /// Ready-to-play stock and jobs, initialized once at scene construction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready: Option<RangeReady>,
 }
 fn stock_ground() -> i32 {
     16
@@ -573,6 +601,19 @@ impl RangeLayout {
                                 !z.contains([p[0], p[2]], 0) || p[1] < 0 || p[1] >= size[1]
                             })
                     })
+            })
+            || r.ready.as_ref().is_some_and(|ready| {
+                ready.construction.len() > 8
+                    || ready.construction.iter().any(|order| {
+                        !matches!(order.kind, RangeUnitKind::TurretT1 | RangeUnitKind::KilFactoryT1 | RangeUnitKind::GrebenStorage)
+                            || !(1..=32).contains(&order.quota)
+                            || (0..3).any(|a| order.at[a] < 0 || order.at[a] >= size[a])
+                    })
+                    || ready.production.iter().any(|order| {
+                        order.actor >= r.units.len()
+                            || r.economy.as_ref().is_none_or(|economy| !economy.produces(r.units[order.actor].kind, order.kind))
+                    })
+                    || (!ready.construction.is_empty() && r.economy.is_none())
             })
             || r.shields.len() > 8
             || r.shields.iter().any(|s| {

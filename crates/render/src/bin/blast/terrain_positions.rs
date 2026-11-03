@@ -34,7 +34,7 @@ impl Terms {
 }
 
 pub(super) fn removed(u: &RangeUnit, from: usize) -> impl Iterator<Item = [i32; 3]> + '_ {
-    let cells = &u.removed[from..];
+    let cells = &u.removed[from.min(u.removed.len())..];
     let split = u.body.turret_y;
     let frames = [
         u.pose,
@@ -112,6 +112,7 @@ mod tests {
                     }
                 }
                 u.removed = all;
+                assert!(removed(&u, u.removed.len() + 1).next().is_none());
             }
         }
     }

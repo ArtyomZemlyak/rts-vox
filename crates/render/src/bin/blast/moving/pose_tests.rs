@@ -56,6 +56,9 @@ fn scene() -> Scene {
 // The former serial formulas, evaluated independently of ActorFrame.
 fn reference(witness: &Witness, scene: &Scene, visual: &Visual) -> Transform {
     let unit = &scene.sim.units[witness.0];
+    if unit.kind == RangeUnitKind::Walker04 && witness.2.is_some_and(|segment| segment >= 10) {
+        return segment_picture(&unit.seg_frames[witness.2.expect("arm segment")]);
+    }
     let p = visible(unit, visual.previous.get(witness.0), scene);
     let t = fraction(scene);
     let mut local = witness.1;
@@ -376,4 +379,24 @@ fn player_weapon_picture_and_muzzle_follow_the_same_tilted_frame() {
     let scale = scene.sim.gun.body.mm as f32 / voxel::unit::WORLD_MM as f32;
     let rendered = pose(&scene.sim.gun).pos + offset + rotation * ((local - centre) * scale);
     assert!((rendered - super::super::visible_muzzle(&scene, &visual)).length() < 0.001);
+}
+
+#[test]
+fn walker_arm_picture_matches_the_physical_muzzle_after_independent_aiming() {
+    let mut unit = sim_core::blast::RangeUnit::of_kind(
+        modding::range::RangeUnitKind::Walker04,
+        [100, 16, 100],
+    );
+    unit.set_arm_targets([[1200, 200, 300]; 4], 0);
+    for arm in 0..4 {
+        let frame = unit.seg_frames[13 + arm * 4];
+        let physical = frame.world([Fx::from_int(4), Fx::from_int(2), Fx::from_int(2)]);
+        let expected = Vec3::new(
+            physical.x.to_f64_lossy() as f32,
+            physical.y.to_f64_lossy() as f32,
+            physical.z.to_f64_lossy() as f32,
+        );
+        let rendered = segment_picture(&frame).transform_point(Vec3::new(4.0, 2.0, 2.0));
+        assert!((rendered - expected).length() < 0.001, "arm={arm}");
+    }
 }

@@ -646,13 +646,21 @@ fn spawn_greben_crew(r: &mut BlastRange, home: usize) {
     let at = r.units[home].motion.pos.map(Fx::to_int_trunc);
     let allied = r.allied(home);
     let direction = if at[0] + 900 < r.size[0] as i32 { 1 } else { -1 };
-    for n in 0..8 {
+    let drones_near = r.units.iter().enumerate().filter(|(id, u)| {
+        *id != home && u.kind == RangeUnitKind::SkobaDrone && r.allied(*id) == allied
+            && (0..3).map(|a| {
+                let p = u.motion.pos[a].to_int_trunc();
+                let d = i64::from(p - at[a]);
+                d * d
+            }).sum::<i64>() <= 2000 * 2000
+    }).count();
+    for n in drones_near..8 {
         if r.units.len() >= MAX_RANGE_UNITS { break; }
         spawn_initial_unit(
             r,
             RangeUnitKind::SkobaDrone,
             allied,
-            [at[0] + direction * 800, at[1] + 44, at[2] - 240 + n * 70],
+            [at[0] + direction * 800, at[1] + 44, at[2] - 240 + n as i32 * 70],
         );
     }
     let crawler_near = r.units.iter().enumerate().any(|(id, u)| {

@@ -2786,60 +2786,59 @@ pub fn walker04() -> UnitBody {
             let elbow = (40 - sy * 22, 35, 40 + sx * 13);
             let wrist = (40 - sy * 33, 27, 40 + sx * 16);
             let muzzle = (40 - sy * 36, 25, 40 + sx * 17);
-            ball(&mut u, shoulder, 5, a);
-            mark_ball(&mut u, shoulder, 5, FINISH_GUN);
-            let mut upper = UnitBody::new_scaled(17, 6, 6, 1, BODY_MM);
-            fill_f(&mut upper, (0, 17), (0, 6), (0, 6), a, FINISH_IVORY);
-            mark(&mut upper, (0, 2), (0, 6), (0, 6), FINISH_GUN);
-            mark(&mut upper, (14, 17), (0, 6), (0, 6), FINISH_GUN);
-            mark(&mut upper, (3, 13), (5, 6), (1, 2), FINISH_PLATE);
-            mark(&mut upper, (3, 13), (5, 6), (4, 5), FINISH_PLATE);
-            mark(&mut upper, (4, 12), (2, 3), (0, 1), FINISH_GUN);
-            mark(&mut upper, (4, 12), (2, 3), (5, 6), FINISH_GUN);
+            ball(&mut u, shoulder, 3, a);
+            mark_ball(&mut u, shoulder, 3, FINISH_STEEL);
+            let mut upper = UnitBody::new_scaled(17, 4, 4, 1, BODY_MM);
+            fill_f(&mut upper, (0, 17), (0, 4), (0, 4), a, FINISH_IVORY);
+            mark(&mut upper, (0, 2), (0, 4), (0, 4), FINISH_GUN);
+            mark(&mut upper, (14, 17), (0, 4), (0, 4), FINISH_GUN);
+            mark(&mut upper, (3, 13), (3, 4), (1, 2), FINISH_PLATE);
+            mark(&mut upper, (3, 13), (3, 4), (2, 3), FINISH_PLATE);
             for x in [4, 11] {
-                mark(&mut upper, (x, x + 1), (5, 6), (2, 4), FINISH_STEEL);
+                mark(&mut upper, (x, x + 1), (3, 4), (1, 3), FINISH_STEEL);
             }
-            u.push_segment(Attach { turret: true, ..Attach::aimed(at(shoulder), (0, 3, 3), (elbow.0 - shoulder.0, elbow.1 - shoulder.1, elbow.2 - shoulder.2)) }, upper);
+            u.push_segment(Attach { turret: true, ..Attach::aimed(at(shoulder), (0, 2, 2), (elbow.0 - shoulder.0, elbow.1 - shoulder.1, elbow.2 - shoulder.2)) }, upper);
 
-            let mut elbow_hub = UnitBody::new_scaled(10, 10, 10, 1, BODY_MM);
-            ball(&mut elbow_hub, (5, 5, 5), 5, a);
-            mark_ball(&mut elbow_hub, (5, 5, 5), 5, FINISH_GUN);
-            fill_f(&mut elbow_hub, (7, 10), (2, 8), (2, 8), a, FINISH_IVORY);
-            mark(&mut elbow_hub, (8, 10), (4, 6), (4, 6), FINISH_PLATE);
-            u.push_segment(Attach { turret: true, ..Attach::flat(at(elbow), (5, 5, 5)) }, elbow_hub);
+            let mut elbow_hub = UnitBody::new_scaled(8, 8, 8, 1, BODY_MM);
+            ball(&mut elbow_hub, (4, 4, 4), 3, a);
+            mark_ball(&mut elbow_hub, (4, 4, 4), 3, FINISH_STEEL);
+            fill_f(&mut elbow_hub, (6, 8), (2, 6), (2, 6), a, FINISH_IVORY);
+            mark(&mut elbow_hub, (6, 8), (3, 5), (3, 5), FINISH_PLATE);
+            u.push_segment(Attach { turret: true, ..Attach::flat(at(elbow), (4, 4, 4)) }, elbow_hub);
 
-            let mut forearm = UnitBody::new_scaled(16, 6, 7, 1, BODY_MM);
-            fill_f(&mut forearm, (0, 16), (0, 6), (0, 7), a, FINISH_IVORY);
-            mark(&mut forearm, (0, 2), (0, 6), (0, 7), FINISH_GUN);
-            mark(&mut forearm, (14, 16), (0, 6), (0, 7), FINISH_GUN);
-            fill_f(&mut forearm, (4, 11), (5, 6), (2, 5), a, FINISH_ENERGY);
-            mark(&mut forearm, (3, 12), (5, 6), (1, 2), FINISH_GUN);
-            mark(&mut forearm, (3, 12), (5, 6), (5, 6), FINISH_GUN);
-            mark(&mut forearm, (12, 13), (1, 5), (1, 6), FINISH_PLATE);
-            for z in [1, 5] {
-                mark(&mut forearm, (3, 4), (4, 5), (z, z + 1), FINISH_STEEL);
-                mark(&mut forearm, (12, 13), (4, 5), (z, z + 1), FINISH_STEEL);
+            let mut forearm = UnitBody::new_scaled(16, 4, 5, 1, BODY_MM);
+            fill_f(&mut forearm, (0, 16), (0, 4), (0, 5), a, FINISH_IVORY);
+            mark(&mut forearm, (0, 2), (0, 4), (0, 5), FINISH_GUN);
+            mark(&mut forearm, (14, 16), (0, 4), (0, 5), FINISH_GUN);
+            fill_f(&mut forearm, (4, 11), (3, 4), (1, 4), a, FINISH_ENERGY);
+            mark(&mut forearm, (3, 12), (3, 4), (0, 1), FINISH_GUN);
+            mark(&mut forearm, (3, 12), (3, 4), (4, 5), FINISH_GUN);
+            mark(&mut forearm, (12, 13), (1, 3), (1, 4), FINISH_PLATE);
+            for z in [1, 3] {
+                mark(&mut forearm, (3, 4), (2, 3), (z, z + 1), FINISH_STEEL);
+                mark(&mut forearm, (12, 13), (2, 3), (z, z + 1), FINISH_STEEL);
             }
-            u.push_segment(Attach { turret: true, ..Attach::aimed(at(elbow), (0, 3, 3), (wrist.0 - elbow.0, wrist.1 - elbow.1, wrist.2 - elbow.2)) }, forearm);
+            u.push_segment(Attach { turret: true, ..Attach::aimed(at(elbow), (0, 2, 2), (wrist.0 - elbow.0, wrist.1 - elbow.1, wrist.2 - elbow.2)) }, forearm);
 
-            let mut laser = UnitBody::new_scaled(6, 6, 6, 1, BODY_MM);
-            fill_f(&mut laser, (0, 6), (0, 6), (0, 6), Part::Weapon, FINISH_GUN);
-            fill_f(&mut laser, (1, 3), (1, 5), (1, 5), Part::Weapon, FINISH_IVORY);
-            mark(&mut laser, (1, 3), (4, 5), (2, 4), FINISH_PLATE);
-            fill_f(&mut laser, (4, 5), (1, 5), (1, 5), Part::Weapon, FINISH_STEEL);
-            fill_f(&mut laser, (5, 6), (2, 4), (2, 4), Part::Weapon, FINISH_ENERGY);
-            u.push_segment(Attach { turret: true, ..Attach::aimed(at(wrist), (0, 3, 3), (muzzle.0 - wrist.0, muzzle.1 - wrist.1, muzzle.2 - wrist.2)) }, laser);
+            let mut laser = UnitBody::new_scaled(4, 4, 4, 1, BODY_MM);
+            fill_f(&mut laser, (0, 4), (0, 4), (0, 4), Part::Weapon, FINISH_GUN);
+            fill_f(&mut laser, (0, 2), (0, 4), (0, 4), Part::Weapon, FINISH_IVORY);
+            mark(&mut laser, (0, 2), (2, 4), (1, 3), FINISH_PLATE);
+            fill_f(&mut laser, (2, 3), (0, 4), (0, 4), Part::Weapon, FINISH_STEEL);
+            fill_f(&mut laser, (3, 4), (1, 3), (1, 3), Part::Weapon, FINISH_ENERGY);
+            u.push_segment(Attach { turret: true, ..Attach::aimed(at(wrist), (0, 2, 2), (muzzle.0 - wrist.0, muzzle.1 - wrist.1, muzzle.2 - wrist.2)) }, laser);
 
-            for (from, to) in [(shoulder, elbow), (elbow, wrist), (wrist, muzzle)] {
-                let mut p = [from.0, from.1, from.2];
-                let target = [to.0, to.1, to.2];
-                for axis in 0..3 {
-                    while p[axis] != target[axis] {
-                        p[axis] += (target[axis] - p[axis]).signum();
-                        u.set(p[0] as usize, p[1] as usize, p[2] as usize, Part::Weapon);
-                        u.set_finish(p[0] as usize, p[1] as usize, p[2] as usize, FINISH_GUN);
-                    }
-                }
+            for x in 40.min(shoulder.0).min(muzzle.0)..=40.max(shoulder.0).max(muzzle.0) {
+                u.set(x as usize, 25, shoulder.2 as usize, Part::Weapon);
+                u.set_finish(x as usize, 25, shoulder.2 as usize, FINISH_IVORY);
+            }
+            for y in 25..=shoulder.1 {
+                u.set(shoulder.0 as usize, y as usize, shoulder.2 as usize, Part::Weapon);
+                u.set_finish(shoulder.0 as usize, y as usize, shoulder.2 as usize, FINISH_IVORY);
+            }
+            for z in shoulder.2.min(muzzle.2)..=shoulder.2.max(muzzle.2) {
+                u.set(muzzle.0 as usize, 25, z as usize, Part::Weapon);
+                u.set_finish(muzzle.0 as usize, 25, z as usize, FINISH_IVORY);
             }
             u.push_weapon_path(WeaponPath {
                 min: [muzzle.0 as u8, 22, (muzzle.2 - 3) as u8],
@@ -2850,9 +2849,9 @@ pub fn walker04() -> UnitBody {
     }
 
     let mut u = seat(u, "Walker 04 · силовые рамы");
-    u.mm = 1000;
+    u.mm = 500;
     for segment in &mut u.segments {
-        segment.body.mm = 1000;
+        segment.body.mm = 500;
     }
     u.turret_y = 41;
     u
@@ -3400,11 +3399,11 @@ mod tests {
     #[test]
     fn strider_has_every_part_and_the_right_size() {
         let s = walker04();
-        // 80×52×80 м при вокселе 1 м — в десять раз крупнее исходного блокаута.
+        // 40×26×40 м при вокселе 0,5 м — вдвое меньше прежнего корпуса.
         assert_eq!((s.vol.nx, s.vol.ny, s.vol.nz), (80, 52, 80));
         assert_eq!(
             s.extent_mm(),
-            (80_000, 52_000, 80_000),
+            (40_000, 26_000, 40_000),
             "шагоход сменил габарит"
         );
         let seen = roles(&s);
