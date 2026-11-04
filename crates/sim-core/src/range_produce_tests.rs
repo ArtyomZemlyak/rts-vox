@@ -355,25 +355,28 @@ fn lines_are_kept_in_slot_order() {
     assert_eq!(p.stalled, 1);
 }
 
-/// 61 allied tanks in rows and two allied bases: 63 units.
+/// Leave exactly one roster slot for the two competing production lines.
 fn crowded() -> RangeLayout {
     let mut l = layout();
+    l.size = [1600, 192, 1600];
+    l.clear_min = [1, 1];
+    l.clear_max = [1599, 1599];
     l.units.clear();
-    for row in 0..8 {
-        for col in 0..8 {
-            if l.units.len() == 61 {
+    for row in 0..(MAX_RANGE_UNITS - 3).div_ceil(16) {
+        for col in 0..16 {
+            if l.units.len() == MAX_RANGE_UNITS - 3 {
                 break;
             }
             l.units.push(RangeUnitDef {
                 kind: RangeUnitKind::Tank,
                 allied: true,
-                at: [100 + 80 * col, 16, 100 + 60 * row],
+                at: [100 + 80 * col as i32, 16, 100 + 60 * row as i32],
                 weapon: None,
             });
         }
     }
-    l.units.push(base(true, [200, 16, 640]));
-    l.units.push(base(true, [520, 16, 640]));
+    l.units.push(base(true, [200, 16, 1000]));
+    l.units.push(base(true, [900, 16, 1000]));
     l
 }
 
@@ -381,7 +384,7 @@ fn crowded() -> RangeLayout {
 fn at_the_roster_ceiling_a_finished_unit_waits_in_its_line() {
     let mut r = range(crowded());
     assert_eq!(r.units.len(), MAX_RANGE_UNITS - 1);
-    let (first, second) = (61, 62);
+    let (first, second) = (MAX_RANGE_UNITS - 3, MAX_RANGE_UNITS - 2);
     let cost = r.production_cost(RangeUnitKind::Strider).unwrap();
     let seeded = 2 * cost;
     seed(&mut r, true, seeded);
@@ -419,6 +422,91 @@ fn at_the_roster_ceiling_a_finished_unit_waits_in_its_line() {
     );
     assert_books(&r, seeded);
     assert_eq!(r.side_store(true).unwrap().0, cost);
+}
+
+#[test]
+fn reserved_foundations_keep_their_space_and_last_roster_slot() {
+    let mut r = range(crowded());
+    let first = MAX_RANGE_UNITS - 3;
+    let at = r.free_spot(first, RangeUnitKind::Tank, true).unwrap();
+    assert!(r
+        .create_construction_site(RangeUnitKind::TurretT1, true, at)
+        .is_some());
+    assert_ne!(r.free_spot(first, RangeUnitKind::Tank, true), Some(at));
+    assert!(r
+        .place_sandbox_unit(RangeUnitKind::Tank, true, at, 0)
+        .is_err());
+    assert_eq!(r.occupied_unit_slots(), MAX_RANGE_UNITS);
+    let cost = r.production_cost(RangeUnitKind::Tank).unwrap();
+    seed(&mut r, true, cost);
+    assert!(r
+        .execute_command(Command::Produce {
+            actor: first,
+            kind: RangeUnitKind::Tank
+        })
+        .accepted());
+    for _ in 0..BUILD {
+        r.production_phase();
+    }
+    assert_eq!(r.units.len(), MAX_RANGE_UNITS - 1);
+    assert_eq!(r.production_paid(first), Some(cost));
+    assert!(r.mining().unwrap().production().unwrap().capped > 0);
+    let copy = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+    assert_eq!(r.state_hash(), copy.state_hash());
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn every_sandbox_kind_after_production_keeps_its_side_pose_and_snapshot() {
+    let mut l = layout();
+    // Exercise the same post-production path one kind at a time. A map-wide
+    // dense occupancy and its restored copy add memory, not test coverage.
+    l.size = [2048, 1024, 2048];
+    l.clear_min = [1, 1];
+    l.clear_max = [2047, 2047];
+    l.units = vec![base(true, [400, 16, 400])];
+    l.blocks = vec![
+        RangeBlock {
+            min: [0; 3],
+            max: [2048, 1024, 2048],
+            material: 0,
+        },
+        RangeBlock {
+            min: [0; 3],
+            max: [2048, 16, 2048],
+            material: 1,
+        },
+    ];
+    for (i, kind) in RangeUnitKind::ALL.into_iter().enumerate() {
+        let mut r = range(l.clone());
+        let cost = r.production_cost(RangeUnitKind::Tank).unwrap();
+        seed(&mut r, true, cost);
+        assert!(r
+            .execute_command(Command::Produce {
+                actor: 0,
+                kind: RangeUnitKind::Tank
+            })
+            .accepted());
+        for _ in 0..BUILD {
+            r.production_phase();
+        }
+        assert_eq!(r.spawned().len(), 1);
+        let tick = r.tick;
+        let at = [1300, 16, 1300];
+        let allied = i % 2 == 0;
+        let id = r
+            .place_sandbox_unit(kind, allied, at, (i % 4) as u8)
+            .unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+        assert_eq!(r.units[id].kind, kind);
+        assert_eq!(r.allied(id), allied);
+        assert_eq!(r.tick, tick);
+        assert!(r.matter.economy.ledger.balanced());
+        let mut section = ("", 0, None);
+        let copy =
+            BlastRange::restore_observed(r.config, &r.snapshot(), |a, b, c| section = (a, b, c))
+                .unwrap_or_else(|| panic!("{kind:?}: sandbox decoder stopped at {section:?}"));
+        assert_eq!(r.state_hash(), copy.state_hash(), "{kind:?}");
+    }
 }
 
 #[test]

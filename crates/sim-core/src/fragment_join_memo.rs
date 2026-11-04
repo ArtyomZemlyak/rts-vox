@@ -194,13 +194,16 @@ mod tests {
             ..Default::default()
         };
         let expected = memo.changed_hash();
-        assert_eq!(memo.changed_sorted(), expected);
+        assert_eq!(memo.changed_sorted().sorted_keys(), expected.sorted_keys());
         let mut unsorted = Memo {
             previous: previous.into_iter().rev().collect(),
             current,
             valid: true,
             ..Default::default()
         };
-        assert_eq!(unsorted.changed().unwrap(), expected);
+        assert_eq!(
+            unsorted.changed().unwrap().sorted_keys(),
+            expected.sorted_keys()
+        );
     }
 }

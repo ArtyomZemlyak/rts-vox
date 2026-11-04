@@ -12,7 +12,9 @@
     machine_gun: (burst_ticks: 30, interval_ticks: 2, range: "machine_gun",
         standoff_milli: 750,
         spread_milli: 3, work: 500, heat: 0, heat_radius: 0,
-        fracture_j: 100000, reload_ticks: 8),
+        // Reinforced T2 steel requires about 159 kJ including fragment motion.
+        // The old 100 kJ packet registered hits but could never claim it.
+        fracture_j: 200000, reload_ticks: 8),
     // A continuous hitscan beam deposits heat each tick at the first
     // solid cell and a 40 cm halo along its visible path, fading toward the edge.
     // Cover blocks the halo; the thermal field melts surfaces over time.

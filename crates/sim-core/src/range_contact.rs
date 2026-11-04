@@ -175,6 +175,7 @@ mod tests {
             })
             .to_vec();
         let mut r = BlastRange::with_layout(c, layout).unwrap();
+        r.control(); // Contact tests do not include automatic range-gun shots.
         r.patrols_running = true;
         for _ in 0..20 {
             r.step();
@@ -253,11 +254,13 @@ mod tests {
         assert!(
             pieces
                 .iter()
-                .all(|(p, v, _)| p.x.sub(mid).abs() < Fx::from_int(4)
-                    && v.x == Fx::ZERO
-                    && v.z == Fx::ZERO),
+                .all(|(p, _, _)| p.x.sub(mid).abs() < Fx::from_int(4)),
             "a piece left the place of the impact: {pieces:?}"
         );
+        // Shared fragment contacts have already run by the end of the tick;
+        // their response can separate touching pieces. The crash itself must
+        // not allocate launch energy in addition to its fracture work.
+        assert_eq!(r.matter.debris.body_motion_mj, 0);
     }
 
     /// **A slow nudge breaks nothing** (ADR-455): under the closing speed
@@ -266,6 +269,14 @@ mod tests {
     fn a_slow_nudge_breaks_and_dents_nothing() {
         // From rest, a unit apart: they meet at a walking pace.
         let mut r = head_on(0);
+        // Bound the actual closing speed, including the run-up through the
+        // grazing allowance. Starting from rest alone does not bound it.
+        let speed = (r.matter.tuning.contact_min_mm_s.saturating_sub(1)
+            / (2 * u32::from(voxel::unit::WORLD_MM)))
+        .max(1) as i32;
+        for u in &mut r.units {
+            u.motion.speed = speed;
+        }
         for _ in 0..40 {
             r.step();
             if r.units[0].motion.shove.x < Fx::ZERO {

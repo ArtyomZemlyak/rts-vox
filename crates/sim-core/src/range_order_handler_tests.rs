@@ -20,6 +20,17 @@ fn arena(kind: RangeUnitKind) -> BlastRange {
             allied,
         })
         .to_vec();
+    // Large logistics/factory templates no longer fit the old 64 m arena.
+    let oversized = layout.units.iter().any(|def| {
+        let (lo, hi) = RangeUnit::of_kind(def.kind, def.at).bounds();
+        (0..3).any(|a| lo[a] < 1 || hi[a] >= layout.size[a] as i32 - 1)
+    });
+    if oversized {
+        layout.size = [4096, 2048, 4096];
+        layout.units[0].at = [1000, 16, 1600];
+        layout.units[1].at = [3000, 16, 1600];
+        layout.clear_max = [4032, 4032];
+    }
     BlastRange::with_layout(
         ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
         layout,

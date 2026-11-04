@@ -43,7 +43,12 @@ pub struct Visual {
 fn segment_picture(frame: &sim_core::damage::Frame) -> Transform {
     let scalar = |v: fx::Fx| v.raw() as f32 / fx::ONE_RAW as f32;
     let vector = |v: sim_core::damage::V3| Vec3::new(scalar(v.x), scalar(v.y), scalar(v.z));
-    let rotation = Quat::from_mat3(&Mat3::from_cols(vector(frame.x), vector(frame.y), vector(frame.z))).normalize();
+    let rotation = Quat::from_mat3(&Mat3::from_cols(
+        vector(frame.x),
+        vector(frame.y),
+        vector(frame.z),
+    ))
+    .normalize();
     let scale = 1.0 / scalar(frame.scale);
     let centre = Vec3::from(frame.centre.map(scalar));
     Transform::from_translation(vector(frame.base) - rotation * (centre * scale))
@@ -801,7 +806,15 @@ pub fn animate(
         frame.kind = u.kind.index();
         frame.walker_segments.clear();
         if u.kind == RangeUnitKind::Walker04 {
-            frame.walker_segments.extend(u.seg_frames.iter().map(segment_picture));
+            let delta = frame.turret * now.0.inverse();
+            let actual_origin = pose(u).pos + now.1;
+            let visible_origin = frame.pos + frame.turret_offset;
+            frame.walker_segments.extend(u.seg_frames.iter().map(|f| {
+                let mut tr = segment_picture(f);
+                tr.translation = visible_origin + delta * (tr.translation - actual_origin);
+                tr.rotation = delta * tr.rotation;
+                tr
+            }));
         }
         frame.legs.clear();
         // The range plants the feet (ADR-279); the picture interpolates

@@ -228,7 +228,7 @@ impl<'h, 's> HullQueries<'h, 's> {
         moving_only: bool,
     ) -> Option<&'h Hull<'s>> {
         if !moving_only {
-            return hull_hit(p, low, high, self.hulls, skip);
+            return hull_hit(p, low, high, self.hulls, u128::from(skip));
         }
         self.hulls.iter().enumerate().find_map(|(i, h)| {
             if (i < 64 && skip & (1 << i) != 0) || h.vel == [Fx::ZERO; 3] {
@@ -332,7 +332,7 @@ mod tests {
                         let low = [Fx::from_ratio(-size, 2); 3];
                         let high = [Fx::from_ratio(size, 2); 3];
                         for skip in [0, 1, u64::MAX, 0xa518_3ec2_d947_6b0f] {
-                            assert_eq!(identity(index.hit(p, low, high, skip)), identity(hull_hit(p, low, high, &hulls, skip)), "count={count}, geometry={geometry}, query={i}, size={size}, skip={skip}");
+                            assert_eq!(identity(index.hit(p, low, high, skip)), identity(hull_hit(p, low, high, &hulls, u128::from(skip))), "count={count}, geometry={geometry}, query={i}, size={size}, skip={skip}");
                         }
                     }
                 }
@@ -348,7 +348,7 @@ mod tests {
                     for skip in [0, 1, 3, u64::MAX] {
                         assert_eq!(
                             identity(query.hit(p, [Fx::ZERO; 3], [Fx::ONE; 3], skip)),
-                            identity(hull_hit(p, [Fx::ZERO; 3], [Fx::ONE; 3], &overlap, skip))
+                            identity(hull_hit(p, [Fx::ZERO; 3], [Fx::ONE; 3], &overlap, u128::from(skip)))
                         );
                     }
                 }

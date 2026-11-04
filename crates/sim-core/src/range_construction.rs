@@ -216,19 +216,29 @@ impl Construction {
             let reserved = s.u64();
             let quota = s.u8();
             let unit = if s.bool() { Some(s.u16()) } else { None };
-            if !matches!(
-                kind,
-                RangeUnitKind::TurretT1
-                    | RangeUnitKind::KilFactoryT1
-                    | RangeUnitKind::GrebenStorage
-            ) || required == 0
+            if !kind.emplacement()
+                || required == 0
                 || completed > required
                 || reserved > required - completed
                 || quota > 32
                 || unit.is_some_and(|id| {
-                    units
-                        .get(usize::from(id))
-                        .is_none_or(|u| u.kind != kind || u.at != at)
+                    units.get(usize::from(id)).is_none_or(|u| {
+                        let upgraded_factory = completed == required
+                            && matches!(
+                                kind,
+                                RangeUnitKind::KilFactoryT1
+                                    | RangeUnitKind::KilFactoryT2
+                                    | RangeUnitKind::KilFactoryT3
+                            )
+                            && matches!(
+                                u.kind,
+                                RangeUnitKind::KilFactoryT2
+                                    | RangeUnitKind::KilFactoryT3
+                                    | RangeUnitKind::KilFactoryT4
+                            )
+                            && u.kind.index() > kind.index();
+                        (u.kind != kind && !upgraded_factory) || u.at != at
+                    })
                 })
             {
                 return None;
@@ -249,7 +259,8 @@ impl Construction {
             return None;
         }
         let n = s.u32() as usize;
-        if n > units.len() || n > s.left() / 24 {
+        // An unloaded drone takes 15 bytes; cargo and an assigned site add fields.
+        if n > units.len() || n > s.left() / 15 {
             return None;
         }
         self.drones.clear();
@@ -318,10 +329,14 @@ impl Construction {
         Some(())
     }
 
-    fn assign_idle(&mut self) {
+    fn assign_idle(&mut self, r: &BlastRange) {
         for site in 0..self.sites.len() {
             let quota = usize::from(self.sites[site].quota);
-            if self.sites[site].delivered == self.sites[site].required {
+            if self.sites[site].delivered == self.sites[site].required
+                || self.sites[site]
+                    .unit
+                    .is_some_and(|id| !r.units.get(usize::from(id)).is_some_and(|u| u.status.alive))
+            {
                 continue;
             }
             let mut assigned = self
@@ -335,7 +350,14 @@ impl Construction {
             let idle: Vec<u16> = self
                 .drones
                 .iter()
-                .filter(|(_, d)| d.site.is_none() && d.cargo.is_none())
+                .filter(|(id, d)| {
+                    d.site.is_none()
+                        && d.cargo.is_none()
+                        && r.units
+                            .get(usize::from(**id))
+                            .is_some_and(|u| u.status.alive)
+                        && r.allied(usize::from(**id)) == self.sites[site].allied
+                })
                 .map(|(&id, _)| id)
                 .collect();
             for id in idle {
@@ -347,7 +369,9 @@ impl Construction {
                 if left == 0 {
                     break;
                 }
-                let want = left.min(BATCH);
+                let density = Amount::from(r.matter.source_density(STEEL)).max(1);
+                let batch = (BATCH / density).max(1) * density;
+                let want = left.min(batch);
                 s.reserved += want;
                 let d = self.drones.get_mut(&id).expect("idle drone");
                 d.site = Some(site as u16);
@@ -406,10 +430,30 @@ impl Construction {
         ) {
             return;
         }
-        self.assign_idle();
+        self.assign_idle(r);
         let ids: Vec<u16> = self.drones.keys().copied().collect();
         for id in ids {
             self.step_drone(r, id);
+        }
+        for site in self.sites.iter().filter(|s| s.delivered < s.required) {
+            if let Some(id) = site.unit.map(usize::from) {
+                let body = r.matter.body_container(id);
+                let intact = r.matter.economy.ledger.held(body) >= site.delivered;
+                let u = &mut r.units[id];
+                if intact && u.status.alive {
+                    // A foundation supports its unfinished scaffold. Once
+                    // damaged or complete, ordinary body physics owns it.
+                    let pos = site.at.map(Fx::from_int);
+                    if u.motion.pos != pos {
+                        u.motion.pos = pos;
+                        u.update_pose(u.motion.drive.head);
+                        u.revision += 1;
+                    }
+                }
+                u.status.engine = false;
+                u.status.weapon = false;
+                u.status.sensor = false;
+            }
         }
     }
 
@@ -423,25 +467,66 @@ impl Construction {
         }
         if !r.units[index].status.alive {
             set_skoba_pose(&mut r.units[index], index, false);
+            if let Some(site) = d
+                .site
+                .take()
+                .and_then(|s| self.sites.get_mut(usize::from(s)))
+            {
+                site.reserved = site.reserved.saturating_sub(d.want);
+            }
+            d.want = 0;
+            d.leg = Leg::Idle;
             if let Some(batch) = d.cargo.take() {
                 let amount = r.matter.economy.ledger.held(batch.container);
-                if let Some(site) = d.site.and_then(|s| self.sites.get_mut(usize::from(s))) {
-                    site.reserved = site.reserved.saturating_sub(d.want);
-                }
                 r.drop_drone_cargo(index, batch.container);
                 self.lost += amount;
             }
             self.drones.insert(id, d);
             return;
         }
-        let allied = r.allied(index);
-        if !r
-            .units
-            .get(usize::from(d.home))
-            .is_some_and(|u| u.status.alive && r.allied(usize::from(d.home)) == allied)
+        // Manual control and its braking tail own flight until the craft stops.
+        // Keep the delivery and cargo intact so automatic work can resume.
+        if r.units[index].motion.pilot.is_some()
+            || r.units[index].motion.drive.vel != Fx::ZERO
+            || r.units[index].motion.drive.yaw_rate != 0
         {
+            self.drones.insert(id, d);
+            return;
+        }
+        let allied = r.allied(index);
+        if !r.units.get(usize::from(d.home)).is_some_and(|u| {
+            u.status.alive
+                && matches!(
+                    u.kind,
+                    RangeUnitKind::GrebenStorage | RangeUnitKind::Crawler
+                )
+                && r.allied(usize::from(d.home)) == allied
+        }) {
             let sides: Vec<bool> = (0..r.units.len()).map(|id| r.allied(id)).collect();
             d.home = nearest_home(&r.units, &sides, index) as u16;
+        }
+        if d.site.is_some_and(|id| {
+            self.sites[usize::from(id)].unit.is_some_and(|unit| {
+                !r.units
+                    .get(usize::from(unit))
+                    .is_some_and(|u| u.status.alive)
+            })
+        }) {
+            let site = &mut self.sites[usize::from(d.site.take().unwrap())];
+            site.reserved = site.reserved.saturating_sub(d.want);
+            d.want = 0;
+            d.leg = if d.cargo.is_some() {
+                Leg::Returning
+            } else {
+                Leg::Idle
+            };
+        }
+        // The self slot denotes no available home. Keep cargo/reservations
+        // and recheck next tick, rather than chase our own moving y + 100.
+        // A loaded delivery to a still-valid site can finish without a home.
+        if usize::from(d.home) == index && matches!(d.leg, Leg::ToSource | Leg::Returning) {
+            self.drones.insert(id, d);
+            return;
         }
         match d.leg {
             Leg::Idle => {}
@@ -464,9 +549,11 @@ impl Construction {
                     self.drones.insert(id, d);
                     return;
                 };
+                let density = Amount::from(r.matter.source_density(STEEL)).max(1);
                 let ledger = &mut r.matter.economy.ledger;
                 let cargo = ledger.create(Kind::Body, 0, d.want);
-                let moved = ledger.transfer(source, cargo, d.want);
+                let available = ledger.held(source).min(d.want) / density * density;
+                let moved = ledger.transfer(source, cargo, available);
                 if moved == 0 {
                     assert!(ledger.retire_empty(cargo));
                     self.drones.insert(id, d);
@@ -535,6 +622,7 @@ impl Construction {
                         s.kind,
                         s.at,
                         s.required,
+                        s.delivered - moved,
                         s.delivered,
                     );
                     if moved < d.want {
@@ -548,7 +636,9 @@ impl Construction {
                     assert!(r.matter.economy.ledger.retire_empty(batch.container));
                     set_skoba_pose(&mut r.units[index], index, true);
                     if s.kind == RangeUnitKind::GrebenStorage && s.delivered == s.required {
-                        spawn_greben_crew(r, usize::from(s.unit.expect("storage unit")));
+                        let home = usize::from(s.unit.expect("storage unit"));
+                        let reserved = self.sites.iter().filter(|s| s.unit.is_none()).count();
+                        spawn_greben_crew(r, home, reserved);
                     }
                 }
             }
@@ -636,10 +726,7 @@ fn set_skoba_loaded(u: &mut RangeUnit, id: usize) {
     if u.kind != RangeUnitKind::SkobaDrone || !u.status.alive || !u.removed.is_empty() {
         return;
     }
-    let mut body = voxel::unit::skoba_with_cargo();
-    body.ablation_milli = u.body.ablation_milli;
-    body.fracture_milli = u.body.fracture_milli;
-    u.body = body;
+    u.restore_skoba_form(2);
     let head = u.motion.drive.head;
     u.update_pose(head);
     u.refresh_damage(id);
@@ -655,15 +742,27 @@ fn set_skoba_pose(u: &mut RangeUnit, id: usize, compact: bool) {
         return;
     }
     let alive = u.status.alive;
-    let mut body = voxel::unit::skoba_drone(compact);
-    body.ablation_milli = u.body.ablation_milli;
-    body.fracture_milli = u.body.fracture_milli;
-    u.body = body;
+    u.restore_skoba_form(u8::from(compact));
     let head = u.motion.drive.head;
     u.update_pose(head);
     u.refresh_damage(id);
     u.status.alive = alive;
     u.revision += 1;
+}
+
+impl RangeUnit {
+    pub(in crate::blast) fn restore_skoba_form(&mut self, form: u8) {
+        let mut body = match form {
+            0 => voxel::unit::skoba(),
+            1 => voxel::unit::skoba_drone(true),
+            2 => voxel::unit::skoba_with_cargo(),
+            _ => unreachable!("validated Skoba form"),
+        };
+        body.ablation_milli = self.body.ablation_milli;
+        body.fracture_milli = self.body.fracture_milli;
+        self.body = body;
+        self.skoba_form = form;
+    }
 }
 
 fn fly(u: &mut RangeUnit, target: [i32; 3]) -> bool {
@@ -686,6 +785,51 @@ fn fly(u: &mut RangeUnit, target: [i32; 3]) -> bool {
 }
 
 impl BlastRange {
+    /// Unmaterialised foundations already own a roster slot and a footprint.
+    /// Production and sandbox insertion must respect both reservations.
+    pub(in super::super) fn reserved_construction_bounds(
+        &self,
+    ) -> impl Iterator<Item = ([i32; 3], [i32; 3])> + '_ {
+        self.mining
+            .as_ref()
+            .and_then(|m| m.construction.as_ref())
+            .into_iter()
+            .flat_map(|c| c.sites.iter())
+            .filter(|s| s.unit.is_none())
+            .map(|s| {
+                super::super::placement::Validator::default().runtime_bounds(
+                    s.kind,
+                    s.at,
+                    if self.battle_mode() && !s.allied {
+                        2
+                    } else {
+                        0
+                    },
+                )
+            })
+    }
+
+    pub(super) fn occupied_unit_slots(&self) -> usize {
+        self.units.len() + self.reserved_construction_bounds().count()
+    }
+
+    pub fn construction_cost(&self, kind: RangeUnitKind) -> Option<Amount> {
+        kind.emplacement().then(|| {
+            self.matter
+                .template_matter(&RangeUnit::of_kind(kind, [0; 3]))
+        })
+    }
+
+    pub fn unit_under_construction(&self, id: usize) -> bool {
+        self.mining
+            .as_ref()
+            .and_then(|m| m.construction.as_ref())
+            .is_some_and(|c| {
+                c.sites
+                    .iter()
+                    .any(|s| s.unit == Some(id as u16) && s.delivered < s.required)
+            })
+    }
     pub fn construction_sites(&self) -> Vec<SiteView> {
         self.mining
             .as_ref()
@@ -708,34 +852,44 @@ impl BlastRange {
             .is_some_and(|c| c.set_quota(site, quota))
     }
 
+    pub fn can_construct(&self, kind: RangeUnitKind, allied: bool, at: [i32; 3]) -> bool {
+        let Some(c) = self.mining.as_ref().and_then(|m| m.construction.as_ref()) else {
+            return false;
+        };
+        if !kind.emplacement()
+            || self.units.len() + c.sites.iter().filter(|s| s.unit.is_none()).count()
+                >= MAX_RANGE_UNITS
+            || c.sites.len() >= 32
+        {
+            return false;
+        }
+        let validator = super::super::placement::Validator::default();
+        let yaw = if self.battle_mode() && !allied { 2 } else { 0 };
+        if validator.runtime(self, kind, at, yaw).is_err() {
+            return false;
+        }
+        let (lo, hi) = validator.runtime_bounds(kind, at, yaw);
+        !c.sites.iter().filter(|s| s.unit.is_none()).any(|s| {
+            let yaw = if self.battle_mode() && !s.allied {
+                2
+            } else {
+                0
+            };
+            let (a, b) = validator.runtime_bounds(s.kind, s.at, yaw);
+            (0..3).all(|k| lo[k] < b[k] && a[k] < hi[k])
+        })
+    }
+
     pub fn create_construction_site(
         &mut self,
         kind: RangeUnitKind,
         allied: bool,
         at: [i32; 3],
     ) -> Option<usize> {
-        if !matches!(
-            kind,
-            RangeUnitKind::TurretT1 | RangeUnitKind::KilFactoryT1 | RangeUnitKind::GrebenStorage
-        ) || self.units.len() >= MAX_RANGE_UNITS
-            || self
-                .mining
-                .as_ref()
-                .and_then(|m| m.construction.as_ref())
-                .is_none()
-        {
+        if !self.can_construct(kind, allied, at) {
             return None;
         }
         let probe = RangeUnit::of_kind(kind, at);
-        let (lo, hi) = probe.bounds();
-        if (0..3).any(|a| lo[a] < 1 || hi[a] >= self.size[a] as i32 - 1)
-            || self.units.iter().any(|u| {
-                let (a, b) = u.bounds();
-                (0..3).all(|k| lo[k] < b[k] && a[k] < hi[k])
-            })
-        {
-            return None;
-        }
         let required = self.matter.template_matter(&probe);
         let quota = if self.construction_sites().is_empty() {
             8
@@ -762,7 +916,7 @@ impl BlastRange {
             .units
             .get(id)
             .is_some_and(|u| u.kind == RangeUnitKind::Crawler && u.status.alive && self.allied(id))
-            || self.units.len() + 4 > MAX_RANGE_UNITS
+            || self.occupied_unit_slots() + 4 > MAX_RANGE_UNITS
             || self
                 .mining
                 .as_ref()
@@ -841,13 +995,64 @@ impl BlastRange {
         }
     }
 
-    pub(crate) fn load_construction(&mut self, s: &mut Scan) -> Option<()> {
+    pub(crate) fn load_construction(&mut self, s: &mut Scan, legacy_forms: bool) -> Option<()> {
         let c = self.mining.as_mut()?.construction.as_mut()?;
-        c.load(s, &self.units, &self.matter.economy.ledger)
+        c.load(s, &self.units, &self.matter.economy.ledger)?;
+        if legacy_forms {
+            // Older snapshots omitted the form. Undamaged loaded/returning
+            // craft have an unambiguous form; damaged historical poses do not.
+            let forms: Vec<_> = c
+                .drones
+                .iter()
+                .filter_map(|(&id, d)| {
+                    let u = &self.units[usize::from(id)];
+                    (u.status.alive && u.removed.is_empty()).then_some((
+                        id,
+                        if d.cargo.is_some() {
+                            2
+                        } else if d.leg == Leg::Returning {
+                            1
+                        } else {
+                            0
+                        },
+                    ))
+                })
+                .collect();
+            for (id, form) in forms.into_iter().filter(|(_, form)| *form != 0) {
+                let u = &mut self.units[usize::from(id)];
+                u.restore_skoba_form(form);
+                u.update_pose(u.motion.drive.head);
+                u.refresh_damage(usize::from(id));
+            }
+        }
+        // An unfinished core is paid and grown incrementally. Its low fill
+        // ratio is construction progress, not a weapon destroying the core.
+        let unfinished: Vec<_> = self
+            .construction_sites()
+            .into_iter()
+            .filter(|s| !s.complete)
+            .collect();
+        for site in unfinished {
+            if let Some(id) = self
+                .units
+                .iter()
+                .position(|u| u.kind == site.kind && u.at == site.at)
+            {
+                let body = self.matter.body_container(id);
+                if self.matter.economy.ledger.held(body) >= site.delivered {
+                    unfinished_status(&mut self.units[id]);
+                } else {
+                    self.units[id].status.weapon = false;
+                    self.units[id].status.engine = false;
+                    self.units[id].status.sensor = false;
+                }
+            }
+        }
+        Some(())
     }
 }
 
-fn spawn_greben_crew(r: &mut BlastRange, home: usize) {
+fn spawn_greben_crew(r: &mut BlastRange, home: usize, reserved: usize) {
     let at = r.units[home].motion.pos.map(Fx::to_int_trunc);
     let allied = r.allied(home);
     let direction = if at[0] + 900 < r.size[0] as i32 {
@@ -874,14 +1079,18 @@ fn spawn_greben_crew(r: &mut BlastRange, home: usize) {
         })
         .count();
     for n in drones_near..8 {
-        if r.units.len() >= MAX_RANGE_UNITS {
+        if r.units.len() + reserved >= MAX_RANGE_UNITS {
             break;
         }
         spawn_initial_unit(
             r,
             RangeUnitKind::SkobaDrone,
             allied,
-            [at[0] + direction * 800, at[1] + 44, at[2] - 240 + n as i32 * 70],
+            [
+                at[0] + direction * 800,
+                at[1] + 44,
+                at[2] - 240 + n as i32 * 70,
+            ],
         );
     }
     let crawler_near = r.units.iter().enumerate().any(|(id, u)| {
@@ -897,7 +1106,7 @@ fn spawn_greben_crew(r: &mut BlastRange, home: usize) {
                 .sum::<i64>()
                 <= 2000 * 2000
     });
-    if !crawler_near && r.units.len() < MAX_RANGE_UNITS {
+    if !crawler_near && r.units.len() + reserved < MAX_RANGE_UNITS {
         spawn_initial_unit(
             r,
             RangeUnitKind::Crawler,
@@ -961,30 +1170,113 @@ fn apply_site_progress(
     r: &mut BlastRange,
     unit: usize,
     kind: RangeUnitKind,
-    at: [i32; 3],
+    _at: [i32; 3],
     required: Amount,
+    previous: Amount,
     delivered: Amount,
 ) {
-    let density = r.matter.source_density(STEEL) as Amount;
-    if density == 0 {
-        return;
-    }
-    let keep = (delivered / density).min((required / density).max(1)) as usize;
     let id = usize::from(unit);
-    let revision = r.units[id].revision;
-    let motion = r.units[id].motion.clone();
-    let mut fresh = RangeUnit::placed(kind, r.allied(id), at, true);
-    fresh.motion = motion;
-    let cells = connected_cells(&fresh.body);
-    for &cell in cells.iter().skip(keep) {
-        fresh.body.remove(cell[0], cell[1], cell[2]);
-        fresh.removed.push(cell.map(|v| v as u8));
+    let cells = construction_geometry(kind);
+    let share = |amount: Amount| {
+        ((cells.len() as u128 * u128::from(amount)) / u128::from(required.max(1))) as usize
+    };
+    let keep = share(delivered).min(cells.len());
+    let u = &mut r.units[id];
+    if previous == 0 {
+        // The first delivery starts with a pristine spawned body. Cells not
+        // paid for yet remain absent and are recorded for snapshot restore.
+        for &(segment, cell) in cells.iter().skip(keep) {
+            if let Some(segment) = segment {
+                u.body.segments[segment]
+                    .body
+                    .remove(cell[0], cell[1], cell[2]);
+                u.seg_removed.push((segment as u8, cell.map(|v| v as u8)));
+            } else {
+                u.body.remove(cell[0], cell[1], cell[2]);
+                u.removed.push(cell.map(|v| v as u8));
+            }
+        }
+    } else {
+        // Add only the newly paid interval. Rebuilding the whole body here
+        // would repair combat damage and erase dents/pending separation.
+        let start = share(previous);
+        for &(segment, cell) in cells.iter().take(keep).skip(start) {
+            let body = if let Some(segment) = segment {
+                &mut u.body.segments[segment].body
+            } else {
+                &mut u.body
+            };
+            let part = body.part_at(cell[0], cell[1], cell[2]);
+            body.set(cell[0], cell[1], cell[2], part);
+        }
+        u.removed.retain(|p| {
+            !u.body
+                .vol
+                .get(usize::from(p[0]), usize::from(p[1]), usize::from(p[2]))
+        });
+        u.seg_removed.retain(|(segment, p)| {
+            !u.body.segments[usize::from(*segment)].body.vol.get(
+                usize::from(p[0]),
+                usize::from(p[1]),
+                usize::from(p[2]),
+            )
+        });
     }
-    let head = fresh.motion.drive.head;
-    fresh.update_pose(head);
-    fresh.refresh_damage(id);
-    r.units[id] = fresh;
-    r.units[id].revision = revision + 1;
+    let head = u.motion.drive.head;
+    u.update_pose(head);
+    if delivered < required {
+        u.update_response();
+        unfinished_status(u);
+    } else {
+        u.refresh_damage(id);
+    }
+    u.revision += 1;
+}
+
+fn unfinished_status(u: &mut RangeUnit) {
+    u.status.alive = true;
+    u.status.engine = false;
+    u.status.weapon = false;
+    u.status.sensor = false;
+}
+
+fn construction_geometry(kind: RangeUnitKind) -> &'static [(Option<usize>, [usize; 3])] {
+    type Cell = (Option<usize>, [usize; 3]);
+    static CELLS: [std::sync::OnceLock<Vec<Cell>>; RangeUnitKind::COUNT] =
+        [const { std::sync::OnceLock::new() }; RangeUnitKind::COUNT];
+    CELLS[kind.index()].get_or_init(|| {
+        let unit = RangeUnit::of_kind(kind, [0; 3]);
+        let root = construction_cells(kind);
+        let seen: std::collections::BTreeSet<_> = root.iter().copied().collect();
+        let mut cells: Vec<Cell> = root.iter().map(|p| (None, *p)).collect();
+        for (segment, body) in std::iter::once((None, &unit.body)).chain(
+            unit.body
+                .segments
+                .iter()
+                .enumerate()
+                .map(|(id, s)| (Some(id), &s.body)),
+        ) {
+            for z in 0..usize::from(body.vol.nz) {
+                for y in 0..usize::from(body.vol.ny) {
+                    for x in 0..usize::from(body.vol.nx) {
+                        let p = [x, y, z];
+                        if body.vol.get(x, y, z) && (segment.is_some() || !seen.contains(&p)) {
+                            cells.push((segment, p));
+                        }
+                    }
+                }
+            }
+        }
+        cells
+    })
+}
+
+fn construction_cells(kind: RangeUnitKind) -> &'static [[usize; 3]] {
+    // Authored local geometry and BFS order do not depend on the site/side.
+    // Keep them outside the delivery loop; no cache contents enter snapshots.
+    static CELLS: [std::sync::OnceLock<Vec<[usize; 3]>>; RangeUnitKind::COUNT] =
+        [const { std::sync::OnceLock::new() }; RangeUnitKind::COUNT];
+    CELLS[kind.index()].get_or_init(|| connected_cells(&RangeUnit::of_kind(kind, [0; 3]).body))
 }
 
 fn connected_cells(body: &voxel::unit::UnitBody) -> Vec<[usize; 3]> {

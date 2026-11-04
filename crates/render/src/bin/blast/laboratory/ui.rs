@@ -277,6 +277,7 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
             ..default()
         })
         .with_children(|p| {
+            frontend::entry(p, &f);
             icon(p, "flask-conical");
             heading(p, &f, "ЛАБОРАТОРИЯ");
             label(p, &f, "", Some(14));
@@ -1941,7 +1942,7 @@ mod tests {
             .iter(world)
             .filter(|(_, n, _)| n.display == Display::Flex)
             .collect();
-        assert_eq!(visible.len(), 3);
+        assert_eq!(visible.len(), 6); // Tank, walker, spider, lightning, Eidolon and crawler.
         for (_, _, action) in visible {
             let LabAction::PickCatalog(i) = action else {
                 panic!("card is not actionable")

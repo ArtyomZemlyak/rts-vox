@@ -43,6 +43,21 @@ fn grove_with_height(kind: RangeUnitKind, allied: bool, tall: bool) -> BlastRang
             weapon: None,
         })
         .collect();
+    if kind.index() >= 14 {
+        l.size = [4096, 2048, 4096];
+        l.clear_min = [64, 64];
+        l.clear_max = [4032, 4032];
+        l.units[0].at = [1000, 16, 1600];
+        for (i, def) in l.units.iter_mut().enumerate().skip(1) {
+            def.at = [2800 + i as i32 * 100, 16, 3000];
+        }
+        for block in &mut l.blocks {
+            block.min[0] += 1780;
+            block.max[0] += 1780;
+            block.min[2] += 1408;
+            block.max[2] += 1408;
+        }
+    }
     let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
     let mut r = BlastRange::with_layout(config, l).unwrap();
     assert!(r.set_navigation_workers(4)); // Six slots exercise deferred feet.
@@ -255,13 +270,14 @@ fn emplacements_reject_movement_and_do_not_remotely_fell_trees() {
         assert_eq!(r.removed_materials[4] + r.removed_materials[5], 0);
         checked += 1;
     }
-    assert_eq!(checked, 6); // Includes the stationary nuclear silo.
+    assert_eq!(checked, 12); // Legacy emplacements plus Razlom, Greben and Kil T1–T4.
 }
 
 #[test]
 fn every_armed_kind_damages_wood_with_its_stock_weapon() {
     for kind in RangeUnitKind::ALL {
-        let mut l = grove(kind, true).layout.take().unwrap();
+        let mut l = grove(RangeUnitKind::Tank, true).layout.take().unwrap();
+        l.units[0].kind = kind;
         l.blocks = vec![
             RangeBlock {
                 min: [400, 16, 180],
@@ -274,6 +290,22 @@ fn every_armed_kind_damages_wood_with_its_stock_weapon() {
                 material: 4,
             },
         ];
+        let mut aim = [402, 45, 192];
+        let (lo, hi) = RangeUnit::of_kind(kind, l.units[0].at).bounds();
+        if (0..3).any(|a| lo[a] < 1 || hi[a] >= l.size[a] as i32 - 1) {
+            l.size = [4096, 2048, 4096];
+            l.clear_max = [4032, 4032];
+            l.units[0].at = [1100, 16, 1600];
+            for (i, def) in l.units.iter_mut().enumerate().skip(1) {
+                def.at = [2800 + i as i32 * 100, 16, 2800];
+            }
+            l.blocks = vec![RangeBlock {
+                min: [2100, 16, 1588],
+                max: [2104, 300, 1612],
+                material: 5,
+            }];
+            aim = [2102, 140, 1600];
+        }
         let config =
             ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
         let mut r = BlastRange::with_layout(config, l).unwrap();
@@ -284,7 +316,8 @@ fn every_armed_kind_damages_wood_with_its_stock_weapon() {
         }
         r.battle.actors[0].next = 0;
         let at = r.units[0].at;
-        assert!(r.battle_order(0, Order::Ground([402, 45, 192]), None));
+        let armed = r.battle_weapon(0).is_some();
+        assert!(r.battle_order(0, Order::Ground(aim), None));
         let mut replay: Option<BlastRange> = None;
         for _ in 0..600 {
             if r.battle.ai.next_tick == r.tick {
@@ -322,13 +355,11 @@ fn every_armed_kind_damages_wood_with_its_stock_weapon() {
                 replay = Some(BlastRange::restore(config, &r.snapshot()).unwrap());
             }
             assert!(r.matter.economy.ledger.balanced());
-            if r.removed_materials[5] > 0
-                || matches!(kind, RangeUnitKind::Base | RangeUnitKind::Crawler)
-            {
+            if r.removed_materials[5] > 0 || !armed {
                 break;
             }
         }
-        if matches!(kind, RangeUnitKind::Base | RangeUnitKind::Crawler) {
+        if !armed {
             assert_eq!(r.battle_weapon(0), None);
             assert_eq!(r.battle.actors[0].fired, 0);
             assert_eq!(r.removed_materials[5], 0);

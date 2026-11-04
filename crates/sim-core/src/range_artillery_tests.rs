@@ -131,21 +131,32 @@ fn player_artillery_surface_blast_keeps_ground_energy_and_replays() {
         }
         if replay.is_none() && r.matter.admission.ground[0] > 0 && r.has_wave_energy() {
             let bytes = r.snapshot();
-            assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 59);
+            // Granular motion can wrap the energy-bearing save. Locate the
+            // actual energy section instead of assuming it ends the stream.
+            let mut energy = fx::blob::Blob::new();
+            r.save_wave_energy(&mut energy);
+            let energy = energy.v;
+            let starts: Vec<_> = bytes
+                .windows(energy.len())
+                .enumerate()
+                .filter_map(|(i, part)| (part == energy.as_slice()).then_some(i))
+                .collect();
+            assert_eq!(starts.len(), 1, "energy section must be unambiguous");
+            let energy_start = starts[0];
             let copy = BlastRange::restore(c, &bytes).expect("player material blast snapshot");
             assert!(
                 !copy.weapon_configured,
                 "save promotion invented a weapon edit"
             );
             assert_eq!(bytes, copy.snapshot());
-            for (offset, value) in [(10, 2), (bytes.len() - 9, 2)] {
+            for (offset, value) in [(10, 2), (energy_start, 2)] {
                 let mut corrupt = bytes.clone();
                 corrupt[offset] = value;
                 assert!(BlastRange::restore(c, &corrupt).is_none());
             }
             let mut corrupt = bytes.clone();
-            let last = corrupt.len() - 8;
-            corrupt[last..].copy_from_slice(&u64::MAX.to_le_bytes());
+            let last = energy_start + energy.len() - 8;
+            corrupt[last..last + 8].copy_from_slice(&u64::MAX.to_le_bytes());
             assert!(
                 BlastRange::restore(c, &corrupt).is_none(),
                 "budget exceeded total energy"

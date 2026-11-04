@@ -3706,8 +3706,6 @@ pub fn walker04() -> UnitBody {
         for sx in [-1i32, 1] {
             let shoulder = (40 - sy * 9, 42, 40 + sx * 9);
             let elbow = (40 - sy * 22, 35, 40 + sx * 13);
-            let wrist = (40 - sy * 33, 27, 40 + sx * 16);
-            let muzzle = (40 - sy * 36, 25, 40 + sx * 17);
             ball(&mut u, shoulder, 3, a);
             mark_ball(&mut u, shoulder, 3, FINISH_STEEL);
             let mut upper = UnitBody::new_scaled(17, 4, 4, 1, BODY_MM);
@@ -3735,6 +3733,7 @@ pub fn walker04() -> UnitBody {
                 upper,
             );
 
+            let arm_root = u.segments.len() as u8;
             let mut elbow_hub = UnitBody::new_scaled(8, 8, 8, 1, BODY_MM);
             ball(&mut elbow_hub, (4, 4, 4), 3, a);
             mark_ball(&mut elbow_hub, (4, 4, 4), 3, FINISH_STEEL);
@@ -3743,7 +3742,8 @@ pub fn walker04() -> UnitBody {
             u.push_segment(
                 Attach {
                     turret: true,
-                    ..Attach::flat(at(elbow), (4, 4, 4))
+                    parent: arm_root,
+                    ..Attach::flat((15, 2, 2), (4, 4, 4))
                 },
                 elbow_hub,
             );
@@ -3763,50 +3763,68 @@ pub fn walker04() -> UnitBody {
             u.push_segment(
                 Attach {
                     turret: true,
-                    ..Attach::aimed(
-                        at(elbow),
-                        (0, 2, 2),
-                        (wrist.0 - elbow.0, wrist.1 - elbow.1, wrist.2 - elbow.2),
-                    )
+                    parent: arm_root + 1,
+                    ..Attach::aimed((4, 4, 4), (0, 2, 2), (14, -4, 0))
                 },
                 forearm,
             );
 
             let mut laser = UnitBody::new_scaled(4, 4, 4, 1, BODY_MM);
             fill_f(&mut laser, (0, 4), (0, 4), (0, 4), Part::Weapon, FINISH_GUN);
-            fill_f(&mut laser, (0, 2), (0, 4), (0, 4), Part::Weapon, FINISH_IVORY);
+            fill_f(
+                &mut laser,
+                (0, 2),
+                (0, 4),
+                (0, 4),
+                Part::Weapon,
+                FINISH_IVORY,
+            );
             mark(&mut laser, (0, 2), (2, 4), (1, 3), FINISH_PLATE);
-            fill_f(&mut laser, (2, 3), (0, 4), (0, 4), Part::Weapon, FINISH_STEEL);
-            fill_f(&mut laser, (3, 4), (1, 3), (1, 3), Part::Weapon, FINISH_ENERGY);
+            fill_f(
+                &mut laser,
+                (2, 3),
+                (0, 4),
+                (0, 4),
+                Part::Weapon,
+                FINISH_STEEL,
+            );
+            fill_f(
+                &mut laser,
+                (3, 4),
+                (1, 3),
+                (1, 3),
+                Part::Weapon,
+                FINISH_ENERGY,
+            );
             u.push_segment(
                 Attach {
                     turret: true,
-                    ..Attach::aimed(
-                        at(wrist),
-                        (0, 2, 2),
-                        (muzzle.0 - wrist.0, muzzle.1 - wrist.1, muzzle.2 - wrist.2),
-                    )
+                    parent: arm_root + 2,
+                    ..Attach::flat((14, 2, 2), (0, 2, 2))
                 },
                 laser,
             );
 
-            for x in 40.min(shoulder.0).min(muzzle.0)..=40.max(shoulder.0).max(muzzle.0) {
-                u.set(x as usize, 25, shoulder.2 as usize, Part::Weapon);
-                u.set_finish(x as usize, 25, shoulder.2 as usize, FINISH_IVORY);
-            }
-            for y in 25..=shoulder.1 {
-                u.set(shoulder.0 as usize, y as usize, shoulder.2 as usize, Part::Weapon);
-                u.set_finish(shoulder.0 as usize, y as usize, shoulder.2 as usize, FINISH_IVORY);
-            }
-            for z in shoulder.2.min(muzzle.2)..=shoulder.2.max(muzzle.2) {
-                u.set(muzzle.0 as usize, 25, z as usize, Part::Weapon);
-                u.set_finish(muzzle.0 as usize, 25, z as usize, FINISH_IVORY);
-            }
-            u.push_weapon_path(WeaponPath {
-                min: [muzzle.0 as u8, 22, (muzzle.2 - 3) as u8],
-                max: [(muzzle.0 + 1) as u8, 28, (muzzle.2 + 4) as u8],
-                axis: 0,
-            });
+            // Weapon feed stays inside the shoulder socket. Articulated arms
+            // supply their real muzzles; fixed root rails were ghost barrels.
+            let min = [
+                (shoulder.0 - 1) as u8,
+                (shoulder.1 - 1) as u8,
+                (shoulder.2 - 1) as u8,
+            ];
+            let max = [
+                (shoulder.0 + 2) as u8,
+                (shoulder.1 + 2) as u8,
+                (shoulder.2 + 2) as u8,
+            ];
+            fill(
+                &mut u,
+                (min[0] as usize, max[0] as usize),
+                (min[1] as usize, max[1] as usize),
+                (min[2] as usize, max[2] as usize),
+                Part::Weapon,
+            );
+            u.push_weapon_path(WeaponPath { min, max, axis: 0 });
         }
     }
 
@@ -3815,7 +3833,9 @@ pub fn walker04() -> UnitBody {
     for segment in &mut u.segments {
         segment.body.mm = 500;
     }
-    u.turret_y = 41;
+    // The complete shoulder balls (y=39..45) belong to the moving crown.
+    // Cutting through their middle left half of every socket on the chassis.
+    u.turret_y = 38;
     u
 }
 

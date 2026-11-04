@@ -29,8 +29,12 @@ fn layout(tank: u64, rate: u32, reach: u32) -> RangeLayout {
     let mut l = RangeLayout::from_ron(include_str!("../../../data/fixture-drive.ron")).unwrap();
     let mut e = RangeEconomy::stock();
     e.bank = None;
+    e.production = None;
     e.kinds.iter_mut().for_each(|k| k.store = 0);
     e.dig_edits_in_flight = 64;
+    for k in &mut e.kinds {
+        k.dig_edits_per_tick = k.dig_edits_per_tick.min(64);
+    }
     let k = e.kind_mut(RangeUnitKind::Tank).unwrap();
     k.tank = tank;
     k.dig_radius = 1;
@@ -362,6 +366,9 @@ fn a_spent_sub_pool_defers_reclaim_and_searches_wait_their_turn() {
     let mut l = layout(1_000_000, 4, 4);
     let e = l.economy.as_mut().unwrap();
     e.dig_edits_in_flight = 4;
+    for k in &mut e.kinds {
+        k.dig_edits_per_tick = k.dig_edits_per_tick.min(4);
+    }
     // Stock also enables the crawler: every configured digger must fit the
     // reduced shared pool, even when the fixture only places tanks.
     e.kind_mut(RangeUnitKind::Crawler)

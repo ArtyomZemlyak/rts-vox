@@ -245,6 +245,7 @@ mod tests {
         fast.0.save(&mut saved);
         let mut loaded = Matter::new(&[]);
         loaded.tuning = fast.0.tuning;
+        loaded.melt_flow = fast.0.melt_flow; // Restore the fixture's legacy thermal configuration too.
         loaded.load(&mut Scan::new(&saved.v), &fast.1, &[]).unwrap();
         assert_eq!(loaded.admission, super::super::AdmissionProfile::default());
         fast.0 = loaded;

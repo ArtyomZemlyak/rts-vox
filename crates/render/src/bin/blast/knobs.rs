@@ -1139,6 +1139,7 @@ pub fn build(commands: &mut Commands, camera: Entity, text_font: &TextFont) {
     commands
         .spawn((
             SettingsRoot,
+            GlobalZIndex(50),
             super::panel::PanelRoot,
             super::panel::ScrollPanel,
             ScrollPosition::default(),
@@ -1313,8 +1314,10 @@ pub fn actions(
     keys: Res<ButtonInput<KeyCode>>,
     edit: Res<Workshop>,
     laboratory: Option<Res<laboratory::Laboratory>>,
+    menu: Option<Res<frontend::Menu>>,
 ) {
-    if laboratory.as_ref().is_some_and(|l| l.active()) {
+    if menu.as_ref().is_some_and(|m| m.shown() && !m.settings()) { return; }
+    if laboratory.as_ref().is_some_and(|l| l.active()) && !menu.as_ref().is_some_and(|m| m.settings()) {
         return;
     }
     if edit.layout.is_none() {
@@ -1406,10 +1409,8 @@ pub fn actions(
         }
     }
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    for (&action, interaction) in &interactions {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for action in interactions.iter().filter(|(_, i)| **i == Interaction::Pressed)
+        .map(|(a, _)| *a).chain(menu.as_ref().and_then(|m| m.panel_command())) {
         match action {
             Action::Settings => o.open = !o.open,
             Action::EditKnob(slot) => {

@@ -110,6 +110,11 @@ pub const TARGET: [i32; 3] = [236, 24, 336];
 pub const ENERGY_TARGET: [i32; 3] = [396, 24, 336];
 pub const WITNESS: [i32; 3] = [377, FLOOR, 305];
 
+#[path = "range_walker.rs"]
+mod walker;
+#[path = "range_walker_save.rs"]
+mod walker_save;
+
 /// A stationary 100 mm body. Damage is a bounded, ordered ablation ledger;
 /// the pristine template minus this ledger completely specifies its state.
 pub struct RangeUnit {
@@ -142,9 +147,12 @@ pub struct RangeUnit {
     section: Option<crate::damage::SectionJob>,
     /// Rest-pose frames of the segments, refreshed with the pose (ADR-278).
     pub seg_frames: Vec<crate::damage::Frame>,
-    /// Derived independent arm targets for Walker 04; rebuilt from orders,
-    /// not authoritative state and therefore not part of snapshot/hash.
+    /// Last independent arm aim. It persists between volleys and determines
+    /// hit geometry, so snapshot wrapper 76 preserves it.
     pub arm_targets: Option<[[i32; 3]; 4]>,
+    /// Skoba's historical body form: open, compact, loaded. Damage can freeze
+    /// a form after the corresponding delivery has finished (snapshot 77).
+    pub(crate) skoba_form: u8,
     /// Segment cells removed by damage or separation: index and cell. Saved.
     pub seg_removed: Vec<(u8, [u8; 3])>,
     seg_dents: BTreeMap<(u8, [u8; 3]), u32>,
@@ -660,6 +668,7 @@ impl RangeUnit {
             section: None,
             seg_frames,
             arm_targets: None,
+            skoba_form: 0,
             seg_removed: Vec::new(),
             seg_dents: BTreeMap::new(),
             seg_detached: 0,
@@ -799,36 +808,7 @@ impl RangeUnit {
                 crate::gait::leg_frames(rig, &self.pose, c, &mut self.seg_frames);
             }
         }
-        if let Some(targets) = self.arm_targets {
-            for (arm, target) in targets.into_iter().enumerate() {
-                let muzzle = 13 + arm * 4;
-                let from = self.seg_frames[muzzle].world([
-                    Fx::from_int(4),
-                    Fx::from_int(2),
-                    Fx::from_int(2),
-                ]);
-                let delta = [
-                    Fx::from_int(target[0]).sub(from.x),
-                    Fx::from_int(target[1]).sub(from.y),
-                    Fx::from_int(target[2]).sub(from.z),
-                ];
-                let flat = delta[0].mul(delta[0]).add(delta[2].mul(delta[2])).sqrt();
-                let yaw = fx::angle::atan2(delta[2].raw(), delta[0].raw());
-                let pitch = fx::angle::atan2(delta[1].raw(), flat.raw());
-                for index in 10 + arm * 4..=muzzle {
-                    let attach = self.body.segments[index].attach;
-                    let pivot =
-                        [attach.at.0, attach.at.1, attach.at.2].map(|v| Fx::from_int(i32::from(v)));
-                    self.seg_frames[index] = crate::damage::aimed_about(
-                        &self.seg_frames[index],
-                        pivot,
-                        yaw,
-                        pitch,
-                        self.motion.drive.head,
-                    );
-                }
-            }
-        }
+        self.aim_walker_arms(turret_yaw);
     }
     pub fn set_arm_targets(&mut self, targets: [[i32; 3]; 4], turret_yaw: i32) {
         self.arm_targets = Some(targets);
@@ -4906,7 +4886,9 @@ fn relative_contact_velocity(
         return phys::V3::ZERO;
     }
     let other_normal = line.scale(target_velocity.dot(line).div(distance2));
-    let relative = incoming.sub(other_normal);
+    let relative = line
+        .scale(incoming.dot(line).div(distance2))
+        .sub(other_normal);
     if relative.dot(line) <= Fx::ZERO {
         phys::V3::ZERO
     } else {
@@ -5506,7 +5488,11 @@ impl BlastRange {
             return Ok(());
         };
         if ready.store > 0 {
-            let store = self.mining.as_ref().and_then(|m| m.haul()).map(|h| h.store(true))
+            let store = self
+                .mining
+                .as_ref()
+                .and_then(|m| m.haul())
+                .map(|h| h.store(true))
                 .ok_or("ready stock needs a store")?;
             let economy = &mut self.matter.economy;
             if economy.ledger.reveal(economy.ground, ready.store) != ready.store
@@ -5516,14 +5502,17 @@ impl BlastRange {
             }
         }
         for order in ready.construction {
-            let site = self.create_construction_site(order.kind, true, order.at)
+            let site = self
+                .create_construction_site(order.kind, true, order.at)
                 .ok_or("ready construction site is occupied")?;
             if !self.set_construction_quota(site, order.quota) {
                 return Err("ready construction quota is invalid".into());
             }
         }
         for order in ready.production {
-            if self.enqueue_product(order.actor, order.kind, true) != battle::commands::Outcome::Applied {
+            if self.enqueue_product(order.actor, order.kind, true)
+                != battle::commands::Outcome::Applied
+            {
                 return Err("ready production order was rejected".into());
             }
         }
@@ -5634,6 +5623,25 @@ impl BlastRange {
         // also identifies the clock used by velocities and deadlines.
         b.u32(67);
         b.u32(crate::TICKS_PER_SECOND as u32);
+        let forms: Vec<_> = self
+            .units
+            .iter()
+            .chain(std::iter::once(&self.gun))
+            .enumerate()
+            .filter(|(_, u)| u.skoba_form != 0)
+            .collect();
+        if !forms.is_empty() {
+            b.u32(77);
+            b.u32(forms.len() as u32);
+            for (id, u) in forms {
+                b.u32(id as u32);
+                b.u8(u.skoba_form);
+            }
+        }
+        let walker_poses = self.has_walker_poses();
+        if walker_poses {
+            b.u32(76);
+        }
         if self.upheaval.has_state() {
             b.u32(74);
         }
@@ -5884,6 +5892,9 @@ impl BlastRange {
         if water_thermal {
             self.water.save_thermal_remainder(&mut b);
         }
+        if walker_poses {
+            self.save_walker_poses(&mut b);
+        }
         b.v
     }
     /// The sections appended to the snapshot after `version`, in order:
@@ -6074,7 +6085,9 @@ impl BlastRange {
         s.ok().then_some(())
     }
     fn has_elevation(&self) -> bool {
-        artillery::elevates(self.gun.kind) || self.units.iter().any(|u| artillery::elevates(u.kind))
+        std::iter::once(&self.gun)
+            .chain(&self.units)
+            .any(|u| artillery::elevates(u.kind) || u.kind == RangeUnitKind::Walker04)
     }
     fn save_structure(&self, b: &mut fx::blob::Blob) {
         for u in &self.units {
@@ -6108,6 +6121,30 @@ impl BlastRange {
             version = s.u32();
         } else if crate::TICKS_PER_SECOND != modding::clock::STREAM_HZ as i32 {
             return None;
+        }
+        let mut skoba_forms = Vec::new();
+        let explicit_skoba_forms = version == 77;
+        if explicit_skoba_forms {
+            let n = s.u32() as usize;
+            if n == 0 || n > modding::range::MAX_RANGE_UNITS + 1 || n > s.left() / 5 {
+                return None;
+            }
+            for _ in 0..n {
+                let id = s.u32() as usize;
+                let form = s.u8();
+                if id > modding::range::MAX_RANGE_UNITS
+                    || !(1..=2).contains(&form)
+                    || skoba_forms.last().is_some_and(|&(last, _)| id <= last)
+                {
+                    return None;
+                }
+                skoba_forms.push((id, form));
+            }
+            version = s.u32();
+        }
+        let walker_poses = version == 76;
+        if walker_poses {
+            version = s.u32();
         }
         let upheaval_scaled = version == 74;
         if upheaval_scaled {
@@ -6308,6 +6345,19 @@ impl BlastRange {
         }
         let gun_id = r.units.len();
         let turret_angle = r.turret.angle;
+        // Choose the saved intact variant before validating dents/removals.
+        // Cargo-only cells do not exist in the ordinary open template.
+        for (id, form) in skoba_forms {
+            let u = if id == gun_id {
+                &mut r.gun
+            } else {
+                r.units.get_mut(id)?
+            };
+            if u.kind != RangeUnitKind::SkobaDrone {
+                return None;
+            }
+            u.restore_skoba_form(form);
+        }
         for (id, u) in r
             .units
             .iter_mut()
@@ -6751,7 +6801,7 @@ impl BlastRange {
         }
         if version >= 75 {
             observe("construction", bytes.len() - s.left(), None);
-            r.load_construction(&mut s)?;
+            r.load_construction(&mut s, !explicit_skoba_forms)?;
         }
         r.check_blank_work()?;
         if coarse {
@@ -6790,6 +6840,9 @@ impl BlastRange {
                 return None;
             }
             r.water.load_thermal_remainder(&mut s, r.size)?;
+        }
+        if walker_poses {
+            r.load_walker_poses(&mut s)?;
         }
         let mut device_containers = std::collections::BTreeSet::new();
         for d in r.layout.as_ref().into_iter().flat_map(|l| &l.lab_devices) {
@@ -7405,7 +7458,9 @@ impl BlastRange {
         let battle_mode = self.battle_mode();
         let physical_gun = self.physical_gun();
         let mut starts = self.navigation.searches_started_per_tick;
+        self.gun.motion.clear_contact();
         for (id, u) in self.units.iter_mut().enumerate() {
+            u.motion.clear_contact();
             u.motion.pilot = self.battle.actors.get(id).and_then(|a| match a.order {
                 battle::Order::Pilot { throttle, turn, .. }
                     if battle_mode && !u.kind.emplacement() =>
@@ -7415,6 +7470,15 @@ impl BlastRange {
                 _ => None,
             });
         }
+        let manual_flight = self.units.iter().any(|u| {
+            u.status.alive
+                && u.kind == RangeUnitKind::SkobaDrone
+                && (u.motion.pilot.is_some()
+                    || u.motion.drive.vel != Fx::ZERO
+                    || u.motion.drive.yaw_rate != 0)
+        });
+        let mut flight_bounds =
+            manual_flight.then(|| self.units.iter().map(RangeUnit::bounds).collect::<Vec<_>>());
         let driven = self.patrols_running && (!battle_mode || self.battle_movement_active());
         if driven && !changed.is_empty() {
             for u in &mut self.units {
@@ -7647,7 +7711,7 @@ impl BlastRange {
                             } else {
                                 None
                             };
-                            let ground = if driven {
+                            let ground = if driven && u.kind != RangeUnitKind::SkobaDrone {
                                 task_detail(id, "ground_begin");
                                 let prepared =
                                     u.motion.prepare_ground(world, &u.body, rubble, &changed);
@@ -7695,7 +7759,26 @@ impl BlastRange {
                         ),
                 );
                 if u.kind == RangeUnitKind::SkobaDrone && u.status.alive {
-                    // Skoba's construction controller owns its hover and flight.
+                    if driven
+                        && (u.motion.pilot.is_some()
+                            || u.motion.drive.vel != Fx::ZERO
+                            || u.motion.drive.yaw_rate != 0)
+                    {
+                        let blockers = flight_bounds
+                            .as_ref()
+                            .unwrap()
+                            .iter()
+                            .enumerate()
+                            .filter(|(other, _)| *other != id)
+                            .map(|(_, bounds)| *bounds);
+                        u.motion.step_pilot_flight(
+                            &self.world,
+                            &u.body,
+                            u.status.engine,
+                            u.mobility,
+                            blockers,
+                        );
+                    }
                 } else if driven {
                     if let Some(prepared) = local_hunts[id].take() {
                         let accepted = u
@@ -7740,8 +7823,11 @@ impl BlastRange {
                 } else {
                     u.motion.drive.head
                 };
-                if !parallel_feet {
+                if !parallel_feet || manual_flight {
                     u.update_pose(head);
+                }
+                if let Some(bounds) = &mut flight_bounds {
+                    bounds[id] = u.bounds();
                 }
                 positions[id] = motion::Obstacle::of(&u.motion, &u.body);
                 if let Some((other, velocity)) = u.motion.take_contact() {
@@ -7802,8 +7888,21 @@ impl BlastRange {
         }
         detail("motion_feet");
         // Position acceptance above remains in stable spatial order. Sample all
-        // contact velocities before transferring any shove: a hull touched
-        // twice in one tick must not make the second contact order-dependent.
+        // contact velocities before transferring any shove. An unobstructed
+        // target contributes its velocity before braking, just like the
+        // refused source. A target that already spent its normal motion on
+        // another hull contributes only its remaining velocity to transfer.
+        let mut refused = vec![
+            false;
+            if contacts.is_empty() {
+                0
+            } else {
+                self.units.len() + 1
+            }
+        ];
+        for &(source, _, _) in &contacts {
+            refused[source] = true;
+        }
         let contact_state: Vec<_> = if contacts.is_empty() {
             Vec::new()
         } else {
@@ -7820,13 +7919,21 @@ impl BlastRange {
                         fx::angle::sin(motion.drive.head).mul(motion.drive.vel),
                     )
                     .add(motion.shove);
-                    (motion.pos, velocity)
+                    (
+                        motion.pos,
+                        if refused[id] {
+                            velocity
+                        } else {
+                            motion.contact_velocity()
+                        },
+                        motion.contact_velocity(),
+                    )
                 })
                 .collect()
         };
-        // A pair meets once, however many of its hulls the other refused:
-        // head-on each carries its own speed along the line, and the
-        // closing speed is their sum (ADR-455).
+        // Price each pair once using both attempted velocities from this
+        // phase. Adding two relative velocities would double head-on speed
+        // and quadruple damage when both hulls report the same contact.
         let mut impacts: BTreeMap<(usize, usize), phys::V3> = BTreeMap::new();
         for (source, target, incoming) in contacts {
             let velocity = relative_contact_velocity(
@@ -7835,13 +7942,19 @@ impl BlastRange {
                 contact_state[target].0,
                 contact_state[target].1,
             );
-            let (pair, along) = if source < target {
-                ((source, target), velocity)
+            let (a, b) = if source < target {
+                (source, target)
             } else {
-                ((target, source), phys::V3::ZERO.sub(velocity))
+                (target, source)
             };
-            let closing = impacts.entry(pair).or_insert(phys::V3::ZERO);
-            *closing = closing.add(along);
+            impacts.entry((a, b)).or_insert_with(|| {
+                relative_contact_velocity(
+                    contact_state[a].2,
+                    contact_state[a].0,
+                    contact_state[b].0,
+                    contact_state[b].2,
+                )
+            });
             let mass = |id: usize| {
                 if id == self.units.len() {
                     self.gun.motion.chassis.mass.max(1)
@@ -9480,6 +9593,16 @@ mod tests {
         assert!(convoy.x > Fx::ZERO && convoy.x < stopped.x);
         assert!(head_on.x > stopped.x);
         assert_eq!(separating, phys::V3::ZERO);
+        let crossing = relative_contact_velocity(
+            phys::V3::new(Fx::from_int(10), Fx::ZERO, Fx::from_int(80)),
+            source,
+            target,
+            phys::V3::new(Fx::from_int(8), Fx::ZERO, Fx::from_int(-80)),
+        );
+        assert_eq!(
+            crossing, convoy,
+            "tangential motion must not become normal crash energy"
+        );
     }
     #[test]
     fn cached_stock_templates_keep_damage_private_to_each_unit() {
@@ -10932,8 +11055,10 @@ mod tests {
         let drop = level.sub(u.motion.hull.y);
         assert!(
             drop > level.sub(floor).mul(Fx::from_ratio(2, 5)),
-            "the hull did not come down: stood {level:?} over {floor:?}, now {:?}",
-            u.motion.hull.y
+            "the hull did not come down: stood {level:?} over {floor:?}, now {:?}; pos={:?} floors={:?} root_low={:?} clearance={:?}",
+            u.motion.hull.y, u.motion.pos, u.motion.floors,
+            (0..u.body.vol.ny as usize).find(|&y| (0..u.body.vol.nz as usize).any(|z| u.body.vol.col(y,z).iter().any(|b| *b != 0))),
+            u.motion.chassis.clearance_cm
         );
     }
     /// A leg whose thigh and shin lost more than half their cells buckles
@@ -11202,6 +11327,8 @@ mod tests {
     #[test]
     fn heated_steel_melts_into_debris_and_soil_does_not() {
         let mut a = BlastRange::new(config());
+        // Isolate fragment fallback. Default viscous melting has its own tests.
+        a.matter.legacy_melt_for_test();
         let steel = a.matter.economy.mats.get(3).expect("range steel");
         assert!(steel.melt > 0 && steel.kindling == 0);
         assert_eq!(a.matter.economy.mats.get(1).map(|d| d.melt), Some(0));
@@ -11427,7 +11554,14 @@ mod tests {
             }
         }
         let mut a = quiet_cover();
+        // This regression needs an unfinished frontier, not a route that the
+        // current faster startup can finish before the checkpoint. Use the
+        // normal scheduler with a deliberately tiny deterministic test share.
+        a.navigation.search_nodes_per_tick = 1;
+        a.gun.motion.defer_fine(true);
         assert!(fine_order(&mut a, [450, 336]), "the order was refused");
+        a.gun.motion.defer_fine(false);
+        a.gun.motion.set_global_search_limit(0);
         // The last drain before the snapshot digs near the search too.
         for tick in 0..4 {
             dig(&mut a, tick);
@@ -11435,6 +11569,8 @@ mod tests {
         }
         assert!(a.gun.motion.searching(), "the search ended early");
         let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
+        b.navigation.search_nodes_per_tick = 1;
+        b.gun.motion.set_global_search_limit(0);
         b.use_full_rubble_print(true);
         for tick in 4..60 {
             dig(&mut a, tick);
@@ -12180,6 +12316,8 @@ mod tests {
     /// went in.
     fn a_block_in_the_air(mat: u16, cap: u16) -> (BlastRange, Vec<[i32; 3]>, usize) {
         let mut a = BlastRange::new(config());
+        // Legacy collapse/fragment contract, without the separate grain solver.
+        a.granular.tuning.materials.clear();
         a.patrols_running = false;
         a.fire_tick = u32::MAX;
         let base = [GUN[0] - 40, FLOOR + 8, GUN[2] + 20];
@@ -12251,6 +12389,8 @@ mod tests {
     #[test]
     fn a_body_with_no_room_for_its_crumbs_falls_whole() {
         let mut a = BlastRange::new(config());
+        // Test the no-particle-slot fallback, not default conservative grain flow.
+        a.granular.tuning.materials.clear();
         a.patrols_running = false;
         a.fire_tick = u32::MAX;
         // A full pool: no slot for a flying piece.
@@ -14532,6 +14672,10 @@ mod tests {
                 c.unit_role_resistance_milli = roles;
                 let at = [100, 28, 96];
                 let mut captured = Explosion::begin(at, &c, &units);
+                // This exhaustive world-point oracle covers legacy captures.
+                // Centre-owned capture has its own exhaustive volume oracle in
+                // range_wave_damage_tests; rotated voxel ownership differs.
+                captured.point_contacts = true;
                 while !captured.capture(&world, &c, &units, &dents, 17) {}
                 let n = captured.wave.size();
                 let half = (n / 2) as i32;

@@ -246,9 +246,19 @@ fn zero_room_eviction_preserves_settled_contacts_outside_the_original_sweep() {
         assert!(e.balanced());
         assert_eq!(
             b.fragments.len(),
-            1,
-            "the evicted cube must land on its support and merge"
+            2,
+            "contact must preserve the two finite cubes"
         );
+        // Contact precedes sleeping/joining. The first bounce can still exceed
+        // the sleep threshold; a query miss would instead fall through this
+        // support outside the original sweep and retain downward velocity.
+        let rider = b.fragments.iter().find(|f| f.id == 1).unwrap();
+        assert!(rider.position.x.add(rider.bounds().0[0])
+            >= hulls[0].pos[0].add(hulls[0].half[0]), "eviction left the rider inside the hull");
+        assert!(rider.position.y >= Fx::from_int(18));
+        assert!(rider.velocity.y >= Fx::ZERO, "missed the settled support");
+        let support = b.fragments.iter().find(|f| f.id == 2).unwrap();
+        assert_eq!(support.position.y, Fx::from_int(17));
         snapshot(&b, &world, &e)
     };
     let expected = run(1);

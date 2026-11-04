@@ -257,7 +257,15 @@ fn walker_laser_emission(buf: &mut MeshBuf, from: Vec3, to: Vec3, hit: bool, sca
     }
 }
 
-fn razlom_wave_emission(buf: &mut MeshBuf, from: Vec3, to: Vec3, hit: bool, scale: f32, serial: u32, now: f32) {
+fn razlom_wave_emission(
+    buf: &mut MeshBuf,
+    from: Vec3,
+    to: Vec3,
+    hit: bool,
+    scale: f32,
+    serial: u32,
+    now: f32,
+) {
     let direction = to - from;
     let axis = direction.normalize_or(Vec3::X);
     let side = axis.cross(Vec3::Y).normalize_or(Vec3::Z);
@@ -265,7 +273,13 @@ fn razlom_wave_emission(buf: &mut MeshBuf, from: Vec3, to: Vec3, hit: bool, scal
     let phase = serial as f32 * 0.37 + now * 8.0;
     for lane in [-1.0, 0.0, 1.0] {
         let offset = up * (lane * 4.0 * scale);
-        beam(buf, from + offset, to + offset, 2.2 * scale, [0.08, 1.8, 7.0, 0.42]);
+        beam(
+            buf,
+            from + offset,
+            to + offset,
+            2.2 * scale,
+            [0.08, 1.8, 7.0, 0.42],
+        );
     }
     for i in 0..6 {
         let t = i as f32 / 5.0;
@@ -278,7 +292,8 @@ fn razlom_wave_emission(buf: &mut MeshBuf, from: Vec3, to: Vec3, hit: bool, scal
         for i in 0..8 {
             let angle = i as f32 * std::f32::consts::TAU / 8.0 + phase;
             let spread = 3.0 + (i % 3) as f32;
-            let offset = (side * angle.cos() + up * angle.sin()) * spread * scale + axis * (i as f32 * 0.35 * scale);
+            let offset = (side * angle.cos() + up * angle.sin()) * spread * scale
+                + axis * (i as f32 * 0.35 * scale);
             cube(buf, at + offset, 1.2 * scale, [4.0, 1.2, 0.2, 0.55]);
         }
     }
@@ -368,27 +383,75 @@ fn hot(input: Input<'_>) -> MeshBuf {
         beam(&mut hot, from, to, 1.9, [0.45, 2.2, 12.0, 0.95]);
         walker_laser_emission(&mut hot, from, to, trace.hit, 2.0, now);
     }
-    for trace in &sim.battle.razlom_lasers {
-        let from = point(trace.from);
-        let to = point(trace.to);
-        beam(&mut hot, from, to, 30.0, [0.01, 0.65, 0.75, 0.12]);
-        beam(&mut hot, from, to, 12.0, [0.02, 2.4, 2.8, 0.36]);
-        beam(&mut hot, from, to, 4.0, [0.55, 9.0, 10.0, 0.96]);
-        razlom_wave_emission(&mut hot, from, to, trace.hit, 2.0, trace.serial, now);
-        if trace.hit {
-            cube(&mut hot, to, 6.0, [0.3, 5.0, 6.0, 0.75]);
+    for front in sim.battle.razlom_lasers.chunks_exact(7) {
+        let fade = (front[3].strength.to_f64_lossy() as f32).clamp(0.0, 1.0);
+        let color = |mut rgba: [f32; 4]| {
+            rgba[3] *= fade * fade;
+            rgba
+        };
+        for trace in front {
+            let from = point(trace.from);
+            let to = point(trace.to);
+            beam(
+                &mut hot,
+                from,
+                to,
+                30.0 * fade,
+                color([0.01, 0.65, 0.75, 0.12]),
+            );
+            beam(
+                &mut hot,
+                from,
+                to,
+                12.0 * fade,
+                color([0.02, 2.4, 2.8, 0.36]),
+            );
+            beam(
+                &mut hot,
+                from,
+                to,
+                4.0 * fade,
+                color([0.55, 9.0, 10.0, 0.96]),
+            );
+            razlom_wave_emission(&mut hot, from, to, trace.hit, 2.0 * fade, trace.serial, now);
+            if trace.hit {
+                cube(&mut hot, to, 6.0 * fade, color([0.3, 5.0, 6.0, 0.75]));
+            }
         }
-    }
-    if let (Some(first), Some(last)) = (
-        sim.battle.razlom_lasers.first(),
-        sim.battle.razlom_lasers.last(),
-    ) {
+        // Each shot owns seven channels. Joining the first and last channels
+        // of all live shots connected unrelated waves into a giant light wall.
+        let first = &front[0];
+        let last = &front[6];
         let left = point(first.from);
         let right = point(last.from);
-        beam(&mut hot, left, right, 12.0, [0.08, 3.0, 3.6, 0.42]);
-        beam(&mut hot, left, right, 3.0, [0.65, 10.0, 12.0, 0.96]);
-        beam(&mut hot, left, point(first.to), 5.0, [0.08, 2.0, 2.8, 0.30]);
-        beam(&mut hot, right, point(last.to), 5.0, [0.08, 2.0, 2.8, 0.30]);
+        beam(
+            &mut hot,
+            left,
+            right,
+            12.0 * fade,
+            color([0.08, 3.0, 3.6, 0.42]),
+        );
+        beam(
+            &mut hot,
+            left,
+            right,
+            3.0 * fade,
+            color([0.65, 10.0, 12.0, 0.96]),
+        );
+        beam(
+            &mut hot,
+            left,
+            point(first.to),
+            5.0 * fade,
+            color([0.08, 2.0, 2.8, 0.30]),
+        );
+        beam(
+            &mut hot,
+            right,
+            point(last.to),
+            5.0 * fade,
+            color([0.08, 2.0, 2.8, 0.30]),
+        );
     }
     for trace in &sim.battle.lightning {
         let from = point(trace.from);
@@ -776,6 +839,59 @@ fn puff(buf: &mut MeshBuf, at: Vec3, edge: f32, col: [f32; 4], p: &Particle, t: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn razlom_fronts_fade_without_joining_separate_shots() {
+        let (mut sim, _, _) = fixture(0);
+        sim.battle.lasers.clear();
+        let effects = Effects::default();
+        let poses = Poses::new();
+        let picture = |sim: &BlastRange| {
+            hot(Input {
+                sim,
+                effects: &effects,
+                particles: &[],
+                now: 0.0,
+                fraction: 1.0,
+                poses: &poses,
+                markers: None,
+                single: (None, 2.0),
+                first_person_origin: None,
+            })
+        };
+        assert!(picture(&sim).pos.is_empty());
+        for z in [200, 1200] {
+            for channel in -3..=3 {
+                sim.battle.razlom_lasers.push(sim_core::blast::weapons::WaveTrace {
+                    strength: fx::Fx::ONE,
+                    trace: sim_core::blast::weapons::Trace {
+                        from: [100, 30, z + channel * 14].map(fx::Fx::from_int),
+                        to: [106, 30, z + channel * 14].map(fx::Fx::from_int),
+                        hit: false,
+                        serial: channel as u32,
+                    },
+                });
+            }
+        }
+        let bright = picture(&sim);
+        assert!(!bright.pos.is_empty());
+        for tri in bright.idx.chunks_exact(3) {
+            let p = [tri[0], tri[1], tri[2]].map(|i| Vec3::from(bright.pos[i as usize]));
+            assert!(
+                p[0].distance(p[1]).max(p[1].distance(p[2])).max(p[2].distance(p[0])) < 200.0,
+                "geometry joined two distant shots"
+            );
+        }
+        for trace in &mut sim.battle.razlom_lasers {
+            trace.strength = fx::Fx::from_ratio(1, 4);
+        }
+        let dim = picture(&sim);
+        let alpha = |b: &MeshBuf| {
+            b.col.iter().filter(|c| c[1] == 10.0 && c[2] == 12.0)
+                .map(|c| c[3]).reduce(f32::max).unwrap()
+        };
+        assert!(alpha(&dim) < alpha(&bright) * 0.1);
+    }
+
     #[test]
     fn laser_emission_is_bounded_and_impact_only_on_hit() {
         let from = Vec3::new(10.0, 20.0, 30.0);

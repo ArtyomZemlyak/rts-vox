@@ -110,7 +110,10 @@ mod tests {
     #[test]
     fn an_engagement_brakes_with_inertia_and_worker_slices_agree() {
         let mut w = fixture();
-        w.units.vel[0] = Fx::from_int(3);
+        // Exercise several braking ticks; 3 units/s is already below one
+        // tick of the current installed brake and legitimately stops at once.
+        w.units.vel[0] = crate::drive::Limits::of(&w.tuning.tracked, crate::TICKS_PER_SECOND)
+            .brake.mul(Fx::from_int(3));
         w.update_engagements();
         w.grid_near
             .rebuild(&w.units.x, &w.units.z, &w.units.live_ids);

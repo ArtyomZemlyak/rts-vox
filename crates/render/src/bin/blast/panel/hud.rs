@@ -166,6 +166,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
             camera,
         ))
         .with_children(|p| {
+            frontend::entry(p, font);
             let brand = label(p, font, "RTS / ПОЛИГОН", 19.0, theme::TEXT);
             p.commands()
                 .entity(brand)
@@ -242,6 +243,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
             .with_children(|p| {
                 label(p, font, "ПРИКАЗЫ", 11.0, theme::MUTED);
                 p.spawn(row()).with_children(|p| {
+                    construction::shortcuts(p, font);
                     for (name, a) in [
                         ("Атаковать точку", Action::Fire),
                         ("Запустить ядерную ракету", Action::NuclearLaunch),
@@ -253,15 +255,6 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                         ("Радиусы выбранных", Action::Ranges),
                     ] {
                         button(p, font, name, a);
-                    }
-                });
-                p.spawn(row()).with_children(|p| {
-                    for (name, kind) in [
-                        ("Строить турель", RangeUnitKind::TurretT1),
-                        ("Строить Kil", RangeUnitKind::KilFactoryT1),
-                        ("Строить Гребень", RangeUnitKind::GrebenStorage),
-                    ] {
-                        button(p, font, name, Action::BuildSite(kind));
                     }
                 });
                 p.spawn(row()).with_children(|p| {
@@ -807,7 +800,13 @@ pub fn refresh(
                         &panel.battle_name
                     };
                     if compact {
-                        format!("{name} · {phase}")
+                        // Long scenario titles otherwise wrap outside the
+                        // fixed header and cover navigation in 960x540.
+                        if view.phase == sim_core::blast::battle::Phase::Fighting {
+                            if edit.layout.as_ref().is_some_and(|l| l.idle_enemies) {
+                                "МИШЕНИ".into()
+                            } else { "БОЙ".into() }
+                        } else { phase.into() }
                     } else if let Some([own, enemy]) = view.base_integrity {
                         format!("{name} · БАЗЫ {own}% / {enemy}% · {phase}")
                     } else {
@@ -1128,6 +1127,40 @@ mod selection_render_tests;
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    #[test]
+    fn compact_battle_header_keeps_long_scenario_titles_out_of_navigation() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Panel>().battle_name =
+            "Гребень: хранилище и снабжение · очень длинное название сценария".into();
+        app.world_mut().spawn(Window {
+            resolution: (960, 540).into(),
+            ..default()
+        });
+        app.add_systems(
+            PostUpdate,
+            refresh.after(super::super::super::ui_snapshot::publish),
+        );
+        let status = app.world_mut().spawn((HudText(0), Text::new(""))).id();
+        app.update();
+        let text = &app.world().get::<Text>(status).unwrap().0;
+        assert!(
+            !text.contains("Гребень:") && text.chars().count() <= 14,
+            "{text}"
+        );
+        app.world_mut()
+            .query::<&mut Window>()
+            .single_mut(app.world_mut())
+            .unwrap()
+            .resolution
+            .set(3840.0, 2160.0);
+        app.update();
+        assert!(app
+            .world()
+            .get::<Text>(status)
+            .unwrap()
+            .0
+            .contains("Гребень:"));
+    }
     #[test]
     fn inspection_is_published_only_for_an_open_populated_drawer() {
         use super::super::{super::ui_snapshot, Readout};
@@ -1532,6 +1565,102 @@ pub(crate) mod tests {
         assert!(label.contains("Груз 0 / 100000000"), "{label}");
         assert!(label.contains("СБОР ОБЛОМКОВ"), "{label}");
     }
+    #[test]
+    fn new_scenarios_launch_from_the_menu_on_the_real_editor_ground() {
+        for id in 21..=26 {
+            let layout = RangeLayout::from_ron(include_str!("../../../../../../data/range-km.ron"))
+                .unwrap()
+                .with_ground_level(80)
+                .unwrap();
+            let sim = BlastRange::new(config(false, false));
+            let mut app = app_with_scene(sim, Workshop::new(Some(layout), false));
+            // A previous placement operation must not leak into a scenario.
+            app.world_mut().resource_mut::<Panel>().construction_kind =
+                Some(RangeUnitKind::GrebenStorage);
+            click(&mut app, Action::Skirmish(id));
+            let preset = modding::range_skirmish::stock(id as usize).unwrap();
+            for (actual, authored) in app
+                .world()
+                .resource::<Panel>()
+                .script
+                .iter()
+                .zip(&preset.script)
+            {
+                use modding::range_skirmish::ScriptedOrder;
+                if let (
+                    ScriptedOrder::Dig(a) | ScriptedOrder::Reclaim(a),
+                    ScriptedOrder::Dig(b) | ScriptedOrder::Reclaim(b),
+                ) = (&actual.order, &authored.order)
+                {
+                    assert_eq!(
+                        a[1],
+                        b[1] + 64,
+                        "script stayed below the raised ground: {id}"
+                    );
+                }
+            }
+            let pending = app.world_mut().resource_mut::<Workshop>().pending.take();
+            assert!(
+                pending.is_some(),
+                "menu rejected scenario {id}: {}",
+                app.world().resource::<Scene>().notice
+            );
+            let (c, layout) = pending.unwrap();
+            app.world_mut()
+                .resource_scope(|world, workshop: Mut<Workshop>| {
+                    world
+                        .resource_mut::<Scene>()
+                        .reset_world(c, Some(layout), &workshop.validator)
+                        .unwrap_or_else(|e| panic!("scenario {id} publication failed: {e}"));
+                });
+            app.update();
+            assert_eq!(
+                app.world().resource::<Scene>().sim.battle.phase,
+                sim_core::blast::battle::Phase::Fighting,
+                "scenario {id}"
+            );
+            assert!(
+                !app.world().resource::<Workshop>().editing,
+                "scenario {id} opened placement"
+            );
+            assert!(!app.world().resource::<Scene>().paused);
+            assert!(app.world().resource::<Panel>().construction_kind.is_none());
+            if id >= 23 {
+                let scene = app.world().resource::<Scene>();
+                let actor = if id == 23 {
+                    0
+                } else if id == 25 {
+                    1
+                } else {
+                    2
+                };
+                assert!(
+                    matches!(scene.sim.battle.actors[actor].order,
+                    sim_core::blast::battle::Order::Reclaim(p) if p[1] >= 80),
+                    "crawler did not start: {id}"
+                );
+            }
+            app.world_mut().resource_mut::<Scene>().sim.step();
+            if id == 25 {
+                assert_eq!(
+                    app.world()
+                        .resource::<Scene>()
+                        .sim
+                        .construction_sites()
+                        .len(),
+                    2
+                );
+                assert!(app
+                    .world()
+                    .resource::<Scene>()
+                    .sim
+                    .construction_sites()
+                    .iter()
+                    .any(|s| s.assigned > 0));
+            }
+        }
+    }
+
     #[test]
     fn walker04_menu_scenario_starts_and_applies_its_focus_order() {
         let mut app = app();

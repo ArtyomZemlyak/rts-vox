@@ -152,7 +152,6 @@ fn passable(t: Terrain, kind: RangeUnitKind, eighth: i32) -> bool {
     let grade_pct = match kind {
         RangeUnitKind::Tank
         | RangeUnitKind::Crawler
-        | RangeUnitKind::Crawler
         | RangeUnitKind::LightningTank
         | RangeUnitKind::EidolonTank
         | RangeUnitKind::Artillery
@@ -228,7 +227,6 @@ fn run(t: Terrain, kind: RangeUnitKind, heading: i32, back: bool) -> Run {
         RangeUnitKind::LightningTank => voxel::unit::lightning_tank(),
         RangeUnitKind::EidolonTank => voxel::unit::eidolon_tank(),
         RangeUnitKind::Walker04 => voxel::unit::walker04(),
-        RangeUnitKind::Crawler => voxel::unit::crawler(),
         RangeUnitKind::RazlomT3 => voxel::unit::razlom_t3(),
         RangeUnitKind::GrebenStorage => voxel::unit::greben_storage(),
         RangeUnitKind::KilFactoryT1 => voxel::unit::kil_factory(1),
@@ -360,7 +358,6 @@ fn probe_poses_along_the_run() {
             RangeUnitKind::LightningTank => voxel::unit::lightning_tank(),
             RangeUnitKind::EidolonTank => voxel::unit::eidolon_tank(),
             RangeUnitKind::Walker04 => voxel::unit::walker04(),
-            RangeUnitKind::Crawler => voxel::unit::crawler(),
             RangeUnitKind::RazlomT3 => voxel::unit::razlom_t3(),
             RangeUnitKind::GrebenStorage => voxel::unit::greben_storage(),
             RangeUnitKind::KilFactoryT1 => voxel::unit::kil_factory(1),

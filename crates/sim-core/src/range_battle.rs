@@ -7,6 +7,8 @@ use modding::{explosion::Delivery, range_battle::Tuning};
 
 #[path = "range_orders.rs"]
 mod orders;
+#[path = "range_razlom.rs"]
+mod razlom;
 
 #[path = "range_commands.rs"]
 pub mod commands;
@@ -255,7 +257,7 @@ pub struct Battle {
     pub traces: Vec<weapons::Trace>,
     pub lasers: Vec<weapons::Trace>,
     pub walker_lasers: Vec<weapons::Trace>,
-    pub razlom_lasers: Vec<weapons::Trace>,
+    pub razlom_lasers: Vec<weapons::WaveTrace>,
     pub lightning: Vec<weapons::Trace>,
     pub laser_config: ExplosionConfig,
     pub tuning: std::sync::Arc<Tuning>,
@@ -3072,7 +3074,8 @@ impl BlastRange {
                     .fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v)))
                     .sqrt()
                     .max(Fx::ONE);
-                let velocity = direction.map(|v| v.div(length).mul(Fx::from_int(120)));
+                let velocity =
+                    direction.map(|v| v.div(length).mul(Fx::from_int(b.tuning.razlom_wave.speed)));
                 completed("orders_misc");
                 b.rounds.push(Round {
                     owner: id,
@@ -3085,7 +3088,7 @@ impl BlastRange {
                 a.fired = a.fired.wrapping_add(1);
                 a.burst = 0;
                 a.charge = None;
-                a.next = self.tick + tuning.laser.reload_ticks.saturating_mul(4);
+                a.next = self.tick + b.tuning.razlom_wave.reload_ticks;
                 continue;
             }
             if kind == RangeUnitKind::Walker04 {
@@ -3116,14 +3119,16 @@ impl BlastRange {
                     }
                 }
                 self.units[id].turret_pitch = if focus { fx::angle::QUARTER } else { 0 };
+                a.elevation.angle = self.units[id].turret_pitch;
+                a.elevation.rate = 0;
                 self.units[id].set_arm_targets(targets, a.turret.angle);
-                let muzzles = weapons::muzzles(&self.units[id], a.turret.angle);
+                let muzzles = weapons::walker_muzzles(&self.units[id]);
                 if muzzles.is_empty() {
                     record_gate(&mut b.fire_trace, id, FireGate::NoMuzzle);
                     continue;
                 }
                 completed("orders_misc");
-                for (arm, from) in muzzles.into_iter().enumerate() {
+                for (arm, from) in muzzles {
                     let trace = self.laser_ray(
                         from,
                         targets[arm],
@@ -3527,152 +3532,12 @@ impl BlastRange {
         let dt = Fx::from_ratio(1, crate::TICKS_PER_SECOND);
         let stream = self.streams.tuning.machine_gun.clone();
         let boxes: Vec<_> = self.units.iter().map(|u| u.bounds()).collect();
+        let mut razlom_work = b.tuning.razlom_wave.cells_per_tick;
         for mut r in std::mem::take(&mut b.rounds) {
             r.previous = r.pos;
             if r.weapon == Weapon::Laser && self.units[r.owner].kind == RangeUnitKind::RazlomT3 {
-                let mut delta = r.velocity.map(|v| v.mul(dt));
-                let length = delta
-                    .iter()
-                    .fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v)))
-                    .sqrt();
-                if length <= Fx::ZERO || r.distance <= Fx::ZERO {
-                    continue;
-                }
-                if length > r.distance {
-                    delta = delta.map(|v| v.mul(r.distance.div(length)));
-                }
-                let mut tuning = motion::spider_tuning().laser.clone();
-                tuning.work = tuning.work.saturating_mul(128);
-                tuning.heat = tuning.heat.saturating_mul(128);
-                tuning.fracture_j = tuning.fracture_j.saturating_mul(128);
-                let flat = r.velocity[0]
-                    .mul(r.velocity[0])
-                    .add(r.velocity[2].mul(r.velocity[2]))
-                    .sqrt()
-                    .max(Fx::ONE);
-                let side = [
-                    Fx::ZERO.sub(r.velocity[2]).div(flat),
-                    Fx::ZERO,
-                    r.velocity[0].div(flat),
-                ];
-                let spacing = Fx::from_ratio(i32::from(self.units[r.owner].body.mm) * 12, 100);
-                let config = b.laser_config;
-                let mut centre = r.pos;
-                let mut contacts = 0;
-                let mut expired = false;
-                for channel in -3i32..=3 {
-                    let offset = side.map(|v| v.mul(spacing).mul(Fx::from_int(channel)));
-                    for vertical in [-4i32, 0, 4] {
-                        let from = std::array::from_fn(|axis| {
-                            r.pos[axis].add(offset[axis]).add(if axis == 1 {
-                                Fx::from_int(vertical)
-                            } else {
-                                Fx::ZERO
-                            })
-                        });
-                        let mut end = from;
-                        let mut previous = from.map(Fx::to_int_trunc);
-                        let mut hit = false;
-                        for step in 1..=4 {
-                            let point = std::array::from_fn(|axis| {
-                                from[axis].add(delta[axis].mul(Fx::from_ratio(step, 4)))
-                            });
-                            let p = point.map(Fx::to_int_trunc);
-                            if (0..3).any(|axis| p[axis] < 0 || p[axis] >= self.size[axis] as i32) {
-                                expired = true;
-                                break;
-                            }
-                            end = point;
-                            if p == previous { continue; }
-                            if let Some(shield) = self.dome_crossed(previous, p) {
-                                self.absorb_work(shield, p, tuning.work);
-                                contacts += 8;
-                                hit = true;
-                                break;
-                            }
-                            if let Some((id, unit)) = self
-                                .units
-                                .iter()
-                                .enumerate()
-                                .find(|(id, unit)| *id != r.owner && unit.solid(p))
-                                .map(|(id, unit)| (id, unit.hit(p)))
-                            {
-                                if let Some((part, cell)) = unit {
-                                    let target = &mut self.units[id];
-                                    for dz in -1i32..=1 {
-                                        for dy in -1i32..=1 {
-                                            for dx in -1i32..=1 {
-                                                let (Some(x), Some(y), Some(z)) = (
-                                                    cell[0].checked_add_signed(dx as isize),
-                                                    cell[1].checked_add_signed(dy as isize),
-                                                    cell[2].checked_add_signed(dz as isize),
-                                                ) else {
-                                                    continue;
-                                                };
-                                                let body = if part == 0 {
-                                                    &target.body
-                                                } else {
-                                                    &target.body.segments[part - 1].body
-                                                };
-                                                if x >= usize::from(body.vol.nx)
-                                                    || y >= usize::from(body.vol.ny)
-                                                    || z >= usize::from(body.vol.nz)
-                                                {
-                                                    continue;
-                                                }
-                                                if part == 0 {
-                                                    target.receive_cell(
-                                                        [x, y, z],
-                                                        u32::MAX / 16,
-                                                        &config,
-                                                    );
-                                                } else {
-                                                    target.receive_seg_cell(
-                                                        part - 1,
-                                                        [x, y, z],
-                                                        u32::MAX / 16,
-                                                        &config,
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                    hit = true;
-                                }
-                            } else if material(&self.world, p) != 0 {
-                                self.world.queue_dig(p[0] as u32, p[1] as u32, p[2] as u32);
-                                contacts += 1;
-                                hit = true;
-                            }
-                            previous = p;
-                        }
-                        if vertical == 0 {
-                            let serial = self.streams.serial;
-                            self.streams.serial = serial.wrapping_add(1);
-                            let trace = weapons::Trace {
-                                from,
-                                to: end,
-                                hit,
-                                serial,
-                            };
-                            if channel == 0 {
-                                centre = trace.to;
-                            }
-                            b.razlom_lasers.push(trace);
-                        }
-                    }
-                }
-                let advanced = std::array::from_fn::<_, 3, _>(|axis| centre[axis].sub(r.pos[axis]));
-                let advanced = advanced
-                    .iter()
-                    .fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v)))
-                    .sqrt();
-                r.distance = r.distance.sub(advanced.min(r.distance));
-                r.distance = r.distance.sub(Fx::from_int(contacts.min(16) * 2).min(r.distance));
-                if expired { r.distance = Fx::ZERO; }
-                r.pos = centre;
-                if r.distance > Fx::ZERO {
-                    b.rounds.push(r);
+                if let Some(round) = self.step_razlom_wave(b, r, &mut razlom_work) {
+                    b.rounds.push(round);
                 }
                 continue;
             }

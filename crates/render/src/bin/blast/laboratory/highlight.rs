@@ -59,6 +59,17 @@ fn clipped(source: &[MeshBuf], pose: Transform, lo: Vec3, hi: Vec3, local: bool)
                 continue;
             }
             let normal = (pose.rotation * Vec3::from(buf.nrm[t[0] as usize])).normalize_or_zero();
+            // A neighbour's face can lie exactly on the selected cell's
+            // boundary. Keep the face only when its solid lies inside the
+            // cell; otherwise an empty corner acquires the neighbour's glow.
+            if (0..3).any(|axis| {
+                (normal[axis] > 0.5
+                    && polygon.iter().all(|p| (p[axis] - lo[axis]).abs() < 1e-4))
+                    || (normal[axis] < -0.5
+                        && polygon.iter().all(|p| (p[axis] - hi[axis]).abs() < 1e-4))
+            }) {
+                continue;
+            }
             for i in 1..polygon.len() - 1 {
                 let points = [polygon[0], polygon[i], polygon[i + 1]];
                 if (points[1] - points[0])

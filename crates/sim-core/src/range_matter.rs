@@ -1655,7 +1655,11 @@ impl Matter {
                     modding::range::RangeUnitKind::KilFactoryT2 => voxel::unit::kil_factory(2),
                     modding::range::RangeUnitKind::KilFactoryT3 => voxel::unit::kil_factory(3),
                     modding::range::RangeUnitKind::KilFactoryT4 => voxel::unit::kil_factory(4),
-                    modding::range::RangeUnitKind::SkobaDrone => voxel::unit::skoba(),
+                    modding::range::RangeUnitKind::SkobaDrone => match u.skoba_form {
+                        1 => voxel::unit::skoba_drone(true),
+                        2 => voxel::unit::skoba_with_cargo(),
+                        _ => voxel::unit::skoba(),
+                    },
                     modding::range::RangeUnitKind::Strider => voxel::unit::strider(),
                     modding::range::RangeUnitKind::Spider => voxel::unit::spider(),
                     modding::range::RangeUnitKind::LightningTank => voxel::unit::lightning_tank(),
@@ -1717,9 +1721,16 @@ impl Matter {
         let l = &self.economy.ledger;
         for (u, id) in units.iter().zip(&self.bodies) {
             let c = l.try_get(*id)?;
+            // The delivered material has its own container. Changing Skoba's
+            // depiction must not create or revalue intrinsic hull stock.
+            let cells = if u.kind == modding::range::RangeUnitKind::SkobaDrone {
+                (u.original_shape.count() as u64).checked_sub(u.removed.len() as u64)?
+            } else {
+                body_cells(u)
+            };
             if !c.alive
                 || c.kind != Kind::Body
-                || c.held != body_cells(u) * u64::from(self.source_density(3))
+                || c.held != cells * u64::from(self.source_density(3))
             {
                 return None;
             }

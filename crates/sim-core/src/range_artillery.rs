@@ -11,7 +11,7 @@ pub(super) struct Aim {
 }
 
 pub(super) fn elevates(kind: RangeUnitKind) -> bool {
-    kind == RangeUnitKind::Spider || kind.artillery()
+    matches!(kind, RangeUnitKind::Spider | RangeUnitKind::Walker04) || kind.artillery()
 }
 
 pub(super) fn valid_pitch(pitch: i32, kind: RangeUnitKind) -> bool {

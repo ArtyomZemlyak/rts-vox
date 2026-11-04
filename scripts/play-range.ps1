@@ -43,7 +43,7 @@ if ($Laboratory) { $rangeArgs += '--laboratory' }
 if ($Battle) { $rangeArgs += @('--battle', '--edit') }
 if ($Zone -gt 1) { $rangeArgs += @('--zone', $Zone.ToString()) }
 $env:WGPU_BACKEND = 'vulkan'
-Write-Output 'POLIGON: RMB ground = move, RMB unit = attack. The left panel contains weapons, power, pause, editor, settings and camera controls.'
+Write-Output 'RTS VOX: choose the range, a battle against AI, or the laboratory in the main menu. F10 returns to the menu and pauses the session.'
 Write-Output 'Optional: wheel zoom, middle mouse pan. Layouts: -LayoutPath data/range-slab.ron (a slab on one pillar), out/range-layout.ron (saved from the editor).'
 # User-requested interactive game window.
 Start-Process -FilePath $binary -WorkingDirectory $repoRoot -WindowStyle Normal -ArgumentList $rangeArgs

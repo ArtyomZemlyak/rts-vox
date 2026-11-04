@@ -16,7 +16,7 @@
  blocks: [
   (min: (800,0,1500), max: (4100,160,3200), material: 0),
   (min: (800,0,1500), max: (4100,16,3200), material: 1),
-  (min: (1400,16,2440), max: (1404,20,2444), material: 6),
+  (min: (1100,16,2680), max: (1104,20,2684), material: 6),
  ],
  initial_debris: [
   (min: (1100,16,2360), max: (1104,18,2364), material: 3),
@@ -28,6 +28,6 @@
  ],
  script: [
   (actor: 2, tick: 0, order: Reclaim((1102,18,2362))),
-  (actor: 2, tick: 240, order: Dig((1400,20,2440))),
+  (actor: 2, tick: 240, order: Dig((1100,20,2680))),
  ],
 )

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_RANGE_BLOCKS: usize = 384;
 /// Machines a range layout places, both sides together (ADR-487).
-pub const MAX_RANGE_UNITS: usize = 64;
+pub const MAX_RANGE_UNITS: usize = 128;
 pub const MAX_RANGE_ZONES: usize = 16;
 
 /// Size of an authored clearing used for remote battle deployment.
@@ -277,7 +277,9 @@ pub struct RangeConstructionOrder {
     #[serde(default = "default_construction_quota")]
     pub quota: u8,
 }
-fn default_construction_quota() -> u8 { 8 }
+fn default_construction_quota() -> u8 {
+    8
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RangeProductionOrder {
@@ -464,6 +466,11 @@ impl RangeLayout {
         for u in &mut self.units {
             shift(&mut u.at);
         }
+        if let Some(ready) = &mut self.ready {
+            for order in &mut ready.construction {
+                shift(&mut order.at);
+            }
+        }
         for device in &mut self.lab_devices {
             shift(&mut device.at);
             if let Some(c) = device.collector.as_mut() {
@@ -646,13 +653,19 @@ impl RangeLayout {
             || r.ready.as_ref().is_some_and(|ready| {
                 ready.construction.len() > 8
                     || ready.construction.iter().any(|order| {
-                        !matches!(order.kind, RangeUnitKind::TurretT1 | RangeUnitKind::KilFactoryT1 | RangeUnitKind::GrebenStorage)
-                            || !(1..=32).contains(&order.quota)
+                        !matches!(
+                            order.kind,
+                            RangeUnitKind::TurretT1
+                                | RangeUnitKind::KilFactoryT1
+                                | RangeUnitKind::GrebenStorage
+                        ) || !(1..=32).contains(&order.quota)
                             || (0..3).any(|a| order.at[a] < 0 || order.at[a] >= size[a])
                     })
                     || ready.production.iter().any(|order| {
                         order.actor >= r.units.len()
-                            || r.economy.as_ref().is_none_or(|economy| !economy.produces(r.units[order.actor].kind, order.kind))
+                            || r.economy.as_ref().is_none_or(|economy| {
+                                !economy.produces(r.units[order.actor].kind, order.kind)
+                            })
                     })
                     || (!ready.construction.is_empty() && r.economy.is_none())
             })
@@ -874,5 +887,29 @@ mod subsoil_tests {
         assert_eq!(stock, deep.with_ground_level(16).unwrap());
         assert!(!stock.to_ron().unwrap().contains("ground_level"));
         assert!(stock.clone().with_ground_level(81).is_err());
+    }
+}
+
+#[cfg(test)]
+mod ready_translation_tests {
+    use super::*;
+    #[test]
+    fn construction_orders_follow_the_translated_terrain() {
+        let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        layout.economy = Some(crate::range_economy::RangeEconomy::stock());
+        layout.ready = Some(RangeReady {
+            construction: vec![RangeConstructionOrder {
+                kind: RangeUnitKind::TurretT1,
+                at: [400, 16, 400],
+                quota: 1,
+            }],
+            ..Default::default()
+        });
+        let shifted = layout.clone().with_ground_level(80).unwrap();
+        assert_eq!(
+            shifted.ready.as_ref().unwrap().construction[0].at,
+            [400, 80, 400]
+        );
+        assert_eq!(shifted.with_ground_level(16).unwrap(), layout);
     }
 }

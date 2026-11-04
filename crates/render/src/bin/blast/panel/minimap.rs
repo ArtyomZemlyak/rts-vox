@@ -9,6 +9,8 @@ pub struct MiniMap {
     generation: Option<u64>,
 }
 #[derive(Component)]
+pub struct MiniRoot;
+#[derive(Component)]
 pub struct Marker(usize);
 #[derive(Component)]
 pub struct ViewEdge {
@@ -20,6 +22,7 @@ const MAP_PIXELS: f32 = 142.0;
 pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
     commands
         .spawn((
+            MiniRoot,
             PanelRoot,
             bevy::ui::RelativeCursorPosition::default(),
             Node {

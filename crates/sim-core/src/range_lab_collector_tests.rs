@@ -422,7 +422,8 @@ fn crawler_reclaim_mode_processes_destroyed_tank_and_never_digs_ground() {
     ))
     .unwrap();
     layout.initial_debris.clear();
-    layout.units[0].at = [260, 16, 320];
+    // Keep the harvesting head clear of the still-intact tank at setup.
+    layout.units[0].at = [240, 16, 320];
     let cfg =
         modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
             .unwrap();

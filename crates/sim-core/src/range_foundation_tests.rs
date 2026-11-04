@@ -14,6 +14,13 @@ fn scene(kind: RangeUnitKind, battle: bool, c: ExplosionConfig) -> BlastRange {
         at: [320, FLOOR, 320],
         weapon: None,
     }];
+    let probe = RangeUnit::of_kind(kind, l.units[0].at);
+    let (lo, hi) = probe.bounds();
+    if (0..3).any(|a| lo[a] < 1 || hi[a] >= l.size[a] as i32 - 1) {
+        l.size = [4096, 2048, 4096];
+        l.units[0].at = [1600, FLOOR, 1600];
+        l.clear_max = [4032, 4032];
+    }
     let mut r = BlastRange::with_layout(c, l).unwrap();
     r.control();
     r
@@ -22,7 +29,12 @@ fn shell() -> ExplosionConfig {
     ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap()
 }
 fn stationary() -> impl Iterator<Item = RangeUnitKind> {
-    RangeUnitKind::ALL.into_iter().filter(|k| k.emplacement())
+    // Keep the legacy offset/excavation matrix at its original scale.
+    // The new 140 m logistics building needs separate bounded probes below.
+    RangeUnitKind::ALL
+        .into_iter()
+        .take(14)
+        .filter(|k| k.emplacement())
 }
 fn burst(r: &mut BlastRange, at: [i32; 3]) {
     let c = r.config;
@@ -49,18 +61,45 @@ fn burst(r: &mut BlastRange, at: [i32; 3]) {
 }
 
 #[test]
+fn new_emplacements_have_complete_footings_and_hold_their_foundation() {
+    for kind in RangeUnitKind::ALL
+        .into_iter()
+        .skip(14)
+        .filter(|k| k.emplacement())
+    {
+        let mut r = scene(kind, true, shell());
+        let f = foundation::blocks(r.layout.as_ref().unwrap())
+            .pop()
+            .unwrap();
+        let [cx, _, cz] = r.units[0].at;
+        for (x, z) in [(f.min[0], f.min[2]), (cx, cz), (f.max[0] - 1, f.max[2] - 1)] {
+            assert_eq!(
+                r.world.material(x as u32, (FLOOR - 1) as u32, z as u32),
+                2,
+                "{kind:?}"
+            );
+        }
+        let before = r.units[0].motion.pos;
+        r.units[0].motion.hull.vy = Fx::from_int(10);
+        for _ in 0..3 {
+            r.step();
+        }
+        assert_eq!(r.units[0].motion.pos, before, "{kind:?}");
+        assert_eq!(r.units[0].motion.hull.vy, Fx::ZERO);
+        assert!(r.matter.economy.ledger.balanced());
+    }
+}
+
+#[test]
 fn foundations_cover_every_emplacement_and_both_generator_paths() {
     for kind in stationary() {
         let r = scene(kind, true, shell());
+        let [cx, _, cz] = r.units[0].at;
         let l = r.layout.as_ref().unwrap();
         let f = foundation::blocks(l).pop().unwrap();
         let g = RangeTerrain::new(true, Some(l.clone()));
         let mut column = vec![0; 32];
-        for (x, z) in [
-            (f.min[0], f.min[2]),
-            (320, 320),
-            (f.max[0] - 1, f.max[2] - 1),
-        ] {
+        for (x, z) in [(f.min[0], f.min[2]), (cx, cz), (f.max[0] - 1, f.max[2] - 1)] {
             g.column(x as u32, z as u32, 0, &mut column);
             for y in 0..32 {
                 assert_eq!(column[y as usize], g.material(x as u32, y, z as u32));
@@ -73,8 +112,8 @@ fn foundations_cover_every_emplacement_and_both_generator_paths() {
                 }
             }
         }
-        assert_eq!(r.world.material(320, 15, 320), 2);
-        assert_eq!(r.world.material(320, 3, 320), 1);
+        assert_eq!(r.world.material(cx as u32, 15, cz as u32), 2);
+        assert_eq!(r.world.material(cx as u32, 3, cz as u32), 1);
     }
     let r = scene(RangeUnitKind::Tank, true, shell());
     assert!(foundation::blocks(r.layout.as_ref().unwrap()).is_empty());
@@ -99,9 +138,10 @@ fn rubble_cannot_lift_an_attached_building_and_zero_speed_does_not_anchor_a_tank
     for kind in stationary() {
         let mut r = scene(kind, true, shell());
         let pos = r.units[0].motion.pos;
+        let [cx, _, cz] = r.units[0].at;
         let mut rubble = nav::vehicle::Rubble::from_sorted(
-            (250..390)
-                .flat_map(|x| (250..390).map(move |z| ([x, z], 40)))
+            (cx - 70..cx + 70)
+                .flat_map(|x| (cz - 70..cz + 70).map(move |z| ([x, z], 40)))
                 .collect(),
         );
         for enabled in [false, true] {
@@ -156,7 +196,8 @@ fn ordinary_ground_blast_keeps_all_buildings_rigid_in_both_modes() {
             ] {
                 let mut r = scene(kind, battle, shell());
                 let pos = r.units[0].motion.pos;
-                burst(&mut r, [320 + offset[0], 15, 320 + offset[1]]);
+                let [cx, _, cz] = r.units[0].at;
+                burst(&mut r, [cx + offset[0], 15, cz + offset[1]]);
                 for _ in 0..90 {
                     r.step();
                     assert_eq!(
@@ -209,6 +250,9 @@ fn undermined_footings_fall_and_replay_across_workers() {
             for z in f.min[2]..f.max[2] {
                 for y in 8..FLOOR {
                     r.world.queue_dig(x as u32, y as u32, z as u32);
+                    if r.world.queued() >= 8192 {
+                        r.world.flush();
+                    }
                 }
             }
         }

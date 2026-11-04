@@ -34,6 +34,10 @@ mod damage_art;
 mod fire;
 #[path = "blast/fragments.rs"]
 mod fragments;
+#[path = "blast/frontend.rs"]
+mod frontend;
+#[path = "blast/construction.rs"]
+mod construction;
 #[path = "blast/frame_limit.rs"]
 mod frame_limit;
 #[path = "blast/gun_art.rs"]
@@ -445,6 +449,7 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--main-menu" | "--skip-menu" => {},
             "--laboratory" => start_laboratory = true,
             "--profile" => {
                 i += 1;
@@ -717,6 +722,13 @@ fn main() {
     if let Some(p) = &out {
         std::fs::create_dir_all(p).expect("capture directory");
     }
+    let start_menu = frontend::requested(&args);
+    if start_menu {
+        drive = true;
+        view = 1;
+        repeat = false;
+        if layout_file.is_none() && load_file.is_none() { layout_file = Some("data/range-km.ron".into()); }
+    }
     // `--edit` включает паузу (`paused: edit`), а шаг симуляции выходит по
     // `scene.paused` — запись писала бы неподвижный кадр сколько угодно секунд
     // и завершалась кодом 0 с валидным timeline (ADR-269). Редактор живёт
@@ -821,6 +833,7 @@ fn main() {
         view = 1;
     }
     let mut hud = panel::Panel::new(drive, demo);
+    hud.sandbox = !battle_preset && !world_battle && skirmish.is_none();
     hud.script = skirmish
         .and_then(|id| modding::range_skirmish::stock(id as usize).ok())
         .map_or_else(Vec::new, |preset| preset.script);
@@ -1027,8 +1040,8 @@ fn main() {
         ..log_plugin
     };
     assert!(
-        !profile_background || profile_output.is_some(),
-        "--profile-background requires --profile"
+        !profile_background || profile_output.is_some() || out.is_some(),
+        "--profile-background requires --profile or --shots"
     );
     // Winit's native maximize path uses SW_MAXIMIZE on Windows, which can
     // activate even a window created with with_active(false). Background
@@ -1099,7 +1112,7 @@ fn main() {
             generation: 0,
             energy,
             anni,
-            paused: edit,
+            paused: edit || start_menu,
             frame: 0,
             finish,
             out,
@@ -1127,6 +1140,8 @@ fn main() {
         })
         .insert_resource(surround::Enabled(surround_enabled))
         .insert_resource(hud)
+        .insert_resource(frontend::Menu::new(start_menu))
+        .init_resource::<construction::Catalog>()
         .insert_resource(laboratory::Laboratory::new(start_laboratory))
         .insert_resource(knobs::Overrides::new(settings, stock_tuning))
         .insert_resource(pilot::Pilot::requested(view == 7))
@@ -1149,28 +1164,30 @@ fn main() {
         .add_systems(
             Update,
             (
+                frontend::input,
                 profile::begin,
                 profile::actions,
                 (
                     (
-                        laboratory::first_person_input,
-                        laboratory::tools_input,
+                        laboratory::first_person_input.run_if(frontend::in_session),
+                        laboratory::tools_input.run_if(frontend::in_session),
                         panel::actions,
+                        construction::input.run_if(frontend::in_session),
                         laboratory::actions,
                     )
                         .chain(),
-                    panel::minimap::input,
-                    panel::scroll,
+                    panel::minimap::input.run_if(frontend::in_session),
+                    panel::scroll.run_if(frontend::can_scroll),
                     knobs::actions,
-                    pilot::input,
+                    pilot::input.run_if(frontend::in_session),
                     (
-                        workbench::input,
-                        laboratory::pointer,
-                        laboratory::flush_live,
+                        workbench::input.run_if(frontend::in_session),
+                        laboratory::pointer.run_if(frontend::in_session),
+                        laboratory::flush_live.run_if(frontend::in_session),
                     )
                         .chain(),
-                    advance,
-                    (panel::scenario_progress, laboratory::measure).chain(),
+                    advance.run_if(frontend::in_session),
+                    (panel::scenario_progress.run_if(frontend::in_session), laboratory::measure.run_if(frontend::in_session)).chain(),
                     panel::minimap::update_terrain,
                     profile::stamp,
                     gun_art::refresh,
@@ -1208,7 +1225,7 @@ fn main() {
                     overview::sync,
                     overview::atmosphere,
                     streaming::camera,
-                    workbench::camera,
+                    workbench::camera.run_if(frontend::in_session),
                     surround::update,
                     laboratory::first_person_draw,
                     laboratory::collectors_draw,
@@ -1219,7 +1236,7 @@ fn main() {
                         panel::refresh,
                         panel::minimap::refresh_markers,
                         panel::minimap::update_view,
-                        panel::hud::refresh,
+                        (panel::hud::refresh, construction::refresh).chain(),
                         knobs::refresh,
                         pilot::hud,
                         (
@@ -1227,14 +1244,14 @@ fn main() {
                             laboratory::sync_ui,
                             laboratory::sync_parameters,
                             laboratory::sync_scenario,
-                            laboratory::scroll_ui,
-                            laboratory::replay_input,
+                            laboratory::scroll_ui.run_if(frontend::in_session),
+                            laboratory::replay_input.run_if(frontend::in_session),
                         )
                             .chain(),
                     )
                         .chain(),
                     panel::hud::refresh_selection_box,
-                    panel::release_keys,
+                    (panel::release_keys, frontend::sync).chain(),
                     record,
                     capture,
                     profile::render_context,
@@ -3105,7 +3122,16 @@ fn capture(
     streaming: Res<streaming::Streaming>,
     laboratory: Option<Res<laboratory::Laboratory>>,
     mut exit: MessageWriter<AppExit>,
+    catalog: Option<Res<construction::Catalog>>,
 ) {
+    if catalog.is_some_and(|c| !c.capture_ready()) { return; }
+    // A map-scale camera can be ready before the asynchronous world columns.
+    // Paused captures must wait for that publication instead of saving sky.
+    if scene.out.is_some() && scene.paused
+        && (scene.sim.size()[0] > TERRAIN_WINDOW[0] || scene.sim.size()[2] > TERRAIN_WINDOW[2])
+        && gas.params.distant.w < 0.5 {
+        return;
+    }
     if !gas.ready.load(Ordering::Relaxed) || streaming.loading() {
         return;
     }

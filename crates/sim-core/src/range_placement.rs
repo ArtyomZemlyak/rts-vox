@@ -24,6 +24,7 @@ impl std::fmt::Display for Rejection {
 }
 
 struct Footprint {
+    cell: i32,
     columns: BTreeMap<[i32; 2], Vec<i32>>,
     min: [i32; 3],
     max: [i32; 3],
@@ -33,11 +34,17 @@ impl Footprint {
         let mut unit = RangeUnit::of_kind(kind, GUN);
         unit.motion.drive.head = head;
         unit.update_pose(head);
-        let (lo, hi) = unit.bounds();
         let mut columns = BTreeMap::new();
         let mut min = [i32::MAX; 3];
         let mut max = [i32::MIN; 3];
-        if kind == RangeUnitKind::GrebenStorage {
+        if matches!(
+            kind,
+            RangeUnitKind::GrebenStorage
+                | RangeUnitKind::KilFactoryT1
+                | RangeUnitKind::KilFactoryT2
+                | RangeUnitKind::KilFactoryT3
+                | RangeUnitKind::KilFactoryT4
+        ) {
             for x in 0..usize::from(unit.body.vol.nx) {
                 for y in 0..usize::from(unit.body.vol.ny) {
                     for z in 0..usize::from(unit.body.vol.nz) {
@@ -46,6 +53,62 @@ impl Footprint {
                         }
                         let p = unit.world_pos([x, y, z]);
                         let p = [p[0] - GUN[0], p[1] - GUN[1], p[2] - GUN[2]];
+                        for a in 0..3 {
+                            min[a] = min[a].min(p[a] - 4);
+                            max[a] = max[a].max(p[a] + 4);
+                        }
+                        columns
+                            .entry([p[0], p[2]])
+                            .or_insert_with(Vec::new)
+                            .push(p[1]);
+                    }
+                }
+            }
+            return Self {
+                cell: 8,
+                columns,
+                min,
+                max,
+            };
+        }
+        // Rasterise the same cell centres as hit queries, one authored part
+        // at a time. A hollow walker no longer transforms every world point
+        // against every unrelated leg or arm inside the union bounding box.
+        let parts = std::iter::once((&unit.body, &unit.pose)).chain(
+            unit.body
+                .segments
+                .iter()
+                .zip(&unit.seg_frames)
+                .map(|(seg, frame)| (&seg.body, frame)),
+        );
+        for (body, frame) in parts {
+            let size = [
+                i32::from(body.vol.nx),
+                i32::from(body.vol.ny),
+                i32::from(body.vol.nz),
+            ];
+            let mut lo = [i32::MAX; 3];
+            let mut hi = [i32::MIN; 3];
+            for k in 0..8 {
+                let p = frame.world(std::array::from_fn(|a| {
+                    fx::Fx::from_int(if k & (1 << a) == 0 { 0 } else { size[a] })
+                }));
+                let p = [p.x, p.y, p.z].map(fx::Fx::to_int_trunc);
+                for a in 0..3 {
+                    lo[a] = lo[a].min(p[a] - 1);
+                    hi[a] = hi[a].max(p[a] + 1);
+                }
+            }
+            for z in lo[2]..hi[2] {
+                for x in lo[0]..hi[0] {
+                    for y in lo[1]..hi[1] {
+                        let Some(c) = super::local_in(body, [x, y, z], frame) else {
+                            continue;
+                        };
+                        if !body.vol.get(c[0], c[1], c[2]) {
+                            continue;
+                        }
+                        let p = [x - GUN[0], y - GUN[1], z - GUN[2]];
                         for a in 0..3 {
                             min[a] = min[a].min(p[a]);
                             max[a] = max[a].max(p[a] + 1);
@@ -57,28 +120,60 @@ impl Footprint {
                     }
                 }
             }
-            return Self { columns, min, max };
         }
-        // The same world-cell centres used by damage/hit queries. Mapping
-        // only segment voxel centres can leave holes in a rotated segment.
-        for z in lo[2]..hi[2] {
-            for x in lo[0]..hi[0] {
-                let ys: Vec<_> = (lo[1]..hi[1])
-                    .filter(|y| unit.solid([x, *y, z]))
-                    .map(|y| y - GUN[1])
-                    .collect();
-                if let (Some(&bottom), Some(&top)) = (ys.first(), ys.last()) {
-                    let p = [x - GUN[0], bottom, z - GUN[2]];
-                    let q = [p[0] + 1, top + 1, p[2] + 1];
-                    for a in 0..3 {
-                        min[a] = min[a].min(p[a]);
-                        max[a] = max[a].max(q[a]);
+        for ys in columns.values_mut() {
+            ys.sort_unstable();
+            ys.dedup();
+        }
+        Self {
+            cell: 1,
+            columns,
+            min,
+            max,
+        }
+    }
+    fn contains(&self, p: [i32; 3]) -> bool {
+        let centre = |a: usize| p[a] - (p[a] - self.min[a]).rem_euclid(self.cell) + self.cell / 2;
+        self.columns
+            .get(&[centre(0), centre(2)])
+            .is_some_and(|ys| ys.binary_search(&centre(1)).is_ok())
+    }
+    fn terrain_intersects(&self, at: [i32; 3], terrain: &RangeTerrain) -> bool {
+        self.columns.iter().any(|(p, ys)| {
+            let x0 = at[0] + p[0] - self.cell / 2;
+            let z0 = at[2] + p[1] - self.cell / 2;
+            (z0..z0 + self.cell).any(|z| {
+                (x0..x0 + self.cell).any(|x| {
+                    let column = terrain.column_of(x as u32, z as u32);
+                    // Conservative empty-sky rejection avoids expanding every
+                    // 80 cm cell into 512 samples on an otherwise empty pad.
+                    let mut top = column.ground as i32;
+                    top = top.max(column.course.unwrap_or(0));
+                    top = top.max(column.blocks.iter().filter(|b| b.2 != 0).map(|b| b.1).max().unwrap_or(0));
+                    top = top.max(column.tree.map_or(0, |(base, h, _, _)| (base + h) as i32));
+                    if column.wall {
+                        top = top.max(66);
                     }
-                    columns.insert([p[0], p[2]], ys);
-                }
-            }
-        }
-        Self { columns, min, max }
+                    if column.target {
+                        top = top.max(45);
+                    }
+                    if column.rock.is_some() {
+                        top = top.max(column.ground as i32 + 5);
+                    }
+                    ys.iter()
+                        .take_while(|y| at[1] + **y - self.cell / 2 < top)
+                        .any(|y| {
+                            let y0 = at[1] + y - self.cell / 2;
+                            (y0..(y0 + self.cell).min(top)).any(|y| {
+                                let mat = terrain.at(&column, x as u32, y as u32, z as u32);
+                                #[cfg(test)]
+                                if mat != 0 { eprintln!("placement obstruction [{x}, {y}, {z}] material={mat} cell={}", self.cell); }
+                                mat != 0
+                            })
+                        })
+                })
+            })
+        })
     }
     fn overlaps(&self, at: [i32; 3], other: &Self, there: [i32; 3]) -> bool {
         if (0..3).any(|a| {
@@ -87,32 +182,140 @@ impl Footprint {
         }) {
             return false;
         }
+        if self.cell > other.cell {
+            return other.overlaps(there, self, at);
+        }
         self.columns.iter().any(|(p, ys)| {
-            let q = [p[0] + at[0] - there[0], p[1] + at[2] - there[2]];
-            other.columns.get(&q).is_some_and(|zs| {
-                ys.iter()
-                    .any(|y| zs.binary_search(&(y + at[1] - there[1])).is_ok())
+            ys.iter().any(|y| {
+                let low = [
+                    p[0] - self.cell / 2,
+                    y - self.cell / 2,
+                    p[1] - self.cell / 2,
+                ];
+                // Equal-size axis-aligned cells overlap iff one of these integer
+                // corners lies in the other occupied cell. Fine/coarse checks use
+                // the fine cell, so a one-world-cube obstruction is never missed.
+                let edges: &[i32] = if self.cell == 1 {
+                    &[0]
+                } else {
+                    &[0, self.cell - 1]
+                };
+                edges.iter().any(|dx| {
+                    edges.iter().any(|dy| {
+                        edges.iter().any(|dz| {
+                            other.contains([
+                                low[0] + dx + at[0] - there[0],
+                                low[1] + dy + at[1] - there[1],
+                                low[2] + dz + at[2] - there[2],
+                            ])
+                        })
+                    })
+                })
             })
         })
     }
 }
 
-pub struct Validator {
-    footprints: [std::sync::OnceLock<Footprint>; RangeUnitKind::COUNT * 4],
+// Stock bodies are immutable; all editors/scenarios can share the same
+// exact masks. The table is bounded by kind and the four authored yaws.
+fn footprints() -> &'static [std::sync::OnceLock<Footprint>; RangeUnitKind::COUNT * 4] {
+    static CACHE: [std::sync::OnceLock<Footprint>; RangeUnitKind::COUNT * 4] =
+        [const { std::sync::OnceLock::new() }; RangeUnitKind::COUNT * 4];
+    &CACHE
 }
-impl Default for Validator {
-    fn default() -> Self {
-        Self {
-            footprints: std::array::from_fn(|_| std::sync::OnceLock::new()),
-        }
-    }
-}
+
+#[derive(Default)]
+pub struct Validator;
 impl Validator {
+    pub fn runtime_bounds(
+        &self,
+        kind: RangeUnitKind,
+        at: [i32; 3],
+        yaw: u8,
+    ) -> ([i32; 3], [i32; 3]) {
+        let shape = self.footprint_yaw(kind, yaw % 4);
+        (
+            std::array::from_fn(|a| at[a] + shape.min[a]),
+            std::array::from_fn(|a| at[a] + shape.max[a]),
+        )
+    }
+    /// Authoring and construction share a cached shape against the live world.
+    /// The caller rechecks on commit, so a preview never grants permission.
+    pub fn runtime(
+        &self,
+        sim: &super::BlastRange,
+        kind: RangeUnitKind,
+        at: [i32; 3],
+        yaw: u8,
+    ) -> Result<(), Rejection> {
+        self.runtime_except(sim, kind, at, yaw, None)
+    }
+    pub(super) fn runtime_except(
+        &self,
+        sim: &super::BlastRange,
+        kind: RangeUnitKind,
+        at: [i32; 3],
+        yaw: u8,
+        skip: Option<usize>,
+    ) -> Result<(), Rejection> {
+        let shape = self.footprint_yaw(kind, yaw % 4);
+        let lo = std::array::from_fn::<_, 3, _>(|a| at[a] + shape.min[a]);
+        let hi = std::array::from_fn::<_, 3, _>(|a| at[a] + shape.max[a]);
+        if (0..3).any(|a| lo[a] < 1 || hi[a] >= sim.size()[a] as i32 - 1) {
+            return Err(Rejection::Outside);
+        }
+        if sim
+            .units
+            .iter()
+            .enumerate()
+            .filter(|(id, _)| Some(*id) != skip)
+            .map(|(_, u)| u)
+            .chain((!sim.battle_mode()).then_some(&sim.gun))
+            .map(|u| u.bounds())
+            .chain(sim.reserved_construction_bounds())
+            .any(|(a, b)| (0..3).all(|k| lo[k] < b[k] && a[k] < hi[k]))
+        {
+            return Err(Rejection::Units);
+        }
+        // An entirely clear footprint above the live ceiling needs no cell
+        // scan. This is exact even after a crater or a new obstacle this tick.
+        if sim
+            .world
+            .column_box_ceiling([lo[0] as u32, lo[2] as u32], [hi[0] as u32, hi[2] as u32])
+            <= lo[1] as u32
+        {
+            return Ok(());
+        }
+        if shape.columns.iter().any(|(p, ys)| {
+            let x = at[0] + p[0] - shape.cell / 2;
+            let z = at[2] + p[1] - shape.cell / 2;
+            ys.iter().any(|y| {
+                let y = at[1] + y - shape.cell / 2;
+                // A coarse model cell occupies the whole cube, not its centre.
+                // Read packed occupancy words instead of 512 scalar queries.
+                if shape.cell == 1 {
+                    sim.world.solid(x as u32, y as u32, z as u32)
+                } else {
+                    sim.world.any_solid_box(
+                        [x as u32, y as u32, z as u32],
+                        [
+                            (x + shape.cell - 1) as u32,
+                            (y + shape.cell - 1) as u32,
+                            (z + shape.cell - 1) as u32,
+                        ],
+                    )
+                }
+            })
+        }) {
+            return Err(Rejection::Terrain);
+        }
+        Ok(())
+    }
     fn footprint(&self, kind: RangeUnitKind, reverse: bool) -> &Footprint {
         self.footprint_yaw(kind, u8::from(reverse) * 2)
     }
     fn footprint_yaw(&self, kind: RangeUnitKind, yaw: u8) -> &Footprint {
-        self.footprints[kind.index() + usize::from(yaw) * RangeUnitKind::COUNT]
+        footprints()[kind.index() + usize::from(yaw) * RangeUnitKind::COUNT]
             .get_or_init(|| Footprint::of(kind, i32::from(yaw) * fx::angle::FULL / 4))
     }
 
@@ -136,20 +339,22 @@ impl Validator {
         at: [i32; 3],
         bounds: ([i32; 3], [i32; 3]),
     ) -> bool {
-        let shape = self.footprints[kind.index() + usize::from(reverse) * 2 * RangeUnitKind::COUNT]
+        let shape = footprints()[kind.index() + usize::from(reverse) * 2 * RangeUnitKind::COUNT]
             .get()
             .expect("product geometry is prepared at scene construction");
         let (lo, hi) = bounds;
         shape.columns.iter().any(|(p, ys)| {
-            let (x, z) = (at[0] + p[0], at[2] + p[1]);
-            x >= lo[0]
-                && x < hi[0]
-                && z >= lo[2]
-                && z < hi[2]
-                && ys.iter().any(|y| {
-                    let y = at[1] + y;
-                    y >= lo[1] && y < hi[1] && world.solid(x as u32, y as u32, z as u32)
+            let x0 = at[0] + p[0] - shape.cell / 2;
+            let z0 = at[2] + p[1] - shape.cell / 2;
+            (z0.max(lo[2])..(z0 + shape.cell).min(hi[2])).any(|z| {
+                (x0.max(lo[0])..(x0 + shape.cell).min(hi[0])).any(|x| {
+                    ys.iter().any(|y| {
+                        let y0 = at[1] + y - shape.cell / 2;
+                        (y0.max(lo[1])..(y0 + shape.cell).min(hi[1]))
+                            .any(|y| world.solid(x as u32, y as u32, z as u32))
+                    })
                 })
+            })
         })
     }
 
@@ -190,23 +395,8 @@ impl Validator {
             {
                 return Err(Rejection::Units);
             }
-            for (p, ys) in &shape.columns {
-                let (x, z) = ((at[0] + p[0]) as u32, (at[2] + p[1]) as u32);
-                let column = terrain.column_of(x, z);
-                if let Some(_y) = ys
-                    .iter()
-                    .find(|y| terrain.at(&column, x, (at[1] + **y) as u32, z) != 0)
-                {
-                    #[cfg(test)]
-                    eprintln!(
-                        "placement collision {:?} at {:?}: cell [{x}, {}, {z}], material {}",
-                        layout.units[i].kind,
-                        at,
-                        at[1] + _y,
-                        terrain.at(&column, x, (at[1] + _y) as u32, z)
-                    );
-                    return Err(Rejection::Terrain);
-                }
+            if shape.terrain_intersects(at, &terrain) {
+                return Err(Rejection::Terrain);
             }
         }
         for piece in &layout.initial_debris {
@@ -227,12 +417,10 @@ impl Validator {
                             );
                             return Err(Rejection::Terrain);
                         }
-                        if units.iter().any(|(shape, at)| {
-                            shape
-                                .columns
-                                .get(&[x - at[0], z - at[2]])
-                                .is_some_and(|ys| ys.contains(&(y - at[1])))
-                        }) {
+                        if units
+                            .iter()
+                            .any(|(shape, at)| shape.contains([x - at[0], y - at[1], z - at[2]]))
+                        {
                             return Err(Rejection::Units);
                         }
                     }
@@ -247,6 +435,134 @@ impl Validator {
 mod tests {
     use super::*;
     use modding::range::{RangeBlock, RangeUnitDef};
+
+    #[test]
+    fn live_placement_checks_coarse_cell_edges_and_same_tick_edits() {
+        let mut l = layout();
+        l.battle = true;
+        l.units.clear();
+        l.shields.clear();
+        l.course = None;
+        l.economy = None;
+        l.size = [2048, 1024, 2048];
+        l.clear_min = [1, 1];
+        l.clear_max = [2047, 2047];
+        l.blocks = vec![
+            RangeBlock {
+                min: [0; 3],
+                max: [2048, 1024, 2048],
+                material: 0,
+            },
+            RangeBlock {
+                min: [0; 3],
+                max: [2048, 16, 2048],
+                material: 1,
+            },
+        ];
+        let config = modding::explosion::ExplosionConfig::from_ron(include_str!(
+            "../../../data/explosion.ron"
+        ))
+        .unwrap();
+        let mut sim = super::super::BlastRange::with_layout(config, l).unwrap();
+        let v = Validator::default();
+        let at = [1000, 16, 1000];
+        for kind in [
+            RangeUnitKind::Tank,
+            RangeUnitKind::GrebenStorage,
+            RangeUnitKind::KilFactoryT1,
+            RangeUnitKind::KilFactoryT4,
+        ] {
+            for yaw in 0..4 {
+                let shape = v.footprint_yaw(kind, yaw);
+                assert!(v.runtime(&sim, kind, at, yaw).is_ok(), "{kind:?}/{yaw}");
+                // An overhang above the model defeats the ceiling shortcut,
+                // but must not become a false collision with the body.
+                let above = [at[0], at[1] + shape.max[1] + 8, at[2]];
+                let write = |sim: &mut super::super::BlastRange, p: [i32; 3], mat| {
+                    sim.world.queue_edit(voxel::Edit {
+                        x: p[0] as u32,
+                        y: p[1] as u32,
+                        z: p[2] as u32,
+                        mat,
+                        by: voxel::NOBODY,
+                    });
+                    sim.world.flush();
+                };
+                write(&mut sim, above, 3);
+                assert!(v.runtime(&sim, kind, at, yaw).is_ok());
+                let (xz, ys) = shape.columns.iter().next().unwrap();
+                let corner = [
+                    at[0] + xz[0] - shape.cell / 2,
+                    at[1] + ys[0] - shape.cell / 2,
+                    at[2] + xz[1] - shape.cell / 2,
+                ];
+                write(&mut sim, corner, 3);
+                assert_eq!(
+                    v.runtime(&sim, kind, at, yaw),
+                    Err(Rejection::Terrain),
+                    "{kind:?}/{yaw}"
+                );
+                write(&mut sim, corner, 0);
+                assert!(
+                    v.runtime(&sim, kind, at, yaw).is_ok(),
+                    "same-tick removal {kind:?}/{yaw}"
+                );
+                write(&mut sim, above, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn large_storage_cells_have_no_placement_holes_between_their_centres() {
+        for kind in [
+            RangeUnitKind::GrebenStorage,
+            RangeUnitKind::KilFactoryT1,
+            RangeUnitKind::KilFactoryT2,
+            RangeUnitKind::KilFactoryT3,
+            RangeUnitKind::KilFactoryT4,
+        ] {
+            for yaw in 0..4 {
+                let f = Footprint::of(kind, yaw * fx::angle::QUARTER);
+                let (p, ys) = f.columns.iter().next().unwrap();
+                let centre = [p[0], ys[0], p[1]];
+                let mut unit = RangeUnit::of_kind(kind, GUN);
+                unit.motion.drive.head = yaw * fx::angle::QUARTER;
+                unit.update_pose(unit.motion.drive.head);
+                for offset in [[-4, -4, -4], [3, 3, 3], [1, 0, 0]] {
+                    let q = std::array::from_fn(|a| centre[a] + offset[a]);
+                    assert!(unit.solid(std::array::from_fn(|a| q[a] + GUN[a])));
+                    assert!(f.contains(q), "yaw={yaw} cell={q:?}");
+                    let point = Footprint {
+                        cell: 1,
+                        columns: BTreeMap::from([([q[0], q[2]], vec![q[1]])]),
+                        min: q,
+                        max: q.map(|v| v + 1),
+                    };
+                    assert!(f.overlaps([0; 3], &point, [0; 3]));
+                    assert!(point.overlaps([0; 3], &f, [0; 3]));
+                    let at = [1600, 16, 1600];
+                    let point = std::array::from_fn(|a| at[a] + q[a]);
+                    let mut l = layout();
+                    l.size = [4096, 2048, 4096];
+                    l.course = None;
+                    l.units.clear();
+                    l.blocks = vec![
+                        RangeBlock {
+                            min: [0; 3],
+                            max: [4096, 2048, 4096],
+                            material: 0,
+                        },
+                        RangeBlock {
+                            min: point,
+                            max: point.map(|v| v + 1),
+                            material: 3,
+                        },
+                    ];
+                    assert!(f.terrain_intersects(at, &RangeTerrain::new(true, Some(l))));
+                }
+            }
+        }
+    }
 
     fn layout() -> RangeLayout {
         RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap()
@@ -328,7 +644,6 @@ mod tests {
 
     #[test]
     fn product_masks_match_fresh_bodies_in_both_orientations_and_across_zero() {
-        use std::collections::BTreeSet;
         let v = Validator::default();
         for kind in RangeUnitKind::ALL {
             v.prepare_product(kind);
@@ -337,32 +652,38 @@ mod tests {
                 for at in [[95, 37, 127], [0; 3]] {
                     let unit = RangeUnit::placed(kind, !reverse, at, true);
                     let (lo, hi) = unit.bounds();
-                    let mut expected = BTreeSet::new();
-                    for z in lo[2]..hi[2] {
-                        for y in lo[1]..hi[1] {
-                            for x in lo[0]..hi[0] {
-                                if unit.solid([x, y, z]) {
-                                    expected.insert([x, y, z]);
+                    let stride = shape.cell as usize;
+                    let edges: &[i32] = if shape.cell == 1 {
+                        &[0]
+                    } else {
+                        &[0, shape.cell - 1]
+                    };
+                    let mut occupied = false;
+                    for z in (lo[2]..hi[2]).step_by(stride) {
+                        for y in (lo[1]..hi[1]).step_by(stride) {
+                            for x in (lo[0]..hi[0]).step_by(stride) {
+                                for &dx in edges {
+                                    for &dy in edges {
+                                        for &dz in edges {
+                                            let p = [x + dx, y + dy, z + dz];
+                                            if (0..3).any(|a| p[a] >= hi[a]) {
+                                                continue;
+                                            }
+                                            let expected = unit.solid(p);
+                                            let actual = shape
+                                                .contains(std::array::from_fn(|a| p[a] - at[a]));
+                                            assert_eq!(
+                                                actual, expected,
+                                                "{kind:?} reverse={reverse} at={at:?} cell={p:?}"
+                                            );
+                                            occupied |= expected;
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                    let actual: BTreeSet<_> = shape
-                        .columns
-                        .iter()
-                        .flat_map(|(p, ys)| {
-                            ys.iter()
-                                .map(move |y| [at[0] + p[0], at[1] + y, at[2] + p[1]])
-                        })
-                        .filter(|p| (0..3).all(|a| p[a] >= lo[a] && p[a] < hi[a]))
-                        .collect();
-                    assert!(!expected.is_empty());
-                    assert!(
-                        actual == expected,
-                        "{kind:?} reverse={reverse} at={at:?}: missing {:?}, extra {:?}",
-                        expected.difference(&actual).take(4).collect::<Vec<_>>(),
-                        actual.difference(&expected).take(4).collect::<Vec<_>>()
-                    );
+                    assert!(occupied);
                 }
             }
         }

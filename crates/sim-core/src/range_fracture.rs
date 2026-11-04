@@ -742,7 +742,9 @@ mod tests {
         let mut units: Vec<_> = RangeUnitKind::ALL
             .into_iter()
             .map(|kind| {
-                let mut unit = RangeUnit::of_kind(kind, [240, 64, 240]);
+                // Large factory/storage templates must also fit the world
+                // used by the saved-fragment bounds validator below.
+                let mut unit = RangeUnit::of_kind(kind, [1200, 128, 1200]);
                 unit.motion.drive.head = fx::angle::FULL / 7;
                 unit.turret_pitch = fx::angle::FULL / 24;
                 unit.update_pose(-fx::angle::FULL / 11);
@@ -750,7 +752,9 @@ mod tests {
             })
             .collect();
         let mut matter = Matter::new(&units);
-        matter.begin(u32::MAX, 4);
+        // Exercise geometry/source restoration across every tier, rather than
+        // exhausting one ordinary weapon's u32-joule payload on T3 gun armour.
+        matter.begin_mj(u64::MAX / 1024, 4);
         matter.begin_body_batch();
         let mut removed = Vec::new();
         for (id, u) in units.iter().enumerate() {
@@ -773,10 +777,12 @@ mod tests {
                             } else {
                                 u.seg_frames[part - 1]
                             };
-                            assert!(matches!(
-                                matter.crush(id, u, part, [x, y, z], &frame),
-                                ClaimResult::Applied
-                            ));
+                            let claim = matter.crush(id, u, part, [x, y, z], &frame);
+                            let room = matter.claim_room();
+                            assert!(matches!(claim, ClaimResult::Applied),
+                                "kind={:?} part={part} cell={x},{y},{z} energy={} room={} unpaid={} deferred={}",
+                                u.kind, matter.remaining_mj, room,
+                                matches!(claim, ClaimResult::Unaffordable), matches!(claim, ClaimResult::Deferred));
                             removed.push((id, part, [x, y, z]));
                             count[layer] += 1;
                         }
@@ -865,20 +871,27 @@ mod tests {
                 &mut units[id].body.segments[part - 1].body
             };
             assert!(b.remove(x, y, z));
+            // Match the authoritative commit, including Skoba's intrinsic
+            // stock (independent of its currently depicted cargo shape).
+            let cell = [x, y, z].map(|v| v as u8);
+            if part == 0 {
+                units[id].removed.push(cell);
+                units[id].detached += 1;
+            } else {
+                units[id].seg_removed.push(((part - 1) as u8, cell));
+                units[id].seg_detached += 1;
+            }
         }
-        let config = modding::explosion::ExplosionConfig::from_ron(include_str!(
-            "../../../data/explosion.ron"
-        ))
-        .unwrap();
-        let layout =
-            modding::range::RangeLayout::from_ron(include_str!("../../../data/range-cover.ron"))
-                .unwrap();
-        let r = crate::blast::BlastRange::with_layout(config, layout).unwrap();
+        struct Air;
+        impl voxel::Generator for Air {
+            fn material(&self, _: u32, _: u32, _: u32) -> u16 { 0 }
+        }
+        let world = voxel::World::new(2560, 128, 2560, 4096, Box::new(Air));
         let mut bytes = Blob::new();
         matter.save(&mut bytes);
         let mut copy = Matter::new(&units);
         assert!(copy
-            .load(&mut Scan::new(&bytes.v), &r.world, &units)
+            .load(&mut Scan::new(&bytes.v), &world, &units)
             .is_some());
         let mut roundtrip = Blob::new();
         copy.save(&mut roundtrip);

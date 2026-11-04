@@ -1,0 +1,10 @@
+// One travelling destructive front. World units are 10 cm.
+(
+    speed: 120,
+    half_width: 42,
+    half_height: 6,
+    fracture_j_per_tick: 512000000,
+    attenuation_per_layer: 12,
+    cells_per_tick: 16384,
+    reload_ticks: 200,
+)

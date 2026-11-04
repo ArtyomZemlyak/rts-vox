@@ -9,6 +9,61 @@ fn pilot(throttle: i8, turn: i8, fire: bool) -> Order {
         fire,
     }
 }
+
+#[test]
+fn skoba_pilot_flies_turns_brakes_and_replays_above_ground() {
+    let mut a = arena(RangeUnitKind::SkobaDrone);
+    a.start_free_control().unwrap();
+    let y = a.units[0].motion.pos[1];
+    let start = a.units[0].motion.pos[0];
+    a.battle_order(0, pilot(1, 1, false), None);
+    for _ in 0..10 {
+        a.step();
+    }
+    assert!(a.units[0].motion.pos[0] > start);
+    assert_ne!(a.units[0].motion.drive.head, 0);
+    assert_eq!(a.units[0].motion.pos[1], y);
+    let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
+    a.set_physics_workers(1);
+    b.set_physics_workers(2);
+    for _ in 0..12 {
+        a.step();
+        b.step();
+        same(&a, &b);
+    }
+    a.battle_order(0, Order::Hold, None);
+    for _ in 0..60 {
+        a.step();
+    }
+    assert_eq!(a.units[0].motion.drive.vel, Fx::ZERO);
+    assert_eq!(a.units[0].motion.drive.yaw_rate, 0);
+    assert_eq!(a.units[0].motion.pos[1], y);
+}
+
+#[test]
+fn skoba_pilot_cannot_cross_a_thin_wall_or_another_hull() {
+    for terrain in [false, true] {
+        let mut r = arena(RangeUnitKind::SkobaDrone);
+        r.units[1].motion.pos[0] = Fx::from_int(270);
+        r.units[1].update_pose(0);
+        if terrain {
+            for y in 16..70 {
+                for z in 285..385 {
+                    r.world.queue_transfer(voxel::Edit::put(240, y, z, 2));
+                }
+            }
+            r.world.flush_transfers();
+        }
+        r.start_free_control().unwrap();
+        r.battle_order(0, pilot(1, 0, false), None);
+        for _ in 0..100 {
+            r.step();
+        }
+        assert!(r.units[0].motion.pos[0] > Fx::from_int(170));
+        assert!(r.units[0].motion.pos[0] < Fx::from_int(if terrain { 209 } else { 207 }));
+        assert!(r.units[0].motion.blocked);
+    }
+}
 #[test]
 fn pilot_all_kinds_move_or_hold_foundation_and_resume_snapshots() {
     for kind in RangeUnitKind::ALL {

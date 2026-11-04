@@ -1,5 +1,83 @@
 use super::*;
 
+fn contact_pair(reverse: bool) -> BlastRange {
+    let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+    layout.course = None;
+    layout.blocks.clear();
+    layout.clear_min = [64, 64];
+    layout.clear_max = [600, 600];
+    layout.units = [300, 361]
+        .map(|x| modding::range::RangeUnitDef {
+            weapon: None,
+            allied: false,
+            kind: RangeUnitKind::Tank,
+            at: [x, FLOOR, 336],
+        })
+        .to_vec();
+    if reverse {
+        layout.units.reverse();
+    }
+    let mut r = BlastRange::with_layout(c, layout).unwrap();
+    r.control();
+    r.patrols_running = false;
+    for _ in 0..20 {
+        r.step();
+    }
+    r
+}
+
+#[test]
+fn passive_convoy_contact_uses_the_targets_velocity_before_its_brakes() {
+    for reverse in [false, true] {
+        let mut a = contact_pair(reverse);
+        let (source, target) = if reverse { (1, 0) } else { (0, 1) };
+        a.matter.tuning.contact_deform_pct = 0;
+        a.units[source].motion.shove.x = Fx::from_int(80);
+        a.units[target].motion.shove.x = Fx::from_int(40);
+        let brake =
+            crate::drive::Limits::of(&a.units[target].motion.chassis, crate::TICKS_PER_SECOND)
+                .brake;
+        let expected = Fx::from_int(40).sub(brake).add(Fx::from_int(20));
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
+        a.set_physics_workers(1);
+        b.set_physics_workers(2);
+        a.step();
+        b.step();
+        assert_eq!(a.state_hash(), b.state_hash());
+        assert!(
+            a.units[target].motion.shove.x.sub(expected).abs() < Fx::from_ratio(1, 1000),
+            "contact used the already braked target: actual={:?}, expected={expected:?}",
+            a.units[target].motion.shove.x
+        );
+        for _ in 0..20 {
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash());
+        }
+    }
+}
+
+#[test]
+fn two_refused_hulls_price_the_same_closing_speed_only_once() {
+    let mut r = contact_pair(false);
+    r.units[0].motion.shove.x = Fx::from_int(80);
+    r.units[1].motion.shove.x = Fx::from_int(-40);
+    let mut reference = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+    reference.contact_damage(0, 1, phys::V3::new(Fx::from_int(120), Fx::ZERO, Fx::ZERO));
+    let broken =
+        |r: &BlastRange| [0, 1].map(|id| r.units[id].removed.len() + r.units[id].seg_removed.len());
+    let expected = broken(&reference);
+    assert!(expected.iter().all(|n| *n > 0));
+    r.step();
+    assert_eq!(
+        broken(&r),
+        expected,
+        "the pair's relative speed must not be added twice"
+    );
+    assert!(r.matter.economy.ledger.balanced());
+}
+
 fn scene(kind: RangeUnitKind) -> BlastRange {
     let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
@@ -138,6 +216,7 @@ fn a_driving_tank_pushes_a_parked_tank_without_overlap_or_replay_drift() {
         }
         let (source, target) = if reverse { (1, 0) } else { (0, 1) };
         let mut a = BlastRange::with_layout(c, layout.clone()).unwrap();
+        a.control();
         a.patrols_running = true;
         for _ in 0..20 {
             a.step();
@@ -151,7 +230,11 @@ fn a_driving_tank_pushes_a_parked_tank_without_overlap_or_replay_drift() {
             a.step();
             let p = motion::Obstacle::of(&a.units[source].motion, &a.units[source].body);
             let q = motion::Obstacle::of(&a.units[target].motion, &a.units[target].body);
-            assert!(q.pos[0].sub(p.pos[0]) >= p.half[0].add(q.half[0]));
+            assert!(
+                p.penetration(&q) <= Fx::from_int(2),
+                "motor hulls exceeded the 20 cm contact allowance: {:?}",
+                p.penetration(&q)
+            );
         }
         let mut b = BlastRange::restore(c, &a.snapshot()).unwrap();
         for _ in 0..180 {
@@ -160,7 +243,11 @@ fn a_driving_tank_pushes_a_parked_tank_without_overlap_or_replay_drift() {
             assert_eq!(a.state_hash(), b.state_hash());
             let p = motion::Obstacle::of(&a.units[source].motion, &a.units[source].body);
             let q = motion::Obstacle::of(&a.units[target].motion, &a.units[target].body);
-            assert!(q.pos[0].sub(p.pos[0]) >= p.half[0].add(q.half[0]));
+            assert!(
+                p.penetration(&q) <= Fx::from_int(2),
+                "motor hulls exceeded the 20 cm contact allowance: {:?}",
+                p.penetration(&q)
+            );
         }
         assert!(
             a.units[target].motion.pos[0] > parked.add(Fx::ONE),
@@ -185,7 +272,7 @@ fn a_convoy_contact_uses_its_closing_speed() {
     layout.blocks.clear();
     layout.clear_min = [64, 64];
     layout.clear_max = [600, 600];
-    layout.units = [300, 361]
+    layout.units = [300, 360]
         .map(|x| modding::range::RangeUnitDef {
             weapon: None,
             allied: false,
@@ -196,6 +283,7 @@ fn a_convoy_contact_uses_its_closing_speed() {
     let mut push = Vec::new();
     for moving_target in [false, true] {
         let mut a = BlastRange::with_layout(c, layout.clone()).unwrap();
+        a.control();
         a.patrols_running = true;
         for _ in 0..20 {
             a.step();
@@ -212,11 +300,22 @@ fn a_convoy_contact_uses_its_closing_speed() {
             target.path = vec![[500, 336]];
             target.drive.vel = Fx::from_int(20);
         }
-        a.step();
+        // Contact is generated after the 20 cm grazing allowance is spent,
+        // not necessarily by the first movement tick.
+        for _ in 0..12 {
+            a.step();
+            if a.units[1].motion.shove.x > Fx::ZERO {
+                break;
+            }
+        }
         push.push(a.units[1].motion.shove.x);
         let p = motion::Obstacle::of(&a.units[0].motion, &a.units[0].body);
         let q = motion::Obstacle::of(&a.units[1].motion, &a.units[1].body);
-        assert!(q.pos[0].sub(p.pos[0]) >= p.half[0].add(q.half[0]));
+        assert!(
+            p.penetration(&q) <= Fx::from_int(2),
+            "motor hulls exceeded the 20 cm contact allowance: {:?}",
+            p.penetration(&q)
+        );
         let mut replay = BlastRange::restore(c, &a.snapshot()).unwrap();
         for _ in 0..8 {
             a.step();
@@ -276,9 +375,27 @@ fn head_on_driving_contact_is_slot_independent() {
         a.step();
         let p = motion::Obstacle::of(&a.units[left].motion, &a.units[left].body);
         let q = motion::Obstacle::of(&a.units[right].motion, &a.units[right].body);
-        assert!(q.pos[0].sub(p.pos[0]) >= p.half[0].add(q.half[0]));
-        assert!(a.units[left].motion.shove.x < Fx::ZERO);
-        assert!(a.units[right].motion.shove.x > Fx::ZERO);
+        assert!(
+            p.penetration(&q) <= Fx::from_int(2),
+            "motor hulls exceeded the 20 cm contact allowance: {:?}",
+            p.penetration(&q)
+        );
+        let velocity = |id: usize| {
+            fx::angle::cos(a.units[id].motion.drive.head)
+                .mul(a.units[id].motion.drive.vel)
+                .add(a.units[id].motion.shove.x)
+        };
+        // Projection rounding in Q32.32 is below 0.001 mm/s here.
+        let epsilon = Fx::from_ratio(1, 100_000);
+        assert!(
+            velocity(left) <= epsilon && velocity(right) >= epsilon.neg(),
+            "the head-on pair kept closing: {:?} {:?}",
+            velocity(left),
+            velocity(right)
+        );
+        assert!(
+            a.units[left].motion.shove.x < Fx::ZERO || a.units[right].motion.shove.x > Fx::ZERO
+        );
         let mut replay = BlastRange::restore(c, &a.snapshot()).unwrap();
         for _ in 0..modding::clock::stream_ticks(60) {
             a.step();
@@ -286,7 +403,11 @@ fn head_on_driving_contact_is_slot_independent() {
             assert_eq!(a.state_hash(), replay.state_hash());
             let p = motion::Obstacle::of(&a.units[left].motion, &a.units[left].body);
             let q = motion::Obstacle::of(&a.units[right].motion, &a.units[right].body);
-            assert!(q.pos[0].sub(p.pos[0]) >= p.half[0].add(q.half[0]));
+            assert!(
+                p.penetration(&q) <= Fx::from_int(2),
+                "motor hulls exceeded the 20 cm contact allowance: {:?}",
+                p.penetration(&q)
+            );
         }
         outcomes.push((a.units[left].motion.pos[0], a.units[right].motion.pos[0]));
     }
@@ -311,6 +432,7 @@ fn solo_shooter_and_target_exchange_contact_shove() {
         layout.units.truncate(1);
         layout.units[0].at = [if gun_is_source { 361 } else { 300 }, FLOOR, 336];
         let mut r = BlastRange::with_layout(c, layout).unwrap();
+        r.control();
         r.patrols_running = false;
         for _ in 0..20 {
             r.step();
@@ -322,10 +444,10 @@ fn solo_shooter_and_target_exchange_contact_shove() {
         };
         if gun_is_source {
             let body = r.gun.body.clone();
-            r.gun.motion.impulse(&body, [254, FLOOR, 336], 120_000);
+            r.gun.motion.impulse(&body, [254, FLOOR, 336], 240_000);
         } else {
             let body = r.units[0].body.clone();
-            r.units[0].motion.impulse(&body, [254, FLOOR, 336], 120_000);
+            r.units[0].motion.impulse(&body, [254, FLOOR, 336], 240_000);
         }
         for _ in 0..90 {
             r.step();

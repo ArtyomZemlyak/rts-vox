@@ -4,16 +4,16 @@ use modding::laboratory::catalog::{self, SceneFile, WeaponAsset};
 #[test]
 fn crawler_without_economy_reports_why_its_tank_is_inactive() {
     let mut layout = Definition::stock().layout;
-    layout.size = [128, 128, 128];
+    layout.size = [640, 192, 640];
     layout.clear_min = [1, 1];
-    layout.clear_max = [127, 127];
+    layout.clear_max = [639, 639];
     layout.gun = [32, 24, 64];
     layout.gun_point = true;
     layout.target = [90, 16, 64];
     layout.units.push(modding::range::RangeUnitDef {
         kind: RangeUnitKind::Crawler,
         allied: true,
-        at: [75, 16, 64],
+        at: [320, 16, 320],
         weapon: None,
     });
     let sim = BlastRange::with_layout(config(false, false), layout).unwrap();
@@ -617,7 +617,7 @@ fn laboratory_rotated_unit_ghost_core_pose_and_saved_prefab_agree() {
     let unit_asset = catalog::Element::from_ron(&unit_asset.to_ron().unwrap()).unwrap();
     let parts = catalog::parts_of_layout(layout.clone()).unwrap();
     assert_eq!(
-        catalog::compose(&lab.definition.layout, &parts).unwrap(),
+        catalog::compose(&c.base_layout(&lab.definition, lab.recipe).unwrap(), &parts).unwrap(),
         layout
     );
     assert_eq!(unit_asset.unit_yaws, [1]);

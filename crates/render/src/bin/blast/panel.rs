@@ -340,6 +340,7 @@ mod mission_tests;
 
 #[derive(Resource)]
 pub struct Panel {
+    pub sandbox: bool,
     pub drive: bool,
     pub demo: bool,
     pub ground_fire: bool,
@@ -376,6 +377,7 @@ impl Panel {
     }
     pub fn new(drive: bool, demo: bool) -> Self {
         Self {
+            sandbox: true,
             drive,
             demo,
             ground_fire: false,
@@ -442,6 +444,7 @@ pub enum Action {
     CrawlerMode(CrawlerMode),
     ElectricSupport,
     UpgradeKil,
+    #[allow(dead_code)] // Existing headless callers retain the guarded compatibility command.
     BuildSite(RangeUnitKind),
     SiteQuota(usize, u8),
     UpgradeCrawler,
@@ -555,6 +558,8 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
     pilot::build(&mut commands, camera, &text_font);
     minimap::build(&mut commands, camera, &text_font);
     laboratory::build(&mut commands, camera, &text_font);
+    frontend::build(&mut commands, camera, &text_font);
+    construction::build(&mut commands, camera, &text_font);
     let mut root = commands.spawn((
         PanelRoot,
         hud::Drawer,
@@ -621,10 +626,27 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             (false, vec![("Штурм турелей T1/T2", Action::Skirmish(3))]),
             (false, vec![("Артиллерия T2: картечь", Action::Skirmish(4))]),
             (false, vec![("Осадная артиллерия T3", Action::Skirmish(5))]),
-            (false, vec![("Walker 04: четыре лазера", Action::Skirmish(21))]),
-            (false, vec![("T3 Разлом: волновая турель", Action::Skirmish(22))]),
-            (false, vec![("Crawler: сбор, бурение и выгрузка", Action::Skirmish(23))]),
-            (false, vec![("Гребень: хранилище и снабжение", Action::Skirmish(26))]),
+            (
+                false,
+                vec![("Walker 04: четыре лазера", Action::Skirmish(21))],
+            ),
+            (
+                false,
+                vec![("T3 Разлом: волновая турель", Action::Skirmish(22))],
+            ),
+            (
+                false,
+                vec![("Crawler: сбор, бурение и выгрузка", Action::Skirmish(23))],
+            ),
+            (
+                false,
+                vec![("Гребень: хранилище и снабжение", Action::Skirmish(26))],
+            ),
+            (false, vec![("Киль: готовый завод", Action::Skirmish(24))]),
+            (
+                false,
+                vec![("Скоба: готовая стройка", Action::Skirmish(25))],
+            ),
             (false, vec![("Режим испытаний / сброс", Action::RangeMode)]),
             (false, vec![("Сценарии испытаний", Action::ScenarioMenu)]),
             (
@@ -904,7 +926,12 @@ pub fn actions(
     scale: Option<ResMut<UiScale>>,
     overrides: Option<Res<knobs::Overrides>>,
     laboratory: Option<Res<laboratory::Laboratory>>,
+    menu: Option<Res<frontend::Menu>>,
 ) {
+    let navigation = menu.as_ref().and_then(|m| m.panel_command());
+    if menu.as_ref().is_some_and(|m| m.shown()) && navigation.is_none() {
+        return;
+    }
     if laboratory.as_ref().is_some_and(|l| l.active()) {
         panel.blocked = roots.iter().any(|r| r.cursor_over());
         return;
@@ -930,10 +957,12 @@ pub fn actions(
         keys.press(k);
         p.keys.push(k);
     };
-    for (&action, interaction) in &interactions {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for action in interactions
+        .iter()
+        .filter(|(_, i)| **i == Interaction::Pressed)
+        .map(|(a, _)| *a)
+        .chain(navigation)
+    {
         scene.notice.clear();
         if scene.sim.battle_mode()
             && scene.sim.battle.phase == sim_core::blast::battle::Phase::Setup
@@ -1006,6 +1035,20 @@ pub fn actions(
             panel.crawler_charges = None;
         }
         match action {
+            Action::BattleWorld
+            | Action::BattleWorldAuto
+            | Action::BattlePreset
+            | Action::Skirmish(_) => panel.sandbox = false,
+            Action::RangeMode | Action::FreeRange | Action::FreeControl | Action::Scenario(_) => {
+                panel.sandbox = true
+            }
+            _ => {}
+        }
+        if action == Action::Edit && !construction::editing_allowed(&scene.sim, Some(&panel)) {
+            scene.notice = "В бою строительство доступно инженерам и заводам".into();
+            continue;
+        }
+        match action {
             Action::Laboratory => {}
             Action::Drawer(id) => {
                 panel.drawer = if panel.drawer == id { 0 } else { id };
@@ -1076,6 +1119,20 @@ pub fn actions(
                         .map(MissionRun::new);
                     panel.script = modding::range_skirmish::stock(id as usize)
                         .map_or_else(|_| Vec::new(), |preset| preset.script);
+                    // The editor adds subsoil below the authored ground. Its
+                    // layout is translated by commit; scripted 3D orders must
+                    // follow the same translation instead of drilling below it.
+                    let dy = edit
+                        .layout
+                        .as_ref()
+                        .map_or(0, |l| l.ground_level - sim_core::blast::FLOOR);
+                    for order in &mut panel.script {
+                        use modding::range_skirmish::ScriptedOrder;
+                        if let ScriptedOrder::Dig(p) | ScriptedOrder::Reclaim(p) = &mut order.order
+                        {
+                            p[1] = p[1].saturating_add(dy);
+                        }
+                    }
                     panel.battle_launch = true;
                     panel.drawer = 0;
                     panel.pending = None;
@@ -1377,6 +1434,10 @@ pub fn actions(
                 }
             }
             Action::BuildSite(kind) => {
+                if !construction::engineer_selected(&scene.sim, &edit) && !panel.sandbox {
+                    scene.notice = "Выберите своего строительного дрона".into();
+                    continue;
+                }
                 panel.construction_kind = Some(kind);
                 panel.ground_fire = false;
                 scene.notice =
@@ -2382,7 +2443,9 @@ mod scenario_tests {
     fn mission_armies_start_quiet_and_accept_real_orders_on_every_layout() {
         for id in 6..modding::range_skirmish::STOCK.len() {
             let preset = modding::range_skirmish::stock(id).unwrap();
-            let Some(mission) = preset.mission.clone() else { continue; };
+            let Some(mission) = preset.mission.clone() else {
+                continue;
+            };
             let base =
                 RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
             let layout = preset.apply_to(base).unwrap();

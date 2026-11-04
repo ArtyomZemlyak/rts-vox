@@ -180,7 +180,7 @@ fn density_changes_preserve_stock_validate_inputs_and_keep_history_after_reset()
     r.matter.save(&mut matter);
     for (material, value, expected) in [
         (0, 1, Outcome::Rejected),
-        (10, 1, Outcome::Rejected),
+        (u16::MAX, 1, Outcome::Rejected),
         (3, modding::MAX_DENSITY + 1, Outcome::Rejected),
         (3, 785, Outcome::Unchanged),
     ] {
@@ -567,7 +567,10 @@ fn material_prelude_rejects_bad_counts_ids_order_masks_values_flags_and_truncati
     }
     // Unknown ID; duplicate/out-of-order second ID; invalid property masks;
     // invalid debris and motion presence flags.
-    for (offset, value) in [(4, 10), (11, 1), (11, 0), (6, 0), (6, 4), (18, 2), (19, 2)] {
+    let mut unknown = bytes.clone();
+    unknown[at + 4..at + 6].copy_from_slice(&u16::MAX.to_le_bytes());
+    assert!(BlastRange::restore(r.config, &unknown).is_none());
+    for (offset, value) in [(11, 1), (11, 0), (6, 0), (6, 4), (18, 2), (19, 2)] {
         let mut bad = bytes.clone();
         bad[at + offset] = value;
         assert!(

@@ -410,6 +410,20 @@ impl Workshop {
         layout.units = preset.units;
         layout.unit_yaws.clear();
         layout.blocks.extend(preset.blocks);
+        let yard =
+            RangeLayout::from_ron(include_str!("../../../../../data/battle-build-yard.ron"))?
+                .with_ground_level(layout.ground_level)?;
+        layout.size[1] = layout.size[1].max(yard.size[1]);
+        layout.units.extend(yard.units);
+        layout.blocks.extend(yard.blocks);
+        let mut economy = modding::range_economy::RangeEconomy::stock();
+        if let Some(bank) = &mut economy.bank {
+            bank.base_store = bank
+                .base_store
+                .max(yard.ready.as_ref().map_or(0, |r| r.store));
+        }
+        layout.economy = Some(economy);
+        layout.ready = yard.ready;
         if let Some(course) = &mut layout.course {
             course.patrols.clear();
         }
@@ -1162,7 +1176,9 @@ pub fn input(
     overrides: Option<Res<knobs::Overrides>>,
     streaming: Option<Res<streaming::Streaming>>,
     laboratory: Option<Res<laboratory::Laboratory>>,
+    catalog: Option<Res<construction::Catalog>>,
 ) {
+    let placing = catalog.as_ref().is_some_and(|c| c.placing());
     if pilot.as_ref().is_some_and(|p| p.active()) {
         edit.camera_drag = false;
         edit.drag_start = None;
@@ -1204,18 +1220,22 @@ pub fn input(
     let stock = knobs::Overrides::default();
     let overrides = overrides.as_deref().unwrap_or(&stock);
     let lab_active = laboratory.as_ref().is_some_and(|l| l.active());
-    if !lab_active && keys.just_pressed(KeyCode::KeyE) {
-        edit.editing = !edit.editing;
-        scene.paused = true;
-        scene.repeat = false;
-        scene.view = 1;
-        scene.notice.clear();
-        if edit.editing {
-            edit.selected = None;
-            edit.pending = Some((
-                scene.sim.config.clone(),
-                edit.layout.as_ref().unwrap().clone(),
-            ));
+    if !lab_active && !placing && keys.just_pressed(KeyCode::KeyE) {
+        if !construction::editing_allowed(&scene.sim, panel.as_deref()) {
+            scene.notice = "В бою строительство доступно инженерам и заводам".into();
+        } else {
+            edit.editing = !edit.editing;
+            scene.paused = true;
+            scene.repeat = false;
+            scene.view = 1;
+            scene.notice.clear();
+            if edit.editing {
+                edit.selected = None;
+                edit.pending = Some((
+                    scene.sim.config.clone(),
+                    edit.layout.as_ref().unwrap().clone(),
+                ));
+            }
         }
     }
     if !lab_active && keys.just_pressed(KeyCode::Home) {
@@ -1294,6 +1314,13 @@ pub fn input(
         }
     }
     edit.previous_cursor = cursor;
+    if placing {
+        edit.hover = None;
+        edit.preview = None;
+        edit.drag_start = None;
+        edit.drag_current = None;
+        return;
+    }
     if laboratory.as_ref().is_some_and(|l| l.active()) {
         edit.hover = None;
         edit.preview = None;
@@ -1385,6 +1412,16 @@ pub fn input(
                             if battle {
                                 let building = panel.as_ref().and_then(|p| p.construction_kind);
                                 if !fire && building.is_some() {
+                                    if !panel.as_ref().is_some_and(|p| p.sandbox)
+                                        && !construction::engineer_selected(&scene.sim, &edit)
+                                    {
+                                        if let Some(panel) = panel.as_mut() {
+                                            panel.construction_kind = None;
+                                        }
+                                        scene.notice =
+                                            "Для строительства выберите своего инженера".into();
+                                        return;
+                                    }
                                     let kind = building.expect("construction kind");
                                     scene.notice = if scene
                                         .sim
@@ -2619,7 +2656,7 @@ mod tests {
         assert!(edit.editing);
         assert!(edit.layout.as_ref().unwrap().battle);
         assert!(edit.sector().unwrap().contains([4850, 5580], 0));
-        assert_eq!(edit.layout.as_ref().unwrap().units.len(), 62);
+        assert_eq!(edit.layout.as_ref().unwrap().units.len(), 64);
         assert_eq!(edit.controlled, Some(1));
         assert_eq!(
             edit.layout
@@ -2634,7 +2671,12 @@ mod tests {
         assert!(edit.layout.as_ref().unwrap().blocks.starts_with(&blocks));
         assert_eq!(
             edit.layout.as_ref().unwrap().blocks.len(),
-            blocks.len() + preset.blocks.len()
+            blocks.len()
+                + preset.blocks.len()
+                + RangeLayout::from_ron(include_str!("../../../../../data/battle-build-yard.ron"))
+                    .unwrap()
+                    .blocks
+                    .len()
         );
         edit.tool = Tool::Steel;
         edit.preview(far, 60);
@@ -2647,8 +2689,7 @@ mod tests {
         let preview = edit.preview.as_ref().unwrap();
         assert_eq!(preview.issue, None, "{:?}", preview.issue);
         edit.commit(preview.next.clone(), config.clone()).unwrap();
-        // Leave room for the three placement probes under the 64-unit limit.
-        // The untouched 62-unit roster is checked above and by the HUD tests.
+        // Keep the placement probes independent of the new construction crew.
         let mut probe_layout = edit.layout.clone().unwrap();
         probe_layout.units.truncate(60);
         edit.commit(probe_layout, config).unwrap();
@@ -2940,9 +2981,15 @@ mod tests {
         for id in 6..modding::range_skirmish::STOCK.len() {
             workshop.skirmish(id as u8, config.clone()).unwrap();
             let preset = modding::range_skirmish::stock(id).unwrap();
-            let Some(mission) = preset.mission else { continue; };
+            let Some(mission) = preset.mission else {
+                continue;
+            };
             let selected = workshop.controlled.unwrap();
-            let expected = if id == 25 { RangeUnitKind::GrebenStorage } else { mission.focus };
+            let expected = if id == 25 {
+                RangeUnitKind::GrebenStorage
+            } else {
+                mission.focus
+            };
             assert_eq!(preset.units[selected].kind, expected);
             assert!(preset.units[selected].allied);
             let zone = workshop.sector().unwrap();
@@ -3659,7 +3706,8 @@ mod subsoil_tests {
         w.range_mode(config).unwrap();
         assert_eq!(w.layout.as_ref().unwrap().ground_level, 80);
         for id in 0..modding::range_skirmish::STOCK.len() {
-            w.skirmish(id as u8, config).unwrap();
+            w.skirmish(id as u8, config)
+                .unwrap_or_else(|error| panic!("mission {id}: {error}"));
             let l = w.layout.as_ref().unwrap();
             assert_eq!(l.ground_level, 80, "mission {id}");
             assert!(l.units.iter().all(|u| u.at[1] >= 80), "mission {id}");

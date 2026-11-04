@@ -417,6 +417,71 @@ fn player_weapon_picture_and_muzzle_follow_the_same_tilted_frame() {
 }
 
 #[test]
+fn walker_shoulders_elbows_and_guns_stay_joined_between_movement_and_focus_ticks() {
+    let mut app = app();
+    let mut unit = sim_core::blast::RangeUnit::of_kind(RangeUnitKind::Walker04, [300, 16, 300]);
+    unit.set_arm_targets([[1200, 80, 300]; 4], 0);
+    let previous = pose(&unit);
+    let previous_head = weapon_picture(&unit);
+    unit.motion.pos[0] = unit.motion.pos[0].add(Fx::from_int(30));
+    unit.motion.drive.head = fx::angle::QUARTER / 2;
+    unit.turret_pitch = fx::angle::QUARTER;
+    unit.set_arm_targets([[900, 180, 800]; 4], fx::angle::QUARTER);
+    app.world_mut().resource_mut::<Scene>().sim.units[0] = unit;
+    let mut entities = Vec::new();
+    for segment in 10..26 {
+        entities.push(
+            app.world_mut()
+                .spawn((
+                    Witness(0, Transform::default(), Some(segment), true),
+                    Transform::default(),
+                ))
+                .id(),
+        );
+    }
+    {
+        let mut v = app.world_mut().resource_mut::<Visual>();
+        v.previous = vec![previous];
+        v.battle_heads = vec![previous_head];
+    }
+    for alpha in [0.0, 0.25, 0.5, 0.9, 1.0] {
+        {
+            let mut s = app.world_mut().resource_mut::<Scene>();
+            s.paused = false;
+            s.acc = alpha / sim_core::TICKS_PER_SECOND as f32;
+        }
+        app.update();
+        let w = app.world();
+        let s = w.resource::<Scene>();
+        let u = &s.sim.units[0];
+        let p = visible(u, Some(&previous), s);
+        let now = weapon_picture(u);
+        let rotation = previous_head.0.slerp(now.0, alpha);
+        let base = p.pos + previous_head.1.lerp(now.1, alpha);
+        let centre = Vec3::new(u.body.vol.nx as f32 * 0.5, 0.0, u.body.vol.nz as f32 * 0.5);
+        let scale = u.body.mm as f32 / voxel::unit::WORLD_MM as f32;
+        for segment in 10..26 {
+            let a = u.body.segments[segment].attach;
+            let tr = w.get::<Transform>(entities[segment - 10]).unwrap();
+            let pivot = Vec3::new(a.pivot.0 as f32, a.pivot.1 as f32, a.pivot.2 as f32);
+            let at = Vec3::new(a.at.0 as f32, a.at.1 as f32, a.at.2 as f32);
+            let expected = if a.parent == 0 {
+                base + rotation * ((at - centre) * scale)
+            } else {
+                w.get::<Transform>(entities[a.parent as usize - 1 - 10])
+                    .unwrap()
+                    .transform_point(at)
+            };
+            assert!(
+                (tr.transform_point(pivot) - expected).length() < 0.02,
+                "separated joint segment={segment} alpha={alpha}: {:?} vs {expected:?}",
+                tr.transform_point(pivot)
+            );
+        }
+    }
+}
+
+#[test]
 fn walker_arm_picture_matches_the_physical_muzzle_after_independent_aiming() {
     let mut unit = sim_core::blast::RangeUnit::of_kind(
         modding::range::RangeUnitKind::Walker04,

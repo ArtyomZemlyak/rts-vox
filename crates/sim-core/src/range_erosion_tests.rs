@@ -176,6 +176,19 @@ fn erosion_move_and_sample_limits_do_not_move_a_grain_twice() {
 }
 
 #[test]
+fn erosion_samples_the_next_batch_without_revisiting_the_previous_prefix() {
+    let (mut w, mut water, mut flow) = fixture(1, 1000, 1024);
+    let real = water.flux[0];
+    water.flux = (0..8).map(|i| Flux { units: if i == 3 { real.units } else { 0 }, ..real }).collect();
+    flow.tuning.erosion.checks_per_tick = 2;
+    assert_eq!(flow.erode(&mut w, &mut water, 0, |_| false), 0);
+    assert_eq!(flow.erode(&mut w, &mut water, 1, |_| false), 1,
+        "the next tick must inspect records 2 and 3, not repeat record 1");
+    assert_eq!(w.material(24, 4, 24), 0);
+    balanced(&water);
+}
+
+#[test]
 fn erosion_flux_ignores_nonlocal_pressure_and_records_only_real_local_moves() {
     let mut water = Water::new();
     water.set([25, 5, 24], 4096);

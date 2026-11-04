@@ -479,6 +479,17 @@ fn granular_mixed_lab_scene_replays_and_balances_the_shared_engine() {
             }
         }
     }
+    // Coherent rocks retain their pose as independent bodies after landing.
+    // Count physical material there too instead of requiring grid rebaking.
+    for body in &r.bodies.list {
+        for voxel in &body.voxels {
+            match voxel.mat {
+                10 => sand += 1,
+                6 => rock += 1,
+                _ => {}
+            }
+        }
+    }
     assert_eq!(sand, 4192, "shared collapse consumed flowing sand");
     assert_eq!(rock, 64, "shared collapse consumed falling stone");
 }

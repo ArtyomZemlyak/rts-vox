@@ -49,6 +49,17 @@ pub struct Trace {
     pub hit: bool,
     pub serial: u32,
 }
+#[derive(Clone, Copy, Debug)]
+pub struct WaveTrace {
+    pub trace: Trace,
+    pub strength: Fx,
+}
+impl std::ops::Deref for WaveTrace {
+    type Target = Trace;
+    fn deref(&self) -> &Trace {
+        &self.trace
+    }
+}
 pub struct Streams {
     pub rounds: Vec<Round>,
     pub traces: Vec<Trace>,
@@ -1003,18 +1014,9 @@ pub(super) fn flight_velocity(delta: [Fx; 3], speed: i32) -> [Fx; 3] {
 
 pub(super) fn muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
     if u.kind == RangeUnitKind::Walker04 {
-        return u
-            .body
-            .weapon_paths()
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| u.body.barrel_connected(p, u.connectivity.reached_cols()))
-            .take(4)
-            .map(|(arm, _)| {
-                let frame = &u.seg_frames[13 + arm * 4];
-                let v = frame.world([Fx::from_int(4), Fx::from_int(2), Fx::from_int(2)]);
-                [v.x, v.y, v.z]
-            })
+        return walker_muzzles(u)
+            .into_iter()
+            .map(|(_, point)| point)
             .collect();
     }
     let f = u.aimed_frame(
@@ -1030,6 +1032,30 @@ pub(super) fn muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
         .map(|p| {
             let v = f.world(muzzle_cell(p));
             [v.x, v.y, v.z]
+        })
+        .collect()
+}
+
+pub(super) fn walker_muzzles(u: &RangeUnit) -> Vec<(usize, [Fx; 3])> {
+    u.body
+        .weapon_paths()
+        .iter()
+        .enumerate()
+        .take(4)
+        .filter_map(|(arm, path)| {
+            let first = 10 + arm * 4;
+            let gun = first + 3;
+            if u.seg_gone[first..=gun].iter().any(|gone| *gone)
+                || u.body.segments[gun]
+                    .body
+                    .subsystem_count(voxel::unit::Part::Weapon)
+                    == 0
+                || !u.body.barrel_connected(path, u.connectivity.reached_cols())
+            {
+                return None;
+            }
+            let p = u.seg_frames[gun].world([Fx::from_int(4), Fx::from_int(2), Fx::from_int(2)]);
+            Some((arm, [p.x, p.y, p.z]))
         })
         .collect()
 }

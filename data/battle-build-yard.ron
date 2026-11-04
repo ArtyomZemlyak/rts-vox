@@ -1,0 +1,16 @@
+// Starting construction yard for the main-menu battle. Coordinates: 10 cm.
+(
+ size: (10000, 1024, 10000),
+ target: (392,24,336), airburst_on_target: true,
+ clear_min: (400,3800), clear_max: (3600,5800),
+ units: [
+  (kind: GrebenStorage, allied: true, at: (1200,16,4600)),
+  (kind: KilFactoryT1, allied: true, at: (2800,16,4600)),
+ ],
+ blocks: [
+  (min: (400,0,3800), max: (3600,1024,5800), material: 0),
+  (min: (400,0,3800), max: (3600,16,5800), material: 1),
+ ],
+ power_milli: [1000], unit_resistance: 180,
+ ready: Some((store: 30000000)),
+)

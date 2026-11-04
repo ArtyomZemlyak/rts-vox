@@ -30,7 +30,7 @@ pub(super) mod tools;
 #[path = "laboratory/ui.rs"]
 mod ui;
 #[path = "laboratory/visuals.rs"]
-mod visuals;
+pub(super) mod visuals;
 pub use collectors::draw as collectors_draw;
 pub use first_person::{
     draw as first_person_draw, flush as flush_live, input as first_person_input,
@@ -312,6 +312,11 @@ pub struct Laboratory {
     tools: tools::State,
 }
 impl Laboratory {
+    pub(super) fn escape_cancels_edit(&self) -> bool {
+        self.active() && (self.ui.help || self.browser || self.constructor.voxel_editing()
+            || self.tools.live || self.constructor.mode != constructor::Mode::Select
+            || self.constructor.selected.is_some())
+    }
     pub fn metric_mode(&self) -> u8 {
         if self.active() {
             self.tools.metric
@@ -647,9 +652,14 @@ pub fn actions(
     mut projections: Query<&mut Projection, With<GasCamera>>,
     mut cursors: Query<&mut bevy::window::CursorOptions>,
     ejecta: Query<Entity, With<Ejecta>>,
+    menu: Option<Res<frontend::Menu>>,
 ) {
+    let navigation = menu.as_ref().and_then(|m| m.panel_command());
+    let lab_navigation = menu.as_ref().and_then(|m| m.lab_command());
+    if menu.as_ref().is_some_and(|m| m.shown()) && lab_navigation.is_none()
+        && navigation != Some(panel::Action::Laboratory) { return; }
     let startup = lab.requested;
-    let enter = startup
+    let enter = startup || navigation == Some(panel::Action::Laboratory)
         || open
             .iter()
             .any(|(a, i)| *i == Interaction::Pressed && *a == panel::Action::Laboratory);
@@ -1182,7 +1192,7 @@ pub fn actions(
     }
     let mut replay_effects = None;
     let mut replay_restored = false;
-    match lab.replay.advance() {
+    match if menu.as_ref().is_some_and(|m| m.shown()) { Ok(None) } else { lab.replay.advance() } {
         Ok(Some((sim, restored_effects))) => {
             if scene.generation < u64::MAX - 1 {
                 scene.sim = sim;
@@ -1209,6 +1219,7 @@ pub fn actions(
     }
     parameters::keyboard(&mut lab, &mut keys);
     let mut actions = std::mem::take(&mut lab.constructor.pending);
+    actions.extend(lab_navigation);
     actions.extend(
         inputs
             .iter()

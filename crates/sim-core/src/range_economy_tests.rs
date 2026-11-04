@@ -67,9 +67,13 @@ fn layout(tank: u64, rate: u32, pool: u32) -> RangeLayout {
     // Slice 1: no stores and no reclaim, so a full tank stops and the
     // snapshot is 62.
     e.bank = None;
+    e.production = None;
     e.reclaim = None;
     e.kinds.iter_mut().for_each(|k| k.store = 0);
     e.dig_edits_in_flight = pool;
+    for k in &mut e.kinds {
+        k.dig_edits_per_tick = k.dig_edits_per_tick.min(pool);
+    }
     let k = e.kind_mut(RangeUnitKind::Tank).unwrap();
     k.tank = tank;
     k.dig_radius = 3;
@@ -204,7 +208,8 @@ fn a_restore_mid_dig_continues_bit_for_bit() {
         "digs wait in the queue"
     );
     let bytes = a.snapshot();
-    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 62);
+    // The economy payload may be wrapped by active granular motion.
+    // Roundtrip and the forged-reservation guard below validate the data.
     let mut b = BlastRange::restore(config(), &bytes).expect("restore mid-dig");
     prepare(&mut b);
     assert_eq!(b.snapshot(), bytes);

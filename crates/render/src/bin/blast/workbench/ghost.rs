@@ -89,28 +89,8 @@ pub fn setup(
         }),
     );
     let mut templates = Templates::default();
-    for (kind, body) in [
-        (RangeUnitKind::Tank, voxel::unit::tank()),
-        (RangeUnitKind::LightningTank, voxel::unit::lightning_tank()),
-        (RangeUnitKind::EidolonTank, voxel::unit::eidolon_tank()),
-        (RangeUnitKind::Crawler, voxel::unit::crawler()),
-        (RangeUnitKind::Strider, voxel::unit::strider()),
-        (RangeUnitKind::Spider, voxel::unit::spider()),
-        (RangeUnitKind::Artillery, voxel::unit::artillery()),
-        (RangeUnitKind::ArtilleryT2, voxel::unit::artillery_t2()),
-        (
-            RangeUnitKind::ArtilleryTurretT2,
-            voxel::unit::artillery_turret_t2(),
-        ),
-        (
-            RangeUnitKind::ArtilleryTurretT3,
-            voxel::unit::artillery_turret_t3(),
-        ),
-        (RangeUnitKind::NuclearSilo, voxel::unit::nuclear_silo()),
-        (RangeUnitKind::TurretT1, voxel::unit::turret_t1()),
-        (RangeUnitKind::TurretT2, voxel::unit::turret_t2()),
-        (RangeUnitKind::Base, voxel::unit::command_base()),
-    ] {
+    for kind in RangeUnitKind::ALL {
+        let body = sim_core::blast::RangeUnit::of_kind(kind, [0; 3]).body;
         let geometry = std::sync::Arc::new(template(&body));
         let handle = meshes.add(mesh(&geometry));
         let mut lo = Vec3::splat(f32::INFINITY);
@@ -166,6 +146,7 @@ pub fn update(
     edit: Res<Workshop>,
     laboratory: Option<Res<laboratory::Laboratory>>,
     colours: Option<Res<Colours>>,
+    catalog: Option<Res<construction::Catalog>>,
     mut ghosts: Query<(
         &Ghost,
         &mut Transform,
@@ -204,6 +185,15 @@ pub fn update(
             } else if *visible != Visibility::Hidden {
                 *visible = Visibility::Hidden;
             }
+            continue;
+        }
+        if catalog.as_ref().is_some_and(|c| c.placing()) {
+            let pose = match ghost { Ghost::Unit(kind) => catalog.as_ref().and_then(|c| c.ghost(*kind)), _ => None };
+            if let Some((pose, invalid)) = pose {
+                *transform = pose;
+                material.0 = colours.0[usize::from(invalid)].clone();
+                *visible = Visibility::Visible;
+            } else { *visible = Visibility::Hidden; }
             continue;
         }
         let Some(p) = preview else {

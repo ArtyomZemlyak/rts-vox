@@ -583,6 +583,43 @@ mod tests {
     }
 
     #[test]
+    fn fragment_paint_roundtrips_all_model_finishes_and_rejects_unknown_finish() {
+        let w = world();
+        let t = tuning().blast;
+        for finish in 0..=voxel::unit::FINISH_IVORY + 1 {
+            let mut b = Bursts::default();
+            b.next_id = 2;
+            b.fragments.push(Fragment {
+                id: 1,
+                position: V3::new(Fx::from_int(48), Fx::from_int(20), Fx::from_int(48)),
+                velocity: V3::ZERO,
+                material: 3,
+                paint: Some([1, finish, 0]),
+                mm: 100,
+                basis: IDENTITY,
+                mass_g: 7850,
+                count: 1,
+                shape: 1,
+                side: 1,
+                chunk: None,
+                held: 1,
+                resting: false,
+            });
+            let mut bytes = Blob::new();
+            b.save(&mut bytes);
+            let copy = Bursts::load(&mut Scan::new(&bytes.v), Some(&w), &t);
+            if finish <= voxel::unit::FINISH_IVORY {
+                let copy = copy.unwrap_or_else(|| panic!("valid finish {finish} rejected"));
+                let mut restored = Blob::new();
+                copy.save(&mut restored);
+                assert_eq!(bytes.v, restored.v);
+            } else {
+                assert!(copy.is_none(), "unknown finish accepted");
+            }
+        }
+    }
+
+    #[test]
     fn ordinary_fragment_record_does_not_store_an_inline_section_payload() {
         assert!(std::mem::size_of::<Fragment>() <= 192);
         assert!(std::mem::size_of::<Option<chunk::Chunk>>() > std::mem::size_of::<Fragment>());
@@ -683,6 +720,21 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn fragment_hull_masks_cover_the_upper_half_of_the_expanded_roster() {
+        let far = Hull {pos:[Fx::from_int(1000);3], head:0, half:[Fx::from_int(2);2], height:Fx::from_int(4),vel:[Fx::ZERO;3],step:Fx::ZERO,solid:None};
+        let p = [Fx::from_int(20),Fx::from_int(14),Fx::from_int(30)];
+        let low = [Fx::from_int(-1);3]; let high = [Fx::ONE;3];
+        for index in [64,100,127] {
+            let mut hulls = vec![far;128];
+            hulls[index].pos = [Fx::from_int(20),Fx::from_int(12),Fx::from_int(30)];
+            assert!(hull_hit(p,low,high,&hulls,0).is_some());
+            assert!(hull_hit(p,low,high,&hulls,1u128 << index).is_none());
+            assert!(hull_near(p,p,low,high,&hulls,0).0);
+            assert!(!hull_near(p,p,low,high,&hulls,1u128 << index).0);
         }
     }
 
@@ -8414,7 +8466,9 @@ impl Bursts {
                 || (f.material == AIR && f.paint.is_none())
                 || f.mm == 0
                 || f.mm > 1000
-                || f.paint.is_some_and(|p| p[0] >= 8 || p[1] > 6 || p[2] > 4)
+                || f.paint.is_some_and(|p| {
+                    p[0] >= 8 || p[1] > voxel::unit::FINISH_IVORY || p[2] > 4
+                })
                 || f.basis
                     .iter()
                     .any(|v| v.len_sq().sub(Fx::ONE).abs() > Fx::from_ratio(1, 100))
@@ -10304,7 +10358,7 @@ fn hull_hit<'h, 's>(
     low: [Fx; 3],
     high: [Fx; 3],
     hulls: &'h [Hull<'s>],
-    skip: u64,
+    skip: u128,
 ) -> Option<&'h Hull<'s>> {
     hull_box_hit(p, low, high, hulls, skip, true)
 }
@@ -10315,7 +10369,7 @@ fn hull_box_hit<'h, 's>(
     low: [Fx; 3],
     high: [Fx; 3],
     hulls: &'h [Hull<'s>],
-    skip: u64,
+    skip: u128,
     exact: bool,
 ) -> Option<&'h Hull<'s>> {
     if hulls.is_empty() {
@@ -10324,7 +10378,7 @@ fn hull_box_hit<'h, 's>(
     let reach = low[0].abs().max(high[0]).max(low[2].abs()).max(high[2]);
     let (bottom, top) = (p[1].add(low[1]), p[1].add(high[1]));
     hulls.iter().enumerate().find_map(|(i, h)| {
-        if (i < 64 && skip & (1 << i) != 0) || !hull_box_overlap(p, reach, bottom, top, h) {
+        if (i < 128 && skip & (1 << i) != 0) || !hull_box_overlap(p, reach, bottom, top, h) {
             return None;
         }
         (!exact || h.meets_piece(p, low, high)).then_some(h)
@@ -10435,10 +10489,10 @@ fn advance_fragment(
     // do not pen it in (ADR-294): it may leave them, and only entering
     // one is a contact.
     let start = arr(f.position);
-    let (mut inside, mut under) = (0u64, 0u64);
+    let (mut inside, mut under) = (0u128, 0u128);
     let reach = low[0].abs().max(high[0]).max(low[2].abs()).max(high[2]);
     let (bottom, top) = (start[1].add(low[1]), start[1].add(high[1]));
-    for (i, h) in hulls.iter().enumerate().take(64) {
+    for (i, h) in hulls.iter().enumerate().take(128) {
         if !hull_box_overlap(start, reach, bottom, top, h) {
             continue;
         }
@@ -10449,7 +10503,7 @@ fn advance_fragment(
             inside |= 1 << i;
         }
     }
-    for (i, h) in hulls.iter().enumerate().take(64) {
+    for (i, h) in hulls.iter().enumerate().take(128) {
         if under & (1 << i) != 0 {
             evict(f, h, low, high, [bounds[0], bounds[2]]);
         }
@@ -10520,15 +10574,15 @@ fn advance_fragment(
 /// rounding of the hull's own frame, against the centre's swept box; and
 /// the swept box against the hull's voxels (ADR-469). A bound from
 /// outside: [`hull_hit`] decides the contact itself. With it, `skip` and
-/// the first 64 hulls that no substep can meet.
+/// the first 128 hulls that no substep can meet.
 fn hull_near(
     from: [Fx; 3],
     to: [Fx; 3],
     low: [Fx; 3],
     high: [Fx; 3],
     hulls: &[Hull],
-    skip: u64,
-) -> (bool, u64) {
+    skip: u128,
+) -> (bool, u128) {
     let reach = low[0].abs().max(high[0]).max(low[2].abs()).max(high[2]);
     let (bottom, top) = (
         from[1].min(to[1]).add(low[1]),
@@ -10541,7 +10595,7 @@ fn hull_near(
     let horizontal_hi = [from[0].max(to[0]), from[2].max(to[2])];
     let (mut near, mut apart) = (false, skip);
     for (i, h) in hulls.iter().enumerate() {
-        if i < 64 && skip & (1 << i) != 0 {
+        if i < 128 && skip & (1 << i) != 0 {
             continue;
         }
         // Superset of the rotated footprint on both world axes. The exact
@@ -10554,7 +10608,7 @@ fn hull_near(
             || horizontal_lo[1] > h.pos[2].add(extent)
             || horizontal_hi[1] < h.pos[2].sub(extent)
         {
-            if i < 64 {
+            if i < 128 {
                 apart |= 1 << i;
             }
             continue;
@@ -10570,7 +10624,7 @@ fn hull_near(
         };
         if reaches && (!exact || h.meets(swept_lo, swept_hi, SWEPT_SAMPLES)) {
             near = true;
-        } else if i < 64 {
+        } else if i < 128 {
             apart |= 1 << i;
         }
     }
@@ -10590,7 +10644,7 @@ fn substeps(
     skip: u32,
     steps: usize,
     mut delta: [Fx; 3],
-    inside: u64,
+    inside: u128,
     local_bounds: ([Fx; 3], [Fx; 3]),
     supported: &mut bool,
 ) {

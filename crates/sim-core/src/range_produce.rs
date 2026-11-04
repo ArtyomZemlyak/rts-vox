@@ -236,7 +236,11 @@ pub fn starting_crews(layout: &mut modding::range::RangeLayout) {
             layout.units.push(RangeUnitDef {
                 allied: true,
                 kind: RangeUnitKind::SkobaDrone,
-                at: [store.at[0] + 800, 60, store.at[2] - 240 + n as i32 * 70],
+                at: [
+                    store.at[0] + 800,
+                    store.at[1] + 44,
+                    store.at[2] - 240 + n as i32 * 70,
+                ],
                 weapon: None,
             });
         }
@@ -257,6 +261,66 @@ pub fn starting_crews(layout: &mut modding::range::RangeLayout) {
 }
 
 impl BlastRange {
+    /// Explicit sandbox authoring: add initial matter without rebuilding or
+    /// healing the running scene. Combat UI must use Produce/construction.
+    pub fn place_sandbox_unit(
+        &mut self,
+        kind: RangeUnitKind,
+        allied: bool,
+        at: [i32; 3],
+        yaw: u8,
+    ) -> Result<usize, &'static str> {
+        if self.layout.is_none() || self.occupied_unit_slots() >= MAX_RANGE_UNITS {
+            return Err("Достигнут лимит юнитов или нет карты");
+        }
+        let authored = self.spawned.is_empty();
+        if !authored
+            && self
+                .mining
+                .as_ref()
+                .and_then(|m| m.production.as_ref())
+                .is_none()
+        {
+            return Err("Сцена не поддерживает добавление техники");
+        }
+        Validator::default()
+            .runtime(self, kind, at, yaw)
+            .map_err(|_| "Место занято или объект выходит за карту")?;
+        let probe = RangeUnit::of_kind(kind, at);
+        let cost = self.matter.template_matter(&probe);
+        let body = self.matter.economy.ledger.create(Kind::Body, cost, cost);
+        let cap = self
+            .mining
+            .as_ref()
+            .and_then(|m| m.data.kind(kind))
+            .map_or(0, |k| k.tank);
+        let tank = (cap > 0).then(|| self.matter.economy.ledger.create(Kind::Hauler, 0, cap));
+        let def = RangeUnitDef {
+            kind,
+            allied,
+            at,
+            weapon: None,
+        };
+        if authored {
+            let layout = self.layout.as_mut().expect("checked layout");
+            while layout.unit_yaws.len() < layout.units.len() {
+                let yaw = layout.unit_yaw(layout.unit_yaws.len());
+                layout.unit_yaws.push(yaw);
+            }
+            layout.units.push(def.clone());
+            layout.unit_yaws.push(yaw % 4);
+        }
+        let id = self.append_unit(Spawned { def, body, tank });
+        if authored {
+            self.spawned.pop();
+        } else {
+            self.note_construction_spawn();
+        }
+        let head = i32::from(yaw % 4) * fx::angle::FULL / 4;
+        self.units[id].motion.drive.head = head;
+        self.units[id].update_pose(head);
+        Ok(id)
+    }
     /// The roster's definitions in slot order: the layout's units, then
     /// the produced ones. The authored layout is never changed by
     /// production, so a snapshot carries it as it was written.
@@ -378,6 +442,14 @@ impl BlastRange {
     }
 
     pub fn upgrade_kil(&mut self, id: usize) -> bool {
+        if !self
+            .units
+            .get(id)
+            .is_some_and(|u| u.status.alive && self.allied(id))
+            || self.unit_under_construction(id)
+        {
+            return false;
+        }
         let next = match self.units.get(id).map(|u| u.kind) {
             Some(RangeUnitKind::KilFactoryT1) => RangeUnitKind::KilFactoryT2,
             Some(RangeUnitKind::KilFactoryT2) => RangeUnitKind::KilFactoryT3,
@@ -387,6 +459,35 @@ impl BlastRange {
         let at = self.units[id].at;
         let motion = self.units[id].motion.clone();
         let mut replacement = RangeUnit::of_kind(next, at);
+        let yaw = (motion.drive.head.rem_euclid(fx::angle::FULL) / (fx::angle::FULL / 4)) as u8;
+        if Validator::default()
+            .runtime_except(self, next, at, yaw, Some(id))
+            .is_err()
+        {
+            return false;
+        }
+        let price = self.matter.template_matter(&replacement);
+        let body = self.matter.body_container(id);
+        let held = self.matter.economy.ledger.held(body);
+        let Some(needed) = price.checked_sub(held) else {
+            return false;
+        };
+        let Some(store) = self
+            .mining
+            .as_ref()
+            .and_then(|m| m.haul())
+            .map(|h| h.store(true))
+        else {
+            return false;
+        };
+        if self.matter.economy.ledger.held(store) < needed {
+            return false;
+        }
+        self.matter.economy.ledger.lower_cap(body, price);
+        assert_eq!(
+            self.matter.economy.ledger.transfer(store, body, needed),
+            needed
+        );
         let head = motion.drive.head;
         replacement.motion = motion;
         replacement.update_pose(head);
@@ -397,6 +498,13 @@ impl BlastRange {
             .and_then(|layout| layout.units.get_mut(id))
         {
             def.kind = next;
+        }
+        let authored = self.layout.as_ref().map_or(0, |l| l.units.len());
+        if let Some(slot) = id
+            .checked_sub(authored)
+            .and_then(|slot| self.spawned.get_mut(slot))
+        {
+            slot.def.kind = next;
         }
         true
     }
@@ -419,6 +527,7 @@ impl BlastRange {
     ) -> battle::commands::Outcome {
         use battle::commands::Outcome;
         if !self.production_open()
+            || self.unit_under_construction(actor)
             || self.allied(actor) != side
             || !self.units.get(actor).is_some_and(|u| u.status.alive)
         {
@@ -568,7 +677,7 @@ impl BlastRange {
         }
         for (slot, kind, blank) in finished {
             let allied = sides[slot];
-            if self.units.len() >= MAX_RANGE_UNITS {
+            if self.occupied_unit_slots() >= MAX_RANGE_UNITS {
                 self.production_mut().capped += 1;
                 continue;
             }
@@ -644,6 +753,7 @@ impl BlastRange {
             .iter()
             .chain((!self.battle_mode()).then_some(&self.gun))
             .map(|u| u.bounds())
+            .chain(self.reserved_construction_bounds())
             .collect();
         let size = self.size.map(|v| v as i32);
         let placement = &self.mining.as_ref()?.production.as_ref()?.placement;
@@ -709,14 +819,7 @@ impl BlastRange {
             let body = s.u32();
             let tank = if s.bool() { Some(s.u32()) } else { None };
             // Something produces it, and it has a tank exactly if it digs.
-            if !(data.produced(kind)
-                || matches!(
-                    kind,
-                    RangeUnitKind::TurretT1
-                        | RangeUnitKind::KilFactoryT1
-                        | RangeUnitKind::GrebenStorage
-                        | RangeUnitKind::Crawler
-                ))
+            if data.kind(kind).is_none()
                 || tank.is_some() != data.digs(kind)
                 || (0..3).any(|a| at[a] < 0 || at[a] >= self.size[a] as i32)
                 || !s.ok()

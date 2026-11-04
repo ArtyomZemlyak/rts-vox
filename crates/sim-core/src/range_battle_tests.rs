@@ -383,6 +383,15 @@ fn arena_of(kinds: [RangeUnitKind; 2]) -> BlastRange {
         l.units[0].at = [500, 16, 800];
         l.units[1].at = [1300, 16, 800];
     }
+    if l.units.iter().any(|def| {
+        let (lo, hi) = RangeUnit::of_kind(def.kind, def.at).bounds();
+        (0..3).any(|a| lo[a] < 1 || hi[a] >= l.size[a] as i32 - 1)
+    }) {
+        l.size = [4096, 2048, 4096];
+        l.clear_max = [4032, 4032];
+        l.units[0].at = [1200, 16, 1600];
+        l.units[1].at = [3000, 16, 1600];
+    }
     BlastRange::with_layout(
         ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
         l,
@@ -443,6 +452,71 @@ fn step_until_walker_beams(r: &mut BlastRange) {
 }
 
 #[test]
+fn walker04_lost_arm_does_not_renumber_the_remaining_guns() {
+    let mut u = RangeUnit::of_kind(RangeUnitKind::Walker04, [300, 16, 300]);
+    u.set_arm_targets(
+        [
+            [1000, 100, 300],
+            [300, 100, 1000],
+            [100, 100, 300],
+            [300, 100, 100],
+        ],
+        0,
+    );
+    let original = weapons::walker_muzzles(&u);
+    assert_eq!(original.len(), 4);
+    u.seg_gone[13] = true;
+    assert_eq!(weapons::walker_muzzles(&u), original[1..]);
+    u.seg_gone[10 + 2 * 4] = true;
+    assert_eq!(weapons::walker_muzzles(&u), vec![original[1], original[3]]);
+}
+
+#[test]
+fn walker04_aiming_keeps_the_shoulders_and_arm_joints_together() {
+    let mut u = RangeUnit::of_kind(RangeUnitKind::Walker04, [300, 16, 300]);
+    let rest = u.seg_frames.clone();
+    assert!(
+        (0..4).all(|arm| i32::from(u.body.turret_y)
+            <= i32::from(u.body.segments[10 + arm * 4].attach.at.1) - 3),
+        "the crown hinge cuts a shoulder socket in half"
+    );
+    let shoulder = |u: &RangeUnit, arm: usize| {
+        let f = u.seg_frames[10 + arm * 4];
+        f.world(f.centre)
+    };
+    let shoulders: Vec<_> = (0..4).map(|arm| shoulder(&u, arm)).collect();
+    u.set_arm_targets(
+        [
+            [1000, 80, 300],
+            [300, 100, 1000],
+            [100, 60, 300],
+            [300, 180, 100],
+        ],
+        0,
+    );
+    for arm in 0..4 {
+        assert!(
+            shoulder(&u, arm).sub(shoulders[arm]).len_sq() < Fx::from_ratio(1, 1000),
+            "arm {arm} left its shoulder: {:?} -> {:?}",
+            shoulders[arm],
+            shoulder(&u, arm)
+        );
+        let start = 10 + arm * 4;
+        for (parent, child) in [(start, start + 1), (start + 2, start + 3)] {
+            let joint = rest[child].world(rest[child].centre);
+            let local = rest[parent].local(joint);
+            let actual = u.seg_frames[child].world(u.seg_frames[child].centre);
+            assert!(
+                u.seg_frames[parent].world(local).sub(actual).len_sq() < Fx::from_ratio(1, 1000),
+                "arm {arm} separated at segment {child}"
+            );
+        }
+    }
+    assert!((55..80).all(|x| (0..u.body.vol.ny as usize).all(|y| (0..80).all(|z| !u.body.vol.get(x,y,z)))),
+        "fixed root contains ghost arm rails beyond the shoulder assembly");
+}
+
+#[test]
 fn walker04_aims_four_independent_arms_at_four_enemies_without_moving_their_mounts() {
     let mut r = walker_arena(Order::Auto);
     let mounts: Vec<_> = (0..4)
@@ -495,6 +569,26 @@ fn walker04_focus_tilts_ninety_degrees_and_uses_the_spider_power_on_all_four_arm
         before,
         "repeated aiming moved the mounts"
     );
+    let bytes = r.snapshot();
+    let mut stage = String::new();
+    let mut copy = BlastRange::restore_observed(r.config, &bytes, |section, offset, unit| {
+        stage = format!("{section} at {offset} unit={unit:?}")
+    })
+    .unwrap_or_else(|| panic!("focused Walker 04 restore refused at {stage}"));
+    assert_eq!(copy.snapshot(), bytes);
+    assert_eq!(copy.battle_muzzles(0), before);
+    assert!(BlastRange::restore(r.config, &bytes[..bytes.len() - 1]).is_none());
+    let mut invalid = bytes.clone();
+    let last = invalid.len() - 4;
+    invalid[last..].copy_from_slice(&i32::MAX.to_le_bytes());
+    assert!(BlastRange::restore(r.config, &invalid).is_none());
+    for _ in 0..12 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        copy.battle.ai.next_tick = copy.tick + copy.battle.ai.tuning.decision_ticks;
+        r.step();
+        copy.step();
+        assert_eq!(r.state_hash(), copy.state_hash());
+    }
 }
 
 #[test]
@@ -695,7 +789,9 @@ fn razlom_wave_kills_t1_keeps_travelling_and_restores_exactly() {
 
 #[test]
 fn razlom_wave_carves_ground_and_fades_on_dense_cover() {
-    let mut layout = arena_of([RangeUnitKind::RazlomT3, RangeUnitKind::Tank]).layout.unwrap();
+    let mut layout = arena_of([RangeUnitKind::RazlomT3, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
     layout.size[1] = 256;
     layout.units[1].at = [600, 16, 336];
     layout.blocks.push(modding::range::RangeBlock {
@@ -716,7 +812,8 @@ fn razlom_wave_carves_ground_and_fades_on_dense_cover() {
     let mut r = BlastRange::with_layout(
         ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
         layout,
-    ).unwrap();
+    )
+    .unwrap();
     r.set_physics_workers(1);
     r.set_navigation_workers(1);
     r.start_battle().unwrap();
@@ -727,28 +824,131 @@ fn razlom_wave_carves_ground_and_fades_on_dense_cover() {
         r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
         fired |= !r.battle.rounds.is_empty() || !r.battle.razlom_lasers.is_empty();
-        if fired && r.battle.rounds.is_empty() { break; }
+        if fired && r.battle.rounds.is_empty() {
+            break;
+        }
     }
     let carved = (300..320).any(|x| (16..=20).any(|y| (300..372).any(|z| !r.world.solid(x, y, z))));
     assert!(carved, "wave did not carve the ground");
-    assert!(r.battle.rounds.is_empty(), "dense cover did not dissipate the wave");
-    assert!(r.units[1].status.alive, "dissipated wave reached the distant target");
+    assert!(
+        r.battle.rounds.is_empty(),
+        "dense cover did not dissipate the wave"
+    );
+    assert!(
+        r.units[1].status.alive,
+        "dissipated wave reached the distant target"
+    );
+}
+
+#[test]
+fn razlom_single_front_opens_a_continuous_passage_and_visibly_loses_strength() {
+    let mut layout = arena_of([RangeUnitKind::RazlomT3, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
+    layout.size[1] = 256;
+    layout.idle_enemies = true;
+    layout.units[1].at = [600, 16, 336];
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [0, 0, 0],
+        max: [640, 256, 640],
+        material: 0,
+    });
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [0, 0, 0],
+        max: [640, 16, 640],
+        material: 1,
+    });
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [300, 16, 280],
+        max: [312, 48, 392],
+        material: 2,
+    });
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.start_battle().unwrap();
+    r.battle_order(0, Order::Ground([600, 32, 336]), None);
+    let mut fired = false;
+    let mut faded = false;
+    for _ in 0..400 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        if !r.battle.razlom_lasers.is_empty() {
+            fired = true;
+            faded |= r
+                .battle
+                .razlom_lasers
+                .iter()
+                .any(|t| t.strength < Fx::from_ratio(9, 10));
+            r.battle_order(0, Order::Hold, None);
+        }
+        if fired && r.battle.rounds.is_empty() {
+            break;
+        }
+    }
+    assert!(fired && faded && r.battle.rounds.is_empty());
+    let removed = (300..312)
+        .flat_map(|x| (28..36).flat_map(move |y| (320..352).map(move |z| [x, y, z])))
+        .filter(|p| !r.world.solid(p[0], p[1], p[2]))
+        .count();
+    assert!(
+        removed >= 2800,
+        "front left sparse pinholes instead of a passage: {removed}/3072"
+    );
+    assert!(r.matter.economy.ledger.balanced());
+    assert!(BlastRange::restore(r.config, &r.snapshot()).is_some());
+}
+
+#[test]
+fn razlom_retries_a_full_fragment_pool_instead_of_losing_the_shot() {
+    let mut r = arena_of([RangeUnitKind::RazlomT3, RangeUnitKind::Tank]);
+    let mut b = Battle::new(&r.units, 180);
+    let pos = [Fx::from_int(421), Fx::from_int(22), Fx::from_int(336)];
+    b.rounds.push(Round {
+        owner: 0,
+        weapon: Weapon::Laser,
+        pos,
+        previous: pos,
+        velocity: [Fx::from_int(120), Fx::ZERO, Fx::ZERO],
+        distance: Fx::from_int(motion::spider_tuning().laser.range),
+    });
+    let cap = r.matter.tuning.max_fragments;
+    r.matter.tuning.max_fragments = 0;
+    r.battle_flight(&mut b);
+    assert_eq!(b.rounds.len(), 1, "full debris pool discarded the wave");
+    assert_eq!(b.rounds[0].pos, pos, "wave passed through deferred material");
+    assert!(r.units[1].removed.is_empty());
+    r.matter.tuning.max_fragments = cap;
+    r.battle_flight(&mut b);
+    assert!(!r.units[1].removed.is_empty(), "wave never resumed damage");
+    assert_eq!(b.rounds.len(), 1);
+    assert!(b.rounds[0].pos[0] > pos[0]);
+    assert!(r.matter.economy.ledger.balanced());
 }
 
 #[test]
 fn razlom_stock_scenario_reaches_tanks_without_crossing_cell_bounds() {
     let preset = modding::range_skirmish::stock(22).unwrap();
-    let base = modding::range::RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+    let base =
+        modding::range::RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
     let layout = preset.apply_to(base).unwrap();
     let mut r = BlastRange::with_layout(
         ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
         layout,
-    ).unwrap();
+    )
+    .unwrap();
     r.start_battle().unwrap();
     for _ in 0..360 {
         r.step();
     }
-    assert!(r.units.iter().skip(1).any(|u| !u.status.alive), "the stock wave killed no T1 tank");
+    assert!(
+        r.units.iter().skip(1).any(|u| !u.status.alive),
+        "the stock wave killed no T1 tank"
+    );
+    assert!(
+        BlastRange::restore(r.config, &r.snapshot()).is_some(),
+        "wave damage must debit body material and leave a restorable scene"
+    );
 }
 
 #[test]
@@ -861,6 +1061,7 @@ fn staratel_scenario_collects_mines_and_unloads_at_its_base() {
     r.start_battle().unwrap();
     let mut collected = false;
     let mut unloaded = false;
+    let mut drilled = false;
     let mut script = preset.script;
     for _ in 0..2400 {
         while script.first().is_some_and(|next| next.tick <= r.tick) {
@@ -885,7 +1086,9 @@ fn staratel_scenario_collects_mines_and_unloads_at_its_base() {
         r.step();
         collected |= r.tank_held(0).is_some_and(|held| held > 0);
         unloaded |= r.side_store(true).is_some_and(|(amount, _)| amount > 0);
-        if unloaded {
+        drilled |= (1100..1104)
+            .any(|x| (16..20).any(|y| (2680..2684).any(|z| r.world.material(x, y, z) != 6)));
+        if unloaded && drilled {
             break;
         }
     }
@@ -899,6 +1102,10 @@ fn staratel_scenario_collects_mines_and_unloads_at_its_base() {
     );
     assert!(collected, "Staratel collected no debris or rock");
     assert!(unloaded, "Staratel never unloaded at the base");
+    assert!(
+        drilled,
+        "Staratel never drilled the authored rock after collecting debris"
+    );
     assert!(r.matter.economy.ledger.balanced());
 }
 
@@ -3144,11 +3351,20 @@ fn dual_machine_guns_keep_owner_and_survive_stop() {
     let fired = r.battle.actors[0].fired;
     assert!(fired > 0);
     assert!(r.battle_order(0, Order::Hold, None));
+    let mut hits = [0; 2];
+    let mut last = Vec::new();
     for _ in 0..150 {
         r.step();
+        for t in &r.battle.traces {
+            hits[usize::from(t.hit)] += 1;
+            last = vec![t.from, t.to];
+        }
     }
     assert_eq!(r.battle.actors[0].fired, fired);
-    assert!(r.units[0].revision > 0, "enemy never shot back");
+    assert!(r.units[0].revision > 0, "enemy never shot back: fired={:?} hits={hits:?} last={last:?} turrets={:?} targets={:?}",
+        r.battle.actors.iter().map(|a|a.fired).collect::<Vec<_>>(),
+        r.battle.actors.iter().map(|a|a.turret.angle).collect::<Vec<_>>(),
+        r.battle.actors.iter().map(|a|a.target).collect::<Vec<_>>());
     assert!(
         r.units[1].revision > 0,
         "own bullets disappeared after stop"
@@ -4469,7 +4685,9 @@ fn enemy_detours_to_firing_range(kind: RangeUnitKind) {
             break;
         }
     }
-    assert!(detoured, "{kind:?} never went around the wall");
+    assert!(detoured, "{kind:?} never went around the wall: fired={first_shot:?} at={:?} dest={:?} path={:?} weapon={:?} drive={:?} blocked={} hull={:?}",
+        r.units[1].at,r.units[1].motion.destination,r.units[1].motion.path,r.battle_weapon(1),
+        r.units[1].motion.drive, r.units[1].motion.blocked, r.units[1].motion.hull);
     assert!(
         first_shot.is_some(),
         "{kind:?} never engaged: at={:?}, blocked={blocked}, dest={:?}, path={:?}",

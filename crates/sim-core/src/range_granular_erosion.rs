@@ -24,8 +24,12 @@ impl Flow {
         let size = [w.nx, w.ny, w.nz];
         // Bounded sample of this tick's flux, rotated by authoritative tick.
         // No historical force queue or map-sized suspended sediment field.
-        let start = tick as usize % water.flux.len();
-        let faces: Vec<_> = (0..water.flux.len().min(tuning.checks_per_tick))
+        // Advance by a complete sample, rather than repeatedly inspecting all
+        // but one record from the previous tick's prefix. Use a fixed width
+        // integer so the authoritative schedule does not depend on pointer size.
+        let count = water.flux.len().min(tuning.checks_per_tick);
+        let start = ((u64::from(tick) * count as u64) % water.flux.len() as u64) as usize;
+        let faces: Vec<_> = (0..count)
             .map(|i| water.flux[(start + i) % water.flux.len()])
             .collect();
         let mut changes = BTreeMap::new();

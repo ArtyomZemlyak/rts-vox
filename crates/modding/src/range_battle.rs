@@ -70,7 +70,25 @@ pub struct TankAmmo {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct RazlomWave {
+    pub speed: i32,
+    pub half_width: i32,
+    pub half_height: i32,
+    pub fracture_j_per_tick: u32,
+    pub attenuation_per_layer: i32,
+    pub cells_per_tick: usize,
+    pub reload_ticks: u32,
+}
+impl Default for RazlomWave {
+    fn default() -> Self {
+        ron::from_str(include_str!("../../../data/razlom-wave.ron")).expect("wave tuning")
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct Tuning {
+    #[serde(default)]
+    pub razlom_wave: RazlomWave,
     pub tank_power_milli: u32,
     #[serde(default = "default_turret_t2_power")]
     pub turret_t2_power_milli: u32,
@@ -151,6 +169,15 @@ impl Tuning {
     pub fn from_ron(s: &str) -> Result<Self, String> {
         let t: Self = ron::from_str(s).map_err(|e| e.to_string())?;
         if !(100..=4000).contains(&t.tank_power_milli)
+            || !(20..=200).contains(&t.razlom_wave.speed)
+            || !(4..=64).contains(&t.razlom_wave.half_width)
+            || !(1..=12).contains(&t.razlom_wave.half_height)
+            || !(1..=1_000_000_000).contains(&t.razlom_wave.fracture_j_per_tick)
+            || !(1..=100).contains(&t.razlom_wave.attenuation_per_layer)
+            || !(16384..=65536).contains(&t.razlom_wave.cells_per_tick)
+            || t.razlom_wave.cells_per_tick < ((t.razlom_wave.speed / crate::clock::HZ as i32 + 3)
+                * (2 * t.razlom_wave.half_width + 3) * (2 * t.razlom_wave.half_height + 1)) as usize
+            || !(1..=1800).contains(&t.razlom_wave.reload_ticks)
             || !(100..=4000).contains(&t.turret_t2_power_milli)
             || t.turret_t2_reload_ticks
                 .is_some_and(|n| !(1..=1800).contains(&n))
@@ -200,6 +227,22 @@ impl Tuning {
             return Err("invalid battle tuning".into());
         }
         Ok(t)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn razlom_wave_has_finite_energy_and_enough_work_for_one_complete_front() {
+    let text = include_str!("../../../data/range-battle.ron");
+    let t = Tuning::from_ron(text).unwrap();
+    assert!(t.razlom_wave.fracture_j_per_tick > 0);
+    for wave in [
+        "speed: 0, half_width: 42, half_height: 6, fracture_j_per_tick: 1, attenuation_per_layer: 12, cells_per_tick: 16384, reload_ticks: 200",
+        "speed: 200, half_width: 64, half_height: 12, fracture_j_per_tick: 1, attenuation_per_layer: 12, cells_per_tick: 16384, reload_ticks: 200",
+        "speed: 120, half_width: 42, half_height: 6, fracture_j_per_tick: 0, attenuation_per_layer: 12, cells_per_tick: 16384, reload_ticks: 200",
+    ] {
+        let bad = text.replacen('(', &format!("(razlom_wave: ({wave}),"),1);
+        assert!(Tuning::from_ron(&bad).is_err());
     }
 }
 
