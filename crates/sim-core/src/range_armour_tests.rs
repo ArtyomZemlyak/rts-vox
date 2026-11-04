@@ -11,12 +11,18 @@ fn electric_tank_armour_is_weaker_than_its_previous_t2_grade() {
     previous.fracture_milli = [3000, 3000, 3000, 3000, 2000];
     assert_eq!(strider.body.ablation_milli, previous.ablation_milli);
     assert_eq!(strider.body.fracture_milli, previous.fracture_milli);
-    let dims = [electric.body.vol.nx, electric.body.vol.ny, electric.body.vol.nz].map(usize::from);
+    let dims = [
+        electric.body.vol.nx,
+        electric.body.vol.ny,
+        electric.body.vol.nz,
+    ]
+    .map(usize::from);
     let p = (0..dims[0])
-        .flat_map(|x| (0..dims[1]).flat_map(move |y|
-            (0..dims[2]).map(move |z| [x, y, z])))
-        .find(|p| electric.body.vol.get(p[0], p[1], p[2])
-            && electric.body.part_at(p[0], p[1], p[2]) == voxel::Part::Armour)
+        .flat_map(|x| (0..dims[1]).flat_map(move |y| (0..dims[2]).map(move |z| [x, y, z])))
+        .find(|p| {
+            electric.body.vol.get(p[0], p[1], p[2])
+                && electric.body.part_at(p[0], p[1], p[2]) == voxel::Part::Armour
+        })
         .expect("electric tank armour");
     assert!(unit_work(&electric.body, p, &c) < unit_work(&previous, p, &c));
     let current = electric.body.clone();
@@ -69,22 +75,36 @@ fn grades_cover_segments_and_the_unchanged_t1_template() {
 
 #[test]
 fn spider_t3_artillery_resistance_is_lower_but_remains_above_t1() {
-    let mut c=ExplosionConfig::from_ron(include_str!("../../../data/siege-shell.ron")).unwrap();
+    let mut c = ExplosionConfig::from_ron(include_str!("../../../data/siege-shell.ron")).unwrap();
     // The range installs its common unit resistance on each battle weapon.
-    c.unit_ablation_resistance=180;
-    let spider=RangeUnit::of_kind(RangeUnitKind::Spider,[512,16,512]);
-    let mut previous=spider.body.clone();
-    previous.ablation_milli=[4500,3000,2500,20000,2000];
-    let mut ordinary=spider.body.clone();
-    ordinary.ablation_milli=[1000;5];
-    let dims=[spider.body.vol.nx,spider.body.vol.ny,spider.body.vol.nz].map(usize::from);
-    for role in [voxel::Part::Armour,voxel::Part::Core,voxel::Part::Engine,voxel::Part::Weapon,voxel::Part::Sensor] {
-        let p=(0..dims[0]).flat_map(|x| (0..dims[1]).flat_map(move |y| (0..dims[2]).map(move |z|[x,y,z])))
-            .find(|p| spider.body.vol.get(p[0],p[1],p[2]) && spider.body.part_at(p[0],p[1],p[2])==role).expect("spider subsystem geometry");
-        let now=unit_work(&spider.body,p,&c);
-        let old=unit_work(&previous,p,&c);
-        let t1=unit_work(&ordinary,p,&c);
-        assert!(now<old && now>t1,"{role:?}: old={old}, new={now}, T1={t1}");
+    c.unit_ablation_resistance = 180;
+    let spider = RangeUnit::of_kind(RangeUnitKind::Spider, [512, 16, 512]);
+    let mut previous = spider.body.clone();
+    previous.ablation_milli = [4500, 3000, 2500, 20000, 2000];
+    let mut ordinary = spider.body.clone();
+    ordinary.ablation_milli = [1000; 5];
+    let dims = [spider.body.vol.nx, spider.body.vol.ny, spider.body.vol.nz].map(usize::from);
+    for role in [
+        voxel::Part::Armour,
+        voxel::Part::Core,
+        voxel::Part::Engine,
+        voxel::Part::Weapon,
+        voxel::Part::Sensor,
+    ] {
+        let p = (0..dims[0])
+            .flat_map(|x| (0..dims[1]).flat_map(move |y| (0..dims[2]).map(move |z| [x, y, z])))
+            .find(|p| {
+                spider.body.vol.get(p[0], p[1], p[2])
+                    && spider.body.part_at(p[0], p[1], p[2]) == role
+            })
+            .expect("spider subsystem geometry");
+        let now = unit_work(&spider.body, p, &c);
+        let old = unit_work(&previous, p, &c);
+        let t1 = unit_work(&ordinary, p, &c);
+        assert!(
+            now < old && now > t1,
+            "{role:?}: old={old}, new={now}, T1={t1}"
+        );
     }
 }
 

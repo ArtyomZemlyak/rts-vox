@@ -10,24 +10,59 @@ impl Matter {
         // list and its order, including blocked candidates, exactly as before.
         for i in 0..heat.melting.len() {
             let p = heat.melting[i];
-            let mat=world.material(p[0],p[1],p[2]);
-            let transform=self.phase_changes.iter().flatten().find(|t|t.from==mat).copied();
-            if let Some(t)=transform.filter(|t|self.economy.mats.get(t.from).zip(self.economy.mats.get(t.to)).is_some_and(|(a,b)|a.density==b.density)) {
-                if !world.on_frame(p[0],p[1],p[2]) && !world.has_pending_dig(p[0],p[1],p[2]) && !self.debris.claimed(p) {
+            let mat = world.material(p[0], p[1], p[2]);
+            let transform = self
+                .phase_changes
+                .iter()
+                .flatten()
+                .find(|t| t.from == mat)
+                .copied();
+            if let Some(t) = transform.filter(|t| {
+                self.economy
+                    .mats
+                    .get(t.from)
+                    .zip(self.economy.mats.get(t.to))
+                    .is_some_and(|(a, b)| a.density == b.density)
+            }) {
+                if !world.on_frame(p[0], p[1], p[2])
+                    && !world.has_pending_dig(p[0], p[1], p[2])
+                    && !self.debris.claimed(p)
+                {
                     // A phase change is a bounded transfer, not a fresh cold
                     // voxel. Apply this tick, conditional on its source still
                     // being present; never resurrect material removed earlier.
-                    world.queue_transfer(voxel::Edit::replace_if(p[0],p[1],p[2],t.from,t.to));
-                    heat.melted_total+=1;
+                    world.queue_transfer(voxel::Edit::replace_if(p[0], p[1], p[2], t.from, t.to));
+                    heat.melted_total += 1;
                 }
-            } else if let Some(flow) = self.melt_flow.iter().flatten().find(|f|f.solid==mat).copied().filter(|f|
-                self.economy.mats.get(f.solid).zip(self.economy.mats.get(f.liquid)).is_some_and(|(a,b)|a.density==b.density)) {
-                if !world.on_frame(p[0],p[1],p[2]) && !world.has_pending_dig(p[0],p[1],p[2]) && !self.debris.claimed(p) {
-                    world.queue_transfer(voxel::Edit::replace_if(p[0],p[1],p[2],flow.solid,flow.liquid));
+            } else if let Some(flow) = self
+                .melt_flow
+                .iter()
+                .flatten()
+                .find(|f| f.solid == mat)
+                .copied()
+                .filter(|f| {
+                    self.economy
+                        .mats
+                        .get(f.solid)
+                        .zip(self.economy.mats.get(f.liquid))
+                        .is_some_and(|(a, b)| a.density == b.density)
+                })
+            {
+                if !world.on_frame(p[0], p[1], p[2])
+                    && !world.has_pending_dig(p[0], p[1], p[2])
+                    && !self.debris.claimed(p)
+                {
+                    world.queue_transfer(voxel::Edit::replace_if(
+                        p[0],
+                        p[1],
+                        p[2],
+                        flow.solid,
+                        flow.liquid,
+                    ));
                     heat.mark_molten(p);
                     heat.melted_total += 1;
                 }
-            } else if self.melt_flow.iter().flatten().any(|f|f.liquid==mat) {
+            } else if self.melt_flow.iter().flatten().any(|f| f.liquid == mat) {
                 // Already fluid: future heat deposits keep it hot.
             } else if self.melt_with_room(world, p, &mut room, true) {
                 heat.forget(p);

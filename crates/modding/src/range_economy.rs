@@ -282,12 +282,16 @@ mod tests {
         assert!(e.production.is_some());
         assert!(e.produces(RangeUnitKind::KilFactoryT1, RangeUnitKind::Tank));
         assert!(e.produces(RangeUnitKind::GrebenStorage, RangeUnitKind::SkobaDrone));
-        assert_eq!(e.products(RangeUnitKind::KilFactoryT1), &[RangeUnitKind::Tank]);
-        assert!(e.kinds.iter().all(|k| k.build_secs == match k.kind {
-            RangeUnitKind::Tank => 10,
-            RangeUnitKind::SkobaDrone => 2,
-            _ => 0,
-        }));
+        assert_eq!(
+            e.products(RangeUnitKind::KilFactoryT1),
+            &[RangeUnitKind::Tank]
+        );
+        assert!(e.kinds.iter().all(|k| k.build_secs
+            == match k.kind {
+                RangeUnitKind::Tank => 10,
+                RangeUnitKind::SkobaDrone => 2,
+                _ => 0,
+            }));
     }
 
     #[test]

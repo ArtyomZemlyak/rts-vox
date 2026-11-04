@@ -167,7 +167,11 @@ pub(super) fn solve_moving(
     // actual position, rather than aiming a trajectory from the hull centre.
     // The longer T3 barrel moves its muzzle farther while turning, so it
     // needs more iterations for nearby targets; retain a fixed work bound.
-    let iterations = if u.kind == RangeUnitKind::ArtilleryTurretT3 { 16 } else { 8 };
+    let iterations = if u.kind == RangeUnitKind::ArtilleryTurretT3 {
+        16
+    } else {
+        8
+    };
     for _ in 0..iterations {
         let f = u.aimed_frame(
             &u.pose,
@@ -219,9 +223,13 @@ pub(super) fn solve_moving(
         // Damping prevents a long muzzle from overshooting back and forth
         // around a close target as the barrel's pivot moves during the solve.
         let (yaw, pitch) = if u.kind == RangeUnitKind::ArtilleryTurretT3 && !settled {
-            (angle::norm(aim.yaw + angle::diff(yaw, aim.yaw) / 2),
-             aim.pitch + angle::diff(pitch, aim.pitch) / 2)
-        } else { (yaw, pitch) };
+            (
+                angle::norm(aim.yaw + angle::diff(yaw, aim.yaw) / 2),
+                aim.pitch + angle::diff(pitch, aim.pitch) / 2,
+            )
+        } else {
+            (yaw, pitch)
+        };
         aim = Aim {
             yaw,
             pitch,

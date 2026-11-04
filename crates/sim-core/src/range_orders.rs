@@ -74,13 +74,19 @@ pub(super) fn validate(
         }
     }
     if let Order::Support(target) = order {
-        if target == id || destination.is_some()
+        if target == id
+            || destination.is_some()
             || range.units[id].kind != RangeUnitKind::LightningTank
-            || !range.units.get(target).is_some_and(|u| u.kind == RangeUnitKind::LightningTank && u.status.alive)
+            || !range
+                .units
+                .get(target)
+                .is_some_and(|u| u.kind == RangeUnitKind::LightningTank && u.status.alive)
             || range.allied(target) != side
             || matches!(actors[target].order, Order::Support(_))
             || actors.iter().any(|actor| actor.order == Order::Support(id))
-        { return Admission::Rejected; }
+        {
+            return Admission::Rejected;
+        }
     }
     if let Order::Ground(p) = order {
         if (0..3).any(|a| p[a] < 0 || p[a] >= range.size[a] as i32) {
@@ -108,7 +114,10 @@ pub(super) fn validate(
     }
     // The rules AI maintains orders; it never replaces a dig (ADR-672).
     if replacement == Replacement::Maintain
-        && matches!(actors[id].order, Order::Dig(_) | Order::Reclaim(_) | Order::Support(_) | Order::Pilot { .. })
+        && matches!(
+            actors[id].order,
+            Order::Dig(_) | Order::Reclaim(_) | Order::Support(_) | Order::Pilot { .. }
+        )
     {
         return Admission::Unchanged;
     }

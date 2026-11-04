@@ -102,17 +102,37 @@ impl Batches {
     ) {
         let fragments = &scene.sim.matter.debris.fragments;
         self.scratch.clear();
+        let full = self.generation != Some(scene.generation) || !enabled;
+        let mut dirty = BTreeSet::new();
+        let tile = |s: &Stamp| {
+            (
+                [s.position.x, s.position.y, s.position.z]
+                    .map(|v| v.to_int_trunc().div_euclid(32)),
+                s.material,
+            )
+        };
         let mut cursor = 0;
         if enabled && (fragments.len() >= 1024 || !self.groups.is_empty()) {
             for (index, f) in fragments.iter().enumerate() {
-                if !f.resting || f.velocity != V3::ZERO || f.chunk.is_some() {
-                    continue;
-                }
-                let stamp = Stamp::of(index, f);
                 while self.input.get(cursor).is_some_and(|s| s.index < index) {
                     cursor += 1;
                 }
+                if !f.resting || f.velocity != V3::ZERO || f.chunk.is_some() {
+                    if !full {
+                        if let Some(old) = self.input.get(cursor).filter(|s| s.index == index) {
+                            dirty.insert(tile(old));
+                        }
+                    }
+                    continue;
+                }
+                let stamp = Stamp::of(index, f);
                 let was_stationary = self.input.get(cursor) == Some(&stamp);
+                if !full && !was_stationary {
+                    dirty.insert(tile(&stamp));
+                    if let Some(old) = self.input.get(cursor).filter(|s| s.index == index) {
+                        dirty.insert(tile(old));
+                    }
+                }
                 // Finish the landing interpolation before publishing static geometry.
                 if !was_stationary
                     && !scene.paused
@@ -126,51 +146,72 @@ impl Batches {
                 self.scratch.push(stamp);
             }
         }
-        let changed = self.generation != Some(scene.generation) || self.input != self.scratch;
+        let full = full || self.scratch.is_empty();
+        let changed = full || self.input != self.scratch;
         let mut flags_dirty = changed || self.flags.len() != fragments.len();
         if changed {
+            let mut seen = if full {
+                BTreeSet::new()
+            } else {
+                self.groups
+                    .keys()
+                    .filter(|(tile, mat, _)| !dirty.contains(&(*tile, *mat)))
+                    .copied()
+                    .collect()
+            };
             let mut tiles: BTreeMap<([i32; 3], u16), Vec<Stamp>> = BTreeMap::new();
             for s in &self.scratch {
-                let tile = [s.position.x, s.position.y, s.position.z]
-                    .map(|v| v.to_int_trunc().div_euclid(32));
-                tiles.entry((tile, s.material)).or_default().push(s.clone());
+                let key = tile(s);
+                if full || dirty.contains(&key) {
+                    tiles.entry(key).or_default().push(s.clone());
+                }
             }
-            let mut old = std::mem::take(&mut self.groups);
             for ((tile, mat), members) in tiles {
                 for (part, members) in members.chunks(PIECES).enumerate() {
                     if members.len() < 4 {
                         continue;
                     }
                     let key = (tile, mat, part);
-                    let group = match old.remove(&key) {
-                        Some(mut g)
-                            if g.members.len() == members.len()
-                                && g.members
-                                    .iter()
-                                    .zip(members)
-                                    .all(|(a, b)| a.same_picture(b)) =>
-                        {
-                            g.members.clone_from_slice(members);
-                            g
-                        }
-                        Some(g) => {
-                            Self::retire(g, commands, meshes, &exists);
+                    seen.insert(key);
+                    let group = self.groups.entry(key).or_insert_with(|| Group {
+                        members: members.to_vec(),
+                        published: None,
+                    });
+                    if group.members.len() == members.len()
+                        && group
+                            .members
+                            .iter()
+                            .zip(members)
+                            .all(|(a, b)| a.same_picture(b))
+                    {
+                        group.members.clone_from_slice(members);
+                    } else {
+                        let old = std::mem::replace(
+                            group,
                             Group {
                                 members: members.to_vec(),
                                 published: None,
-                            }
-                        }
-                        None => Group {
-                            members: members.to_vec(),
-                            published: None,
-                        },
-                    };
-                    self.groups.insert(key, group);
+                            },
+                        );
+                        Self::retire(old, commands, meshes, &exists);
+                    }
                 }
             }
-            for (_, g) in old {
-                Self::retire(g, commands, meshes, &exists);
-            }
+            self.groups.retain(|key, group| {
+                if seen.contains(key) {
+                    true
+                } else {
+                    let old = std::mem::replace(
+                        group,
+                        Group {
+                            members: Vec::new(),
+                            published: None,
+                        },
+                    );
+                    Self::retire(old, commands, meshes, &exists);
+                    false
+                }
+            });
             std::mem::swap(&mut self.input, &mut self.scratch);
             self.generation = Some(scene.generation);
         }

@@ -49,7 +49,7 @@ impl Laboratory {
     }
 }
 
-pub fn bounds(layout: &RangeLayout, templates: &Templates)->(Vec3,Vec3) {
+pub fn bounds(layout: &RangeLayout, templates: &Templates) -> (Vec3, Vec3) {
     let mut lo = Vec3::splat(f32::INFINITY);
     let mut hi = Vec3::splat(f32::NEG_INFINITY);
     for b in &layout.blocks {
@@ -76,10 +76,10 @@ pub fn bounds(layout: &RangeLayout, templates: &Templates)->(Vec3,Vec3) {
             }
         }
     }
-    (lo,hi)
+    (lo, hi)
 }
 pub fn outline(layout: &RangeLayout, templates: &Templates, gizmos: &mut Gizmos, colour: Color) {
-    let (lo,hi)=bounds(layout,templates);
+    let (lo, hi) = bounds(layout, templates);
     if lo.is_finite() && hi.is_finite() {
         gizmos.cube(
             Transform::from_translation((lo + hi) * 0.5).with_scale(hi - lo + Vec3::splat(0.7)),
@@ -101,7 +101,7 @@ fn tint(material: u16) -> [f32; 3] {
     match material {
         1 | 8 => [0.52, 0.43, 0.32],
         10 => [0.76, 0.61, 0.36],
-        12 => [0.37,0.61,0.51],
+        12 => [0.37, 0.61, 0.51],
         11 => [0.16, 0.61, 0.80],
         2 => [0.65, 0.66, 0.63],
         3 => [0.39, 0.57, 0.70],

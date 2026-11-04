@@ -519,9 +519,13 @@ impl CollapseLayer {
     /// Materials with their own conservative flow stay in the world. The
     /// support graph still includes them; cohesive neighbours may fall off.
     pub fn apply_iter_held_filtered(
-        &mut self, w: &mut World, edits: impl Iterator<Item = Edit>,
-        bodies: &mut Bodies, mut completed: impl FnMut(&'static str),
-        held: &dyn Fn([u32; 3]) -> bool, detach_material: &dyn Fn(u16) -> bool,
+        &mut self,
+        w: &mut World,
+        edits: impl Iterator<Item = Edit>,
+        bodies: &mut Bodies,
+        mut completed: impl FnMut(&'static str),
+        held: &dyn Fn([u32; 3]) -> bool,
+        detach_material: &dyn Fn(u16) -> bool,
     ) -> CollapseStats {
         let cs = CS as u32;
         let mut st = CollapseStats::default();
@@ -1564,8 +1568,15 @@ impl CollapseLayer {
                 continue;
             }
             self.cells.clear();
-            self.cells.extend(cells.iter().copied().filter(|&(x, y, z)| detach_material(w.material(x, y, z))));
-            if self.cells.is_empty() { continue; }
+            self.cells.extend(
+                cells
+                    .iter()
+                    .copied()
+                    .filter(|&(x, y, z)| detach_material(w.material(x, y, z))),
+            );
+            if self.cells.is_empty() {
+                continue;
+            }
             if !bodies.detach(w, &self.cells) {
                 continue;
             }

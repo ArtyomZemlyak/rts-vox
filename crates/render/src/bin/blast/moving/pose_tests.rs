@@ -348,12 +348,32 @@ fn every_actor_weapon_picture_follows_the_physical_elevated_frame() {
     let visual = app.world().resource::<Visual>();
     for (i, u) in scene.sim.units.iter().enumerate() {
         let f = u.root_frame(usize::from(u.body.turret_y));
-        let expected = Vec3::new(f.x.x.to_f64_lossy() as f32, f.x.y.to_f64_lossy() as f32, f.x.z.to_f64_lossy() as f32);
-        assert!((visual.frame_poses[i].turret * Vec3::X - expected).length() < 0.0001, "{:?}", u.kind);
-        let local = [Fx::from_ratio(u.body.vol.nx as i32, 2), Fx::from_int(u.body.turret_y as i32), Fx::from_ratio(u.body.vol.nz as i32, 2)];
+        let expected = Vec3::new(
+            f.x.x.to_f64_lossy() as f32,
+            f.x.y.to_f64_lossy() as f32,
+            f.x.z.to_f64_lossy() as f32,
+        );
+        assert!(
+            (visual.frame_poses[i].turret * Vec3::X - expected).length() < 0.0001,
+            "{:?}",
+            u.kind
+        );
+        let local = [
+            Fx::from_ratio(u.body.vol.nx as i32, 2),
+            Fx::from_int(u.body.turret_y as i32),
+            Fx::from_ratio(u.body.vol.nz as i32, 2),
+        ];
         let mount = f.world(local);
-        let expected = Vec3::new(mount.x.to_f64_lossy() as f32, mount.y.to_f64_lossy() as f32, mount.z.to_f64_lossy() as f32);
-        let rendered = visual.frame_poses[i].pos + visual.frame_poses[i].turret_offset + visual.frame_poses[i].turret * Vec3::Y * (u.body.turret_y as f32 * u.body.mm as f32 / voxel::unit::WORLD_MM as f32);
+        let expected = Vec3::new(
+            mount.x.to_f64_lossy() as f32,
+            mount.y.to_f64_lossy() as f32,
+            mount.z.to_f64_lossy() as f32,
+        );
+        let rendered = visual.frame_poses[i].pos
+            + visual.frame_poses[i].turret_offset
+            + visual.frame_poses[i].turret
+                * Vec3::Y
+                * (u.body.turret_y as f32 * u.body.mm as f32 / voxel::unit::WORLD_MM as f32);
         assert!((rendered - expected).length() < 0.001, "{:?}", u.kind);
     }
 }
@@ -367,12 +387,27 @@ fn player_weapon_picture_and_muzzle_follow_the_same_tilted_frame() {
     scene.sim.gun.update_pose(scene.sim.turret.angle);
     let visual = Visual::default();
     let (rotation, offset) = visible_gun_frame(&scene, &visual);
-    let physical = scene.sim.gun.root_frame(usize::from(scene.sim.gun.body.turret_y));
-    let forward = Vec3::new(physical.x.x.to_f64_lossy() as f32, physical.x.y.to_f64_lossy() as f32, physical.x.z.to_f64_lossy() as f32);
+    let physical = scene
+        .sim
+        .gun
+        .root_frame(usize::from(scene.sim.gun.body.turret_y));
+    let forward = Vec3::new(
+        physical.x.x.to_f64_lossy() as f32,
+        physical.x.y.to_f64_lossy() as f32,
+        physical.x.z.to_f64_lossy() as f32,
+    );
     assert!((rotation * Vec3::X - forward).length() < 0.0001);
     let path = scene.sim.gun.body.weapon_paths()[0];
-    let local = Vec3::new(path.max[0] as f32 + 1.0, (path.min[1] as f32 + path.max[1] as f32) * 0.5, (path.min[2] as f32 + path.max[2] as f32) * 0.5);
-    let centre = Vec3::new(scene.sim.gun.body.vol.nx as f32 * 0.5, 0.0, scene.sim.gun.body.vol.nz as f32 * 0.5);
+    let local = Vec3::new(
+        path.max[0] as f32 + 1.0,
+        (path.min[1] as f32 + path.max[1] as f32) * 0.5,
+        (path.min[2] as f32 + path.max[2] as f32) * 0.5,
+    );
+    let centre = Vec3::new(
+        scene.sim.gun.body.vol.nx as f32 * 0.5,
+        0.0,
+        scene.sim.gun.body.vol.nz as f32 * 0.5,
+    );
     let scale = scene.sim.gun.body.mm as f32 / voxel::unit::WORLD_MM as f32;
     let rendered = pose(&scene.sim.gun).pos + offset + rotation * ((local - centre) * scale);
     assert!((rendered - super::super::visible_muzzle(&scene, &visual)).length() < 0.001);

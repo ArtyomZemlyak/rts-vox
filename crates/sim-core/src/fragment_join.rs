@@ -24,12 +24,16 @@ impl Geometry {
                 mm: f.mm,
             })
     }
+    #[cfg(test)]
     fn origin(self) -> V3 {
+        self.origin_at(Fx::from_ratio(
+            i32::from(self.mm),
+            i32::from(voxel::unit::WORLD_MM),
+        ))
+    }
+    fn origin_at(self, scale: Fx) -> V3 {
         self.position
-            .sub(shape_centre(self.shape, self.side).scale(Fx::from_ratio(
-                i32::from(self.mm),
-                i32::from(voxel::unit::WORLD_MM),
-            )))
+            .sub(shape_centre(self.shape, self.side).scale(scale))
     }
     pub fn join(self, other: Self) -> Option<Self> {
         // Full 4³ masks are the legacy saturated-pile presentation. Do not
@@ -45,8 +49,8 @@ impl Geometry {
         {
             return None;
         }
-        let origin = self.origin();
-        let delta = arr(other.origin().sub(origin));
+        let origin = self.origin_at(scale);
+        let delta = arr(other.origin_at(scale).sub(origin));
         let offset = delta.map(|v| v.div(scale).add(Fx::from_ratio(1, 2)).to_int_trunc());
         // Only numerical roundoff in centre/scale arithmetic is tolerated.
         // No visible grid snapping, settling, turning or rescaling is allowed.

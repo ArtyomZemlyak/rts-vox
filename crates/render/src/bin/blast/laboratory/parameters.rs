@@ -102,7 +102,9 @@ pub fn source_list(p: &mut ChildSpawnerCommands, f: &TextFont) {
     }
 }
 pub fn get(l: &Laboratory, id: u8) -> i64 {
-    if id>=60 {return scenario::get_number(l,id);}
+    if id >= 60 {
+        return scenario::get_number(l, id);
+    }
     let c = l.config();
     let s = sources::active(l);
     match id {
@@ -154,7 +156,7 @@ pub fn get(l: &Laboratory, id: u8) -> i64 {
                 .unit_resistance as i64
         }
         30..=32 => {
-            let mat = l.constructor.material(&l.definition,l.recipe);
+            let mat = l.constructor.material(&l.definition, l.recipe);
             l.constructor
                 .workspace
                 .material
@@ -184,7 +186,7 @@ fn live_value(l: &Laboratory, scene: &Scene, id: u8) -> i64 {
             .matter
             .economy
             .mats
-            .get(l.constructor.material(&l.definition,l.recipe))
+            .get(l.constructor.material(&l.definition, l.recipe))
         {
             return match id {
                 30 => m.strength as i64,
@@ -196,7 +198,9 @@ fn live_value(l: &Laboratory, scene: &Scene, id: u8) -> i64 {
     get(l, id)
 }
 pub fn apply(l: &mut Laboratory, id: u8, value: i64, scene: &mut Scene) -> Result<bool, String> {
-    if id>=60 {return scenario::set_number(l,id,value,scene);}
+    if id >= 60 {
+        return scenario::set_number(l, id, value, scene);
+    }
     if matches!(id,0..=15|40..=54) && !scene.sim.ready() {
         return Err(
             "Изменяйте параметры после завершения опыта; при необходимости нажмите «Сброс»".into(),
@@ -339,7 +343,7 @@ pub fn apply(l: &mut Laboratory, id: u8, value: i64, scene: &mut Scene) -> Resul
         l.constructor.base = Some(base);
         l.constructor.stand = false;
     } else if (30..=32).contains(&id) {
-        let material = l.constructor.material(&l.definition,l.recipe);
+        let material = l.constructor.material(&l.definition, l.recipe);
         let field = match id {
             30 => MaterialField::Strength,
             31 => MaterialField::Density,
@@ -433,7 +437,7 @@ fn parse_number(id: u8, text: &str) -> Result<i64, String> {
         .replace(',', ".")
         .parse::<f64>()
         .map_err(|_| "Введите число")?;
-    if !n.is_finite() || (n < 0.0 && !matches!(id,64|65)) || n < -1.0 || n > u32::MAX as f64 {
+    if !n.is_finite() || (n < 0.0 && !matches!(id, 64 | 65)) || n < -1.0 || n > u32::MAX as f64 {
         return Err("Нужно неотрицательное конечное число".into());
     }
     let value = n * if id == 0 { 1000.0 } else { 1.0 };
@@ -520,7 +524,7 @@ pub fn sync(
                 .matter
                 .economy
                 .mats
-                .get(lab.constructor.material(&lab.definition,lab.recipe))
+                .get(lab.constructor.material(&lab.definition, lab.recipe))
             {
                 value = match id {
                     30 => m.strength.to_string(),

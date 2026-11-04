@@ -92,7 +92,11 @@ impl BlastRange {
             repose_drop: granular
                 .map(|m| (m.repose_drop as i32 + self.water.repose_bonus(at)).max(1) as u32),
             yield_pressure: granular.map(|m| m.yield_pressure),
-            motion: if motion {self.granular.motion_at(&self.world, at)} else {None},
+            motion: if motion {
+                self.granular.motion_at(&self.world, at)
+            } else {
+                None
+            },
         })
     }
 }

@@ -119,7 +119,9 @@ impl Job {
 impl BlastRange {
     // Flight reserves continuation capacity before any complete salvo is fired.
     pub(super) fn solid_flight_room(&self, rounds: &[battle::Round], count: usize) -> bool {
-        if self.battle_mode() && self.battle.autonomous { return true; }
+        if self.battle_mode() && self.battle.autonomous {
+            return true;
+        }
         self.kinetic.jobs.len()
             + self.streams.rounds.len()
             + rounds
@@ -307,8 +309,12 @@ impl BlastRange {
             }
             _ => None,
         };
-        let before = job.direct.is_none().then(|| self.units.iter()
-            .map(|u| (u.removed.len(), u.seg_removed.len())).collect::<Vec<_>>());
+        let before = job.direct.is_none().then(|| {
+            self.units
+                .iter()
+                .map(|u| (u.removed.len(), u.seg_removed.len()))
+                .collect::<Vec<_>>()
+        });
         let previous = (self.matter.remaining_mj, self.matter.fragment_box());
         self.matter.remaining_mj = job.remaining_mj;
         self.matter.fragment_size(job.config.fragment_box);

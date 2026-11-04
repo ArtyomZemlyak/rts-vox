@@ -32,14 +32,22 @@ impl BlastRange {
 
     pub(super) fn apply_gun_command(&mut self, command: GunCommand) -> Outcome {
         match command {
-            GunCommand::LabStream { origin, target, enabled } => self.lab_stream(origin, target, enabled),
+            GunCommand::LabStream {
+                origin,
+                target,
+                enabled,
+            } => self.lab_stream(origin, target, enabled),
             GunCommand::Detonate { at } => {
-                if !self.point_gun() || self.battle_mode()
+                if !self.point_gun()
+                    || self.battle_mode()
                     || self.config.delivery != modding::explosion::Delivery::Blast
-                    || (0..3).any(|a| at[a] < 0 || at[a] >= self.size[a] as i32) {
+                    || (0..3).any(|a| at[a] < 0 || at[a] >= self.size[a] as i32)
+                {
                     return Outcome::Rejected;
                 }
-                if !self.ready() { return Outcome::Busy; }
+                if !self.ready() {
+                    return Outcome::Busy;
+                }
                 self.player = true;
                 self.fire_tick = u32::MAX;
                 self.begin_charge_impact(at, at);
@@ -51,11 +59,19 @@ impl BlastRange {
                 }
                 let layout = self.layout.as_mut().expect("point emitter layout");
                 if (0..3).any(|a| at[a] < 0 || at[a] >= layout.size[a] as i32)
-                    || at[0] < 32 || at[0] >= layout.size[0] as i32 - 32
-                    || at[2] < 32 || at[2] >= layout.size[2] as i32 - 32 {
+                    || at[0] < 32
+                    || at[0] >= layout.size[0] as i32 - 32
+                    || at[2] < 32
+                    || at[2] >= layout.size[2] as i32 - 32
+                {
                     return Outcome::Rejected;
                 }
-                if layout.gun == at { Outcome::Unchanged } else { layout.gun = at; Outcome::Applied }
+                if layout.gun == at {
+                    Outcome::Unchanged
+                } else {
+                    layout.gun = at;
+                    Outcome::Applied
+                }
             }
             GunCommand::Control => {
                 let changed = !self.player;
@@ -77,7 +93,9 @@ impl BlastRange {
                 }
             }
             GunCommand::Attack { target } => {
-                if self.point_gun() {return Outcome::Rejected;}
+                if self.point_gun() {
+                    return Outcome::Rejected;
+                }
                 if self.order_attack_inner(target) {
                     Outcome::Applied
                 } else {
@@ -89,7 +107,9 @@ impl BlastRange {
                 Outcome::Applied
             }
             GunCommand::AutoAttack { enabled } => {
-                if self.point_gun() && enabled {return Outcome::Rejected;}
+                if self.point_gun() && enabled {
+                    return Outcome::Rejected;
+                }
                 self.set_auto_attack_inner(enabled);
                 Outcome::Applied
             }

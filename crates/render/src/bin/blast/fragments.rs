@@ -11,10 +11,10 @@ pub(super) mod history;
 #[cfg(test)]
 #[path = "fragments/lifecycle_tests.rs"]
 mod lifecycle_tests;
-#[path = "fragments/slots.rs"]
-mod slots;
 #[path = "fragments/picking.rs"]
 pub(super) mod picking;
+#[path = "fragments/slots.rs"]
+mod slots;
 #[derive(Component)]
 pub struct Piece(u64, u64, bool);
 #[derive(Default)]
@@ -115,12 +115,13 @@ pub fn draw(
     // cheap panels through one bounded frame instead of delaying their birth.
     const SECTION_WORK: usize = 1024;
     let mut section_work = 0;
-    {
-        let Cache {
-            batches,
-            materials: cached,
-            ..
-        } = &mut *cache;
+    let Cache {
+        batches,
+        materials: cached,
+        slots,
+        ..
+    } = &mut *cache;
+    let mut update = || {
         batches.update(
             batching.is_some(),
             &scene,
@@ -131,8 +132,18 @@ pub fn draw(
             cached,
             |e| batch_entities.contains(e),
         );
+    };
+    let mut align = || slots.align(fragments);
+    if let Some(pool) = bevy::tasks::ComputeTaskPool::try_get().filter(|_| fragments.len() >= 2048)
+    {
+        pool.scope(|scope| {
+            scope.spawn(async move { align() });
+            update();
+        });
+    } else {
+        update();
+        align();
     }
-    cache.slots.align(fragments);
     {
         let Cache { slots, chunks, .. } = &mut *cache;
         for slot in slots.retired.drain(..) {
@@ -382,8 +393,14 @@ mod tests {
         }
         let shard = piece_mesh(1, 1, [1.0; 4]);
         assert_eq!(shard.indices().unwrap().len() / 3, 12);
-        let normals=shard.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap().as_float3().unwrap();
-        assert!(normals.iter().all(|n|n.iter().filter(|v|v.abs()>0.001).count()==1));
+        let normals = shard
+            .attribute(Mesh::ATTRIBUTE_NORMAL)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        assert!(normals
+            .iter()
+            .all(|n| n.iter().filter(|v| v.abs() > 0.001).count() == 1));
     }
     #[test]
     fn saturated_pile_mesh_matches_physical_bounds() {

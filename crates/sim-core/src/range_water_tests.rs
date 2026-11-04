@@ -4,81 +4,145 @@ use voxel::Edit;
 
 #[test]
 fn water_free_flight_matches_gravity_and_preserves_a_falling_volume() {
-    let w=world();
-    let mut f=liquid(&w,[28,56,28],[30,59,30]);
-    let volume=sum(&f);
-    let mut copy=None;
-    let mut previous=56;
-    let mut drops=Vec::new();
+    let w = world();
+    let mut f = liquid(&w, [28, 56, 28], [30, 59, 30]);
+    let volume = sum(&f);
+    let mut copy = None;
+    let mut previous = 56;
+    let mut drops = Vec::new();
     for n in 1..=20 {
-        f.step(&w,&[]);
-        let low=f.cells().map(|(p,_)|p[1]).min().unwrap() as i32;
-        let analytic=56-98*n*n/(2*crate::TICKS_PER_SECOND*crate::TICKS_PER_SECOND);
-        assert!((low-analytic).abs()<=1,"tick {n}: y={low}, ballistic y={analytic}");
-        assert_eq!(sum(&f),volume);
-        assert!(f.cells().all(|(p,_)|(28..30).contains(&p[0])&&(28..30).contains(&p[2])),"water must not diffuse sideways in free air");
-        assert_eq!(f.cells().count(),12,"the whole finite volume must fall together");
-        drops.push(previous-low);previous=low;
-        if n==7 {
-            let mut b=fx::blob::Blob::new();f.save(&mut b);
-            let mut restored=Water::new();restored.load(&mut fx::blob::Scan::new(&b.v),[64;3]).unwrap();copy=Some(restored);
-        }else if let Some(back)=&mut copy {
-            back.step(&w,&[]);let mut a=fx::blob::Blob::new();let mut b=fx::blob::Blob::new();f.save(&mut a);back.save(&mut b);assert_eq!(a.v,b.v);
+        f.step(&w, &[]);
+        let low = f.cells().map(|(p, _)| p[1]).min().unwrap() as i32;
+        let analytic = 56 - 98 * n * n / (2 * crate::TICKS_PER_SECOND * crate::TICKS_PER_SECOND);
+        assert!(
+            (low - analytic).abs() <= 1,
+            "tick {n}: y={low}, ballistic y={analytic}"
+        );
+        assert_eq!(sum(&f), volume);
+        assert!(
+            f.cells()
+                .all(|(p, _)| (28..30).contains(&p[0]) && (28..30).contains(&p[2])),
+            "water must not diffuse sideways in free air"
+        );
+        assert_eq!(
+            f.cells().count(),
+            12,
+            "the whole finite volume must fall together"
+        );
+        drops.push(previous - low);
+        previous = low;
+        if n == 7 {
+            let mut b = fx::blob::Blob::new();
+            f.save(&mut b);
+            let mut restored = Water::new();
+            restored
+                .load(&mut fx::blob::Scan::new(&b.v), [64; 3])
+                .unwrap();
+            copy = Some(restored);
+        } else if let Some(back) = &mut copy {
+            back.step(&w, &[]);
+            let mut a = fx::blob::Blob::new();
+            let mut b = fx::blob::Blob::new();
+            f.save(&mut a);
+            back.save(&mut b);
+            assert_eq!(a.v, b.v);
         }
     }
-    assert!(drops[19]>drops[3],"free-flight velocity must actually accelerate");
-    f.step(&w,&[]);
-    assert_eq!(f.cells().map(|(p,_)|p[1]).min(),Some(4),"5.2 m free fall must reach the floor by 1.05 s");
-    for _ in 0..30 {f.step(&w,&[]);assert_eq!(sum(&f),volume);}
-    assert!(f.cells().all(|(p,_)|p[1]>=4),"fast water must not tunnel through the ground");
-    assert!(f.cells().any(|(p,_)|p[1]==4),"water must reach the floor");
+    assert!(
+        drops[19] > drops[3],
+        "free-flight velocity must actually accelerate"
+    );
+    f.step(&w, &[]);
+    assert_eq!(
+        f.cells().map(|(p, _)| p[1]).min(),
+        Some(4),
+        "5.2 m free fall must reach the floor by 1.05 s"
+    );
+    for _ in 0..30 {
+        f.step(&w, &[]);
+        assert_eq!(sum(&f), volume);
+    }
+    assert!(
+        f.cells().all(|(p, _)| p[1] >= 4),
+        "fast water must not tunnel through the ground"
+    );
+    assert!(
+        f.cells().any(|(p, _)| p[1] == 4),
+        "water must reach the floor"
+    );
 }
 
 #[test]
 fn water_free_fall_acceleration_does_not_depend_on_liquid_viscosity() {
-    let w=world();let mut reference=None;
-    for viscosity in [0,200,950] {
-        let mut f=liquid(&w,[30,56,30],[31,57,31]);f.tuning.viscosity_milli=viscosity;
-        let mut positions=Vec::new();
-        for _ in 0..18 {f.step(&w,&[]);positions.push(f.cells().map(|(p,_)|p).collect::<Vec<_>>());}
-        if let Some(expected)=&reference {assert_eq!(&positions,expected);}else{reference=Some(positions);}
+    let w = world();
+    let mut reference = None;
+    for viscosity in [0, 200, 950] {
+        let mut f = liquid(&w, [30, 56, 30], [31, 57, 31]);
+        f.tuning.viscosity_milli = viscosity;
+        let mut positions = Vec::new();
+        for _ in 0..18 {
+            f.step(&w, &[]);
+            positions.push(f.cells().map(|(p, _)| p).collect::<Vec<_>>());
+        }
+        if let Some(expected) = &reference {
+            assert_eq!(&positions, expected);
+        } else {
+            reference = Some(positions);
+        }
     }
 }
 
 #[test]
 fn water_falling_speed_is_available_through_the_whole_moving_column() {
-    let w=world();
-    let mut f=liquid(&w,[30,50,30],[31,53,31]);
-    for _ in 0..5 {f.step(&w,&[]);}
-    let column=f.cells().map(|(p,_)|p).collect::<Vec<_>>();
-    let low=*column.iter().min_by_key(|p|p[1]).unwrap();
-    let speed=f.falling_speed_at(low).expect("moving water speed");
-    assert!(speed>Fx::ZERO);
-    assert!(column.iter().all(|p|f.falling_speed_at(*p)==Some(speed)));
-    assert_eq!(f.falling_speed_at([29,low[1],30]),None);
+    let w = world();
+    let mut f = liquid(&w, [30, 50, 30], [31, 53, 31]);
+    for _ in 0..5 {
+        f.step(&w, &[]);
+    }
+    let column = f.cells().map(|(p, _)| p).collect::<Vec<_>>();
+    let low = *column.iter().min_by_key(|p| p[1]).unwrap();
+    let speed = f.falling_speed_at(low).expect("moving water speed");
+    assert!(speed > Fx::ZERO);
+    assert!(column.iter().all(|p| f.falling_speed_at(*p) == Some(speed)));
+    assert_eq!(f.falling_speed_at([29, low[1], 30]), None);
 }
 
 #[test]
 fn water_free_flight_moves_a_whole_column_even_with_one_work_item_per_tick() {
-    let w=world();let mut slow=liquid(&w,[30,40,30],[31,56,31]);
-    let mut normal=liquid(&w,[30,40,30],[31,56,31]);slow.tuning.checks_per_tick=1;
+    let w = world();
+    let mut slow = liquid(&w, [30, 40, 30], [31, 56, 31]);
+    let mut normal = liquid(&w, [30, 40, 30], [31, 56, 31]);
+    slow.tuning.checks_per_tick = 1;
     for _ in 0..15 {
-        slow.step(&w,&[]);normal.step(&w,&[]);
-        assert_eq!(slow.cells().collect::<Vec<_>>(),normal.cells().collect::<Vec<_>>());
-        assert!(slow.checks<=1);
+        slow.step(&w, &[]);
+        normal.step(&w, &[]);
+        assert_eq!(
+            slow.cells().collect::<Vec<_>>(),
+            normal.cells().collect::<Vec<_>>()
+        );
+        assert!(slow.checks <= 1);
     }
 }
 
 #[test]
 fn water_motion_rejects_corrupt_velocity_and_loads_legacy_volume_without_motion() {
-    let w=world();let mut f=liquid(&w,[30,50,30],[31,51,31]);f.step(&w,&[]);
-    let mut b=fx::blob::Blob::new();f.save_legacy(&mut b);
-    let mut old=Water::new();old.load_legacy(&mut fx::blob::Scan::new(&b.v),[64;3]).unwrap();
-    assert!(!old.has_motion());assert_eq!(sum(&old),sum(&f));
-    let mut motion=fx::blob::Blob::new();f.save_motion(&mut motion);
-    assert!(motion.v.len()>=40);
+    let w = world();
+    let mut f = liquid(&w, [30, 50, 30], [31, 51, 31]);
+    f.step(&w, &[]);
+    let mut b = fx::blob::Blob::new();
+    f.save_legacy(&mut b);
+    let mut old = Water::new();
+    old.load_legacy(&mut fx::blob::Scan::new(&b.v), [64; 3])
+        .unwrap();
+    assert!(!old.has_motion());
+    assert_eq!(sum(&old), sum(&f));
+    let mut motion = fx::blob::Blob::new();
+    f.save_motion(&mut motion);
+    assert!(motion.v.len() >= 40);
     motion.v[16..24].copy_from_slice(&(-1i64).to_le_bytes());
-    assert!(old.load_motion(&mut fx::blob::Scan::new(&motion.v),[64;3]).is_none());
+    assert!(old
+        .load_motion(&mut fx::blob::Scan::new(&motion.v), [64; 3])
+        .is_none());
 }
 
 struct Flat;
@@ -122,59 +186,113 @@ fn sum(w: &Water) -> u64 {
 }
 #[test]
 fn large_water_volume_spreads_promptly_and_preserves_mass() {
-    let w=world();
-    for (name,min,max) in [("fall",[20,35,20],[28,43,28]),("spread",[20,4,18],[37,16,54])] {
-        let mut water=liquid(&w,min,max);
-        let total=sum(&water);
+    let w = world();
+    for (name, min, max) in [
+        ("fall", [20, 35, 20], [28, 43, 28]),
+        ("spread", [20, 4, 18], [37, 16, 54]),
+    ] {
+        let mut water = liquid(&w, min, max);
+        let total = sum(&water);
         for tick in 1..=20 {
-            water.step(&w,&[]);
-            if [1,5,10,20].contains(&tick) {
-                let low=water.cells().map(|(p,_)|p[1]).min().unwrap();
-                let outside=water.cells().filter(|(p,_)|p[0]<min[0] as u32 || p[0]>=max[0] as u32 || p[2]<min[2] as u32 || p[2]>=max[2] as u32).map(|(_,v)|u64::from(v)).sum::<u64>();
-                if name=="fall" && tick==10 {assert_eq!(low,23);}
-                if name=="spread" && tick==5 {assert!(outside>=1_000_000,"large pool barely moved: {outside}");}
-                if name=="spread" && tick==20 {assert!(outside>=1_800_000,"large pool spread too slowly: {outside}");}
+            water.step(&w, &[]);
+            if [1, 5, 10, 20].contains(&tick) {
+                let low = water.cells().map(|(p, _)| p[1]).min().unwrap();
+                let outside = water
+                    .cells()
+                    .filter(|(p, _)| {
+                        p[0] < min[0] as u32
+                            || p[0] >= max[0] as u32
+                            || p[2] < min[2] as u32
+                            || p[2] >= max[2] as u32
+                    })
+                    .map(|(_, v)| u64::from(v))
+                    .sum::<u64>();
+                if name == "fall" && tick == 10 {
+                    assert_eq!(low, 23);
+                }
+                if name == "spread" && tick == 5 {
+                    assert!(outside >= 1_000_000, "large pool barely moved: {outside}");
+                }
+                if name == "spread" && tick == 20 {
+                    assert!(
+                        outside >= 1_800_000,
+                        "large pool spread too slowly: {outside}"
+                    );
+                }
             }
-            assert_eq!(sum(&water),total);
+            assert_eq!(sum(&water), total);
         }
     }
 }
 #[test]
 fn water_spread_from_a_grounded_column_is_prompt_and_conservative() {
-    let w=world();
-    let mut f=liquid(&w,[28,4,28],[32,12,32]);
-    let initial=sum(&f);
+    let w = world();
+    let mut f = liquid(&w, [28, 4, 28], [32, 12, 32]);
+    let initial = sum(&f);
     for tick in 1..=40 {
-        f.step(&w,&[]);
-        assert_eq!(sum(&f),initial);
-        if [10,20,40].contains(&tick) {
-            let threshold=f.tuning.units_per_voxel/8;
-            let reach=f.cells().filter(|(p,v)| p[1]==4 && *v>=threshold)
-                .map(|(p,_)|p[0].abs_diff(30).max(p[2].abs_diff(30))).max().unwrap_or(0);
-            let sum_axis = |axis:usize, low:bool| f.cells().filter(|(p,_)| if low {p[axis]<28} else {p[axis]>=32}).map(|(_,v)|u64::from(v)).sum::<u64>();
+        f.step(&w, &[]);
+        assert_eq!(sum(&f), initial);
+        if [10, 20, 40].contains(&tick) {
+            let threshold = f.tuning.units_per_voxel / 8;
+            let reach = f
+                .cells()
+                .filter(|(p, v)| p[1] == 4 && *v >= threshold)
+                .map(|(p, _)| p[0].abs_diff(30).max(p[2].abs_diff(30)))
+                .max()
+                .unwrap_or(0);
+            let sum_axis = |axis: usize, low: bool| {
+                f.cells()
+                    .filter(|(p, _)| if low { p[axis] < 28 } else { p[axis] >= 32 })
+                    .map(|(_, v)| u64::from(v))
+                    .sum::<u64>()
+            };
             eprintln!("tick={tick} reach={reach} cells={} active={} checks={} transfers={} outward=[{},{},{},{}]",f.stats().cells,f.stats().active,f.checks,f.transfers,sum_axis(0,true),sum_axis(0,false),sum_axis(2,true),sum_axis(2,false));
-            if tick==20 {
-                assert!(reach>=9,"water spread too slowly: reach={reach}");
-                assert!([sum_axis(0,true),sum_axis(0,false),sum_axis(2,true),sum_axis(2,false)].into_iter().all(|v|v>initial/5),"the flow favours one direction");
+            if tick == 20 {
+                assert!(reach >= 9, "water spread too slowly: reach={reach}");
+                assert!(
+                    [
+                        sum_axis(0, true),
+                        sum_axis(0, false),
+                        sum_axis(2, true),
+                        sum_axis(2, false)
+                    ]
+                    .into_iter()
+                    .all(|v| v > initial / 5),
+                    "the flow favours one direction"
+                );
             }
         }
     }
 }
 #[test]
 fn faster_water_respects_a_wall_and_passes_through_an_opening() {
-    let mut w=world();
-    put(&mut w,[30,4,1],[31,24,63],2);
-    let mut f=liquid(&w,[25,4,28],[29,10,32]);
-    let volume=sum(&f);
-    for _ in 0..30 {f.step(&w,&[]);}
-    assert!(f.cells().all(|(p,_)|p[0]<30),"water crossed a closed wall");
-    assert_eq!(sum(&f),volume);
-    put(&mut w,[30,4,27],[31,9,33],0);
-    f.observe(w.edits(),[64;3]);
-    for _ in 0..45 {f.step(&w,&[]);}
-    let beyond=f.cells().filter(|(p,_)|p[0]>30).map(|(_,v)|u64::from(v)).sum::<u64>();
-    assert!(beyond>=u64::from(f.tuning.units_per_voxel),"water did not cross the opening");
-    assert_eq!(sum(&f),volume);
+    let mut w = world();
+    put(&mut w, [30, 4, 1], [31, 24, 63], 2);
+    let mut f = liquid(&w, [25, 4, 28], [29, 10, 32]);
+    let volume = sum(&f);
+    for _ in 0..30 {
+        f.step(&w, &[]);
+    }
+    assert!(
+        f.cells().all(|(p, _)| p[0] < 30),
+        "water crossed a closed wall"
+    );
+    assert_eq!(sum(&f), volume);
+    put(&mut w, [30, 4, 27], [31, 9, 33], 0);
+    f.observe(w.edits(), [64; 3]);
+    for _ in 0..45 {
+        f.step(&w, &[]);
+    }
+    let beyond = f
+        .cells()
+        .filter(|(p, _)| p[0] > 30)
+        .map(|(_, v)| u64::from(v))
+        .sum::<u64>();
+    assert!(
+        beyond >= u64::from(f.tuning.units_per_voxel),
+        "water did not cross the opening"
+    );
+    assert_eq!(sum(&f), volume);
 }
 fn basin(w: &mut World) {
     for (min, max) in [
@@ -247,25 +365,47 @@ fn water_pressure_equalizes_vessels_through_a_submerged_passage() {
 
 #[test]
 fn laboratory_vessels_move_water_much_faster_without_changing_volume() {
-    let exp=modding::laboratory::experiments::stock().into_iter().find(|e|e.id=="water-vessels").unwrap();
-    let cfg=modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
-    let mut amounts=Vec::new();
-    for legacy in [true,false] {
-        let mut sim=BlastRange::with_layout(cfg,exp.layout.clone()).unwrap();
-        if legacy {sim.water.tuning.pressure_checks=2048;sim.water.tuning.pressure_packets=64;
-            sim.water.tuning.pressure_interval=4;sim.water.tuning.transfers_per_tick=1024;}
-        let volume=sim.water.stats().initial_units;
-        for _ in 0..10 {
-            sim.water.step(&sim.world,&[]);
-            assert_eq!(sim.water.stats().units,volume);
-            assert!(sim.water.checks<=sim.water.tuning.checks_per_tick);
-            assert!(sim.water.transfers<=sim.water.tuning.transfers_per_tick);
+    let exp = modding::laboratory::experiments::stock()
+        .into_iter()
+        .find(|e| e.id == "water-vessels")
+        .unwrap();
+    let cfg =
+        modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
+            .unwrap();
+    let mut amounts = Vec::new();
+    for legacy in [true, false] {
+        let mut sim = BlastRange::with_layout(cfg, exp.layout.clone()).unwrap();
+        if legacy {
+            sim.water.tuning.pressure_checks = 2048;
+            sim.water.tuning.pressure_packets = 64;
+            sim.water.tuning.pressure_interval = 4;
+            sim.water.tuning.transfers_per_tick = 1024;
         }
-        let right:u64=sim.water.cells().filter(|(p,_)|p[0]>=385).map(|(_,n)|u64::from(n)).sum();
-        assert!(legacy || right>volume/100,"new flow did not reach the second vessel");
+        let volume = sim.water.stats().initial_units;
+        for _ in 0..10 {
+            sim.water.step(&sim.world, &[]);
+            assert_eq!(sim.water.stats().units, volume);
+            assert!(sim.water.checks <= sim.water.tuning.checks_per_tick);
+            assert!(sim.water.transfers <= sim.water.tuning.transfers_per_tick);
+        }
+        let right: u64 = sim
+            .water
+            .cells()
+            .filter(|(p, _)| p[0] >= 385)
+            .map(|(_, n)| u64::from(n))
+            .sum();
+        assert!(
+            legacy || right > volume / 100,
+            "new flow did not reach the second vessel"
+        );
         amounts.push(right);
     }
-    assert!(amounts[1]>=amounts[0].saturating_mul(10),"old={} new={}",amounts[0],amounts[1]);
+    assert!(
+        amounts[1] >= amounts[0].saturating_mul(10),
+        "old={} new={}",
+        amounts[0],
+        amounts[1]
+    );
 }
 
 #[test]

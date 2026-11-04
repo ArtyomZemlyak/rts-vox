@@ -55,8 +55,11 @@ fn assert_separate(s: &BlastRange) {
             let ub = &s.units[b];
             let depth = motion::Obstacle::of(&ua.motion, &ua.body)
                 .penetration(&motion::Obstacle::of(&ub.motion, &ub.body));
-            assert!(depth <= Fx::from_int(2),
-                "hull overlap {depth:?} exceeds 20 cm: {a}/{b} at {}", s.tick);
+            assert!(
+                depth <= Fx::from_int(2),
+                "hull overlap {depth:?} exceeds 20 cm: {a}/{b} at {}",
+                s.tick
+            );
         }
     }
 }
@@ -72,22 +75,36 @@ fn small_group_advances_without_deep_hull_overlap() {
     for tick in 0..120 {
         s.step();
         assert_separate(&s);
-        for u in &s.units { assert!(u.motion.drive.vel.abs() <= Fx::from_int(u.motion.speed)); }
+        for u in &s.units {
+            assert!(u.motion.drive.vel.abs() <= Fx::from_int(u.motion.speed));
+        }
         if tick == 59 {
-            let mut copy = BlastRange::restore(config(), &s.snapshot()).expect("group movement snapshot");
+            let mut copy =
+                BlastRange::restore(config(), &s.snapshot()).expect("group movement snapshot");
             copy.set_navigation_workers(1);
             copy.set_physics_workers(1);
             replay = Some(copy);
         } else if let Some(copy) = replay.as_mut() {
             copy.step();
-            assert_eq!(s.units.iter().map(|u| (u.motion.pos, u.motion.drive)).collect::<Vec<_>>(),
-                copy.units.iter().map(|u| (u.motion.pos, u.motion.drive)).collect::<Vec<_>>(),
-                "group motion diverged after restoring at tick {tick}");
+            assert_eq!(
+                s.units
+                    .iter()
+                    .map(|u| (u.motion.pos, u.motion.drive))
+                    .collect::<Vec<_>>(),
+                copy.units
+                    .iter()
+                    .map(|u| (u.motion.pos, u.motion.drive))
+                    .collect::<Vec<_>>(),
+                "group motion diverged after restoring at tick {tick}"
+            );
         }
     }
     assert_eq!(s.state_hash(), replay.unwrap().state_hash());
     for (i, u) in s.units.iter().enumerate() {
-        assert!(u.motion.pos[0] > start[i].add(Fx::from_int(40)), "unit {i} did not advance");
+        assert!(
+            u.motion.pos[0] > start[i].add(Fx::from_int(40)),
+            "unit {i} did not advance"
+        );
     }
 }
 #[test]

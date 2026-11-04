@@ -30,7 +30,11 @@ pub enum Phenomenon {
     WaterFlow,
     HydrostaticPressure,
     Buoyancy,
-    Wetting,Vitrification,UndergroundUplift,Drilling,HydraulicErosion,
+    Wetting,
+    Vitrification,
+    UndergroundUplift,
+    Drilling,
+    HydraulicErosion,
 }
 impl Phenomenon {
     pub const ALL: [Self; 31] = [
@@ -60,7 +64,11 @@ impl Phenomenon {
         Self::WaterFlow,
         Self::HydrostaticPressure,
         Self::Buoyancy,
-        Self::Wetting,Self::Vitrification,Self::UndergroundUplift,Self::Drilling,Self::HydraulicErosion,
+        Self::Wetting,
+        Self::Vitrification,
+        Self::UndergroundUplift,
+        Self::Drilling,
+        Self::HydraulicErosion,
     ];
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -99,13 +107,23 @@ pub struct Plan {
     pub inputs: Vec<Input>,
 }
 impl Plan {
-    pub fn validate_sources(&self,layout:&RangeLayout,sources:&[super::sources::Source])->Result<(),String> {
+    pub fn validate_sources(
+        &self,
+        layout: &RangeLayout,
+        sources: &[super::sources::Source],
+    ) -> Result<(), String> {
         self.validate(layout)?;
-        let mut linked=std::collections::BTreeSet::new();
+        let mut linked = std::collections::BTreeSet::new();
         for source in sources {
-            if let Some(i)=source.input {
-                if !linked.insert(i) || !self.inputs.get(i).is_some_and(|input|
-                    match input {Input::Fire=>!source.detonate,Input::Detonate{at}=>source.detonate&&*at==source.at,_=>false}) || layout.battle {
+            if let Some(i) = source.input {
+                if !linked.insert(i)
+                    || !self.inputs.get(i).is_some_and(|input| match input {
+                        Input::Fire => !source.detonate,
+                        Input::Detonate { at } => source.detonate && *at == source.at,
+                        _ => false,
+                    })
+                    || layout.battle
+                {
                     return Err("Некорректная связь источника с командой сценария".into());
                 }
             }

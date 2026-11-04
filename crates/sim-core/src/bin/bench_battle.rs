@@ -979,6 +979,10 @@ fn main() {
                         coarse_us = elapsed;
                     }
                     "motion_routes" => motion_detail[0] += elapsed,
+                    "motion_routes_ground" => {
+                        motion_detail[0] += elapsed;
+                        ground_us = elapsed;
+                    }
                     "motion_ground" => ground_us = elapsed,
                     "motion_commit" => motion_detail[1] = elapsed,
                     "motion_feet" => feet_us = elapsed,

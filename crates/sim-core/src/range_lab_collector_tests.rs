@@ -270,22 +270,43 @@ fn lab_collector_restores_partially_disassembled_piece_without_duplicate_materia
 fn real_crawler_drives_digs_delivers_to_a_live_base_and_restores() {
     use super::super::battle::Order;
     use modding::range::RangeUnitKind;
-    let e = modding::laboratory::experiments::stock().into_iter()
-        .find(|e| e.id == "crawler-base").unwrap();
+    let e = modding::laboratory::experiments::stock()
+        .into_iter()
+        .find(|e| e.id == "crawler-base")
+        .unwrap();
     let mut l = e.layout;
     l.size = [384, 128, 320];
-    l.clear_min = [1, 1]; l.clear_max = [383, 319];
-    l.gun = [96, 24, 128]; l.target = [290, 18, 128];
-    l.units[0].at = [120, 16, 128]; l.units[1].at = [48, 16, 220];
-    l.blocks[0].min = [280, 1, 120]; l.blocks[0].max = [302, 16, 136];
-    l.economy.as_mut().unwrap().kind_mut(RangeUnitKind::Crawler).unwrap().tank = 5200;
-    let cfg = modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    l.clear_min = [1, 1];
+    l.clear_max = [383, 319];
+    l.gun = [96, 24, 128];
+    l.target = [290, 18, 128];
+    l.units[0].at = [120, 16, 128];
+    l.units[1].at = [48, 16, 220];
+    l.blocks[0].min = [280, 1, 120];
+    l.blocks[0].max = [302, 16, 136];
+    l.economy
+        .as_mut()
+        .unwrap()
+        .kind_mut(RangeUnitKind::Crawler)
+        .unwrap()
+        .tank = 5200;
+    let cfg =
+        modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
+            .unwrap();
     let mut r = BlastRange::with_layout(cfg, l).unwrap();
-    r.set_physics_workers(1); r.set_navigation_workers(1);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
     r.start_free_control().unwrap();
     assert_eq!(r.units[0].kind, RangeUnitKind::Crawler);
     assert_eq!(r.units[1].kind, RangeUnitKind::Base);
-    assert!(r.battle_order(0, Order::Dig([290, 8, 128]), None), "unit status: {:?}; digs: {}; battle: {}; phase: {:?}", r.units[0].status, r.mining().is_some_and(|m|m.digs(RangeUnitKind::Crawler)), r.battle_mode(), r.battle.phase);
+    assert!(
+        r.battle_order(0, Order::Dig([290, 8, 128]), None),
+        "unit status: {:?}; digs: {}; battle: {}; phase: {:?}",
+        r.units[0].status,
+        r.mining().is_some_and(|m| m.digs(RangeUnitKind::Crawler)),
+        r.battle_mode(),
+        r.battle.phase
+    );
     let mut moved = false;
     let mut copied = None;
     for tick in 0..1500 {
@@ -293,13 +314,19 @@ fn real_crawler_drives_digs_delivers_to_a_live_base_and_restores() {
         moved |= r.units[0].motion.pos[0].to_int_trunc() > 125;
         if tick == 20 {
             let mut c = BlastRange::restore(r.config, &r.snapshot()).unwrap();
-            c.set_physics_workers(1); c.set_navigation_workers(1);
+            c.set_physics_workers(1);
+            c.set_navigation_workers(1);
             copied = Some(c);
         } else if tick < 25 {
-            if let Some(c) = copied.as_mut() { c.step(); assert_eq!(r.state_hash(), c.state_hash()); }
+            if let Some(c) = copied.as_mut() {
+                c.step();
+                assert_eq!(r.state_hash(), c.state_hash());
+            }
         }
         assert!(r.matter.economy.ledger.balanced());
-        if r.side_store(true).unwrap().0 > 0 { break; }
+        if r.side_store(true).unwrap().0 > 0 {
+            break;
+        }
     }
     assert!(moved, "crawler never approached the face");
     assert!(r.side_store(true).unwrap().0 > 0, "crawler failed to deliver to the base: pos {:?}, target {:?}, enabled {}, blocked {}, status {:?}, tank {:?}, hauling {}, phase {:?}", r.units[0].motion.pos.map(Fx::to_int_trunc),r.units[0].motion.destination,r.units[0].motion.enabled,r.units[0].motion.blocked,r.units[0].status,r.tank_held(0),r.hauling(0),r.battle.phase);
@@ -308,36 +335,68 @@ fn real_crawler_drives_digs_delivers_to_a_live_base_and_restores() {
 #[test]
 fn real_crawler_reclaims_actual_debris_into_its_own_tank() {
     use super::super::battle::Order;
-    let e = modding::laboratory::experiments::stock().into_iter().find(|e| e.id == "crawler-base").unwrap();
+    let e = modding::laboratory::experiments::stock()
+        .into_iter()
+        .find(|e| e.id == "crawler-base")
+        .unwrap();
     let mut l = e.layout;
-    l.size = [256, 128, 320]; l.clear_min = [1, 1]; l.clear_max = [255, 319];
-    l.gun = [96, 24, 128]; l.target = [150, 16, 128];
-    l.units[0].at = [120, 16, 128]; l.units[1].at = [48, 16, 220]; l.blocks.clear();
-    let cfg = modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    l.size = [256, 128, 320];
+    l.clear_min = [1, 1];
+    l.clear_max = [255, 319];
+    l.gun = [96, 24, 128];
+    l.target = [150, 16, 128];
+    l.units[0].at = [120, 16, 128];
+    l.units[1].at = [48, 16, 220];
+    l.blocks.clear();
+    let cfg =
+        modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
+            .unwrap();
     let mut r = BlastRange::with_layout(cfg, l).unwrap();
-    r.set_physics_workers(1); r.set_navigation_workers(1); r.start_free_control().unwrap();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    r.start_free_control().unwrap();
     let id = piece(&mut r, [145, 16, 128], 2);
     assert!(r.battle_order(0, Order::Reclaim([145, 16, 128]), None));
     for _ in 0..80 {
         r.step();
         assert!(r.matter.economy.ledger.balanced());
-        if !r.matter.debris.fragments.iter().any(|f| f.id == id) { break; }
+        if !r.matter.debris.fragments.iter().any(|f| f.id == id) {
+            break;
+        }
     }
-    assert!(!r.matter.debris.fragments.iter().any(|f| f.id == id), "real unit did not reclaim the fragment");
-    assert!(r.tank_held(0).unwrap() >= 240, "reclaimed material did not enter the unit tank");
+    assert!(
+        !r.matter.debris.fragments.iter().any(|f| f.id == id),
+        "real unit did not reclaim the fragment"
+    );
+    assert!(
+        r.tank_held(0).unwrap() >= 240,
+        "reclaimed material did not enter the unit tank"
+    );
 }
 
 #[test]
 fn crawler_reclaims_clicked_piece_then_nearby_and_emits_transfer_visuals() {
     use super::super::battle::Order;
-    let e = modding::laboratory::experiments::stock().into_iter().find(|e| e.id == "crawler-base").unwrap();
+    let e = modding::laboratory::experiments::stock()
+        .into_iter()
+        .find(|e| e.id == "crawler-base")
+        .unwrap();
     let mut l = e.layout;
-    l.size = [512, 128, 320]; l.clear_min = [1, 1]; l.clear_max = [511, 319];
-    l.gun = [96, 24, 128]; l.target = [180, 16, 128];
-    l.units[0].at = [120, 16, 128]; l.units[1].at = [48, 16, 220]; l.blocks.clear();
-    let cfg = modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    l.size = [512, 128, 320];
+    l.clear_min = [1, 1];
+    l.clear_max = [511, 319];
+    l.gun = [96, 24, 128];
+    l.target = [180, 16, 128];
+    l.units[0].at = [120, 16, 128];
+    l.units[1].at = [48, 16, 220];
+    l.blocks.clear();
+    let cfg =
+        modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
+            .unwrap();
     let mut r = BlastRange::with_layout(cfg, l).unwrap();
-    r.set_physics_workers(1); r.set_navigation_workers(1); r.start_free_control().unwrap();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    r.start_free_control().unwrap();
     let clicked = piece(&mut r, [180, 16, 128], 2);
     let nearby = piece(&mut r, [300, 16, 128], 3);
     let outside = piece(&mut r, [350, 16, 128], 3);
@@ -358,46 +417,92 @@ fn crawler_reclaims_clicked_piece_then_nearby_and_emits_transfer_visuals() {
 #[test]
 fn crawler_reclaim_mode_processes_destroyed_tank_and_never_digs_ground() {
     use super::super::battle::Order;
-    let mut layout = modding::range::RangeLayout::from_ron(include_str!("../../../data/range-crawler-field.ron")).unwrap();
+    let mut layout = modding::range::RangeLayout::from_ron(include_str!(
+        "../../../data/range-crawler-field.ron"
+    ))
+    .unwrap();
     layout.initial_debris.clear();
     layout.units[0].at = [260, 16, 320];
-    let cfg = modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let cfg =
+        modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
+            .unwrap();
     let mut r = BlastRange::with_layout(cfg, layout).unwrap();
-    r.set_physics_workers(1); r.set_navigation_workers(1);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
     r.start_free_control().unwrap();
     let target = 2;
     let (x, y, z) = r.units[target].body.core;
     let n = r.units[target].body.core_size;
     let mut removed = 0;
-    for dz in 0..n { for dy in 0..n { for dx in 0..n {
-        let cell = [x + dx, y + dy, z + dz].map(usize::from);
-        if r.units[target].body.vol.get(cell[0], cell[1], cell[2]) {
-            r.units[target].receive_cell(cell, u32::MAX, &cfg);
-            removed += 1;
+    for dz in 0..n {
+        for dy in 0..n {
+            for dx in 0..n {
+                let cell = [x + dx, y + dy, z + dz].map(usize::from);
+                if r.units[target].body.vol.get(cell[0], cell[1], cell[2]) {
+                    r.units[target].receive_cell(cell, u32::MAX, &cfg);
+                    removed += 1;
+                }
+            }
         }
-    }}}
+    }
     r.matter.annihilate_body(target, removed);
     r.units[target].refresh_damage(target);
     assert!(!r.units[target].status.alive);
     assert!(r.battle_order(0, Order::Reclaim([340, 16, 292]), None));
-    let initial = r.matter.economy.ledger.held(r.matter.body_container(target));
+    let initial = r
+        .matter
+        .economy
+        .ledger
+        .held(r.matter.body_container(target));
     let chosen = piece(&mut r, [340, 16, 292], 2);
     r.step();
-    assert!(!r.matter.debris.fragments.iter().any(|f| f.id == chosen), "clicked fragment must precede the nearby wreck");
-    assert_eq!(r.matter.economy.ledger.held(r.matter.body_container(target)), initial);
+    assert!(
+        !r.matter.debris.fragments.iter().any(|f| f.id == chosen),
+        "clicked fragment must precede the nearby wreck"
+    );
+    assert_eq!(
+        r.matter
+            .economy
+            .ledger
+            .held(r.matter.body_container(target)),
+        initial
+    );
     let ground = r.world.material(340, 15, 292);
     let mut saw_hull_visual = false;
     for _ in 0..100 {
         r.step();
-        saw_hull_visual |= r.mining().unwrap().reclaim_visuals().iter().any(|e| e.crawler == 0 && e.material == 3);
+        saw_hull_visual |= r
+            .mining()
+            .unwrap()
+            .reclaim_visuals()
+            .iter()
+            .any(|e| e.crawler == 0 && e.material == 3);
         assert!(r.matter.economy.ledger.balanced());
     }
-    assert!(saw_hull_visual, "wreck transfer did not emit visual samples");
-    let remaining = r.matter.economy.ledger.held(r.matter.body_container(target));
+    assert!(
+        saw_hull_visual,
+        "wreck transfer did not emit visual samples"
+    );
+    let remaining = r
+        .matter
+        .economy
+        .ledger
+        .held(r.matter.body_container(target));
     eprintln!("wreck matter before={initial} remaining={remaining}, cargo={:?} fragments={} order={:?} pos={:?} target={:?} status={:?} reclaim={:?}", r.tank_held(0), r.matter.debris.fragments.len(), r.battle.actors[0].order, r.units[0].motion.pos.map(Fx::to_int_trunc), r.units[target].motion.pos.map(Fx::to_int_trunc), r.units[0].status, r.mining().unwrap().reclaim().map(|v| (v.searches,v.reclaimed)));
-    assert_eq!(remaining, 0, "tank hull was not reclaimed within five simulated seconds");
-    assert_eq!(r.tank_held(0).unwrap(), initial + 240, "crawler did not collect the entire wreck within five seconds");
-    assert_eq!(r.world.material(340, 15, 292), ground, "reclaim mode drilled terrain");
+    assert_eq!(
+        remaining, 0,
+        "tank hull was not reclaimed within five simulated seconds"
+    );
+    assert_eq!(
+        r.tank_held(0).unwrap(),
+        initial + 240,
+        "crawler did not collect the entire wreck within five seconds"
+    );
+    assert_eq!(
+        r.world.material(340, 15, 292),
+        ground,
+        "reclaim mode drilled terrain"
+    );
     let copy = BlastRange::restore(r.config, &r.snapshot()).expect("reclaim snapshot");
     assert_eq!(r.state_hash(), copy.state_hash());
 }
@@ -405,11 +510,18 @@ fn crawler_reclaim_mode_processes_destroyed_tank_and_never_digs_ground() {
 #[test]
 fn enlarged_crawler_drill_reaches_rock_from_working_range() {
     use super::super::battle::Order;
-    let mut layout = modding::range::RangeLayout::from_ron(include_str!("../../../data/range-crawler-field.ron")).unwrap();
+    let mut layout = modding::range::RangeLayout::from_ron(include_str!(
+        "../../../data/range-crawler-field.ron"
+    ))
+    .unwrap();
     layout.initial_debris.clear();
-    let cfg = modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let cfg =
+        modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
+            .unwrap();
     let mut r = BlastRange::with_layout(cfg, layout).unwrap();
-    r.set_physics_workers(1); r.set_navigation_workers(1); r.start_free_control().unwrap();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    r.start_free_control().unwrap();
     r.units[0].motion.pos = [247, 15, 289].map(Fx::from_int);
     r.units[0].motion.drive.head = -fx::angle::FULL / 4;
     r.units[0].update_pose(0);
@@ -419,47 +531,88 @@ fn enlarged_crawler_drill_reaches_rock_from_working_range() {
         r.world.flush();
         r.credit_digs();
         r.tick += 1;
-        if r.mining().unwrap().cells > 0 { break; }
+        if r.mining().unwrap().cells > 0 {
+            break;
+        }
     }
-    assert!(r.mining().unwrap().cells > 0, "drill failed at {:?}", r.units[0].world_pos(voxel::unit::CRAWLER_DRILL_TIP));
+    assert!(
+        r.mining().unwrap().cells > 0,
+        "drill failed at {:?}",
+        r.units[0].world_pos(voxel::unit::CRAWLER_DRILL_TIP)
+    );
 }
 
 #[test]
 fn real_crawler_delivers_a_partial_load_when_salvage_face_is_empty() {
     use super::super::battle::Order;
-    let e = modding::laboratory::experiments::stock().into_iter().find(|e| e.id == "crawler-base").unwrap();
+    let e = modding::laboratory::experiments::stock()
+        .into_iter()
+        .find(|e| e.id == "crawler-base")
+        .unwrap();
     let mut l = e.layout;
-    l.size = [256, 128, 320]; l.clear_min = [1, 1]; l.clear_max = [255, 319];
-    l.gun = [96, 24, 128]; l.target = [145, 21, 128];
-    l.units[0].at = [120, 16, 128]; l.units[1].at = [48, 16, 220]; l.blocks.clear();
-    let cfg = modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    l.size = [256, 128, 320];
+    l.clear_min = [1, 1];
+    l.clear_max = [255, 319];
+    l.gun = [96, 24, 128];
+    l.target = [145, 21, 128];
+    l.units[0].at = [120, 16, 128];
+    l.units[1].at = [48, 16, 220];
+    l.blocks.clear();
+    let cfg =
+        modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
+            .unwrap();
     let mut r = BlastRange::with_layout(cfg, l).unwrap();
-    r.set_physics_workers(1); r.set_navigation_workers(1); r.start_free_control().unwrap();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    r.start_free_control().unwrap();
     let id = piece(&mut r, [145, 16, 128], 2);
     assert!(r.battle_order(0, Order::Reclaim([145, 21, 128]), None));
     for _ in 0..100 {
         r.step();
         assert!(r.matter.economy.ledger.balanced());
-        if r.side_store(true).unwrap().0 > 0 { break; }
+        if r.side_store(true).unwrap().0 > 0 {
+            break;
+        }
     }
     assert!(!r.matter.debris.fragments.iter().any(|f| f.id == id));
-    assert!(r.side_store(true).unwrap().0 > 0, "small load was left in the crawler");
+    assert!(
+        r.side_store(true).unwrap().0 > 0,
+        "small load was left in the crawler"
+    );
     assert_eq!(r.tank_held(0), Some(0));
 }
 
 fn drill_range(material: u16) -> BlastRange {
     use super::super::battle::Order;
-    let e = modding::laboratory::experiments::stock().into_iter().find(|e| e.id == "crawler-base").unwrap();
+    let e = modding::laboratory::experiments::stock()
+        .into_iter()
+        .find(|e| e.id == "crawler-base")
+        .unwrap();
     let mut l = e.layout;
-    l.size = [256, 128, 256]; l.clear_min = [1, 1]; l.clear_max = [255, 255];
-    l.gun = [96, 24, 128]; l.target = [190, 8, 128];
-    l.units[0].at = [155, 16, 128]; l.units[1].at = [48, 16, 128];
-    l.blocks[0].min = [180, 1, 120]; l.blocks[0].max = [202, 16, 136]; l.blocks[0].material = material;
+    l.size = [256, 128, 256];
+    l.clear_min = [1, 1];
+    l.clear_max = [255, 255];
+    l.gun = [96, 24, 128];
+    l.target = [190, 8, 128];
+    l.units[0].at = [155, 16, 128];
+    l.units[1].at = [48, 16, 128];
+    l.blocks[0].min = [180, 1, 120];
+    l.blocks[0].max = [202, 16, 136];
+    l.blocks[0].material = material;
     // Capacity must not limit this material comparison.
-    l.economy.as_mut().unwrap().kind_mut(modding::range::RangeUnitKind::Crawler).unwrap().tank = 900_000;
-    let cfg = modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    l.economy
+        .as_mut()
+        .unwrap()
+        .kind_mut(modding::range::RangeUnitKind::Crawler)
+        .unwrap()
+        .tank = 900_000;
+    let cfg =
+        modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
+            .unwrap();
     let mut r = BlastRange::with_layout(cfg, l).unwrap();
-    r.set_physics_workers(1); r.set_navigation_workers(1); r.start_free_control().unwrap();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    r.start_free_control().unwrap();
     assert!(r.battle_order(0, Order::Dig([190, 8, 128]), None));
     r
 }
@@ -478,12 +631,16 @@ fn real_crawler_drill_requires_its_drive_and_cuts_hard_material_more_slowly() {
     let mut rock = drill_range(6);
     let mut steel = drill_range(3);
     for _ in 0..12 {
-        rock.step(); steel.step();
+        rock.step();
+        steel.step();
         assert!(rock.matter.economy.ledger.balanced() && steel.matter.economy.ledger.balanced());
     }
     let rock_cells = rock.mining().unwrap().cells;
     let steel_cells = steel.mining().unwrap().cells;
-    assert!(steel_cells > 0 && rock_cells > steel_cells, "rock={rock_cells}, steel={steel_cells}");
+    assert!(
+        steel_cells > 0 && rock_cells > steel_cells,
+        "rock={rock_cells}, steel={steel_cells}"
+    );
     assert!(rock.tank_held(0).unwrap() > 0 && steel.tank_held(0).unwrap() > 0);
 }
 
@@ -495,26 +652,41 @@ fn crawler_drill_follows_the_hull_even_if_turret_aim_changes() {
     let tip = voxel::unit::CRAWLER_DRILL_TIP;
     let local = tip.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2)));
     let expected = u.pose.world(local);
-    assert_eq!(u.world_pos(tip), [expected.x, expected.y, expected.z].map(Fx::to_int_trunc));
+    assert_eq!(
+        u.world_pos(tip),
+        [expected.x, expected.y, expected.z].map(Fx::to_int_trunc)
+    );
 }
 
 #[test]
 fn crawler_field_starts_with_reclaimable_debris_and_delivers_to_base() {
     use super::super::battle::Order;
-    let layout = modding::range::RangeLayout::from_ron(include_str!("../../../data/range-crawler-field.ron")).unwrap();
+    let layout = modding::range::RangeLayout::from_ron(include_str!(
+        "../../../data/range-crawler-field.ron"
+    ))
+    .unwrap();
     assert!(layout.units.iter().all(|u| u.allied));
     assert_eq!(layout.units.len(), 4);
-    let cfg = modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let cfg =
+        modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
+            .unwrap();
     let mut r = BlastRange::with_layout(cfg, layout).unwrap();
-    r.set_physics_workers(1); r.set_navigation_workers(1);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
     r.start_free_control().unwrap();
     assert!(r.matter.debris.fragments.len() >= 20);
     assert!(r.matter.debris.fragments.iter().all(|f| f.resting));
     assert!(r.matter.economy.ledger.balanced());
-    let f = r.matter.debris.fragments.iter().find(|f| {
-        let p = [f.position.x, f.position.y, f.position.z].map(Fx::to_int_trunc);
-        (p[0] - 314).abs() <= 4 && (p[2] - 282).abs() <= 4
-    }).expect("starting collection target");
+    let f = r
+        .matter
+        .debris
+        .fragments
+        .iter()
+        .find(|f| {
+            let p = [f.position.x, f.position.y, f.position.z].map(Fx::to_int_trunc);
+            (p[0] - 314).abs() <= 4 && (p[2] - 282).abs() <= 4
+        })
+        .expect("starting collection target");
     let id = f.id;
     assert!(r.battle_order(0, Order::Reclaim([314, 17, 282]), None));
     let mut collected = false;
@@ -522,16 +694,28 @@ fn crawler_field_starts_with_reclaimable_debris_and_delivers_to_base() {
     let mut charge = 0;
     let charges = [[368, 21, 292], [464, 21, 376]];
     for _ in 0..900 {
-        if charge < charges.len() && r.scenario_charge(charges[charge], 20000) { charge += 1; }
+        if charge < charges.len() && r.scenario_charge(charges[charge], 20000) {
+            charge += 1;
+        }
         r.step();
         assert!(r.matter.economy.ledger.balanced());
         collected |= !r.matter.debris.fragments.iter().any(|f| f.id == id);
         loaded |= r.tank_held(0).unwrap_or(0) > 0;
-        if collected && loaded && r.side_store(true).unwrap().0 > 0 && charge == charges.len() { break; }
+        if collected && loaded && r.side_store(true).unwrap().0 > 0 && charge == charges.len() {
+            break;
+        }
     }
     assert!(collected, "the selected fragment was not collected");
     assert!(loaded, "no cargo reached the crawler tank");
-    assert!(r.side_store(true).unwrap().0 > 0, "cargo did not reach the base: pos {:?}, tank {:?}, hauling {}, order {:?}, fragments {}", r.units[0].motion.pos.map(Fx::to_int_trunc), r.tank_held(0), r.hauling(0), r.battle.actors[0].order, r.matter.debris.fragments.len());
+    assert!(
+        r.side_store(true).unwrap().0 > 0,
+        "cargo did not reach the base: pos {:?}, tank {:?}, hauling {}, order {:?}, fragments {}",
+        r.units[0].motion.pos.map(Fx::to_int_trunc),
+        r.tank_held(0),
+        r.hauling(0),
+        r.battle.actors[0].order,
+        r.matter.debris.fragments.len()
+    );
     assert!(r.battle.actors.iter().all(|a| a.fired == 0));
     let rock_face = [316, 27, 204];
     assert!(r.battle_order(0, Order::Dig(rock_face), None));
@@ -540,7 +724,9 @@ fn crawler_field_starts_with_reclaimable_debris_and_delivers_to_base() {
         r.step();
         if tick % 10 == 0 {
             drilled = (300..332).any(|x| (190..218).any(|z| r.world.material(x, 27, z) != 6));
-            if drilled { break; }
+            if drilled {
+                break;
+            }
         }
     }
     assert!(drilled, "crawler did not reach or drill the scenario rock face: position {:?}, cargo {:?}, order {:?}, destination {:?}, status {:?}, mined {}, hauling {}, tip {:?}", r.units[0].at, r.tank_held(0), r.battle.actors[0].order, r.units[0].motion.destination, r.units[0].status, r.mining().unwrap().cells, r.hauling(0), r.units[0].world_pos(voxel::unit::CRAWLER_DRILL_TIP));
@@ -551,20 +737,38 @@ fn crawler_field_starts_with_reclaimable_debris_and_delivers_to_base() {
 
 #[test]
 fn crawler_field_charges_damage_real_tanks_without_harming_crawler() {
-    let layout = modding::range::RangeLayout::from_ron(include_str!("../../../data/range-crawler-field.ron")).unwrap();
-    let cfg = modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let layout = modding::range::RangeLayout::from_ron(include_str!(
+        "../../../data/range-crawler-field.ron"
+    ))
+    .unwrap();
+    let cfg =
+        modding::explosion::ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
+            .unwrap();
     let mut r = BlastRange::with_layout(cfg, layout).unwrap();
-    r.set_physics_workers(1); r.set_navigation_workers(1);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
     r.start_free_control().unwrap();
     for (id, at) in [(2, [368, 21, 292]), (3, [464, 21, 376])] {
         let mut started = false;
         for tick in 0..1200 {
-            if !started { started = r.scenario_charge(at, 20000); }
+            if !started {
+                started = r.scenario_charge(at, 20000);
+            }
             r.step();
-            if started && tick >= 200 && r.explosion.as_ref().is_some_and(|e| e.wave.finished() && e.pending.is_empty()) { break; }
+            if started
+                && tick >= 200
+                && r.explosion
+                    .as_ref()
+                    .is_some_and(|e| e.wave.finished() && e.pending.is_empty())
+            {
+                break;
+            }
         }
         assert!(started, "charge {id} did not start");
-        assert!(!r.units[id].status.alive && !r.units[id].removed.is_empty(), "tank {id} was not destroyed");
+        assert!(
+            !r.units[id].status.alive && !r.units[id].removed.is_empty(),
+            "tank {id} was not destroyed"
+        );
     }
     assert!(r.units[0].status.alive && r.units[1].status.alive);
     assert!(r.matter.economy.ledger.balanced());

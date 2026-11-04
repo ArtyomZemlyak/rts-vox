@@ -50,8 +50,24 @@ impl Constructor {
         self.workspace.selected_material = Some(id);
         self.preview_key = None;
         self.snap_shape = None;
-        if self.voxel_editing() {return Ok((false,format!("Материал кисти кубиков: {} · вернитесь в «Кубики»",material_name(d,id))));}
-        if self.mode==Mode::Live {return Ok((false,format!("Материал живой кисти: {} · вернитесь во вкладку «Инструмент»",material_name(d,id))));}
+        if self.voxel_editing() {
+            return Ok((
+                false,
+                format!(
+                    "Материал кисти кубиков: {} · вернитесь в «Кубики»",
+                    material_name(d, id)
+                ),
+            ));
+        }
+        if self.mode == Mode::Live {
+            return Ok((
+                false,
+                format!(
+                    "Материал живой кисти: {} · вернитесь во вкладку «Инструмент»",
+                    material_name(d, id)
+                ),
+            ));
+        }
         Ok((false,format!("Выбран материал «{}». Нажмите «Применить»; для кисти и новых деталей он используется сразу",material_name(d,id))))
     }
     pub fn apply_material(
@@ -91,8 +107,12 @@ impl Constructor {
         ))
     }
     pub fn material_context(&self, d: &Definition, r: Recipe) -> String {
-        if self.voxel_editing() {return format!("Материал кисти кубиков: {}\nВыберите материал и вернитесь во вкладку «Кубики». Он изменит только затронутые клетки детали",self.material_name(d,r));}
-        if self.mode==Mode::Live {return format!("Материал живой кисти: {}\nВыберите материал и вернитесь во вкладку «Инструмент». Он будет добавляться при удержании ЛКМ",self.material_name(d,r));}
+        if self.voxel_editing() {
+            return format!("Материал кисти кубиков: {}\nВыберите материал и вернитесь во вкладку «Кубики». Он изменит только затронутые клетки детали",self.material_name(d,r));
+        }
+        if self.mode == Mode::Live {
+            return format!("Материал живой кисти: {}\nВыберите материал и вернитесь во вкладку «Инструмент». Он будет добавляться при удержании ЛКМ",self.material_name(d,r));
+        }
         if let Some(i) = self.material_editing() {
             let e = &self.placed[i].element;
             if !e.shields.is_empty() && e.units.is_empty() {

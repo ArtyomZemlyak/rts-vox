@@ -46,7 +46,13 @@ pub struct Motion {
     pub max_steps: u32,
 }
 impl Default for Motion {
-    fn default()->Self {Self {checks_per_tick:32768,column_cells:256,max_steps:32}}
+    fn default() -> Self {
+        Self {
+            checks_per_tick: 32768,
+            column_cells: 256,
+            max_steps: 32,
+        }
+    }
 }
 impl Tuning {
     pub fn stock() -> Self {
@@ -122,11 +128,19 @@ mod tests {
     }
     #[test]
     fn water_motion_work_limits_are_bounded_and_old_definitions_get_defaults() {
-        let stock=include_str!("../../../data/range-water.ron");
-        for (a,b) in [("checks_per_tick:32768","checks_per_tick:0"),("column_cells:256","column_cells:513"),("max_steps:32","max_steps:0")] {
-            assert!(Tuning::from_ron(&stock.replace(a,b)).is_err());
+        let stock = include_str!("../../../data/range-water.ron");
+        for (a, b) in [
+            ("checks_per_tick:32768", "checks_per_tick:0"),
+            ("column_cells:256", "column_cells:513"),
+            ("max_steps:32", "max_steps:0"),
+        ] {
+            assert!(Tuning::from_ron(&stock.replace(a, b)).is_err());
         }
-        let old=stock.lines().filter(|line|!line.contains("motion:")).collect::<Vec<_>>().join("\n");
-        assert_eq!(Tuning::from_ron(&old).unwrap().motion.max_steps,32);
+        let old = stock
+            .lines()
+            .filter(|line| !line.contains("motion:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(Tuning::from_ron(&old).unwrap().motion.max_steps, 32);
     }
 }

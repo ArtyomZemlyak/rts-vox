@@ -219,7 +219,8 @@ impl Placed {
 pub fn stock() -> Vec<Element> {
     let mut l: Library =
         ron::from_str(include_str!("../../../data/lab-elements.ron")).expect("lab elements RON");
-    let structures:Library=ron::from_str(include_str!("../../../data/lab-structures.ron")).expect("lab structures RON");
+    let structures: Library = ron::from_str(include_str!("../../../data/lab-structures.ron"))
+        .expect("lab structures RON");
     l.elements.extend(structures.elements);
     for (i, e) in l.elements.iter().enumerate() {
         e.validate().expect("valid stock element");
@@ -275,24 +276,34 @@ impl SceneFile {
         Ok(s)
     }
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != 1 || self.visual > 2 || self.base.size[0] > 4096 || self.base.size[2] > 4096 || self.base.size[1] > 1024 {
+        if self.version != 1
+            || self.visual > 2
+            || self.base.size[0] > 4096
+            || self.base.size[2] > 4096
+            || self.base.size[1] > 1024
+        {
             return Err("unsupported laboratory scene version or size".into());
         }
         self.weapon.validate()?;
         self.workspace.validate(&self.base, self.elements.len())?;
-        if self.workspace.sources.iter().any(|s|s.binding.is_some_and(|i|self.elements[i].element.units.is_empty())) {
+        if self.workspace.sources.iter().any(|s| {
+            s.binding
+                .is_some_and(|i| self.elements[i].element.units.is_empty())
+        }) {
             return Err("Источник должен быть привязан к элементу с юнитом".into());
         }
-        if self
-            .strength
-            .is_some_and(|(id, n)| ![1, 2, 3, 4, 5, 6, 8, 10, 11, 12].contains(&id) || n == 0 || n > 1000000)
-        {
+        if self.strength.is_some_and(|(id, n)| {
+            ![1, 2, 3, 4, 5, 6, 8, 10, 11, 12].contains(&id) || n == 0 || n > 1000000
+        }) {
             return Err("invalid laboratory material override".into());
         }
         compose(&self.base, &self.elements)?;
         if let Some(plan) = &self.experiment {
-            plan.validate_sources(&compose(&self.base, &self.elements)?,&self.workspace.sources)?;
-        } else if self.workspace.sources.iter().any(|s|s.input.is_some()) {
+            plan.validate_sources(
+                &compose(&self.base, &self.elements)?,
+                &self.workspace.sources,
+            )?;
+        } else if self.workspace.sources.iter().any(|s| s.input.is_some()) {
             return Err("Источник ссылается на отсутствующий сценарий".into());
         }
         Ok(())

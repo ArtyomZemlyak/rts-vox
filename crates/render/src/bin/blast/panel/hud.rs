@@ -261,14 +261,18 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                         ("Строить турель", RangeUnitKind::TurretT1),
                         ("Строить Kil", RangeUnitKind::KilFactoryT1),
                         ("Строить Гребень", RangeUnitKind::GrebenStorage),
-                    ] { button(p, font, name, Action::BuildSite(kind)); }
+                    ] {
+                        button(p, font, name, Action::BuildSite(kind));
+                    }
                 });
                 p.spawn(row()).with_children(|p| {
                     for (name, mode) in [
                         ("Движение", CrawlerMode::Move),
                         ("Сбор", CrawlerMode::Reclaim),
                         ("Бурение", CrawlerMode::Drill),
-                    ] { button(p, font, name, Action::CrawlerMode(mode)); }
+                    ] {
+                        button(p, font, name, Action::CrawlerMode(mode));
+                    }
                 });
                 label(
                     p,
@@ -285,7 +289,13 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                     theme::MUTED,
                 );
                 for site in 0..4 {
-                    label(p, font, &format!("Площадка {} · дронов на стройку", site + 1), 11.0, theme::MUTED);
+                    label(
+                        p,
+                        font,
+                        &format!("Площадка {} · дронов на стройку", site + 1),
+                        11.0,
+                        theme::MUTED,
+                    );
                     p.spawn(row()).with_children(|p| {
                         for quota in [2, 4, 6, 8] {
                             button(p, font, &format!("{quota}"), Action::SiteQuota(site, quota));
@@ -614,14 +624,40 @@ pub fn refresh(
                     }),
             )
         } else if matches!(action, Some(Action::CrawlerMode(_))) {
-            Some(battle && !edit.editing && selected_ids.iter().any(|&id|
-                view.units.get(id).is_some_and(|u| matches!(u.kind, RangeUnitKind::Crawler) && u.status.alive)))
+            Some(
+                battle
+                    && !edit.editing
+                    && selected_ids.iter().any(|&id| {
+                        view.units.get(id).is_some_and(|u| {
+                            matches!(u.kind, RangeUnitKind::Crawler) && u.status.alive
+                        })
+                    }),
+            )
         } else if matches!(action, Some(Action::UpgradeKil)) {
-            Some(battle && !edit.editing && selected_ids.iter().any(|&id|
-                view.units.get(id).is_some_and(|u| matches!(u.kind, RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3) && u.status.alive)))
+            Some(
+                battle
+                    && !edit.editing
+                    && selected_ids.iter().any(|&id| {
+                        view.units.get(id).is_some_and(|u| {
+                            matches!(
+                                u.kind,
+                                RangeUnitKind::KilFactoryT1
+                                    | RangeUnitKind::KilFactoryT2
+                                    | RangeUnitKind::KilFactoryT3
+                            ) && u.status.alive
+                        })
+                    }),
+            )
         } else if matches!(action, Some(Action::ElectricSupport)) {
-            Some(battle && !edit.editing && selected_ids.iter().any(|&id|
-                view.units.get(id).is_some_and(|u| u.kind == RangeUnitKind::LightningTank && u.status.alive)))
+            Some(
+                battle
+                    && !edit.editing
+                    && selected_ids.iter().any(|&id| {
+                        view.units.get(id).is_some_and(|u| {
+                            u.kind == RangeUnitKind::LightningTank && u.status.alive
+                        })
+                    }),
+            )
         } else if matches!(action, Some(Action::Fire | Action::AutoAttack)) {
             Some(
                 !battle
@@ -1381,7 +1417,7 @@ pub(crate) mod tests {
         workshop.battle_preset(config(false, false)).unwrap();
         let (c, layout) = workshop.pending.take().unwrap();
         let sim = BlastRange::with_layout(c, layout).unwrap();
-        app_with_scene(sim,workshop)
+        app_with_scene(sim, workshop)
     }
     pub(crate) fn app_with_scene(sim: BlastRange, workshop: Workshop) -> App {
         let scene = Scene {
@@ -1440,36 +1476,56 @@ pub(crate) mod tests {
     }
     #[test]
     fn crawler_field_hud_shows_the_tank_and_the_base_store() {
-        let layout = RangeLayout::from_ron(include_str!("../../../../../../data/range-crawler-field.ron")).unwrap();
-        let config = ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron")).unwrap();
+        let layout = RangeLayout::from_ron(include_str!(
+            "../../../../../../data/range-crawler-field.ron"
+        ))
+        .unwrap();
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron"))
+                .unwrap();
         let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
         sim.start_free_control().unwrap();
         let mut workshop = Workshop::new(Some(layout), false);
         workshop.controlled = Some(0);
         let mut app = app_with_scene(sim, workshop);
-        app.add_systems(PostUpdate, refresh.after(super::super::super::ui_snapshot::publish));
+        app.add_systems(
+            PostUpdate,
+            refresh.after(super::super::super::ui_snapshot::publish),
+        );
         let text = app.world_mut().spawn((HudText(1), Text::new(""))).id();
         app.update();
         let label = &app.world().get::<Text>(text).unwrap().0;
-        assert!(label.contains("Груз 0 / 100000000") && label.contains("база 0 / 100100000"), "{label}");
+        assert!(
+            label.contains("Груз 0 / 100000000") && label.contains("база 0 / 100100000"),
+            "{label}"
+        );
         app.world_mut().resource_mut::<Workshop>().controlled = Some(1);
         app.update();
         let label = &app.world().get::<Text>(text).unwrap().0;
-        assert!(label.contains("БАЗА") && label.contains("Запас стороны 0 / 100100000"), "{label}");
+        assert!(
+            label.contains("БАЗА") && label.contains("Запас стороны 0 / 100100000"),
+            "{label}"
+        );
     }
     #[test]
     fn staratel_hud_shows_cargo_and_the_current_reclaim_order() {
         let preset = modding::range_skirmish::stock(23).unwrap();
-        let layout = RangeLayout::from_ron(include_str!("../../../../../../data/range-km.ron")).unwrap();
+        let layout =
+            RangeLayout::from_ron(include_str!("../../../../../../data/range-km.ron")).unwrap();
         let layout = preset.apply_to(layout).unwrap();
-        let config = ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron")).unwrap();
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron"))
+                .unwrap();
         let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
         sim.start_battle().unwrap();
         let mut workshop = Workshop::new(Some(layout), false);
         workshop.controlled = Some(0);
         let mut app = app_with_scene(sim, workshop);
         app.world_mut().resource_mut::<Panel>().script = preset.script;
-        app.add_systems(PostUpdate, refresh.after(super::super::super::ui_snapshot::publish));
+        app.add_systems(
+            PostUpdate,
+            refresh.after(super::super::super::ui_snapshot::publish),
+        );
         let text = app.world_mut().spawn((HudText(1), Text::new(""))).id();
         app.update();
         let label = &app.world().get::<Text>(text).unwrap().0;
@@ -1481,19 +1537,36 @@ pub(crate) mod tests {
     fn walker04_menu_scenario_starts_and_applies_its_focus_order() {
         let mut app = app();
         click(&mut app, Action::Skirmish(21));
-        let (config, layout) = app.world_mut().resource_mut::<Workshop>().pending.take().unwrap();
+        let (config, layout) = app
+            .world_mut()
+            .resource_mut::<Workshop>()
+            .pending
+            .take()
+            .unwrap();
         assert_eq!(layout.size[1], 768);
-        app.world_mut().resource_mut::<Scene>().sim = BlastRange::with_layout(config, layout).unwrap();
+        app.world_mut().resource_mut::<Scene>().sim =
+            BlastRange::with_layout(config, layout).unwrap();
         app.update();
         let scene = app.world().resource::<Scene>();
-        assert_eq!(scene.sim.battle.phase, sim_core::blast::battle::Phase::Fighting);
+        assert_eq!(
+            scene.sim.battle.phase,
+            sim_core::blast::battle::Phase::Fighting
+        );
         assert_eq!(scene.sim.units.len(), 6);
-        assert!(matches!(scene.sim.battle.actors[1].order, sim_core::blast::battle::Order::Attack(2)));
+        assert!(matches!(
+            scene.sim.battle.actors[1].order,
+            sim_core::blast::battle::Order::Attack(2)
+        ));
     }
     #[test]
     fn crawler_mode_buttons_select_a_mode_without_issuing_an_order() {
-        let layout = RangeLayout::from_ron(include_str!("../../../../../../data/range-crawler-field.ron")).unwrap();
-        let config = ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron")).unwrap();
+        let layout = RangeLayout::from_ron(include_str!(
+            "../../../../../../data/range-crawler-field.ron"
+        ))
+        .unwrap();
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron"))
+                .unwrap();
         let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
         sim.start_free_control().unwrap();
         let mut workshop = Workshop::new(Some(layout), false);
@@ -1503,47 +1576,83 @@ pub(crate) mod tests {
         for mode in [CrawlerMode::Reclaim, CrawlerMode::Drill, CrawlerMode::Move] {
             click(&mut app, Action::CrawlerMode(mode));
             assert_eq!(app.world().resource::<Panel>().crawler_mode, mode);
-            assert_eq!(app.world().resource::<Scene>().sim.battle.actors[0].order, before);
+            assert_eq!(
+                app.world().resource::<Scene>().sim.battle.actors[0].order,
+                before
+            );
             assert!(!app.world().resource::<Panel>().ground_fire);
         }
     }
     #[test]
     fn electric_support_button_waits_for_an_allied_target() {
-        let mut layout = RangeLayout::from_ron(include_str!("../../../../../../data/range-cover.ron")).unwrap();
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../../../../data/range-cover.ron")).unwrap();
         layout.battle = true;
-        layout.blocks.clear(); layout.shields.clear(); layout.course = None;
-        layout.clear_min = [64, 64]; layout.clear_max = [600, 600];
+        layout.blocks.clear();
+        layout.shields.clear();
+        layout.course = None;
+        layout.clear_min = [64, 64];
+        layout.clear_max = [600, 600];
         layout.units[0].kind = RangeUnitKind::LightningTank;
         layout.units[0].allied = true;
-        let config = ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron")).unwrap();
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron"))
+                .unwrap();
         let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
         sim.start_free_control().unwrap();
         let mut workshop = Workshop::new(Some(layout), false);
-        workshop.editing = false; workshop.controlled = Some(0); workshop.selected_units = vec![0];
+        workshop.editing = false;
+        workshop.controlled = Some(0);
+        workshop.selected_units = vec![0];
         let mut app = app_with_scene(sim, workshop);
         let before = app.world().resource::<Scene>().sim.battle.actors[0].order;
         click(&mut app, Action::ElectricSupport);
         assert!(app.world().resource::<Panel>().electric_support_target);
-        assert_eq!(app.world().resource::<Scene>().sim.battle.actors[0].order, before);
+        assert_eq!(
+            app.world().resource::<Scene>().sim.battle.actors[0].order,
+            before
+        );
         click(&mut app, Action::Stop);
         assert!(!app.world().resource::<Panel>().electric_support_target);
     }
     #[test]
     fn crawler_field_menu_enters_free_control_without_enemies() {
-        let layout = RangeLayout::from_ron(include_str!("../../../../../../data/range-crawler-field.ron")).unwrap();
-        let config = ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron")).unwrap();
+        let layout = RangeLayout::from_ron(include_str!(
+            "../../../../../../data/range-crawler-field.ron"
+        ))
+        .unwrap();
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron"))
+                .unwrap();
         let sim = BlastRange::with_layout(config, layout.clone()).unwrap();
         let mut app = app_with_scene(sim, Workshop::new(Some(layout), false));
         click(&mut app, Action::CrawlerField);
         assert!(app.world().resource::<Panel>().free_launch);
-        let (config, layout) = app.world_mut().resource_mut::<Workshop>().pending.take().unwrap();
-        app.world_mut().resource_mut::<Scene>().sim = BlastRange::with_layout(config, layout).unwrap();
+        let (config, layout) = app
+            .world_mut()
+            .resource_mut::<Workshop>()
+            .pending
+            .take()
+            .unwrap();
+        app.world_mut().resource_mut::<Scene>().sim =
+            BlastRange::with_layout(config, layout).unwrap();
         app.update();
         let scene = app.world().resource::<Scene>();
         assert!(scene.sim.battle_mode() && scene.sim.player && !scene.paused);
-        assert!(scene.sim.units.iter().enumerate().all(|(i, _)| scene.sim.allied(i)));
-        assert_eq!(scene.sim.battle.actors[0].order, sim_core::blast::battle::Order::Reclaim([314, 17, 282]));
-        assert!(scene.sim.explosion.is_some(), "the first tank charge must start automatically");
+        assert!(scene
+            .sim
+            .units
+            .iter()
+            .enumerate()
+            .all(|(i, _)| scene.sim.allied(i)));
+        assert_eq!(
+            scene.sim.battle.actors[0].order,
+            sim_core::blast::battle::Order::Reclaim([314, 17, 282])
+        );
+        assert!(
+            scene.sim.explosion.is_some(),
+            "the first tank charge must start automatically"
+        );
         assert_eq!(app.world().resource::<Workshop>().controlled, Some(0));
         assert!(!app.world().resource::<Panel>().free_launch);
     }

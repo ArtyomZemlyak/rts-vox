@@ -41,14 +41,19 @@ impl Footprint {
             for x in 0..usize::from(unit.body.vol.nx) {
                 for y in 0..usize::from(unit.body.vol.ny) {
                     for z in 0..usize::from(unit.body.vol.nz) {
-                        if !unit.body.vol.get(x, y, z) { continue; }
+                        if !unit.body.vol.get(x, y, z) {
+                            continue;
+                        }
                         let p = unit.world_pos([x, y, z]);
                         let p = [p[0] - GUN[0], p[1] - GUN[1], p[2] - GUN[2]];
                         for a in 0..3 {
                             min[a] = min[a].min(p[a]);
                             max[a] = max[a].max(p[a] + 1);
                         }
-                        columns.entry([p[0], p[2]]).or_insert_with(Vec::new).push(p[1]);
+                        columns
+                            .entry([p[0], p[2]])
+                            .or_insert_with(Vec::new)
+                            .push(p[1]);
                     }
                 }
             }
@@ -176,7 +181,9 @@ impl Validator {
             {
                 return Err(Rejection::Outside);
             }
-            if layout.allow_overlap {continue;}
+            if layout.allow_overlap {
+                continue;
+            }
             if units[..i]
                 .iter()
                 .any(|&(other, there)| shape.overlaps(at, other, there))
@@ -191,7 +198,13 @@ impl Validator {
                     .find(|y| terrain.at(&column, x, (at[1] + **y) as u32, z) != 0)
                 {
                     #[cfg(test)]
-                    eprintln!("placement collision {:?} at {:?}: cell [{x}, {}, {z}], material {}", layout.units[i].kind, at, at[1] + _y, terrain.at(&column, x, (at[1] + _y) as u32, z));
+                    eprintln!(
+                        "placement collision {:?} at {:?}: cell [{x}, {}, {z}], material {}",
+                        layout.units[i].kind,
+                        at,
+                        at[1] + _y,
+                        terrain.at(&column, x, (at[1] + _y) as u32, z)
+                    );
                     return Err(Rejection::Terrain);
                 }
             }
@@ -208,11 +221,18 @@ impl Validator {
                     for y in piece.min[1]..piece.max[1] {
                         if terrain.at(&column, x as u32, y as u32, z as u32) != 0 {
                             #[cfg(test)]
-                            eprintln!("debris intersects at [{x}, {y}, {z}]: {}", terrain.at(&column, x as u32, y as u32, z as u32));
+                            eprintln!(
+                                "debris intersects at [{x}, {y}, {z}]: {}",
+                                terrain.at(&column, x as u32, y as u32, z as u32)
+                            );
                             return Err(Rejection::Terrain);
                         }
-                        if units.iter().any(|(shape, at)| shape.columns.get(&[x - at[0], z - at[2]])
-                            .is_some_and(|ys| ys.contains(&(y - at[1])))) {
+                        if units.iter().any(|(shape, at)| {
+                            shape
+                                .columns
+                                .get(&[x - at[0], z - at[2]])
+                                .is_some_and(|ys| ys.contains(&(y - at[1])))
+                        }) {
                             return Err(Rejection::Units);
                         }
                     }

@@ -2582,7 +2582,10 @@ mod tests {
         for (k, s) in seen.iter().enumerate() {
             if !s {
                 assert!(
-                    matches!(FINISH_ALL[k], Finish::Steel | Finish::Energy | Finish::Ivory),
+                    matches!(
+                        FINISH_ALL[k],
+                        Finish::Steel | Finish::Energy | Finish::Ivory
+                    ),
                     "отделка {k} без роли — лишний материал"
                 );
                 assert_eq!(finish_of(k as u8 + 1, Part::Armour), FINISH_ALL[k]);

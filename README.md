@@ -425,7 +425,7 @@ grep -rn '\[QUESTION' docs/
 
 Вход в документацию — [docs/README.md](docs/README.md).
 Текущая очередь оптимизации — [единый план316](docs/analysis/316-optimization-delivery-plan.md),
-свежие измерения и архитектурный разбор — [аудит321](docs/analysis/321-engine-performance-review.md).
+свежие измерения и архитектурный разбор — [аудит427](docs/analysis/427-engine-performance-review.md).
 
 | | |
 |---|---|

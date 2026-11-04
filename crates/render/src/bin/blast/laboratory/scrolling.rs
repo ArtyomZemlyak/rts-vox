@@ -106,12 +106,12 @@ pub fn update(
     }
     let current = (
         lab.ui.tab,
-        (matches!(lab.ui.tab,0|1))
+        (matches!(lab.ui.tab, 0 | 1))
             .then_some(lab.constructor.selected)
             .flatten(),
         match lab.ui.tab {
             2 | 10 => lab.constructor.workspace.selected,
-            1 => lab.constructor.material(&lab.definition,lab.recipe) as usize,
+            1 => lab.constructor.material(&lab.definition, lab.recipe) as usize,
             _ => 0,
         },
     );

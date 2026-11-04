@@ -307,8 +307,12 @@ pub(super) fn attack_range(
 
 fn lightning_tuning() -> &'static modding::range_weapon::Stream {
     static TUNING: std::sync::OnceLock<modding::range_weapon::Stream> = std::sync::OnceLock::new();
-    TUNING.get_or_init(|| modding::range_weapon::Tuning::from_ron(include_str!("../../../data/range-weapons.ron"))
-        .expect("range weapon tuning").lightning.expect("stock lightning tuning"))
+    TUNING.get_or_init(|| {
+        modding::range_weapon::Tuning::from_ron(include_str!("../../../data/range-weapons.ron"))
+            .expect("range weapon tuning")
+            .lightning
+            .expect("stock lightning tuning")
+    })
 }
 fn supported_lightning(helpers: u32) -> modding::range_weapon::Stream {
     let mut stream = lightning_tuning().clone();
@@ -341,7 +345,17 @@ fn effective_weapon(
     if kind == RangeUnitKind::NuclearSilo {
         return Some(Weapon::Nuclear);
     }
-    if matches!(kind, RangeUnitKind::Base | RangeUnitKind::Crawler | RangeUnitKind::GrebenStorage | RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4 | RangeUnitKind::SkobaDrone) {
+    if matches!(
+        kind,
+        RangeUnitKind::Base
+            | RangeUnitKind::Crawler
+            | RangeUnitKind::GrebenStorage
+            | RangeUnitKind::KilFactoryT1
+            | RangeUnitKind::KilFactoryT2
+            | RangeUnitKind::KilFactoryT3
+            | RangeUnitKind::KilFactoryT4
+            | RangeUnitKind::SkobaDrone
+    ) {
         return None;
     }
     if kind == RangeUnitKind::Walker04 || kind == RangeUnitKind::RazlomT3 {
@@ -734,9 +748,14 @@ impl Battle {
                 }
                 Order::Reclaim(p) => {
                     b.u8(7);
-                    for v in p { b.i32(v); }
+                    for v in p {
+                        b.i32(v);
+                    }
                 }
-                Order::Support(id) => { b.u8(8); b.usize(id); }
+                Order::Support(id) => {
+                    b.u8(8);
+                    b.usize(id);
+                }
                 Order::Pilot {
                     throttle,
                     turn,
@@ -825,15 +844,21 @@ impl Battle {
                 }
                 7 if version >= 62 => {
                     let p = std::array::from_fn(|_| s.i32());
-                    if (0..3).any(|k| p[k] < 0 || p[k] >= size[k] as i32) { return None; }
+                    if (0..3).any(|k| p[k] < 0 || p[k] >= size[k] as i32) {
+                        return None;
+                    }
                     Order::Reclaim(p)
                 }
                 8 => {
                     let target = s.usize();
-                    if target >= units.len() || target == id
+                    if target >= units.len()
+                        || target == id
                         || units[id].kind != RangeUnitKind::LightningTank
                         || units[target].kind != RangeUnitKind::LightningTank
-                        || allied[id] != allied[target] { return None; }
+                        || allied[id] != allied[target]
+                    {
+                        return None;
+                    }
                     Order::Support(target)
                 }
                 6 => {
@@ -881,7 +906,8 @@ impl Battle {
             let owner = s.usize();
             let weapon = Weapon::from_code(s.u8())?;
             if (weapon == Weapon::Lightning
-                || (weapon == Weapon::Laser && (owner >= units.len() || units[owner].kind != RangeUnitKind::RazlomT3)))
+                || (weapon == Weapon::Laser
+                    && (owner >= units.len() || units[owner].kind != RangeUnitKind::RazlomT3)))
                 || (version < 43 && weapon.energetic())
                 || (version < 51 && weapon == Weapon::Canister)
             {
@@ -960,9 +986,7 @@ fn stop_active_beam(a: &mut Actor, kind: RangeUnitKind, tick: u32) {
         } else {
             motion::spider_tuning().laser.reload_ticks
         };
-        a.next = a
-            .next
-            .max(tick.saturating_add(reload));
+        a.next = a.next.max(tick.saturating_add(reload));
         a.burst = 0;
         a.charge = None;
     }
@@ -1122,7 +1146,9 @@ impl BlastRange {
     pub fn point_gun(&self) -> bool {
         self.layout.as_ref().is_some_and(|l| l.gun_point)
     }
-    pub fn physical_gun(&self) -> bool { !self.battle_mode() && !self.point_gun() }
+    pub fn physical_gun(&self) -> bool {
+        !self.battle_mode() && !self.point_gun()
+    }
     /// Setup accepts explicit movement without running combat or AI.
     pub fn battle_movement_active(&self) -> bool {
         matches!(self.battle.phase, Phase::Setup | Phase::Fighting)
@@ -1167,16 +1193,37 @@ impl BlastRange {
     /// Active, in-range allied links; the visual readout uses the same rules
     /// as the combat pass, and never grants the bonus by itself.
     pub fn electric_support_count(&self, id: usize) -> u32 {
-        let Some(target) = self.units.get(id) else { return 0; };
-        if target.kind != RangeUnitKind::LightningTank || !target.status.alive || !target.status.weapon { return 0; }
-        self.battle.actors.iter().enumerate().filter(|(other, actor)| {
-            let u = &self.units[*other];
-            if actor.order != Order::Support(id) || !u.status.alive || !u.status.weapon || !u.status.engine
-                || self.allied(*other) != self.allied(id) { return false; }
-            let dx = i64::from(u.motion.pos[0].to_int_trunc() - target.motion.pos[0].to_int_trunc());
-            let dz = i64::from(u.motion.pos[2].to_int_trunc() - target.motion.pos[2].to_int_trunc());
-            dx * dx + dz * dz <= 160i64.pow(2)
-        }).count().min(4) as u32
+        let Some(target) = self.units.get(id) else {
+            return 0;
+        };
+        if target.kind != RangeUnitKind::LightningTank
+            || !target.status.alive
+            || !target.status.weapon
+        {
+            return 0;
+        }
+        self.battle
+            .actors
+            .iter()
+            .enumerate()
+            .filter(|(other, actor)| {
+                let u = &self.units[*other];
+                if actor.order != Order::Support(id)
+                    || !u.status.alive
+                    || !u.status.weapon
+                    || !u.status.engine
+                    || self.allied(*other) != self.allied(id)
+                {
+                    return false;
+                }
+                let dx =
+                    i64::from(u.motion.pos[0].to_int_trunc() - target.motion.pos[0].to_int_trunc());
+                let dz =
+                    i64::from(u.motion.pos[2].to_int_trunc() - target.motion.pos[2].to_int_trunc());
+                dx * dx + dz * dz <= 160i64.pow(2)
+            })
+            .count()
+            .min(4) as u32
     }
 
     /// Switching ammunition keeps the current order and reload deadline.
@@ -1683,7 +1730,9 @@ impl BlastRange {
                         request.order,
                         Order::Move
                             | Order::Hold
-                            | Order::Dig(_) | Order::Reclaim(_) | Order::Support(_)
+                            | Order::Dig(_)
+                            | Order::Reclaim(_)
+                            | Order::Support(_)
                             | Order::Pilot { fire: false, .. }
                     ))
         {
@@ -1702,9 +1751,15 @@ impl BlastRange {
     /// own admission rules; external owners schedule this same operation.
     pub fn execute_command(&mut self, command: commands::Command) -> commands::Outcome {
         let (id, order, destination, fallback) = match command {
-            commands::Command::Sculpt{at,edge,material,erase}=> {
-                let outcome=self.sculpt(at,edge,material,erase);
-                self.record_player_command(command,outcome);return outcome;
+            commands::Command::Sculpt {
+                at,
+                edge,
+                material,
+                erase,
+            } => {
+                let outcome = self.sculpt(at, edge, material, erase);
+                self.record_player_command(command, outcome);
+                return outcome;
             }
             commands::Command::Gun(input) => {
                 let outcome = self.apply_gun_command(input);
@@ -1806,7 +1861,8 @@ impl BlastRange {
                 };
                 // Between ticks, a manual Move uses the current physical rubble.
                 let routed = order == Order::Move
-                    || matches!(order, Order::Dig(_) | Order::Reclaim(_)) && request.destination.is_some();
+                    || matches!(order, Order::Dig(_) | Order::Reclaim(_))
+                        && request.destination.is_some();
                 let current = (routed && fallback.is_none()).then(|| self.current_rubble());
                 let mut executor = orders::Executor {
                     units: &mut self.units,
@@ -2207,7 +2263,13 @@ impl BlastRange {
                 let stationary_target_in_range = !mobile_gun && {
                     self.units.iter().enumerate().any(|(id, u)| {
                         let weapon = match u.kind {
-                            RangeUnitKind::Base | RangeUnitKind::GrebenStorage | RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4 | RangeUnitKind::SkobaDrone => None,
+                            RangeUnitKind::Base
+                            | RangeUnitKind::GrebenStorage
+                            | RangeUnitKind::KilFactoryT1
+                            | RangeUnitKind::KilFactoryT2
+                            | RangeUnitKind::KilFactoryT3
+                            | RangeUnitKind::KilFactoryT4
+                            | RangeUnitKind::SkobaDrone => None,
                             RangeUnitKind::Spider => Some(Weapon::Laser),
                             RangeUnitKind::LightningTank => Some(Weapon::Lightning),
                             RangeUnitKind::EidolonTank => Some(Weapon::Kinetic),
@@ -2222,7 +2284,9 @@ impl BlastRange {
                             RangeUnitKind::Artillery => {
                                 Some(battle.actors[id].weapon.unwrap_or(Weapon::Blast))
                             }
-                            RangeUnitKind::Walker04 | RangeUnitKind::RazlomT3 => Some(Weapon::Laser),
+                            RangeUnitKind::Walker04 | RangeUnitKind::RazlomT3 => {
+                                Some(Weapon::Laser)
+                            }
                             // An immobilized tank may still switch ammunition.
                             RangeUnitKind::Tank | RangeUnitKind::Crawler => None,
                         };
@@ -2319,11 +2383,23 @@ impl BlastRange {
         const LINK_RANGE: i32 = 160;
         let mut support = vec![0u32; self.units.len()];
         for (id, actor) in b.actors.iter().enumerate() {
-            let Order::Support(target) = actor.order else { continue; };
-            if target >= self.units.len() || target == id { continue; }
-            let a = &self.units[id]; let t = &self.units[target];
-            if !a.status.alive || !a.status.weapon || !a.status.engine || !t.status.alive
-                || !t.status.weapon || self.allied(id) != self.allied(target) { continue; }
+            let Order::Support(target) = actor.order else {
+                continue;
+            };
+            if target >= self.units.len() || target == id {
+                continue;
+            }
+            let a = &self.units[id];
+            let t = &self.units[target];
+            if !a.status.alive
+                || !a.status.weapon
+                || !a.status.engine
+                || !t.status.alive
+                || !t.status.weapon
+                || self.allied(id) != self.allied(target)
+            {
+                continue;
+            }
             let dx = i64::from(a.motion.pos[0].to_int_trunc() - t.motion.pos[0].to_int_trunc());
             let dz = i64::from(a.motion.pos[2].to_int_trunc() - t.motion.pos[2].to_int_trunc());
             if dx * dx + dz * dz <= i64::from(LINK_RANGE).pow(2) {
@@ -2335,7 +2411,9 @@ impl BlastRange {
         }
         let mut bursts = Vec::new();
         for id in 0..self.units.len() {
-            if b.phase == Phase::Setup && !matches!(b.actors[id].order, Order::Pilot { .. } | Order::Support(_)) {
+            if b.phase == Phase::Setup
+                && !matches!(b.actors[id].order, Order::Pilot { .. } | Order::Support(_))
+            {
                 continue;
             }
             if !self.units[id].status.alive || !self.units[id].status.weapon {
@@ -2347,31 +2425,55 @@ impl BlastRange {
             }
             let kind = self.units[id].kind;
             if let Order::Support(target) = b.actors[id].order {
-                let valid = target < self.units.len() && target != id
-                    && self.units[target].status.alive && self.units[target].kind == RangeUnitKind::LightningTank
+                let valid = target < self.units.len()
+                    && target != id
+                    && self.units[target].status.alive
+                    && self.units[target].kind == RangeUnitKind::LightningTank
                     && self.allied(id) == self.allied(target);
-                if !valid { b.actors[id].order = Order::Hold; self.units[id].motion.stop(); continue; }
+                if !valid {
+                    b.actors[id].order = Order::Hold;
+                    self.units[id].motion.stop();
+                    continue;
+                }
                 let from = self.units[id].motion.pos.map(Fx::to_int_trunc);
                 let to = self.units[target].motion.pos.map(Fx::to_int_trunc);
-                let dx = i64::from(to[0] - from[0]); let dz = i64::from(to[2] - from[2]);
+                let dx = i64::from(to[0] - from[0]);
+                let dz = i64::from(to[2] - from[2]);
                 let distance = ((dx * dx + dz * dz) as u64).isqrt().max(1) as i64;
                 if distance > i64::from(LINK_RANGE) {
                     if self.tick % 20 == 0 || self.units[id].motion.destination.is_none() {
                         let back = 120i64.min(distance);
-                        self.units[id].motion.queue_move(&self.world, [to[0] - (dx * back / distance) as i32, to[2] - (dz * back / distance) as i32]);
+                        self.units[id].motion.queue_move(
+                            &self.world,
+                            [
+                                to[0] - (dx * back / distance) as i32,
+                                to[2] - (dz * back / distance) as i32,
+                            ],
+                        );
                     }
                 } else {
-                    if self.units[id].motion.destination.is_some() { self.units[id].motion.stop(); }
-                    if self.units[id].status.engine && self.units[target].status.weapon && self.tick % 2 == 0 {
-                        let angle = fx::angle::atan2(Fx::from_int(to[2] - from[2]).raw(), Fx::from_int(to[0] - from[0]).raw());
+                    if self.units[id].motion.destination.is_some() {
+                        self.units[id].motion.stop();
+                    }
+                    if self.units[id].status.engine
+                        && self.units[target].status.weapon
+                        && self.tick % 2 == 0
+                    {
+                        let angle = fx::angle::atan2(
+                            Fx::from_int(to[2] - from[2]).raw(),
+                            Fx::from_int(to[0] - from[0]).raw(),
+                        );
                         b.actors[id].turret.step(angle, self.turret_limits);
                         self.units[id].update_pose(b.actors[id].turret.angle);
                         let muzzle = weapons::muzzles(&self.units[id], b.actors[id].turret.angle)
-                            .first().copied().unwrap_or_else(|| aim_point(&self.units[id]).map(Fx::from_int));
+                            .first()
+                            .copied()
+                            .unwrap_or_else(|| aim_point(&self.units[id]).map(Fx::from_int));
                         b.lightning.push(weapons::Trace {
                             from: muzzle,
                             to: aim_point(&self.units[target]).map(Fx::from_int),
-                            hit: true, serial: self.tick.wrapping_mul(31).wrapping_add(id as u32),
+                            hit: true,
+                            serial: self.tick.wrapping_mul(31).wrapping_add(id as u32),
                         });
                     }
                 }
@@ -2445,7 +2547,9 @@ impl BlastRange {
                 continue;
             };
             let mut range = attack_range(&b.tuning, kind, weapon, stream.range);
-            if weapon == Weapon::Lightning { range = supported_lightning(support[id]).range; }
+            if weapon == Weapon::Lightning {
+                range = supported_lightning(support[id]).range;
+            }
             // Borrow individual config fields independently of the mutable actor.
             let config = match weapon {
                 Weapon::Blast => &b.shell_config,
@@ -2467,9 +2571,9 @@ impl BlastRange {
                 continue;
             };
             let mut target_velocity = [Fx::ZERO; 3];
-            if let Some(other) =
-                target.filter(|_| !matches!(weapon, Weapon::Laser | Weapon::Lightning) && a.order.point().is_none())
-            {
+            if let Some(other) = target.filter(|_| {
+                !matches!(weapon, Weapon::Laser | Weapon::Lightning) && a.order.point().is_none()
+            }) {
                 let u = &self.units[other];
                 target_velocity = [
                     u.motion.drive.vel.mul(fx::angle::cos(u.motion.drive.head)),
@@ -2550,7 +2654,10 @@ impl BlastRange {
             // Explicit point orders retain their ordinary physical contacts.
             completed("orders_misc");
             let blocked_direct = in_range
-                && matches!(weapon, Weapon::MachineGun | Weapon::Kinetic | Weapon::Laser | Weapon::Lightning)
+                && matches!(
+                    weapon,
+                    Weapon::MachineGun | Weapon::Kinetic | Weapon::Laser | Weapon::Lightning
+                )
                 && !kind.emplacement()
                 && a.order.point().is_none()
                 && weapons::muzzles(&self.units[id], a.turret.angle)
@@ -2845,9 +2952,19 @@ impl BlastRange {
             }
             if weapon == Weapon::Lightning {
                 record_gate(&mut b.fire_trace, id, FireGate::Beam);
-                if let Some(from) = weapons::muzzles(&self.units[id], a.turret.angle).first().copied() {
+                if let Some(from) = weapons::muzzles(&self.units[id], a.turret.angle)
+                    .first()
+                    .copied()
+                {
                     let electric = supported_lightning(support[id]);
-                    let trace = self.laser_ray(from, p, Some(id), &electric, config, (&mut completed, physics));
+                    let trace = self.laser_ray(
+                        from,
+                        p,
+                        Some(id),
+                        &electric,
+                        config,
+                        (&mut completed, physics),
+                    );
                     b.lightning.push(trace);
                     // At most three secondary contacts, on four ticks per
                     // burst. Every arc uses ordinary occlusion and shields.
@@ -2855,7 +2972,11 @@ impl BlastRange {
                         let mut end = trace.to;
                         let at = end.map(Fx::to_int_trunc);
                         let mut source = self.units.iter().enumerate().find_map(|(other, unit)| {
-                            (other != id && unit.status.alive && self.allied(other) != self.allied(id) && unit.solid(at)).then_some(other)
+                            (other != id
+                                && unit.status.alive
+                                && self.allied(other) != self.allied(id)
+                                && unit.solid(at))
+                            .then_some(other)
                         });
                         let mut visited = vec![id];
                         let mut secondary = electric.clone();
@@ -2865,24 +2986,55 @@ impl BlastRange {
                         secondary.heat = electric.heat / 2;
                         secondary.work = electric.work / 2;
                         for _ in 0..3 {
-                            let Some(previous) = source else { break; };
+                            let Some(previous) = source else {
+                                break;
+                            };
                             visited.push(previous);
                             let origin = end.map(Fx::to_int_trunc);
-                            let next = self.units.iter().enumerate().filter(|(other, unit)| {
-                                unit.status.alive && !visited.contains(other) && self.allied(*other) != self.allied(id)
-                            }).filter_map(|(other, unit)| {
-                                let target = aim_point(unit);
-                                let d = (0..3).map(|axis| { let v = i64::from(target[axis] - origin[axis]); v * v }).sum::<i64>();
-                                (d <= i64::from(secondary.range).pow(2)).then_some((d, other, target))
-                            }).min_by_key(|(distance, other, _)| (*distance, *other));
-                            let Some((_, _, target)) = next else { break; };
-                            let arc = self.laser_ray(end, target, Some(previous), &secondary, config, (&mut completed, physics));
+                            let next = self
+                                .units
+                                .iter()
+                                .enumerate()
+                                .filter(|(other, unit)| {
+                                    unit.status.alive
+                                        && !visited.contains(other)
+                                        && self.allied(*other) != self.allied(id)
+                                })
+                                .filter_map(|(other, unit)| {
+                                    let target = aim_point(unit);
+                                    let d = (0..3)
+                                        .map(|axis| {
+                                            let v = i64::from(target[axis] - origin[axis]);
+                                            v * v
+                                        })
+                                        .sum::<i64>();
+                                    (d <= i64::from(secondary.range).pow(2))
+                                        .then_some((d, other, target))
+                                })
+                                .min_by_key(|(distance, other, _)| (*distance, *other));
+                            let Some((_, _, target)) = next else {
+                                break;
+                            };
+                            let arc = self.laser_ray(
+                                end,
+                                target,
+                                Some(previous),
+                                &secondary,
+                                config,
+                                (&mut completed, physics),
+                            );
                             end = arc.to;
                             b.lightning.push(arc);
-                            if !arc.hit { break; }
+                            if !arc.hit {
+                                break;
+                            }
                             let at = end.map(Fx::to_int_trunc);
                             source = self.units.iter().enumerate().find_map(|(other, unit)| {
-                                (unit.status.alive && !visited.contains(&other) && self.allied(other) != self.allied(id) && unit.solid(at)).then_some(other)
+                                (unit.status.alive
+                                    && !visited.contains(&other)
+                                    && self.allied(other) != self.allied(id)
+                                    && unit.solid(at))
+                                .then_some(other)
                             });
                         }
                     }
@@ -2915,7 +3067,11 @@ impl BlastRange {
                     Fx::ZERO,
                     Fx::from_int(p[2]).sub(centre[2]),
                 ];
-                let length = direction.iter().fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v))).sqrt().max(Fx::ONE);
+                let length = direction
+                    .iter()
+                    .fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v)))
+                    .sqrt()
+                    .max(Fx::ONE);
                 let velocity = direction.map(|v| v.div(length).mul(Fx::from_int(20)));
                 completed("orders_misc");
                 b.rounds.push(Round {
@@ -3229,7 +3385,11 @@ impl BlastRange {
         record_gate(&mut b.fire_trace, id, FireGate::Fired);
         let speed = config.shell_speed;
         for barrel in 0..count {
-            let muzzle = muzzles[if shell && kind != RangeUnitKind::EidolonTank { 0 } else { barrel }];
+            let muzzle = muzzles[if shell && kind != RangeUnitKind::EidolonTank {
+                0
+            } else {
+                barrel
+            }];
             let mut delta: [Fx; 3] = std::array::from_fn(|k| Fx::from_int(p[k]).sub(muzzle[k]));
             if weapon == Weapon::Canister && barrel > 0 {
                 // One central round and a rotated ring. A finite authored
@@ -3338,7 +3498,9 @@ impl BlastRange {
                 } else if weapon == Weapon::Siege {
                     b.tuning.siege.reload_ticks
                 } else if kind == RangeUnitKind::EidolonTank {
-                    b.tuning.eidolon_reload_ticks.unwrap_or(b.tuning.tank_reload_ticks)
+                    b.tuning
+                        .eidolon_reload_ticks
+                        .unwrap_or(b.tuning.tank_reload_ticks)
                 } else if kind == RangeUnitKind::TurretT2 {
                     b.tuning
                         .turret_t2_reload_ticks
@@ -3369,7 +3531,10 @@ impl BlastRange {
             r.previous = r.pos;
             if r.weapon == Weapon::Laser && self.units[r.owner].kind == RangeUnitKind::RazlomT3 {
                 let mut delta = r.velocity.map(|v| v.mul(dt));
-                let length = delta.iter().fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v))).sqrt();
+                let length = delta
+                    .iter()
+                    .fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v)))
+                    .sqrt();
                 if length <= Fx::ZERO || r.distance <= Fx::ZERO {
                     continue;
                 }
@@ -3380,20 +3545,36 @@ impl BlastRange {
                 tuning.work = tuning.work.saturating_mul(128);
                 tuning.heat = tuning.heat.saturating_mul(128);
                 tuning.fracture_j = tuning.fracture_j.saturating_mul(128);
-                let flat = r.velocity[0].mul(r.velocity[0]).add(r.velocity[2].mul(r.velocity[2])).sqrt().max(Fx::ONE);
-                let side = [Fx::ZERO.sub(r.velocity[2]).div(flat), Fx::ZERO, r.velocity[0].div(flat)];
+                let flat = r.velocity[0]
+                    .mul(r.velocity[0])
+                    .add(r.velocity[2].mul(r.velocity[2]))
+                    .sqrt()
+                    .max(Fx::ONE);
+                let side = [
+                    Fx::ZERO.sub(r.velocity[2]).div(flat),
+                    Fx::ZERO,
+                    r.velocity[0].div(flat),
+                ];
                 let spacing = Fx::from_ratio(i32::from(self.units[r.owner].body.mm) * 12, 100);
                 let config = b.laser_config;
                 let mut centre = r.pos;
                 for channel in -3i32..=3 {
                     let offset = side.map(|v| v.mul(spacing).mul(Fx::from_int(channel)));
                     for vertical in [-4i32, 0, 4] {
-                        let from = std::array::from_fn(|axis| r.pos[axis].add(offset[axis]).add(if axis == 1 { Fx::from_int(vertical) } else { Fx::ZERO }));
+                        let from = std::array::from_fn(|axis| {
+                            r.pos[axis].add(offset[axis]).add(if axis == 1 {
+                                Fx::from_int(vertical)
+                            } else {
+                                Fx::ZERO
+                            })
+                        });
                         let mut end = from;
                         let mut previous = from.map(Fx::to_int_trunc);
                         let mut hit = false;
                         for step in 1..=4 {
-                            let point = std::array::from_fn(|axis| from[axis].add(delta[axis].mul(Fx::from_ratio(step, 4))));
+                            let point = std::array::from_fn(|axis| {
+                                from[axis].add(delta[axis].mul(Fx::from_ratio(step, 4)))
+                            });
                             let p = point.map(Fx::to_int_trunc);
                             if (0..3).any(|axis| p[axis] < 0 || p[axis] >= self.size[axis] as i32) {
                                 break;
@@ -3404,27 +3585,51 @@ impl BlastRange {
                                 hit = true;
                                 break;
                             }
-                            let body_hit = self.units.iter().enumerate().any(|(id, unit)| {
-                                id != r.owner && unit.solid(p)
-                            });
+                            let body_hit = self
+                                .units
+                                .iter()
+                                .enumerate()
+                                .any(|(id, unit)| id != r.owner && unit.solid(p));
                             if body_hit || material(&self.world, p) != 0 {
                                 if body_hit {
-                                    let id = self.units.iter().position(|unit| unit.solid(p)).expect("contact unit");
+                                    let id = self
+                                        .units
+                                        .iter()
+                                        .position(|unit| unit.solid(p))
+                                        .expect("contact unit");
                                     if self.units[id].kind == RangeUnitKind::Tank {
-                                        let origin = [self.units[id].body.core.0, self.units[id].body.core.1, self.units[id].body.core.2].map(usize::from);
+                                        let origin = [
+                                            self.units[id].body.core.0,
+                                            self.units[id].body.core.1,
+                                            self.units[id].body.core.2,
+                                        ]
+                                        .map(usize::from);
                                         let size = usize::from(self.units[id].body.core_size);
                                         for z in origin[2]..origin[2] + size {
                                             for y in origin[1]..origin[1] + size {
                                                 for x in origin[0]..origin[0] + size {
-                                                    if self.units[id].body.part_at(x, y, z) == voxel::Part::Core {
-                                                        self.units[id].receive_cell([x, y, z], u32::MAX, &config);
+                                                    if self.units[id].body.part_at(x, y, z)
+                                                        == voxel::Part::Core
+                                                    {
+                                                        self.units[id].receive_cell(
+                                                            [x, y, z],
+                                                            u32::MAX,
+                                                            &config,
+                                                        );
                                                     }
                                                 }
                                             }
                                         }
                                     }
                                 }
-                                self.stream_contact_owned(p, &tuning, false, from.map(Fx::to_int_trunc), &config, Some(r.owner));
+                                self.stream_contact_owned(
+                                    p,
+                                    &tuning,
+                                    false,
+                                    from.map(Fx::to_int_trunc),
+                                    &config,
+                                    Some(r.owner),
+                                );
                                 hit = true;
                                 break;
                             }
@@ -3433,7 +3638,12 @@ impl BlastRange {
                         if vertical == 0 {
                             let serial = self.streams.serial;
                             self.streams.serial = serial.wrapping_add(1);
-                            let trace = weapons::Trace { from, to: end, hit, serial };
+                            let trace = weapons::Trace {
+                                from,
+                                to: end,
+                                hit,
+                                serial,
+                            };
                             if channel == 0 {
                                 centre = trace.to;
                             }
@@ -3442,7 +3652,10 @@ impl BlastRange {
                     }
                 }
                 let advanced = std::array::from_fn::<_, 3, _>(|axis| centre[axis].sub(r.pos[axis]));
-                let advanced = advanced.iter().fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v))).sqrt();
+                let advanced = advanced
+                    .iter()
+                    .fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v)))
+                    .sqrt();
                 r.distance = r.distance.sub(advanced.min(r.distance));
                 r.pos = centre;
                 if r.distance > Fx::ZERO {
@@ -3566,10 +3779,12 @@ impl BlastRange {
                     let mut energy = b.material_energy_mj(r.weapon);
                     self.matter.begin_mj(energy, config.fragment_box);
                     self.matter.remaining_mj = old;
-                    let reserved=self.upheaval.reserve(&self.world,at,&config,energy);
-                    energy-=reserved;
-                    let mut wave_config=config;
-                    wave_config.material_energy_j=wave_config.material_energy_j.saturating_sub((reserved/1000) as u32);
+                    let reserved = self.upheaval.reserve(&self.world, at, &config, energy);
+                    energy -= reserved;
+                    let mut wave_config = config;
+                    wave_config.material_energy_j = wave_config
+                        .material_energy_j
+                        .saturating_sub((reserved / 1000) as u32);
                     let side = (r.owner < self.units.len()).then(|| self.allied(r.owner));
                     let mut wave = Explosion::begin_impact(
                         &self.world,
@@ -3596,7 +3811,12 @@ impl BlastRange {
                         config.heat_units,
                         config.heat_per_cell,
                     );
-                    self.water.absorb_radial_heat(&self.world,at,config.heat_units,config.heat_per_cell);
+                    self.water.absorb_radial_heat(
+                        &self.world,
+                        at,
+                        config.heat_units,
+                        config.heat_per_cell,
+                    );
                     b.impacts.push(Impact {
                         at,
                         from: prev,
@@ -3672,10 +3892,18 @@ impl BlastRange {
         if autonomous {
             // Every admitted AI-battle wave gets its authored share. Backlog
             // may cost a frame, but a full wave queue cannot starve new hits.
-            let capture = waves.iter().filter(|w| w.wave.capturing()).fold(0usize, |n,w|
-                n.saturating_add(config_of(w.weapon).capture_cells_per_tick));
-            let work = waves.iter().filter(|w| !w.wave.capturing()).fold(0usize, |n,w|
-                n.saturating_add(config_of(w.weapon).wave_work_per_tick));
+            let capture = waves
+                .iter()
+                .filter(|w| w.wave.capturing())
+                .fold(0usize, |n, w| {
+                    n.saturating_add(config_of(w.weapon).capture_cells_per_tick)
+                });
+            let work = waves
+                .iter()
+                .filter(|w| !w.wave.capturing())
+                .fold(0usize, |n, w| {
+                    n.saturating_add(config_of(w.weapon).wave_work_per_tick)
+                });
             capture_left = capture_left.max(capture);
             work_left = work_left.max(work);
             contact_left = contact_left.max(work);

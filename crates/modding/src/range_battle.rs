@@ -342,11 +342,21 @@ mod tests {
     #[test]
     fn eidolon_reload_is_bounded_and_optional_for_older_data() {
         let shipped = include_str!("../../../data/range-battle.ron");
-        let old = shipped.lines().filter(|l| !l.contains("eidolon_reload_ticks:")).collect::<Vec<_>>().join("\n");
+        let old = shipped
+            .lines()
+            .filter(|l| !l.contains("eidolon_reload_ticks:"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_eq!(Tuning::from_ron(&old).unwrap().eidolon_reload_ticks, None);
-        assert_eq!(Tuning::from_ron(shipped).unwrap().eidolon_reload_ticks, Some(48));
+        assert_eq!(
+            Tuning::from_ron(shipped).unwrap().eidolon_reload_ticks,
+            Some(48)
+        );
         for n in [0, 1801, u32::MAX] {
-            let bad = shipped.replace("eidolon_reload_ticks: Some(48)", &format!("eidolon_reload_ticks: Some({n})"));
+            let bad = shipped.replace(
+                "eidolon_reload_ticks: Some(48)",
+                &format!("eidolon_reload_ticks: Some({n})"),
+            );
             assert!(Tuning::from_ron(&bad).is_err());
         }
     }

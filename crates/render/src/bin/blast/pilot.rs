@@ -20,7 +20,9 @@ pub struct Pilot {
     trigger_ready: bool,
 }
 impl Pilot {
-    pub(super) fn rebind_generation(&mut self, generation: u64) { self.generation = generation; }
+    pub(super) fn rebind_generation(&mut self, generation: u64) {
+        self.generation = generation;
+    }
     pub fn requested(requested: bool) -> Self {
         Self {
             requested,

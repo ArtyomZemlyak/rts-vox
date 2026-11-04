@@ -1314,7 +1314,9 @@ pub fn actions(
     edit: Res<Workshop>,
     laboratory: Option<Res<laboratory::Laboratory>>,
 ) {
-    if laboratory.as_ref().is_some_and(|l| l.active()) { return; }
+    if laboratory.as_ref().is_some_and(|l| l.active()) {
+        return;
+    }
     if edit.layout.is_none() {
         return;
     }

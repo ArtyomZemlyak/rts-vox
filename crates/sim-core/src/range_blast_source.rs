@@ -7,7 +7,8 @@ impl BlastRange {
     /// wave and damage budgets as a normal impact apply; never replace an
     /// unfinished wave or let a scenario charge escape the map.
     pub fn scenario_charge(&mut self, at: [i32; 3], power_milli: u32) -> bool {
-        if !self.battle_mode() || !self.shot_ready()
+        if !self.battle_mode()
+            || !self.shot_ready()
             || self.explosion.as_ref().is_some_and(|e| e.capturing())
             || (0..3).any(|a| at[a] < 0 || at[a] >= self.size[a] as i32)
         {
@@ -31,13 +32,22 @@ impl BlastRange {
             self.config.heat_units,
             self.config.heat_per_cell,
         );
-        self.water.absorb_radial_heat(&self.world,at,self.config.heat_units,self.config.heat_per_cell);
+        self.water.absorb_radial_heat(
+            &self.world,
+            at,
+            self.config.heat_units,
+            self.config.heat_per_cell,
+        );
         self.matter
             .begin(self.config.material_energy_j, self.config.fragment_box);
-        let reserved=self.upheaval.reserve(&self.world,at,&self.config,self.matter.remaining_mj);
-        self.matter.remaining_mj-=reserved;
-        let mut wave_config=self.config;
-        wave_config.material_energy_j=wave_config.material_energy_j.saturating_sub((reserved/1000) as u32);
+        let reserved =
+            self.upheaval
+                .reserve(&self.world, at, &self.config, self.matter.remaining_mj);
+        self.matter.remaining_mj -= reserved;
+        let mut wave_config = self.config;
+        wave_config.material_energy_j = wave_config
+            .material_energy_j
+            .saturating_sub((reserved / 1000) as u32);
         self.explosion = Some(Explosion::begin_impact(
             &self.world,
             at,

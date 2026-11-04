@@ -31,6 +31,7 @@ struct Node {
     end: usize,
     first: usize,
     children: Option<[usize; 2]>,
+    moving: bool,
 }
 impl<'h, 's> HullQueries<'h, 's> {
     pub fn new(hulls: &'h [Hull<'s>]) -> Self {
@@ -84,6 +85,9 @@ impl<'h, 's> HullQueries<'h, 's> {
     fn build(&mut self, boxes: &[([Fx; 3], [Fx; 3])], start: usize, end: usize) -> usize {
         let index = self.nodes.len();
         let first = *self.order[start..end].iter().min().unwrap();
+        let moving = self.order[start..end]
+            .iter()
+            .any(|&i| self.hulls[i].vel != [Fx::ZERO; 3]);
         self.nodes.push(Node {
             lo: boxes[first].0,
             hi: boxes[first].1,
@@ -91,6 +95,7 @@ impl<'h, 's> HullQueries<'h, 's> {
             end,
             first,
             children: None,
+            moving,
         });
         let (lo, hi, children) = if end - start <= LEAF {
             // Spatial partitioning is derived only. A leaf still examines
@@ -138,12 +143,22 @@ impl<'h, 's> HullQueries<'h, 's> {
             end,
             first,
             children,
+            moving,
         };
         index
     }
     /// First exact contact in canonical source order, respecting the skip mask.
     pub fn hit(&self, p: [Fx; 3], low: [Fx; 3], high: [Fx; 3], skip: u64) -> Option<&'h Hull<'s>> {
-        self.hit_with(p, low, high, skip, &mut |_| {})
+        self.hit_with(p, low, high, skip, false, &mut |_| {})
+    }
+    pub fn hit_moving(
+        &self,
+        p: [Fx; 3],
+        low: [Fx; 3],
+        high: [Fx; 3],
+        skip: u64,
+    ) -> Option<&'h Hull<'s>> {
+        self.hit_with(p, low, high, skip, true, &mut |_| {})
     }
     fn hit_with(
         &self,
@@ -151,10 +166,11 @@ impl<'h, 's> HullQueries<'h, 's> {
         low: [Fx; 3],
         high: [Fx; 3],
         skip: u64,
+        moving_only: bool,
         examined: &mut impl FnMut(usize),
     ) -> Option<&'h Hull<'s>> {
         if self.nodes.is_empty() {
-            return hull_hit(p, low, high, self.hulls, skip);
+            return self.scalar_hit(p, low, high, skip, moving_only);
         }
         let reach = low[0].abs().max(high[0]).max(low[2].abs()).max(high[2]);
         let (bottom, top) = (p[1].add(low[1]), p[1].add(high[1]));
@@ -186,7 +202,7 @@ impl<'h, 's> HullQueries<'h, 's> {
             ))
         };
         let Some((lo, hi)) = bounds() else {
-            return hull_hit(p, low, high, self.hulls, skip);
+            return self.scalar_hit(p, low, high, skip, moving_only);
         };
         let contact = Contact {
             p,
@@ -200,25 +216,47 @@ impl<'h, 's> HullQueries<'h, 's> {
             skip,
         };
         let mut best = None;
-        self.find(0, &contact, &mut best, examined);
+        self.find(0, &contact, moving_only, &mut best, examined);
         best.map(|i| &self.hulls[i])
+    }
+    fn scalar_hit(
+        &self,
+        p: [Fx; 3],
+        low: [Fx; 3],
+        high: [Fx; 3],
+        skip: u64,
+        moving_only: bool,
+    ) -> Option<&'h Hull<'s>> {
+        if !moving_only {
+            return hull_hit(p, low, high, self.hulls, skip);
+        }
+        self.hulls.iter().enumerate().find_map(|(i, h)| {
+            if (i < 64 && skip & (1 << i) != 0) || h.vel == [Fx::ZERO; 3] {
+                return None;
+            }
+            let reach = low[0].abs().max(high[0]).max(low[2].abs()).max(high[2]);
+            let (bottom, top) = (p[1].add(low[1]), p[1].add(high[1]));
+            (hull_box_overlap(p, reach, bottom, top, h) && h.meets_piece(p, low, high)).then_some(h)
+        })
     }
     fn find(
         &self,
         index: usize,
         q: &Contact,
+        moving_only: bool,
         best: &mut Option<usize>,
         examined: &mut impl FnMut(usize),
     ) {
         let node = &self.nodes[index];
-        if best.is_some_and(|i| node.first >= i)
+        if (moving_only && !node.moving)
+            || best.is_some_and(|i| node.first >= i)
             || (0..3).any(|k| node.hi[k] < q.lo[k] || node.lo[k] > q.hi[k])
         {
             return;
         }
         if let Some([left, right]) = node.children {
-            self.find(left, q, best, examined);
-            self.find(right, q, best, examined);
+            self.find(left, q, moving_only, best, examined);
+            self.find(right, q, moving_only, best, examined);
             return;
         }
         for &i in &self.order[node.start..node.end] {
@@ -227,7 +265,8 @@ impl<'h, 's> HullQueries<'h, 's> {
             }
             examined(i);
             let h = &self.hulls[i];
-            if (i < 64 && q.skip & (1 << i) != 0)
+            if (moving_only && h.vel == [Fx::ZERO; 3])
+                || (i < 64 && q.skip & (1 << i) != 0)
                 || !hull_box_overlap(q.p, q.reach, q.bottom, q.top, h)
             {
                 continue;
@@ -343,6 +382,53 @@ mod tests {
         }
     }
     #[test]
+    fn moving_contacts_match_filtered_scalar_reference() {
+        let holes = |p: [i32; 3]| (p[0] + p[1] + p[2]).rem_euclid(3) == 0;
+        let empty = |_: [i32; 3]| false;
+        for count in [0, 1, 8, 15, 16, 17, 63, 64, 65, 96] {
+            for geometry in [0, 1, 2] {
+                let hulls: Vec<_> = (0..count)
+                    .map(|i| {
+                        let mut h = hull((i * 37) % count);
+                        h.vel = if i % 2 == 0 { [Fx::ZERO; 3] } else { h.vel };
+                        h.solid = match geometry {
+                            1 => Some(Solid(&holes)),
+                            2 => Some(Solid(&empty)),
+                            _ => None,
+                        };
+                        h
+                    })
+                    .collect();
+                let index = HullQueries::new(&hulls);
+                for i in 0..128 {
+                    let p = [
+                        Fx::from_ratio(i % 180 * 3 - 12, 3),
+                        Fx::from_ratio(i % 24 - 4, 2),
+                        Fx::from_ratio(i % 100 * 2 - 5, 2),
+                    ];
+                    for size in [1, 3, 12] {
+                        let low = [Fx::from_ratio(-size, 2); 3];
+                        let high = [Fx::from_ratio(size, 2); 3];
+                        for skip in [0, 1, u64::MAX, 0xa518_3ec2_d947_6b0f] {
+                            let expected = hulls.iter().enumerate().find_map(|(i, h)| {
+                                if (i < 64 && skip & (1 << i) != 0) || h.vel == [Fx::ZERO; 3] {
+                                    return None;
+                                }
+                                let reach =
+                                    low[0].abs().max(high[0]).max(low[2].abs()).max(high[2]);
+                                let (bottom, top) = (p[1].add(low[1]), p[1].add(high[1]));
+                                (hull_box_overlap(p, reach, bottom, top, h)
+                                    && h.meets_piece(p, low, high))
+                                .then_some(h)
+                            });
+                            assert_eq!(identity(index.hit_moving(p, low, high, skip)), identity(expected), "count={count}, geometry={geometry}, query={i}, size={size}, skip={skip}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn local_hull_contact_rejects_distant_roster_without_testing_every_hull() {
         for count in [64, 256, 1024] {
             let hulls: Vec<_> = (0..count)
@@ -357,7 +443,9 @@ mod tests {
             let h = &hulls[count - 1];
             let p = [h.pos[0], Fx::from_int(4), h.pos[2]];
             let mut examined = 0;
-            let hit = index.hit_with(p, [Fx::ZERO; 3], [Fx::ONE; 3], 0, &mut |_| examined += 1);
+            let hit = index.hit_with(p, [Fx::ZERO; 3], [Fx::ONE; 3], 0, false, &mut |_| {
+                examined += 1
+            });
             assert_eq!(identity(hit), Some(h.vel[0]));
             assert!(examined <= LEAF, "count={count}, examined={examined}");
         }

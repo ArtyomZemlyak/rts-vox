@@ -206,20 +206,33 @@ pub fn starting_crews(layout: &mut modding::range::RangeLayout) {
     if !layout.battle || layout.economy.is_none() {
         return;
     }
-    let stores: Vec<RangeUnitDef> = layout.units.iter()
+    let stores: Vec<RangeUnitDef> = layout
+        .units
+        .iter()
         .filter(|u| u.allied && u.kind == RangeUnitKind::GrebenStorage)
         .cloned()
         .collect();
     for store in stores {
         let near = |u: &RangeUnitDef, kind, reach: i64| {
-            u.allied && u.kind == kind && (0..3).map(|a| {
-                let d = i64::from(u.at[a] - store.at[a]);
-                d * d
-            }).sum::<i64>() <= reach * reach
+            u.allied
+                && u.kind == kind
+                && (0..3)
+                    .map(|a| {
+                        let d = i64::from(u.at[a] - store.at[a]);
+                        d * d
+                    })
+                    .sum::<i64>()
+                    <= reach * reach
         };
-        let drones = layout.units.iter().filter(|u| near(u, RangeUnitKind::SkobaDrone, 1400)).count();
+        let drones = layout
+            .units
+            .iter()
+            .filter(|u| near(u, RangeUnitKind::SkobaDrone, 1400))
+            .count();
         for n in drones..8 {
-            if layout.units.len() >= MAX_RANGE_UNITS { break; }
+            if layout.units.len() >= MAX_RANGE_UNITS {
+                break;
+            }
             layout.units.push(RangeUnitDef {
                 allied: true,
                 kind: RangeUnitKind::SkobaDrone,
@@ -227,7 +240,10 @@ pub fn starting_crews(layout: &mut modding::range::RangeLayout) {
                 weapon: None,
             });
         }
-        if !layout.units.iter().any(|u| near(u, RangeUnitKind::Crawler, 2000))
+        if !layout
+            .units
+            .iter()
+            .any(|u| near(u, RangeUnitKind::Crawler, 2000))
             && layout.units.len() < MAX_RANGE_UNITS
         {
             layout.units.push(RangeUnitDef {
@@ -375,7 +391,11 @@ impl BlastRange {
         replacement.motion = motion;
         replacement.update_pose(head);
         self.units[id] = replacement;
-        if let Some(def) = self.layout.as_mut().and_then(|layout| layout.units.get_mut(id)) {
+        if let Some(def) = self
+            .layout
+            .as_mut()
+            .and_then(|layout| layout.units.get_mut(id))
+        {
             def.kind = next;
         }
         true
@@ -689,7 +709,14 @@ impl BlastRange {
             let body = s.u32();
             let tank = if s.bool() { Some(s.u32()) } else { None };
             // Something produces it, and it has a tank exactly if it digs.
-            if !(data.produced(kind) || matches!(kind, RangeUnitKind::TurretT1 | RangeUnitKind::KilFactoryT1 | RangeUnitKind::GrebenStorage | RangeUnitKind::Crawler))
+            if !(data.produced(kind)
+                || matches!(
+                    kind,
+                    RangeUnitKind::TurretT1
+                        | RangeUnitKind::KilFactoryT1
+                        | RangeUnitKind::GrebenStorage
+                        | RangeUnitKind::Crawler
+                ))
                 || tank.is_some() != data.digs(kind)
                 || (0..3).any(|a| at[a] < 0 || at[a] >= self.size[a] as i32)
                 || !s.ok()
@@ -819,7 +846,8 @@ impl BlastRange {
                 return None;
             }
         }
-        if p.lines.iter().any(|l| p.wrecks.contains_key(&l.slot)) || (!p.active() && !construction) {
+        if p.lines.iter().any(|l| p.wrecks.contains_key(&l.slot)) || (!p.active() && !construction)
+        {
             return None;
         }
         s.ok().then_some(())

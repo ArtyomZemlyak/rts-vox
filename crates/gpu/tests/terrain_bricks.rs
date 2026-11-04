@@ -51,7 +51,11 @@ fn sparse_coarse_reduction_updates_only_selected_parents_and_lowers_removed_ceil
     let bricks = g.storage(((count + 4) * 4) as u64, "bricks");
     let dirty = g.storage(16, "dirty coarse bricks");
     let config = uniform(&g, &[64, 32, 64, 1]);
-    let pipe = g.pipeline(include_str!("../../render/src/terrain_bricks.wgsl"), "reduce", "sparse coarse");
+    let pipe = g.pipeline(
+        include_str!("../../render/src/terrain_bricks.wgsl"),
+        "reduce",
+        "sparse coarse",
+    );
     let group = group(&g, &pipe, &[(0, &config), (3, &bricks), (4, &dirty)]);
     let mut values = vec![0u32; count + 4];
     // Parent 3 has a remaining low voxel and a previously higher ceiling.
@@ -158,7 +162,11 @@ fn bricks_rebuild_after_removal_and_rays_preserve_thin_walls_in_wrapped_windows(
         "reduce",
         "coarse bricks",
     );
-    let reduce_group = group(&g, &reduce, &[(0, &config), (3, &bricks), (4, &dirty_coarse)]);
+    let reduce_group = group(
+        &g,
+        &reduce,
+        &[(0, &config), (3, &bricks), (4, &dirty_coarse)],
+    );
     let query = r#"
 struct Ray { origin:vec4<f32>, direction:vec4<f32> };
 @group(0) @binding(0) var<storage,read> rays:array<Ray>;
@@ -356,7 +364,8 @@ fn query(@builtin(global_invocation_id) gid:vec3<u32>) {
         g.queue.write_buffer(&terrain, 0, as_bytes(&words));
         g.queue.write_buffer(&dirty, 0, as_bytes(&[index as u32]));
         let parent = b[0] / 4 + 2 * (b[2] / 4);
-        g.queue.write_buffer(&dirty_coarse, 0, as_bytes(&[parent as u32]));
+        g.queue
+            .write_buffer(&dirty_coarse, 0, as_bytes(&[parent as u32]));
         g.queue.write_buffer(&config, 0, as_bytes(&[64, 32, 64, 1]));
         dispatch(&g, &build, &build_group, 1);
         expected[index] = 0;

@@ -1,5 +1,336 @@
 # Единый план производительности движка
 
+Проба513 [parallel Batches scan](513-parallel-batches-scan.md) отклонена:
+pooled FPS+0,24% при разных знаках пар, `fragments`+2,38%, p99 кадра+1,11%.
+Serial/parallel oracle и lifecycle прошли, но ordered copy/сборка results не окупились.
+Parallel code и test полностью откачены; ADR-842 восстановлен.
+
+Срез512 / ADR-842 [fused motion routes+ground](512-fused-motion-routes-ground.md):
+две1600-пары дали mean−1,48%, позднее окно−1,70%, motion−3,23%; все35 CSV-полей
+и hashes совпали, replay1/4/8 прошёл. Две native пары дали +3,37% pooled FPS,
+`simulation_core`−1,47%, но p99 кадра+0,87% в обеих парах. Один pool barrier удалён;
+per-actor routes→ground и ordered commit прежние.
+
+Срез511 / ADR-841 [overlap terrain publication и occupancy preparation](511-overlap-terrain-occupancy.md):
+две native пары дали +1,12% pooled FPS, occupancy−63,53%, terrain/publication−8,66%;
+p99 +0,23% при разных знаках пар, улучшение хвоста не заявляется. Split-vs-sequential
+oracle и lifecycle прошли, state hash на1150 тиках совпал. Устранён независимый
+render-барьер; полный owned SIM publication и retained-history остаются открытыми.
+
+Проба510 [compact Settled selection](510-compact-settled-selection.md) отклонена:
+общий variant mean+0,68%, support-only mean+0,28%, rubble+3,12%. Shape union
+`selected || asks` исправлен, все36 полей совпали, но полного выигрыша нет.
+Исходный Option-builder восстановлен.
+
+Проба509 [gas display occupancy](509-gas-occupancy-skipping.md) отклонена:
+FPS−0,23%, p99 кадра+0,14%, `fragments`+0,84%; обе пары по FPS отрицательные.
+Clear/build occupancy и DDA-проверки не окупились. ADR-840 восстановлен.
+
+Срез508 [суммарный baseline→838](508-cumulative-838-measurement.md): mean−27,14%,
+позднее окно−31,06%, debris−47,86%, rubble−24,68%, motion−2,01%; все36 полей
+совпали. Скорость тика ×1,372, позднего ×1,451. Это новая matched оценка вместо499,
+не суммарный native FPS-замер; ADR-839/840/841/842 измеряются отдельно.
+
+Проба507 [HashSet для dirty-tile reconciliation](507-hash-dirty-set.md) отклонена:
+FPS−1,34%, `fragments`+2,42%, `simulation_core`+1,39%, realtime ratio−0,43%.
+`BTreeSet` и ADR-840 восстановлены.
+
+Срез506 / ADR-840 [dirty-tile reconciliation](506-dirty-tile-batches.md): две native
+пары дали +3,87% FPS, p99 кадра−3,95%, `fragments`−1,64%, realtime ratio+3,15%.
+Lifecycle пройден после явного full rebuild при `!enabled` и пустом scratch.
+Unaffected tiles не пересобираются; scene generation и source order прежние.
+
+Проба505 [source-stable batch members](505-source-stable-batch-members.md) отклонена:
+FPS−0,11%, `fragments`+3,32%, `simulation_core`+1,26%; знаки пар разошлись,
+стабильного выигрыша нет. ADR-839 восстановлен.
+
+Срез504 / ADR-839 [in-place reconciliation render batches](504-in-place-render-batches.md).
+Lifecycle-тест прошёл; две native пары дали +0,56% FPS и p99 кадра−0,60%,
+`simulation_core`−0,16%. `fragments` p50 не изменился. `groups` больше не
+пересоздаётся целиком при каждом изменении; source order и progressive publication прежние.
+
+Срез501 / ADR-838 [x86-64-v3](501-x86-64-v3.md): две ordinary1600-пары дали
+mean−0,37%, позднее окно−0,90%, debris−2,16%; все36 полей и replay1/4/8 совпали.
+Две native пары дали +2,85% FPS, p99 кадра−3,03%, `fragments`−6,45%,
+`simulation_core`−1,57%, realtime ratio+1,52%. `.cargo/config.toml` задаёт v3
+только для Windows MSVC в пределах ADR-093; `native` и AVX-512 не используются.
+
+Проба500 [слияние rubble classify и Settled boxes/ranges](500-fused-rubble-classify.md)
+отклонена: mean+0,41%, позднее окно+0,51%, debris+1,37%, несмотря на rubble−1,81%.
+Все36 полей совпали; исходный builder восстановлен. Локальное улучшение одной фазы
+не принимается при регрессии полного тика.
+
+Срез499 [суммарный baseline→837](499-cumulative-837-measurement.md): две строгие
+1600-пары дали mean−26,71%, позднее окно−30,76%, debris−47,21%, rubble−23,78%,
+motion−2,32%; все36 полей совпали. Относительная скорость тика ×1,365, позднего ×1,444.
+Same-physics8 контроль: mean−13,45%, позднее окно−16,91%. Это новая matched оценка
+вместо485, не пересчёт процентов разных серий и не суммарный native FPS-замер.
+
+Срез498 / ADR-837 [tracked sortedness в join memo](498-tracked-sorted-memo.md): две
+ordinary1600-пары дали mean−2,11%, позднее окно−2,70%, debris−3,73%,
+rubble−3,11%; все36 полей и replay1/4/8 совпали. Две native пары дали +0,35% FPS,
+p99 кадра−1,01%, `simulation_core`−0,38%, realtime ratio+0,21%. Два повторных O(N)
+windows-all прохода заменены tracked flags; diff/fallback прежние.
+
+Проба497 [Settled cells с вертикальными масками](497-vertical-mask-settled-cells.md)
+отклонена: две ordinary1600-пары дали mean+0,77%, позднее окно+0,91%,
+debris+1,71%, rubble+2,84%; все36 полей совпали. Экономия nodes не окупила
+фильтрацию при контактах. Исходные per-Y linked nodes восстановлены.
+[Профиль496](496-rubble-3000-profile.md) подтвердил6,022мс второго Settled в
+rubble; следующий срез не должен повторять sorting/vertical mask/persistent indexes.
+
+Проба495 [sorted contiguous Settled cells](495-sorted-settled-cells.md) отклонена:
+две ordinary1600-пары дали mean+6,24%, позднее окно+7,26%, debris+16,65%,
+rubble+5,00%; все36 полей совпали. Сортировка entries дороже сэкономленных hash
+entries. Исходный linked builder восстановлен; ADR и native-замер не нужны.
+Свежий [профиль494](494-current-3000-profile.md) остаётся основой следующего среза.
+
+Проба493 [PGO по полному ИИ-бою](493-pgo.md) отклонена: две ordinary1600-пары дали
+mean−1,61%, позднее окно−1,28%, motion−4,51%, route−5,36%, все36 полей и replay1/4/8
+совпали; однако две native пары дали FPS−0,64%, p99 кадра+0,61%,
+`simulation_core`+1,25% и realtime ratio−0,39%. Headless-выигрыш не переносится в
+игру. Новый ADR и обязательный `.profdata` не вводятся; ADR-836 fat LTO сохранён.
+Следующий срез снова выбирается по retained-history профилю, не по build flags.
+
+Срез492 / ADR-836: [fat LTO](492-fat-lto.md). Две ordinary1600-пары дали mean−0,63%,
+позднее окно−1,08%, debris−1,84%; все36 полей и replay1/4/8 совпали. Две native
+пары дали +1,59% FPS, p99 кадра−1,01%, `fragments` p50−6,14% и
+`simulation_core` p50−0,93%; все capture валидны,20Гц не достигнуто. Это изменение
+release profile без изменения исходной логики и не решение retained-history lifecycle.
+
+Срез490 / ADR-835: [overlap fragment publication и slot alignment](490-overlap-fragment-publication.md).
+Две native пары дали +6,1% FPS, около−13% `fragments` p50 и−5,4% p99 кадра;
+lifecycle-тест прошёл. Это устранение render-барьера, а не изменение SIM lifecycle.
+
+Срез486 / ADR-834: [переиспользование merge shard buffers](486-reused-merge-shards.md).
+Две ordinary1600-пары дали mean−0,22%, позднее окно−0,43%; все36 полей и replay1/4/8
+совпали. Изменено только время жизни существующих vectors, а не join membership.
+
+Срез485 [суммарный baseline→832](485-cumulative-832-measurement.md): две строгие
+1600-пары дали mean−26,31%, позднее окно−29,75%, debris−46,54%, rubble−22,17%;
+все36 полей совпали. Относительная скорость тика ×1,357, позднего ×1,423. Это новая
+matched оценка вместо479, не пересчёт процентов разных серий и не native FPS-замер.
+
+Срез484 / ADR-833: [восемь render compute workers](484-default-compute-workers.md).
+Две native пары дали +2,84% FPS и около−11% `simulation_core` p50; все capture
+валидны, 20 Гц не достигнуто. Изменён только compute pool, глобальный Rayon4 и SIM
+сохранены.
+
+Срез483 / ADR-832: [hash-таблица changed keys](483-hash-changed-keys.md).
+Две ordinary1600-пары дали mean−0,87%, позднее окно−1,41%, debris−3,14%; merge keys
+примерно−14%. Все36 полей и replay1/4/8 совпали. Изменён только membership-контейнер,
+а не join lifecycle.
+
+Срез482 / ADR-831: [overlap merge keys и wake wreck prune](482-merge-prune-overlap.md).
+Две ordinary1600-пары дали mean−0,59%, позднее окно−0,65%, при смешанных парах и
+debris+0,34%. Все36 полей и replay1/4/8 совпали. Это небольшое устранение ожидания,
+а не изменение join membership или решение retained-history lifecycle.
+
+Срез479 [суммарный baseline→830](479-cumulative-830-measurement.md): две строгие
+1600-пары дали mean−23,70%, позднее окно−27,24%, debris−43,49%, rubble−18,24%;
+все36 полей совпали. Относительная скорость тика ×1,311, позднего ×1,374. Это новая
+matched оценка вместо475, не пересчёт процентов разных серий и не native FPS-замер.
+
+Срез478 / ADR-830: [overlap Settled shapes и cell construction](478-overlap-shapes-cells.md).
+Две ordinary1600-пары дали mean−4,01%, позднее окно−5,05%, debris−9,63%; SettledCells
+примерно−39%. Все36 полей и replay1/4/8 совпали. Это устранение барьера независимых
+стадий без новых buffers, а не решение retained-history lifecycle.
+
+Срез475 [суммарный baseline→829](475-cumulative-829-measurement.md): две строгие
+1600-пары дали mean−23,50%, позднее окно−26,15%, debris−41,10%, rubble−19,70%;
+все36 полей совпали. Относительная скорость тика ×1,307, позднего ×1,354. Это новая
+matched оценка вместо470, не пересчёт процентов разных серий и не native FPS-замер.
+
+Срез474 / ADR-829: [восемь physics workers по умолчанию](474-default-physics-workers.md).
+World headless mean−14,94%, позднее окно−16,74%, debris−26,38%; Canister−14,77%;
+native +5,76% FPS и−6,85% p99. Все36 полей и replay совпали. 20 Гц не достигнуто;
+retained-history работа и owned publication остаются открытыми.
+
+Срез470 [суммарный baseline→828](470-cumulative-828-measurement.md): две строгие
+1600-пары дали mean−9,81%, позднее окно−12,15%, debris−20,69%; все36 полей совпали.
+Это новая matched оценка вместо454, не native FPS-замер и не сложение процентов разных
+серий. Следующий глобальный вопрос остаётся P0-B exact compact cold piles.
+
+Срез467 / ADR-828: [параллельная очистка Settled stripes](467-parallel-settled-clear.md).
+Две ordinary1600-пары дали mean−0,76%, позднее окно−0,64%, debris−0,92%; все36 полей
+и replay1/4/8 совпали. Это завершённый срез OPT316-04a без нового persistent state;
+основная retained-history работа и полная FPS-приёмка остаются открытыми.
+
+Срез457 [native после ADR-827](457-native-827-measurement.md): 26,50 FPS,
+p99 110,856 мс,1% low8,30,987 тиков,debt19,realtime ratio0,8202. Это новое
+фактическое состояние, не matched FPS A/B;20Гц не достигнуто. Следующий этап —
+owned SIM publication/owner, без подмены retained-history оптимизации SIM.
+
+Срез454 [суммарный baseline→827](454-cumulative-827-measurement.md): две строгие
+1600-пары дали mean−10,82%, позднее окно−14,17%, debris−21,53%, motion−0,90%,
+rubble−2,31%; все35 полей и hash совпали. Это заменяет прежнюю cumulative оценку,
+но не является новым native FPS-замером. Следующий глобальный вопрос — P0-B exact
+compact cold piles после rejected persistent indexes.
+
+Срез453 / ADR-827: [переиспользование subcell offsets](453-reused-subcell-offsets.md).
+Один derived массив на `Explosion` вместо нового Vec на каждый read/contact/ground-only
+вызов. Ordinary ABBA: mean−0,79%, позднее окно−0,76%, все35 полей и replay1/4/8
+совпали. Nuclear: все181 hash совпали, `read_ground`−50,41%. Это завершённый точный
+срез OPT316-02b, а не закрытие capture/paid claims или общей FPS-приёмки.
+
+Срез448 [Resting World stable-ID foundation](448-resting-world-foundation.md):
+dense id→record/slot, persistent membership, exact want gate, full/incremental
+oracle совпали. Это не микрокэш и ещё не runtime speedup. Следом ordered mutation
+journal и замена полного Settled с ABBA/replay/drain.
+
+Проба447 [inline changed в batches](447-inline-batch-change-detection-rejected.md)
+отклонена: две native пары FPS−1,87%, fragments+5,85%, p99+1,55%. Lifecycle и
+контекст валидны, realtime20Гц нет. `batches.rs` возвращён без diff; встроенное
+Vec comparison эффективнее changed-логики.
+
+Срез446 / ADR-826: [pool snapshot в keep_on_map](446-fused-fragment-pool-snapshot.md).
+Повторный полный проход удалён. Две1600-пары: mean−0,27%, позднее окно−0,84%,
+debris−0,84%. Все36 полей и replay1/4/8 совпали. Retained history остаётся P0-A.
+
+Проба445 [identity radius `SettledShape`](445-settled-shape-identity-rejected.md)
+отклонена: mean+0,99%, позднее окно+1,48%, cells+8,40%. Все36 полей и shape
+тесты совпали; исходная формула восстановлена.
+
+Проба443 [run-length material summaries](443-material-run-summaries-rejected.md)
+отклонена: nuclear max−5,73%, read_ground−7,00%, pack−83,72%, но две обычные
+серии mean+0,77%, позднее окно+0,94%, debris+1,61%. Все543 nuclear хеша и36
+полей ordinary совпали; runtime полностью возвращён к baseline.
+
+Срез444 [суммарный замер ADR-819→825](444-cumulative-825-measurement.md):
+две строгие1600-пары mean−7,53%, позднее окно−11,62%, debris−17,53%; все36
+полей совпали. Текущий native60:29,81FPS,p99 104,386мс,1% low8,96,1026 тиков,
+долг19. Исторический427 даёт ориентир+15,95% FPS, не matched A/B. Реального
+20Гц нет; прежняя оценка18–21% заменена строгими значениями.
+
+Проба442 [parallel join current](442-parallel-join-current-rejected.md) отклонена:
+mean+3,45%, позднее окно+3,79%, merge_keys+51,91%. Все36 полей совпали; runtime
+возвращён к ADR-825. Indexed collect/Rayon дороже линейного прохода.
+
+Проба441 [слияние selected/cell partition](441-fused-settled-selection-rejected.md)
+отклонена: mean+3,17%, позднее окно+4,54%, candidates+cells+26,40%. Порядок
+cell lists,36 полей и restore совпали; runtime возвращён к ADR-825. Не увеличивать
+requests ради удаления selected; учитывать сумму phases.
+
+Проба440 [dirty join membership](440-dirty-join-membership-rejected.md) отклонена:
+mean+17,80%, позднее окно+19,11%, merge_keys+290,3%. Все36 полей совпали;
+runtime возвращён к ADR-825. Binary updates и ordered dirty set дороже линейного
+current. Следующий Settled — слияние candidates/shape/cell partition без selected.
+
+Проба439 [streaming sorted diff](439-streaming-join-diff-rejected.md) отклонена:
+две пары дали mean−0,72%, позднее окно−0,44%, но merge_keys+1,54%; вторая пара
+почти устранила общий эффект. Все36 полей совпали, runtime возвращён к ADR-825.
+Следующий кандидат — dirty membership/current, не перестановка полных проходов.
+
+Проба438 [persistent boxes `Settled`](438-persistent-settled-boxes-rejected.md)
+отклонена: mean+1,56%, позднее окно+2,94%, settled_boxes+14,70%. Все36 полей
+и lab restore совпали после запрета reuse во внешнем rubble-path. Runtime не
+переносился. Нужен dirty journal/устранение полных проходов, не signature-cache.
+
+Срез437 / ADR-825: [merge-aware memo](437-merge-aware-join-memo.md).
+Memo остаётся действительным после transfers: donors/heads инвалидируют свои keys
+на следующем тике. Две пары1600: mean−7,67%, позднее окно−9,60%, debris−16,99%,
+grouped inputs−93,42%. Все36 полей и replay1/4/8 совпали. Полный current, Settled,
+wake и rubble остаются; следующий шаг — persistent exact `Settled`/current.
+
+Стратегия436 [Active World + Resting World](436-global-resting-world.md):
+глобальная цель — CPU plateau без смены геймплея. Логический обломок не должен
+быть вечно обслуживаемым телом: cold pages, stable-ID/order, persistent indexes,
+due schedule и единый ordered mutation journal для Settled/join/wake/rubble/
+publication. Внедрение поэтапное с oracle, не большой rewrite. Sparse/compound
+piles — отдельный ADR только для оставшегося роста памяти/числа объектов.
+
+Диагностика435 [фактической работы retained state](435-retained-work-counters.md):
+в позднем бою selected `Settled`≈94% истории, cell links424317/тик. Join memo
+недействительно1576/1600 тиков из-за transfers; grouped136036 из current136382
+при39,55 transfers. Первый узкий эксперимент — merge-aware memo с точной
+инвалидацией donor/head keys, затем persistent полный `Settled` с exact `want`
+gate. Обычный transfer не должен означать полный rebuild. Все36 полей совпали.
+
+Исследование434 [retained debris и внешние архитектуры](434-retained-state-research.md)
+уточняет P0-A: persistent exact `Settled` с `want` gate на каждую ячейку,
+stable-ID membership, dirty fallback и active/cold layout. Затем persistent join
+membership вместо полного `current`, dependency wake/rubble и только потом
+compound piles отдельным ADR. Box2D/Jolt/PhysX подтверждают направление; culling
+NVIDIA Blast и потеря точности неприменимы. Первый шаг — counters и узкий A1.
+
+Проба433 [sorted Vec changed-ключей](433-sorted-changed-vec-rejected.md)
+отклонена: mean+1,66%, debris+2,02%, merge keys позднего окна+1,70%. Все36
+полей совпали; runtime не переносился. Дерево заменено только в изолированном
+прототипе; устойчивого ускорения полного тика нет.
+
+Проба432 [переиспользования `selected`](432-selected-buffer-rejected.md)
+отклонена: candidates−8%, но mean+0,17%, debris+0,82%. Все36 полей совпали;
+runtime не переносился. Локального ускорения недостаточно для принятия.
+
+Срез431 / ADR-824: [moving-only запросы корпусов](431-moving-hull-queries.md).
+Wake проверяет push только среди корпусов с ненулевой скоростью, BVH-узлы
+получают moving flag. Две пары дают mean−1,31%, позднее окно−1,27%; все36
+полей и replay совпали. Отдельный стабильный процент wake не заявляется.
+
+Срез430 / ADR-823: [merge join по ID](430-sorted-changed-keys.md).
+`Memo::changed` больше не строит большую hash-таблицу для сортированных ID.
+Две пары: merge_keys−3,7/−3,0%, mean−0,27%; все36 полей, холодный oracle и
+replay совпали. Несортированный hash fallback прежний. P0-A продолжается.
+
+Проба429 [кэширования шкалы `Geometry`](429-geometry-scale-cache-rejected.md)
+отклонена: merge_groups+5,1%, поздний тик+6,52% при совпадающих36 полях.
+Origin-кэш заранее удалён из-за изменяемой позиции; runtime не переносился.
+
+Проба428 [фильтра singleton changed-куч](428-singleton-join-filter-rejected.md)
+отклонена: merge_keys+8,8%, поздний тик+2,79% при совпадающих36 полях.
+Runtime не переносился. Подсчёт всех ключей дороже пропускаемой работы.
+
+Срез426 / ADR-822: [точная ёмкость `others`](426-motion-others-capacity.md).
+Две пары1600: mean35,173→34,943мс (−0,65%), motion−0,68%, позднее окно−0,67%.
+Все36 полей и replay совпали. Это завершённая P2-оптимизация, не смена P0-A.
+
+Актуализация: [сквозной аудит427](427-engine-performance-review.md). Свежий
+headless mean91,271мс, последнее окно161,110мс;945938 фрагментов. Native60:
+25,71FPS,p99кадра115,677мс,968 тиков за60с. Главный приоритет — retained
+history и его потребители: dirty/active Settled/wake/merge/rubble, затем агрегация
+осевших обломков отдельным ADR. Пики волн, owned SIM owner, gas и масштабная
+навигация остаются самостоятельными направлениями. Полный drain1610/1800 не
+считается завершённым; свежих GPU passes нет.
+
+Проба425 [битовой маски `support_due`](425-settled-due-mask-rejected.md) отклонена:
+после исправления mapping все36 полей совпали, но mean+9,24%, Settled+4,99%.
+Runtime не переносился; повторный support_due дешевле маски и её объединения.
+
+Проба424 [incremental `Settled`](424-incremental-settled-rejected.md) отклонена:
+полный y-superset изменил контакты hull-wake вне исходного want, найдено31560
+расхождений; mean+38%. Runtime не переносился. Следующий индекс обязан сохранять
+точную want.column-семантику.
+
+Проба423 [BVH для `Settled::carries`](423-hull-carries-index-rejected.md)
+отклонена: candidates+19,1%, поздний тик+1,44% при62 корпусах. Scalar-oracle
+и все36 игровых полей совпали; runtime не переносился. Persistent membership
+Settled остаётся основным кандидатом04a.
+
+Срез422 / ADR-821: [слияние только изменившихся куч](422-changed-join-groups.md).
+Стабильные ID, ключи и геометрия инвалидируют только затронутые кучи; полный
+fallback и следующий тик после переноса прежние. Три пары1501–1600 дали
+−4,88/−0,37/−3,38%; все36 полей, холодный oracle и replay совпали. Полные обходы
+Settled/wake и сборка current остаются в05a.
+
+Проба421 [active-list для `debris_translate`](421-active-translate-rejected.md)
+отклонена: пачки256 дали mean+6,32% при локальном выигрыше `translate`,
+пачки4096 — поздний тик+4,50%. Все36 игровых полей совпали; runtime в рабочее
+дерево не переносился. Более крупные полные обходы05a остаются открытыми.
+
+Срез420 / ADR-820: [общая шкала слияния обломков](420-join-scale.md).
+`Geometry::join` больше не выполняет три одинаковых fixed-point деления шкалы.
+В двух1600-парах `merge_groups` дешевле в обеих, поздний тик53,727→52,221мс
+(−2,80%); полный mean+0,14%, то есть на уровне шума. Все36 полей, replay и
+тесты геометрии сохранены. Memo-вариант411 отклонён; active/dirty обходы открыты.
+
+Срез410 / ADR-819: [компактная запись приземлений](410-compact-landed-wrecks.md).
+`debris_translate` собирает только фактические приземления вместо `Vec<Option<Wreck>>`
+на всю историю. В годной 1600-паре mean38,610→35,424мс, позднее окно
+57,161→51,530мс, целевая фаза−35,16%; первая3000-пара дала mean−1,38%.
+Все36 игровых полей каждого тика, replay и хеши1/4/8 сохранены. Повторные серии
+содержали внешние паузы; стабильный общий FPS не заявляется. Active/dirty IDs,
+persistent membership и остальные полные обходы05a/04a остаются открытыми.
+
 Срез399 / ADR-814: [широкая кубическая ядерная воронка](399-wide-cubic-nuclear-crater.md).
 Ширина14→83,1м при глубине центра6,5м; новые уступы задаются данными,
 сохраняются с зарядом и читаются занятыми рядами над полом. Размер куба,
@@ -121,7 +452,7 @@ Ordinary native240 среза323:3840×1949,39,7 FPS,p9956,54 мс,
 | OPT316-00 | P0, базовые часы готовы; пробелы открыты | Узкие счётчики причин/стоимости и сопоставление CPU/GPU кадров | Перед своим экспериментом |
 | OPT316-01 | **Выполнен**,317 / ADR-743 | Равный rubble сохраняет coarse cache | Только регрессии |
 | OPT316-02a | **Выполнен**,318 / ADR-744 | Ограничена лишняя подготовка coarse cells; общий peak gate открыт | Только регрессии |
-| OPT316-02b | **Частично**,319/320/345/346/347 / ADR-745/746/762/763/764 | Columns, маски отказов, панели и процедурные интервалы готовы; дальше exact summaries и bulk claims | Профиль capture/claims/read |
+| OPT316-02b | **Частично**,319/320/345/346/347/453 / ADR-745/746/762/763/764/827 | Columns, маски, панели, процедурные интервалы и reused offsets готовы; дальше exact capture/bulk claims | Профиль capture/claims/read |
 | OPT316-03 | P0, **открыт**, drain321 выполнен | Полнота контактов, причины удержания slots, меньше повторов, устойчивый progress валки |00; не блокирует точный04a |
 | OPT316-04, подготовка колонок | **Выполненный срез322**, ADR-747 | Компактные footprint spans и прямые максимумы строк; повторные клетки не материализуются | Прежние проверки опор и fallback |
 | OPT316-04, чтение опор | **Выполненный срез323**, ADR-748 | Независимые supports на замороженном индексе; ordered join | Полный rebuild индекса сохранён |

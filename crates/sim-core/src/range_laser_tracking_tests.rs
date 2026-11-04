@@ -375,7 +375,8 @@ fn spider_direct_beam_damages_new_target_when_heat_field_is_full_of_hot_cells() 
         for y in 0..body.vol.ny {
             for z in 0..body.vol.nz {
                 if body.vol.get(x as usize, y as usize, z as usize)
-                    && body.part_at(x as usize, y as usize, z as usize) == voxel::Part::Armour {
+                    && body.part_at(x as usize, y as usize, z as usize) == voxel::Part::Armour
+                {
                     old.push(thermal::Cell {
                         unit: 2,
                         part: 0,
@@ -405,7 +406,10 @@ fn spider_direct_beam_damages_new_target_when_heat_field_is_full_of_hot_cells() 
         r.thermals.melted > 0,
         "direct laser heat was rejected by a full field of hot cells"
     );
-    assert!(r.thermals.hot() >= 64, "accepted heat must not evict earlier cells");
+    assert!(
+        r.thermals.hot() >= 64,
+        "accepted heat must not evict earlier cells"
+    );
     assert!(r.matter.economy.ledger.balanced());
 }
 

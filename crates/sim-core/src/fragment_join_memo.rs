@@ -2,6 +2,9 @@
 //! Never caches world support, physics admission, or an approximate fingerprint.
 use super::*;
 pub(super) type Key = ([i32; 3], Mat, Option<[u8; 3]>, u16);
+fn changed_insert(changed: &mut FxLookup<Key, ()>, key: Key) {
+    changed.insert(key, ());
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct Input {
     pub key: Key,
@@ -14,6 +17,8 @@ pub(super) struct Memo {
     previous: Vec<Input>,
     pub current: Vec<Input>,
     valid: bool,
+    previous_sorted: bool,
+    current_sorted: bool,
     #[cfg(test)]
     pub hits: u64,
 }
@@ -24,16 +29,22 @@ impl Memo {
     }
     pub fn start_full(&mut self) {
         self.current.clear();
+        self.current_sorted = true;
     }
     pub fn start_update(&mut self) {
         assert!(self.can_update());
         self.current.clone_from(&self.previous);
+        self.current_sorted = self.previous_sorted;
     }
     pub fn update(&mut self, input: Input) {
-        match self.current.binary_search_by_key(&input.id, |input| input.id) {
+        match self
+            .current
+            .binary_search_by_key(&input.id, |input| input.id)
+        {
             Ok(index) => self.current[index] = input,
             Err(index) => self.current.insert(index, input),
         }
+        self.current_sorted = true;
     }
     pub fn remove(&mut self, id: u64) {
         if let Ok(index) = self.current.binary_search_by_key(&id, |input| input.id) {
@@ -50,6 +61,11 @@ impl Memo {
         f: &Fragment,
         geometry: fragment_join::Geometry,
     ) {
+        if self.current.is_empty() {
+            self.current_sorted = true;
+        } else {
+            self.current_sorted &= self.current.last().is_some_and(|last| last.id < f.id);
+        }
         self.current.push(Input {
             key,
             index,
@@ -57,13 +73,11 @@ impl Memo {
             geometry,
         });
     }
-    pub fn changed(&mut self) -> Option<BTreeSet<Key>> {
+    pub fn changed(&mut self) -> Option<FxLookup<Key, ()>> {
         if !self.valid {
             return None;
         }
-        let sorted = self.previous.windows(2).all(|pair| pair[0].id < pair[1].id)
-            && self.current.windows(2).all(|pair| pair[0].id < pair[1].id);
-        let changed = if sorted {
+        let changed = if self.previous_sorted && self.current_sorted {
             self.changed_sorted()
         } else {
             self.changed_hash()
@@ -74,25 +88,25 @@ impl Memo {
         }
         Some(changed)
     }
-    fn changed_sorted(&self) -> BTreeSet<Key> {
-        let mut changed = BTreeSet::new();
+    fn changed_sorted(&self) -> FxLookup<Key, ()> {
+        let mut changed = FxLookup::default();
         let (mut old, mut new) = (0, 0);
         while old < self.previous.len() || new < self.current.len() {
             if new == self.current.len()
                 || (old < self.previous.len() && self.previous[old].id < self.current[new].id)
             {
-                changed.insert(self.previous[old].key);
+                changed_insert(&mut changed, self.previous[old].key);
                 old += 1;
             } else if old == self.previous.len() || self.previous[old].id > self.current[new].id {
-                changed.insert(self.current[new].key);
+                changed_insert(&mut changed, self.current[new].key);
                 new += 1;
             } else {
                 if self.previous[old].key != self.current[new].key {
-                    changed.insert(self.previous[old].key);
-                    changed.insert(self.current[new].key);
+                    changed_insert(&mut changed, self.previous[old].key);
+                    changed_insert(&mut changed, self.current[new].key);
                 }
                 if self.previous[old].geometry != self.current[new].geometry {
-                    changed.insert(self.current[new].key);
+                    changed_insert(&mut changed, self.current[new].key);
                 }
                 old += 1;
                 new += 1;
@@ -100,31 +114,31 @@ impl Memo {
         }
         changed
     }
-    fn changed_hash(&self) -> BTreeSet<Key> {
+    fn changed_hash(&self) -> FxLookup<Key, ()> {
         let mut previous_by_id: FxLookup<u64, (usize, Key, fragment_join::Geometry)> =
             FxLookup::with_capacity(self.previous.len());
         for (index, input) in self.previous.iter().enumerate() {
             previous_by_id.insert(input.id, (index, input.key, input.geometry));
         }
         let mut matched = vec![false; self.previous.len()];
-        let mut changed = BTreeSet::new();
+        let mut changed = FxLookup::default();
         for input in &self.current {
             if let Some((index, key, geometry)) = previous_by_id.get(&input.id) {
                 matched[*index] = true;
                 if *key != input.key {
-                    changed.insert(*key);
-                    changed.insert(input.key);
+                    changed_insert(&mut changed, *key);
+                    changed_insert(&mut changed, input.key);
                 }
                 if *geometry != input.geometry {
-                    changed.insert(input.key);
+                    changed_insert(&mut changed, input.key);
                 }
             } else {
-                changed.insert(input.key);
+                changed_insert(&mut changed, input.key);
             }
         }
         for (index, input) in self.previous.iter().enumerate() {
             if !matched[index] {
-                changed.insert(input.key);
+                changed_insert(&mut changed, input.key);
             }
         }
         changed
@@ -133,8 +147,10 @@ impl Memo {
         // Transfers are visible as removed donors and changed heads in the next
         // input, which invalidates exactly their old and new keys.
         self.valid = true;
+        self.previous_sorted = self.current_sorted;
         std::mem::swap(&mut self.previous, &mut self.current);
         self.current.clear();
+        self.current_sorted = true;
     }
 }
 

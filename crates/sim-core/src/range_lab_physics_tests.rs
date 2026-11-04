@@ -18,314 +18,656 @@ fn lab() -> BlastRange {
 
 #[test]
 fn tank_energy_cannon_damages_more_than_the_previous_shot() {
-    use modding::range::{RangeUnitDef,RangeUnitKind};
-    let mut layout=modding::laboratory::Definition::stock().layout;
-    layout.size=[128,128,128];layout.clear_min=[1,1];layout.clear_max=[127,127];
-    layout.gun_point=true;layout.gun=[32,32,32];layout.target=[64,16,64];layout.laboratory=true;
-    layout.units=vec![RangeUnitDef{allied:true,kind:RangeUnitKind::Tank,at:[64,16,64],weapon:None}];
-    let current=ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
-    let mut previous=current;previous.energy=1550;previous.heat_per_cell=105;
-    let mut damage=[0;2];
-    for (index, config) in [current,previous].into_iter().enumerate() {
-        let mut sim=BlastRange::with_layout(config,layout.clone()).unwrap();
-        sim.control();sim.set_physics_workers(1);sim.set_navigation_workers(1);
-        assert!(sim.execute_command(Command::Gun(battle::commands::GunCommand::Detonate {at:[64,30,64]})).admitted());
-        for _ in 0..40 {sim.step();}
-        damage[index]=sim.units[0].removed.len()+sim.units[0].seg_removed.len();
+    use modding::range::{RangeUnitDef, RangeUnitKind};
+    let mut layout = modding::laboratory::Definition::stock().layout;
+    layout.size = [128, 128, 128];
+    layout.clear_min = [1, 1];
+    layout.clear_max = [127, 127];
+    layout.gun_point = true;
+    layout.gun = [32, 32, 32];
+    layout.target = [64, 16, 64];
+    layout.laboratory = true;
+    layout.units = vec![RangeUnitDef {
+        allied: true,
+        kind: RangeUnitKind::Tank,
+        at: [64, 16, 64],
+        weapon: None,
+    }];
+    let current =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut previous = current;
+    previous.energy = 1550;
+    previous.heat_per_cell = 105;
+    let mut damage = [0; 2];
+    for (index, config) in [current, previous].into_iter().enumerate() {
+        let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
+        sim.control();
+        sim.set_physics_workers(1);
+        sim.set_navigation_workers(1);
+        assert!(sim
+            .execute_command(Command::Gun(battle::commands::GunCommand::Detonate {
+                at: [64, 30, 64]
+            }))
+            .admitted());
+        for _ in 0..40 {
+            sim.step();
+        }
+        damage[index] = sim.units[0].removed.len() + sim.units[0].seg_removed.len();
         assert!(sim.matter.economy.ledger.balanced());
     }
-    eprintln!("energy cannon tank cells removed: new={} previous={}",damage[0],damage[1]);
-    assert!(damage[1]>0 && damage[0]>damage[1],"current/previous tank damage: {damage:?}");
+    eprintln!(
+        "energy cannon tank cells removed: new={} previous={}",
+        damage[0], damage[1]
+    );
+    assert!(
+        damage[1] > 0 && damage[0] > damage[1],
+        "current/previous tank damage: {damage:?}"
+    );
 }
 
 #[test]
 fn spider_weapon_survives_repeated_t2_energy_impacts_at_the_muzzle() {
-    use modding::range::{RangeUnitDef,RangeUnitKind};
-    let mut layout=modding::laboratory::Definition::stock().layout;
-    layout.size=[256,128,256];layout.clear_min=[1,1];layout.clear_max=[255,255];
-    layout.gun_point=true;layout.gun=[32,32,32];layout.target=[128,16,128];layout.laboratory=true;
-    layout.units=vec![RangeUnitDef{allied:true,kind:RangeUnitKind::Spider,at:[128,16,128],weapon:None}];
-    let mut config=ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap().at_power(1200);
-    config.hull_impulse_milli=0; // Keep each deliberate strike on the same spot.
-    let mut r=BlastRange::with_layout(config,layout).unwrap();r.control();
-    r.set_physics_workers(1);r.set_navigation_workers(1);
-    let at=r.units[0].world_pos([86,45,40]);
-    let mut landed=0;
+    use modding::range::{RangeUnitDef, RangeUnitKind};
+    let mut layout = modding::laboratory::Definition::stock().layout;
+    layout.size = [256, 128, 256];
+    layout.clear_min = [1, 1];
+    layout.clear_max = [255, 255];
+    layout.gun_point = true;
+    layout.gun = [32, 32, 32];
+    layout.target = [128, 16, 128];
+    layout.laboratory = true;
+    layout.units = vec![RangeUnitDef {
+        allied: true,
+        kind: RangeUnitKind::Spider,
+        at: [128, 16, 128],
+        weapon: None,
+    }];
+    let mut config = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron"))
+        .unwrap()
+        .at_power(1200);
+    config.hull_impulse_milli = 0; // Keep each deliberate strike on the same spot.
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.control();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    let at = r.units[0].world_pos([86, 45, 40]);
+    let mut landed = 0;
     for _ in 0..4 {
-        for _ in 0..120 {if r.ready(){break;}r.step();}
-        assert!(r.execute_command(Command::Gun(battle::commands::GunCommand::Detonate{at})).admitted());
-        for _ in 0..120 {r.step();if r.ready(){break;}}
-        landed+=1;
-        assert!(r.units[0].status.alive && r.units[0].status.weapon,
-            "spider core or weapon lost after {landed} concentrated hits: {:?}",r.units[0].status);
+        for _ in 0..120 {
+            if r.ready() {
+                break;
+            }
+            r.step();
+        }
+        assert!(r
+            .execute_command(Command::Gun(battle::commands::GunCommand::Detonate { at }))
+            .admitted());
+        for _ in 0..120 {
+            r.step();
+            if r.ready() {
+                break;
+            }
+        }
+        landed += 1;
+        assert!(
+            r.units[0].status.alive && r.units[0].status.weapon,
+            "spider core or weapon lost after {landed} concentrated hits: {:?}",
+            r.units[0].status
+        );
         assert!(r.matter.economy.ledger.balanced());
     }
 }
 
 #[test]
 fn spider_armour_rebalance_increases_damage_from_t2_energy() {
-    use modding::range::{RangeUnitDef,RangeUnitKind};
+    use modding::range::{RangeUnitDef, RangeUnitKind};
     let mut damage = [0usize; 2];
     for (index, previous) in [true, false].into_iter().enumerate() {
-        let mut layout=modding::laboratory::Definition::stock().layout;
-        layout.size=[256,128,256];layout.clear_min=[1,1];layout.clear_max=[255,255];
-        layout.gun_point=true;layout.gun=[32,32,32];layout.target=[128,16,128];layout.laboratory=true;
-        layout.units=vec![RangeUnitDef{allied:true,kind:RangeUnitKind::Spider,at:[128,16,128],weapon:None}];
-        let mut config=ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap().at_power(1200);
-        config.hull_impulse_milli=0;
-        let mut r=BlastRange::with_layout(config,layout).unwrap();r.control();
-        r.set_physics_workers(1);r.set_navigation_workers(1);
+        let mut layout = modding::laboratory::Definition::stock().layout;
+        layout.size = [256, 128, 256];
+        layout.clear_min = [1, 1];
+        layout.clear_max = [255, 255];
+        layout.gun_point = true;
+        layout.gun = [32, 32, 32];
+        layout.target = [128, 16, 128];
+        layout.laboratory = true;
+        layout.units = vec![RangeUnitDef {
+            allied: true,
+            kind: RangeUnitKind::Spider,
+            at: [128, 16, 128],
+            weapon: None,
+        }];
+        let mut config = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron"))
+            .unwrap()
+            .at_power(1200);
+        config.hull_impulse_milli = 0;
+        let mut r = BlastRange::with_layout(config, layout).unwrap();
+        r.control();
+        r.set_physics_workers(1);
+        r.set_navigation_workers(1);
         if previous {
-            let grade=[4500,3000,2500,20000,2000];
-            r.units[0].body.ablation_milli=grade;
-            for part in &mut r.units[0].body.segments { part.body.ablation_milli=grade; }
+            let grade = [4500, 3000, 2500, 20000, 2000];
+            r.units[0].body.ablation_milli = grade;
+            for part in &mut r.units[0].body.segments {
+                part.body.ablation_milli = grade;
+            }
         }
-        let at=r.units[0].world_pos([86,45,40]);
+        let at = r.units[0].world_pos([86, 45, 40]);
         for _ in 0..4 {
-            for _ in 0..120 {if r.ready(){break;}r.step();}
-            assert!(r.execute_command(Command::Gun(battle::commands::GunCommand::Detonate{at})).admitted());
-            for _ in 0..120 {r.step();if r.ready(){break;}}
+            for _ in 0..120 {
+                if r.ready() {
+                    break;
+                }
+                r.step();
+            }
+            assert!(r
+                .execute_command(Command::Gun(battle::commands::GunCommand::Detonate { at }))
+                .admitted());
+            for _ in 0..120 {
+                r.step();
+                if r.ready() {
+                    break;
+                }
+            }
         }
-        damage[index]=r.units[0].removed.len()+r.units[0].seg_removed.len();
-        assert!(r.units[0].status.alive && r.units[0].status.weapon,
-            "spider lost its core or weapon during four T2 energy impacts");
+        damage[index] = r.units[0].removed.len() + r.units[0].seg_removed.len();
+        assert!(
+            r.units[0].status.alive && r.units[0].status.weapon,
+            "spider lost its core or weapon during four T2 energy impacts"
+        );
         assert!(r.matter.economy.ledger.balanced());
     }
     eprintln!("T2 energy, four muzzle impacts: previous/current removed cells {damage:?}");
-    assert!(damage[1]>damage[0], "previous vs current removed cells: {damage:?}");
+    assert!(
+        damage[1] > damage[0],
+        "previous vs current removed cells: {damage:?}"
+    );
 }
 #[test]
 fn lab_live_cannon_tracks_during_charge_keeps_its_deadline_and_restores_flight() {
     use battle::commands::GunCommand as G;
-    let mut r=lab();r.set_physics_workers(1);r.set_navigation_workers(1);
-    let config=ExplosionConfig::from_ron(include_str!("../../../data/kinetic-shell.ron")).unwrap();
-    r.execute_command(Command::ConfigureWeapon{config});
-    let mut deadline=None;
+    let mut r = lab();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/kinetic-shell.ron")).unwrap();
+    r.execute_command(Command::ConfigureWeapon { config });
+    let mut deadline = None;
     for i in 0..=config.charge_ticks {
-        let origin=[40,70+i as i32,64];let target=[90,70+i as i32,64];
-        assert_eq!(r.execute_command(Command::Gun(G::LabStream{origin,target,enabled:true})),Outcome::Applied);
-        if let Some(want)=deadline {assert_eq!(r.fire_tick,want,"tracking must not restart charge");}else{deadline=Some(r.fire_tick);}
+        let origin = [40, 70 + i as i32, 64];
+        let target = [90, 70 + i as i32, 64];
+        assert_eq!(
+            r.execute_command(Command::Gun(G::LabStream {
+                origin,
+                target,
+                enabled: true
+            })),
+            Outcome::Applied
+        );
+        if let Some(want) = deadline {
+            assert_eq!(r.fire_tick, want, "tracking must not restart charge");
+        } else {
+            deadline = Some(r.fire_tick);
+        }
         r.step();
     }
-    assert!(r.shell.is_some(),"the charged round must launch");
-    let before=r.state_hash();
-    assert_eq!(r.execute_command(Command::Gun(G::LabStream{origin:[48,60,64],target:[80,60,64],enabled:true})),Outcome::Busy);
-    assert_eq!(r.state_hash(),before,"busy must not move a flying round's source");
-    let mut back=BlastRange::restore(r.config,&r.snapshot()).unwrap();back.set_physics_workers(1);back.set_navigation_workers(1);
-    let stop=Command::Gun(G::LabStream{origin:[0;3],target:[0;3],enabled:false});
-    r.execute_command(stop);back.execute_command(stop);
+    assert!(r.shell.is_some(), "the charged round must launch");
+    let before = r.state_hash();
+    assert_eq!(
+        r.execute_command(Command::Gun(G::LabStream {
+            origin: [48, 60, 64],
+            target: [80, 60, 64],
+            enabled: true
+        })),
+        Outcome::Busy
+    );
+    assert_eq!(
+        r.state_hash(),
+        before,
+        "busy must not move a flying round's source"
+    );
+    let mut back = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+    back.set_physics_workers(1);
+    back.set_navigation_workers(1);
+    let stop = Command::Gun(G::LabStream {
+        origin: [0; 3],
+        target: [0; 3],
+        enabled: false,
+    });
+    r.execute_command(stop);
+    back.execute_command(stop);
     assert!(r.shell.is_some());
-    for _ in 0..4 {r.step();back.step();assert_eq!(r.state_hash(),back.state_hash());}
+    for _ in 0..4 {
+        r.step();
+        back.step();
+        assert_eq!(r.state_hash(), back.state_hash());
+    }
 }
 
 #[test]
 fn lab_live_laser_can_cut_while_the_previous_explosion_is_working() {
     use battle::commands::GunCommand as G;
-    let mut r=lab();r.set_physics_workers(1);r.set_navigation_workers(1);
-    assert_eq!(r.execute_command(Command::Gun(G::Detonate{at:[64,15,64]})),Outcome::Applied);
+    let mut r = lab();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    assert_eq!(
+        r.execute_command(Command::Gun(G::Detonate { at: [64, 15, 64] })),
+        Outcome::Applied
+    );
     assert!(r.explosion.is_some());
-    r.execute_command(Command::ConfigureWeapon{config:ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap()});
-    assert_eq!(r.execute_command(Command::Gun(G::LabStream{origin:[40,60,64],target:[90,60,64],enabled:true})),Outcome::Applied);
-    r.step();assert!(r.streams.emitted()>0);
+    r.execute_command(Command::ConfigureWeapon {
+        config: ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap(),
+    });
+    assert_eq!(
+        r.execute_command(Command::Gun(G::LabStream {
+            origin: [40, 60, 64],
+            target: [90, 60, 64],
+            enabled: true
+        })),
+        Outcome::Applied
+    );
+    r.step();
+    assert!(r.streams.emitted() > 0);
 }
 #[test]
 fn lab_fragment_landing_he_shell_retains_finite_shapes_and_restores_the_settled_world() {
     use battle::commands::GunCommand as G;
-    let mut r=lab();r.set_physics_workers(1);r.set_navigation_workers(1);
-    assert_eq!(r.execute_command(Command::Sculpt{at:[60,16,60],edge:8,material:2,erase:false}),Outcome::Queued);
+    let mut r = lab();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    assert_eq!(
+        r.execute_command(Command::Sculpt {
+            at: [60, 16, 60],
+            edge: 8,
+            material: 2,
+            erase: false
+        }),
+        Outcome::Queued
+    );
     r.step();
-    assert_eq!(r.execute_command(Command::Gun(G::Detonate{at:[64,18,64]})),Outcome::Applied);
-    let mut seen=BTreeMap::new();let mut flying=0;let mut resting=0;
+    assert_eq!(
+        r.execute_command(Command::Gun(G::Detonate { at: [64, 18, 64] })),
+        Outcome::Applied
+    );
+    let mut seen = BTreeMap::new();
+    let mut flying = 0;
+    let mut resting = 0;
     for _ in 0..140 {
         r.step();
         for f in &r.matter.debris.fragments {
-            if f.chunk.is_some() {continue;}
-            flying+=usize::from(!f.resting);resting+=usize::from(f.resting);
-            assert_eq!(f.count,f.shape.count_ones(),"landing must not hide inventory in a saturated enlarged pile");
-            if let Some(&(count,shape,side,mm))=seen.get(&f.id) {
-                if count==f.count {assert_eq!((shape,side,mm),(f.shape,f.side,f.mm),"a surviving shard changed shape on landing");}
+            if f.chunk.is_some() {
+                continue;
             }
-            seen.insert(f.id,(f.count,f.shape,f.side,f.mm));
+            flying += usize::from(!f.resting);
+            resting += usize::from(f.resting);
+            assert_eq!(
+                f.count,
+                f.shape.count_ones(),
+                "landing must not hide inventory in a saturated enlarged pile"
+            );
+            if let Some(&(count, shape, side, mm)) = seen.get(&f.id) {
+                if count == f.count {
+                    assert_eq!(
+                        (shape, side, mm),
+                        (f.shape, f.side, f.mm),
+                        "a surviving shard changed shape on landing"
+                    );
+                }
+            }
+            seen.insert(f.id, (f.count, f.shape, f.side, f.mm));
         }
         assert!(r.matter.economy.ledger.balanced());
     }
-    assert!(flying>0&&resting>0,"the HE fixture must actually fly and land debris");
-    let mut back=BlastRange::restore(r.config,&r.snapshot()).unwrap();back.set_physics_workers(1);back.set_navigation_workers(1);
-    for _ in 0..3 {r.step();back.step();assert_eq!(r.state_hash(),back.state_hash());}
+    assert!(
+        flying > 0 && resting > 0,
+        "the HE fixture must actually fly and land debris"
+    );
+    let mut back = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+    back.set_physics_workers(1);
+    back.set_navigation_workers(1);
+    for _ in 0..3 {
+        r.step();
+        back.step();
+        assert_eq!(r.state_hash(), back.state_hash());
+    }
 }
 #[test]
 fn lab_live_stream_moves_the_real_laser_and_stops_without_resetting_the_world() {
     use battle::commands::GunCommand as G;
-    let mut r=lab();
-    r.set_physics_workers(1);r.set_navigation_workers(1);
-    let config=ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap();
-    r.execute_command(Command::ConfigureWeapon{config});
-    for y in 16..35 {for z in 60..68 {r.world.queue_transfer(voxel::Edit::put(64,y,z,3));}}
-    r.world.flush_transfers();
-    let target=[64,30,64];
-    for origin in [[48,30,64],[48,31,63]] {
-        assert_eq!(r.execute_command(Command::Gun(G::LabStream{origin,target,enabled:true})),Outcome::Applied);
-        r.step();
-        assert_eq!(r.muzzle().map(Fx::to_int_trunc),origin);
-        assert!(r.streams.traces.iter().any(|t|t.from.map(Fx::to_int_trunc)==origin&&t.hit));
+    let mut r = lab();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap();
+    r.execute_command(Command::ConfigureWeapon { config });
+    for y in 16..35 {
+        for z in 60..68 {
+            r.world.queue_transfer(voxel::Edit::put(64, y, z, 3));
+        }
     }
-    assert!(r.heat.cell(target.map(|v|v as u32)).heat>0 || r.heat.melted_total>0);
-    let mut restored=BlastRange::restore(r.config,&r.snapshot()).unwrap();
-    restored.set_physics_workers(1);restored.set_navigation_workers(1);
-    assert_eq!(r.state_hash(),restored.state_hash());
-    let stop=Command::Gun(G::LabStream{origin:[0;3],target:[0;3],enabled:false});
-    assert_eq!(r.execute_command(stop),Outcome::Applied);
-    assert_eq!(restored.execute_command(stop),Outcome::Applied);
-    let serial=r.streams.emitted();
-    for _ in 0..4 {r.step();restored.step();assert_eq!(r.state_hash(),restored.state_hash());}
-    assert_eq!(r.streams.emitted(),serial);
+    r.world.flush_transfers();
+    let target = [64, 30, 64];
+    for origin in [[48, 30, 64], [48, 31, 63]] {
+        assert_eq!(
+            r.execute_command(Command::Gun(G::LabStream {
+                origin,
+                target,
+                enabled: true
+            })),
+            Outcome::Applied
+        );
+        r.step();
+        assert_eq!(r.muzzle().map(Fx::to_int_trunc), origin);
+        assert!(r
+            .streams
+            .traces
+            .iter()
+            .any(|t| t.from.map(Fx::to_int_trunc) == origin && t.hit));
+    }
+    assert!(r.heat.cell(target.map(|v| v as u32)).heat > 0 || r.heat.melted_total > 0);
+    let mut restored = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+    restored.set_physics_workers(1);
+    restored.set_navigation_workers(1);
+    assert_eq!(r.state_hash(), restored.state_hash());
+    let stop = Command::Gun(G::LabStream {
+        origin: [0; 3],
+        target: [0; 3],
+        enabled: false,
+    });
+    assert_eq!(r.execute_command(stop), Outcome::Applied);
+    assert_eq!(restored.execute_command(stop), Outcome::Applied);
+    let serial = r.streams.emitted();
+    for _ in 0..4 {
+        r.step();
+        restored.step();
+        assert_eq!(r.state_hash(), restored.state_hash());
+    }
+    assert_eq!(r.streams.emitted(), serial);
     assert!(r.streams.traces.is_empty());
-    assert!(r.world.material(64,16,60)!=0,"stop must retain the existing world");
+    assert!(
+        r.world.material(64, 16, 60) != 0,
+        "stop must retain the existing world"
+    );
 }
 #[test]
 fn lab_laser_makes_steel_flow_with_heat_and_replays() {
     use battle::commands::GunCommand as G;
-    let mut r=lab(); r.set_physics_workers(1); r.set_navigation_workers(1);
-    for y in 30..34 { for z in 62..66 { r.world.queue_transfer(voxel::Edit::put(80,y,z,3)); }}
+    let mut r = lab();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    for y in 30..34 {
+        for z in 62..66 {
+            r.world.queue_transfer(voxel::Edit::put(80, y, z, 3));
+        }
+    }
     r.world.flush_transfers();
-    let config=ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap();
-    r.execute_command(Command::ConfigureWeapon{config});
-    assert_eq!(r.execute_command(Command::Gun(G::LabStream{origin:[60,32,64],target:[90,32,64],enabled:true})),Outcome::Applied);
-    for _ in 0..10 { r.step(); }
-    assert!(r.heat.melted_total>0,"laser never melted the wall");
-    assert!(r.heat.has_molten(),"steel did not enter a flowing phase");
-    let before:Vec<_>=r.heat.molten_cells().filter(|p|r.world.material(p[0],p[1],p[2])==13).collect();
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap();
+    r.execute_command(Command::ConfigureWeapon { config });
+    assert_eq!(
+        r.execute_command(Command::Gun(G::LabStream {
+            origin: [60, 32, 64],
+            target: [90, 32, 64],
+            enabled: true
+        })),
+        Outcome::Applied
+    );
+    for _ in 0..10 {
+        r.step();
+    }
+    assert!(r.heat.melted_total > 0, "laser never melted the wall");
+    assert!(r.heat.has_molten(), "steel did not enter a flowing phase");
+    let before: Vec<_> = r
+        .heat
+        .molten_cells()
+        .filter(|p| r.world.material(p[0], p[1], p[2]) == 13)
+        .collect();
     assert!(!before.is_empty());
     assert!(r.matter.economy.ledger.balanced());
-    let mut back=BlastRange::restore(r.config,&r.snapshot()).unwrap();
-    back.set_physics_workers(1); back.set_navigation_workers(1);
-    for _ in 0..8 { r.step(); back.step(); assert_eq!(r.state_hash(),back.state_hash()); }
-    let after:Vec<_>=r.heat.molten_cells().filter(|p|r.world.material(p[0],p[1],p[2])==13).collect();
-    assert_ne!(before,after,"melt never moved");
+    let mut back = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+    back.set_physics_workers(1);
+    back.set_navigation_workers(1);
+    for _ in 0..8 {
+        r.step();
+        back.step();
+        assert_eq!(r.state_hash(), back.state_hash());
+    }
+    let after: Vec<_> = r
+        .heat
+        .molten_cells()
+        .filter(|p| r.world.material(p[0], p[1], p[2]) == 13)
+        .collect();
+    assert_ne!(before, after, "melt never moved");
     assert!(r.matter.economy.ledger.balanced());
 }
 #[test]
 fn lab_live_stream_rejects_invalid_or_nonlaboratory_sources_atomically() {
     use battle::commands::GunCommand as G;
-    let mut r=lab();
-    r.execute_command(Command::ConfigureWeapon{config:ExplosionConfig::from_ron(include_str!("../../../data/flamethrower.ron")).unwrap()});
-    for origin in [[0,32,64],[i32::MAX,32,64],[32,-1,64],[32,32,127]] {
-        let before=r.state_hash();
-        assert_eq!(r.execute_command(Command::Gun(G::LabStream{origin,target:[64,32,64],enabled:true})),Outcome::Rejected);
-        assert_eq!(r.state_hash(),before);
+    let mut r = lab();
+    r.execute_command(Command::ConfigureWeapon {
+        config: ExplosionConfig::from_ron(include_str!("../../../data/flamethrower.ron")).unwrap(),
+    });
+    for origin in [[0, 32, 64], [i32::MAX, 32, 64], [32, -1, 64], [32, 32, 127]] {
+        let before = r.state_hash();
+        assert_eq!(
+            r.execute_command(Command::Gun(G::LabStream {
+                origin,
+                target: [64, 32, 64],
+                enabled: true
+            })),
+            Outcome::Rejected
+        );
+        assert_eq!(r.state_hash(), before);
     }
-    r.layout.as_mut().unwrap().laboratory=false;
-    let before=r.state_hash();
-    assert_eq!(r.execute_command(Command::Gun(G::LabStream{origin:[32,32,64],target:[64,32,64],enabled:true})),Outcome::Rejected);
-    assert_eq!(r.state_hash(),before);
+    r.layout.as_mut().unwrap().laboratory = false;
+    let before = r.state_hash();
+    assert_eq!(
+        r.execute_command(Command::Gun(G::LabStream {
+            origin: [32, 32, 64],
+            target: [64, 32, 64],
+            enabled: true
+        })),
+        Outcome::Rejected
+    );
+    assert_eq!(r.state_hash(), before);
 }
 #[test]
 fn lab_live_flame_stops_new_packets_but_launched_fire_keeps_flying() {
     use battle::commands::GunCommand as G;
-    let mut r=lab();r.set_physics_workers(1);r.set_navigation_workers(1);
-    r.execute_command(Command::ConfigureWeapon{config:ExplosionConfig::from_ron(include_str!("../../../data/flamethrower.ron")).unwrap()});
-    r.execute_command(Command::Gun(G::LabStream{origin:[40,40,64],target:[80,40,64],enabled:true}));
+    let mut r = lab();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    r.execute_command(Command::ConfigureWeapon {
+        config: ExplosionConfig::from_ron(include_str!("../../../data/flamethrower.ron")).unwrap(),
+    });
+    r.execute_command(Command::Gun(G::LabStream {
+        origin: [40, 40, 64],
+        target: [80, 40, 64],
+        enabled: true,
+    }));
     r.step();
     assert!(!r.streams.rounds.is_empty());
-    let serial=r.streams.emitted();
-    let pos=r.streams.rounds[0].pos;
-    r.execute_command(Command::Gun(G::LabStream{origin:[0;3],target:[0;3],enabled:false}));
+    let serial = r.streams.emitted();
+    let pos = r.streams.rounds[0].pos;
+    r.execute_command(Command::Gun(G::LabStream {
+        origin: [0; 3],
+        target: [0; 3],
+        enabled: false,
+    }));
     r.step();
-    assert_eq!(r.streams.emitted(),serial);
+    assert_eq!(r.streams.emitted(), serial);
     assert!(!r.streams.rounds.is_empty());
-    assert_ne!(r.streams.rounds[0].pos,pos);
+    assert_ne!(r.streams.rounds[0].pos, pos);
 }
 #[test]
 fn lab_flamethrower_evaporates_water_on_direct_contact_and_replays() {
     use battle::commands::GunCommand as G;
-    let mut r=lab(); r.set_physics_workers(1); r.set_navigation_workers(1);
-    for x in 60..68 { for y in 16..19 { for z in 60..68 {
-        assert!(r.water.edit_volume([x,y,z],true));
-    }}}
-    let initial=r.water.stats().units;
-    r.execute_command(Command::ConfigureWeapon{config:ExplosionConfig::from_ron(include_str!("../../../data/flamethrower.ron")).unwrap()});
-    assert_eq!(r.execute_command(Command::Gun(G::LabStream{origin:[40,17,64],target:[66,17,64],enabled:true})),Outcome::Applied);
-    for _ in 0..12 {r.step();}
-    assert!(r.water.stats().vapor_units>0,"flame passed through water without evaporating it");
-    assert_eq!(r.water.stats().units,initial);
-    let mut copy=BlastRange::restore(r.config,&r.snapshot()).unwrap();
-    copy.set_physics_workers(1); copy.set_navigation_workers(1);
-    let start=r.water.stats().vapor_units;
-    for _ in 0..12 {r.step();copy.step();assert_eq!(r.state_hash(),copy.state_hash());}
-    assert!(r.water.stats().vapor_units>start,"continued flame stopped evaporating water");
-    assert_eq!(r.water.stats().units,initial);
+    let mut r = lab();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    for x in 60..68 {
+        for y in 16..19 {
+            for z in 60..68 {
+                assert!(r.water.edit_volume([x, y, z], true));
+            }
+        }
+    }
+    let initial = r.water.stats().units;
+    r.execute_command(Command::ConfigureWeapon {
+        config: ExplosionConfig::from_ron(include_str!("../../../data/flamethrower.ron")).unwrap(),
+    });
+    assert_eq!(
+        r.execute_command(Command::Gun(G::LabStream {
+            origin: [40, 17, 64],
+            target: [66, 17, 64],
+            enabled: true
+        })),
+        Outcome::Applied
+    );
+    for _ in 0..12 {
+        r.step();
+    }
+    assert!(
+        r.water.stats().vapor_units > 0,
+        "flame passed through water without evaporating it"
+    );
+    assert_eq!(r.water.stats().units, initial);
+    let mut copy = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+    copy.set_physics_workers(1);
+    copy.set_navigation_workers(1);
+    let start = r.water.stats().vapor_units;
+    for _ in 0..12 {
+        r.step();
+        copy.step();
+        assert_eq!(r.state_hash(), copy.state_hash());
+    }
+    assert!(
+        r.water.stats().vapor_units > start,
+        "continued flame stopped evaporating water"
+    );
+    assert_eq!(r.water.stats().units, initial);
     assert!(r.matter.economy.ledger.balanced());
 }
 #[test]
 fn lab_laser_evaporates_water_and_cannot_heat_the_wall_behind_it() {
     use battle::commands::GunCommand as G;
-    let mut r=lab(); r.set_physics_workers(1); r.set_navigation_workers(1);
-    let water=[60,40,64];
-    assert!(r.water.edit_volume(water,true));
-    r.world.queue_transfer(voxel::Edit::put(70,40,64,3));
+    let mut r = lab();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    let water = [60, 40, 64];
+    assert!(r.water.edit_volume(water, true));
+    r.world.queue_transfer(voxel::Edit::put(70, 40, 64, 3));
     r.world.flush_transfers();
-    let initial=r.water.stats().units;
-    r.execute_command(Command::ConfigureWeapon{config:ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap()});
-    assert_eq!(r.execute_command(Command::Gun(G::LabStream{origin:[40,40,64],target:[70,40,64],enabled:true})),Outcome::Applied);
+    let initial = r.water.stats().units;
+    r.execute_command(Command::ConfigureWeapon {
+        config: ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap(),
+    });
+    assert_eq!(
+        r.execute_command(Command::Gun(G::LabStream {
+            origin: [40, 40, 64],
+            target: [70, 40, 64],
+            enabled: true
+        })),
+        Outcome::Applied
+    );
     r.step();
-    assert!(r.water.stats().vapor_units>0,"laser did not evaporate water");
-    assert_eq!(r.heat.cell([70,40,64]).heat,0,"water did not attenuate the beam");
-    assert!(r.streams.traces.iter().any(|t|t.hit && t.to[0].to_int_trunc()<=60));
-    assert_eq!(r.water.stats().units,initial);
-    let mut copy=BlastRange::restore(r.config,&r.snapshot()).unwrap();
-    copy.set_physics_workers(1);copy.set_navigation_workers(1);
-    for _ in 0..4 {r.step();copy.step();assert_eq!(r.state_hash(),copy.state_hash());}
-    assert_eq!(r.water.stats().units,initial);
+    assert!(
+        r.water.stats().vapor_units > 0,
+        "laser did not evaporate water"
+    );
+    assert_eq!(
+        r.heat.cell([70, 40, 64]).heat,
+        0,
+        "water did not attenuate the beam"
+    );
+    assert!(r
+        .streams
+        .traces
+        .iter()
+        .any(|t| t.hit && t.to[0].to_int_trunc() <= 60));
+    assert_eq!(r.water.stats().units, initial);
+    let mut copy = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+    copy.set_physics_workers(1);
+    copy.set_navigation_workers(1);
+    for _ in 0..4 {
+        r.step();
+        copy.step();
+        assert_eq!(r.state_hash(), copy.state_hash());
+    }
+    assert_eq!(r.water.stats().units, initial);
 }
 #[test]
 fn laser_thermal_halo_evaporates_nearby_water() {
-    let mut r=lab(); r.set_physics_workers(1); r.set_navigation_workers(1);
-    assert!(r.water.edit_volume([60,80,65],true));
-    let tuning=r.streams.tuning.laser.clone();
-    let centre=|p:[i32;3]|p.map(|n|Fx::from_int(n).add(Fx::from_ratio(1,2)));
-    r.laser_halo(centre([40,80,64]),centre([70,80,64]),None,&tuning);
-    assert!(r.water.stats().vapor_units>0,"nearby water received no halo heat");
+    let mut r = lab();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    assert!(r.water.edit_volume([60, 80, 65], true));
+    let tuning = r.streams.tuning.laser.clone();
+    let centre = |p: [i32; 3]| p.map(|n| Fx::from_int(n).add(Fx::from_ratio(1, 2)));
+    r.laser_halo(centre([40, 80, 64]), centre([70, 80, 64]), None, &tuning);
+    assert!(
+        r.water.stats().vapor_units > 0,
+        "nearby water received no halo heat"
+    );
 }
 #[test]
 fn fuel_fire_evaporates_exposed_water_but_not_water_behind_a_wall() {
-    let mut r=lab(); r.set_physics_workers(1); r.set_navigation_workers(1);
-    let water=[62,80,64];
-    assert!(r.water.edit_volume(water,true));
-    let from=[60,80,64].map(|v|Fx::from_int(v).add(Fx::from_ratio(1,2)));
-    let initial=r.water.stats().units;
-    let used=r.deposit_fire_heat(from,4,1000);
-    assert!(used>0 && r.water.stats().vapor_units>0,"open water received no fire heat");
-    assert_eq!(r.water.stats().units,initial);
-    r.world.queue_transfer(voxel::Edit::put(61,80,64,3));
+    let mut r = lab();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    let water = [62, 80, 64];
+    assert!(r.water.edit_volume(water, true));
+    let from = [60, 80, 64].map(|v| Fx::from_int(v).add(Fx::from_ratio(1, 2)));
+    let initial = r.water.stats().units;
+    let used = r.deposit_fire_heat(from, 4, 1000);
+    assert!(
+        used > 0 && r.water.stats().vapor_units > 0,
+        "open water received no fire heat"
+    );
+    assert_eq!(r.water.stats().units, initial);
+    r.world.queue_transfer(voxel::Edit::put(61, 80, 64, 3));
     r.world.flush_transfers();
-    let before=r.water.stats().vapor_units;
-    r.deposit_fire_heat(from,4,1000);
-    assert_eq!(r.water.stats().vapor_units,before,"fire crossed a wall to reach water");
+    let before = r.water.stats().vapor_units;
+    r.deposit_fire_heat(from, 4, 1000);
+    assert_eq!(
+        r.water.stats().vapor_units,
+        before,
+        "fire crossed a wall to reach water"
+    );
 }
 #[test]
 fn explosion_thermal_pulse_evaporates_water_without_crossing_a_wall() {
-    for blocked in [false,true] {
-        let mut r=lab(); r.set_physics_workers(1); r.set_navigation_workers(1);
-        assert!(r.water.edit_volume([62,80,64],true));
-        if blocked {r.world.queue_transfer(voxel::Edit::put(61,80,64,3));r.world.flush_transfers();}
-        let initial=r.water.stats().units;
-        r.begin_charge_impact([60,80,64],[60,80,64]);
-        assert_eq!(r.water.stats().vapor_units>0,!blocked);
-        assert_eq!(r.water.stats().units,initial);
+    for blocked in [false, true] {
+        let mut r = lab();
+        r.set_physics_workers(1);
+        r.set_navigation_workers(1);
+        assert!(r.water.edit_volume([62, 80, 64], true));
+        if blocked {
+            r.world.queue_transfer(voxel::Edit::put(61, 80, 64, 3));
+            r.world.flush_transfers();
+        }
+        let initial = r.water.stats().units;
+        r.begin_charge_impact([60, 80, 64], [60, 80, 64]);
+        assert_eq!(r.water.stats().vapor_units > 0, !blocked);
+        assert_eq!(r.water.stats().units, initial);
     }
 }
 #[test]
 fn pending_water_heat_survives_full_scene_snapshot() {
-    let mut r=lab();r.set_physics_workers(1);r.set_navigation_workers(1);
-    let p=[60,80,64];assert!(r.water.edit_volume(p,true));
-    assert_eq!(r.water.absorb_heat(p,1,r.size),1);
-    let mut copy=BlastRange::restore(r.config,&r.snapshot()).expect("snapshot with partial water heat");
-    copy.set_physics_workers(1);copy.set_navigation_workers(1);
+    let mut r = lab();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    let p = [60, 80, 64];
+    assert!(r.water.edit_volume(p, true));
+    assert_eq!(r.water.absorb_heat(p, 1, r.size), 1);
+    let mut copy =
+        BlastRange::restore(r.config, &r.snapshot()).expect("snapshot with partial water heat");
+    copy.set_physics_workers(1);
+    copy.set_navigation_workers(1);
     for _ in 1..r.water.tuning.evaporation_heat {
-        r.water.absorb_heat(p,1,r.size);copy.water.absorb_heat(p,1,copy.size);
-        assert_eq!(r.state_hash(),copy.state_hash());
+        r.water.absorb_heat(p, 1, r.size);
+        copy.water.absorb_heat(p, 1, copy.size);
+        assert_eq!(r.state_hash(), copy.state_hash());
     }
-    assert_eq!(r.water.stats().vapor_units,1);
+    assert_eq!(r.water.stats().vapor_units, 1);
 }
 #[test]
 fn lab_physics_sculpt_is_gated_bounded_and_actual_removals_are_accounted() {
@@ -435,7 +777,10 @@ fn lab_physics_sand_vitrifies_through_shared_heat_without_losing_volume() {
     r.heat.add(&r.world, p, 1600);
     r.step();
     assert_eq!(r.world.material(p[0], p[1], p[2]), 12);
-    assert!(r.heat.cell(p).heat > 0, "vitrification discarded stored heat");
+    assert!(
+        r.heat.cell(p).heat > 0,
+        "vitrification discarded stored heat"
+    );
     assert_eq!(
         r.matter.economy.mats.get(10).unwrap().density,
         r.matter.economy.mats.get(12).unwrap().density
@@ -453,19 +798,34 @@ fn lab_glass_accepts_laser_heat_and_melts_again_without_losing_matter() {
     r.set_physics_workers(1);
     r.set_navigation_workers(1);
     let p = [64, 30, 64];
-    for y in 27..34 { for z in 61..68 {
-        r.world.queue_transfer(voxel::Edit::put(64, y, z, 12));
-    }}
+    for y in 27..34 {
+        for z in 61..68 {
+            r.world.queue_transfer(voxel::Edit::put(64, y, z, 12));
+        }
+    }
     r.world.flush_transfers();
-    r.execute_command(Command::ConfigureWeapon { config: ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap() });
-    assert_eq!(r.execute_command(Command::Gun(G::LabStream { origin: [48, 30, 64], target: [64, 30, 64], enabled: true })), Outcome::Applied);
+    r.execute_command(Command::ConfigureWeapon {
+        config: ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap(),
+    });
+    assert_eq!(
+        r.execute_command(Command::Gun(G::LabStream {
+            origin: [48, 30, 64],
+            target: [64, 30, 64],
+            enabled: true
+        })),
+        Outcome::Applied
+    );
     r.step();
     assert!(r.heat.cell(p).heat > 0, "laser failed to heat glass");
     let threshold = r.matter.economy.mats.get(12).unwrap().melt;
     r.heat.add(&r.world, p, threshold);
     r.step();
-    assert!(r.heat.molten_cells().any(|q|r.world.material(q[0],q[1],q[2])==16),
-        "hot glass did not enter a conserved flowing phase");
+    assert!(
+        r.heat
+            .molten_cells()
+            .any(|q| r.world.material(q[0], q[1], q[2]) == 16),
+        "hot glass did not enter a conserved flowing phase"
+    );
     assert!(r.matter.economy.ledger.balanced());
     let copy = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     assert_eq!(r.state_hash(), copy.state_hash());
@@ -543,21 +903,51 @@ fn buried_charge_varied_power_and_depth_preserves_energy_and_moves_units() {
     for power in [100u32, 500, 1000, 4000] {
         for y in [1, 8, 14, 16] {
             let mut l = modding::laboratory::Definition::stock().layout;
-            l.size=[128,128,128];l.clear_min=[1,1];l.clear_max=[127,127];l.gun_point=true;l.gun=[32,32,32];l.target=[64,16,64];l.laboratory=true;
-            l.units=vec![RangeUnitDef{allied:true,kind:RangeUnitKind::Tank,at:[64,16,64],weapon:None}];
-            let c=ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap().at_power(power);
-            let mut r=BlastRange::with_layout(c,l).unwrap();r.control();r.set_physics_workers(1);r.set_navigation_workers(1);
-            assert!(r.execute_command(Command::Gun(battle::commands::GunCommand::Detonate{at:[64,y,64]})).admitted());
-            let initial=r.units[0].motion.pos[1];let mut max=initial;
-            for _ in 0..35 {r.step();max=max.max(r.units[0].motion.pos[1]);}
+            l.size = [128, 128, 128];
+            l.clear_min = [1, 1];
+            l.clear_max = [127, 127];
+            l.gun_point = true;
+            l.gun = [32, 32, 32];
+            l.target = [64, 16, 64];
+            l.laboratory = true;
+            l.units = vec![RangeUnitDef {
+                allied: true,
+                kind: RangeUnitKind::Tank,
+                at: [64, 16, 64],
+                weapon: None,
+            }];
+            let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
+                .unwrap()
+                .at_power(power);
+            let mut r = BlastRange::with_layout(c, l).unwrap();
+            r.control();
+            r.set_physics_workers(1);
+            r.set_navigation_workers(1);
+            assert!(r
+                .execute_command(Command::Gun(battle::commands::GunCommand::Detonate {
+                    at: [64, y, 64]
+                }))
+                .admitted());
+            let initial = r.units[0].motion.pos[1];
+            let mut max = initial;
+            for _ in 0..35 {
+                r.step();
+                max = max.max(r.units[0].motion.pos[1]);
+            }
             if y < 16 {
                 assert!(r.upheaval.raised > 0, "no uplift: power={power} y={y}");
-                assert!(max > initial, "unit remained suspended: power={power} y={y}");
+                assert!(
+                    max > initial,
+                    "unit remained suspended: power={power} y={y}"
+                );
             } else {
-                assert_eq!(r.upheaval.raised, 0, "surface charge must not create underground uplift");
+                assert_eq!(
+                    r.upheaval.raised, 0,
+                    "surface charge must not create underground uplift"
+                );
             }
             assert!(r.matter.economy.ledger.balanced());
-            assert!(r.matter.spent_mj<=r.matter.supplied_mj);
+            assert!(r.matter.spent_mj <= r.matter.supplied_mj);
         }
     }
 }
@@ -575,12 +965,18 @@ fn buried_scenario_charge_power_expands_real_uplift_and_replays() {
         l.target = [128, 16, 128];
         l.laboratory = true;
         l.units.clear();
-        let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap().at_power(power);
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
+            .unwrap()
+            .at_power(power);
         let mut r = BlastRange::with_layout(c, l).unwrap();
         r.control();
         r.set_physics_workers(1);
         r.set_navigation_workers(1);
-        assert!(r.execute_command(Command::Gun(battle::commands::GunCommand::Detonate { at: [128, 8, 128] })).admitted());
+        assert!(r
+            .execute_command(Command::Gun(battle::commands::GunCommand::Detonate {
+                at: [128, 8, 128]
+            }))
+            .admitted());
         let mut radius = 0i64;
         let mut max_speed = 0i64;
         for tick in 0..8 {
@@ -594,7 +990,8 @@ fn buried_scenario_charge_power_expands_real_uplift_and_replays() {
                 max_speed = max_speed.max(-body.vy.raw());
             }
             if tick == 1 {
-                let mut restored = BlastRange::restore(r.config, &r.snapshot()).expect("scaled uplift snapshot");
+                let mut restored =
+                    BlastRange::restore(r.config, &r.snapshot()).expect("scaled uplift snapshot");
                 assert_eq!(restored.state_hash(), r.state_hash());
                 let mut uninterrupted = BlastRange::restore(r.config, &r.snapshot()).unwrap();
                 for _ in 0..2 {
@@ -611,44 +1008,82 @@ fn buried_scenario_charge_power_expands_real_uplift_and_replays() {
     eprintln!("buried uplift 1x, 10x, 100x: {results:?}");
     for pair in results.windows(2) {
         assert!(pair[1].0 > pair[0].0, "radius did not expand: {results:?}");
-        assert!(pair[1].1 > pair[0].1, "uplift did not accelerate: {results:?}");
+        assert!(
+            pair[1].1 > pair[0].1,
+            "uplift did not accelerate: {results:?}"
+        );
         assert!(pair[1].2 > pair[0].2, "uplift did not grow: {results:?}");
     }
 }
 
 #[test]
 fn buried_heave_uses_edited_ground_above_the_original_surface() {
-    let mut r=lab();r.set_physics_workers(1);r.set_navigation_workers(1);
-    for x in 56..72 {for z in 56..72 {for y in 16..32 {
-        r.world.queue_transfer(voxel::Edit::put(x,y,z,1));
-    }}}
+    let mut r = lab();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    for x in 56..72 {
+        for z in 56..72 {
+            for y in 16..32 {
+                r.world.queue_transfer(voxel::Edit::put(x, y, z, 1));
+            }
+        }
+    }
     r.world.flush_transfers();
-    assert!(r.execute_command(Command::Gun(battle::commands::GunCommand::Detonate{at:[64,24,64]})).admitted());
-    for _ in 0..16 {r.step();}
-    assert!(r.upheaval.raised>0,"charge inside an authored mound must lift the current surface");
+    assert!(r
+        .execute_command(Command::Gun(battle::commands::GunCommand::Detonate {
+            at: [64, 24, 64]
+        }))
+        .admitted());
+    for _ in 0..16 {
+        r.step();
+    }
+    assert!(
+        r.upheaval.raised > 0,
+        "charge inside an authored mound must lift the current surface"
+    );
     assert!(r.matter.economy.ledger.balanced());
-    assert!(r.matter.spent_mj<=r.matter.supplied_mj);
+    assert!(r.matter.spent_mj <= r.matter.supplied_mj);
 }
 
 #[test]
 fn buried_heave_bounds_for_weak_and_deep_charges() {
     for power in [0u32, 1, 1000, 4000] {
         for y in [1, 48, 94, 96] {
-            let mut l=modding::laboratory::Definition::stock().layout;
-            l.size=[128,128,128];l.ground_level=96;l.clear_min=[1,1];l.clear_max=[127,127];
-            l.gun_point=true;l.gun=[32,100,32];l.target=[64,96,64];l.laboratory=true;
-            let c=ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap().at_power(power);
-            let mut r=BlastRange::with_layout(c,l).unwrap();r.set_physics_workers(1);r.set_navigation_workers(1);
-            r.matter.begin(c.material_energy_j,c.fragment_box);
-            let reserved=r.upheaval.reserve(&r.world,[64,y,64],&c,u64::from(c.material_energy_j)*1000);
-            if power==0 || y==96 {assert_eq!(reserved,0,"power={power} y={y}");}
-            else {assert!(reserved>0,"power={power} y={y}");}
-            r.matter.remaining_mj-=reserved;
-            for _ in 0..4 {r.step();}
-            assert!(r.matter.spent_mj<=r.matter.supplied_mj);
+            let mut l = modding::laboratory::Definition::stock().layout;
+            l.size = [128, 128, 128];
+            l.ground_level = 96;
+            l.clear_min = [1, 1];
+            l.clear_max = [127, 127];
+            l.gun_point = true;
+            l.gun = [32, 100, 32];
+            l.target = [64, 96, 64];
+            l.laboratory = true;
+            let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
+                .unwrap()
+                .at_power(power);
+            let mut r = BlastRange::with_layout(c, l).unwrap();
+            r.set_physics_workers(1);
+            r.set_navigation_workers(1);
+            r.matter.begin(c.material_energy_j, c.fragment_box);
+            let reserved = r.upheaval.reserve(
+                &r.world,
+                [64, y, 64],
+                &c,
+                u64::from(c.material_energy_j) * 1000,
+            );
+            if power == 0 || y == 96 {
+                assert_eq!(reserved, 0, "power={power} y={y}");
+            } else {
+                assert!(reserved > 0, "power={power} y={y}");
+            }
+            r.matter.remaining_mj -= reserved;
+            for _ in 0..4 {
+                r.step();
+            }
+            assert!(r.matter.spent_mj <= r.matter.supplied_mj);
             assert!(r.matter.economy.ledger.balanced());
-            let back=BlastRange::restore(r.config,&r.snapshot()).unwrap();
-            assert_eq!(r.state_hash(),back.state_hash());
+            let back = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+            assert_eq!(r.state_hash(), back.state_hash());
         }
     }
 }
@@ -656,23 +1091,55 @@ fn buried_heave_bounds_for_weak_and_deep_charges() {
 #[test]
 fn underground_lift_moves_mobile_unit_kinds_and_keeps_a_base_anchored() {
     use modding::range::{RangeUnitDef, RangeUnitKind};
-    for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider, RangeUnitKind::Spider, RangeUnitKind::Crawler, RangeUnitKind::Base] {
-        let mut l=modding::laboratory::Definition::stock().layout;
-        l.size=[256,128,256];l.clear_min=[1,1];l.clear_max=[255,255];l.gun_point=true;l.gun=[32,32,32];l.target=[128,16,128];l.laboratory=true;
-        l.units=vec![RangeUnitDef{allied:true,kind,at:[128,16,128],weapon:None}];
-        let c=ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
-        let mut r=BlastRange::with_layout(c,l).unwrap();r.control();r.set_physics_workers(1);r.set_navigation_workers(1);
-        r.matter.begin(c.material_energy_j,c.fragment_box);
-        let reserved=r.upheaval.reserve(&r.world,[128,8,128],&c,u64::from(c.material_energy_j)*1000);
-        r.matter.remaining_mj-=reserved;
-        let initial=r.units[0].motion.pos[1];let mut peak=initial;
-        for _ in 0..25 {r.step();peak=peak.max(r.units[0].motion.pos[1]);}
-        if kind==RangeUnitKind::Base {assert_eq!(peak,initial,"base moved under heave");}
-        else {assert!(peak>initial,"{kind:?} was not lifted");}
+    for kind in [
+        RangeUnitKind::Tank,
+        RangeUnitKind::Strider,
+        RangeUnitKind::Spider,
+        RangeUnitKind::Crawler,
+        RangeUnitKind::Base,
+    ] {
+        let mut l = modding::laboratory::Definition::stock().layout;
+        l.size = [256, 128, 256];
+        l.clear_min = [1, 1];
+        l.clear_max = [255, 255];
+        l.gun_point = true;
+        l.gun = [32, 32, 32];
+        l.target = [128, 16, 128];
+        l.laboratory = true;
+        l.units = vec![RangeUnitDef {
+            allied: true,
+            kind,
+            at: [128, 16, 128],
+            weapon: None,
+        }];
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+        let mut r = BlastRange::with_layout(c, l).unwrap();
+        r.control();
+        r.set_physics_workers(1);
+        r.set_navigation_workers(1);
+        r.matter.begin(c.material_energy_j, c.fragment_box);
+        let reserved = r.upheaval.reserve(
+            &r.world,
+            [128, 8, 128],
+            &c,
+            u64::from(c.material_energy_j) * 1000,
+        );
+        r.matter.remaining_mj -= reserved;
+        let initial = r.units[0].motion.pos[1];
+        let mut peak = initial;
+        for _ in 0..25 {
+            r.step();
+            peak = peak.max(r.units[0].motion.pos[1]);
+        }
+        if kind == RangeUnitKind::Base {
+            assert_eq!(peak, initial, "base moved under heave");
+        } else {
+            assert!(peak > initial, "{kind:?} was not lifted");
+        }
         assert!(r.matter.economy.ledger.balanced());
-        assert!(r.matter.spent_mj<=r.matter.supplied_mj);
-        let copy=BlastRange::restore(r.config,&r.snapshot()).unwrap();
-        assert_eq!(r.state_hash(),copy.state_hash());
+        assert!(r.matter.spent_mj <= r.matter.supplied_mj);
+        let copy = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+        assert_eq!(r.state_hash(), copy.state_hash());
     }
 }
 

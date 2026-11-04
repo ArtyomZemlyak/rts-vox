@@ -43,7 +43,9 @@ impl Skirmish {
             || !s.units.iter().any(|u| u.allied)
             || !s.units.iter().any(|u| !u.allied)
             || s.script.iter().any(|order| order.actor >= s.units.len())
-            || s.script.windows(2).any(|orders| orders[0].tick > orders[1].tick)
+            || s.script
+                .windows(2)
+                .any(|orders| orders[0].tick > orders[1].tick)
         {
             return Err("skirmish needs a briefing and two bounded armies".into());
         }
@@ -70,8 +72,15 @@ impl Skirmish {
             });
         }
         layout.battle = true;
-        if self.script.iter().any(|order| matches!(order.order, ScriptedOrder::Dig(_) | ScriptedOrder::Reclaim(_))) {
-            layout.economy.get_or_insert_with(crate::range_economy::RangeEconomy::stock);
+        if self.script.iter().any(|order| {
+            matches!(
+                order.order,
+                ScriptedOrder::Dig(_) | ScriptedOrder::Reclaim(_)
+            )
+        }) {
+            layout
+                .economy
+                .get_or_insert_with(crate::range_economy::RangeEconomy::stock);
         }
         if let Some(height) = self.world_height {
             layout.size[1] = height;
@@ -285,7 +294,9 @@ mod tests {
                             | RangeUnitKind::TurretT1
                             | RangeUnitKind::TurretT2 => ranges.energy,
                             RangeUnitKind::Strider => ranges.machine_gun,
-                            RangeUnitKind::Spider | RangeUnitKind::Walker04 | RangeUnitKind::RazlomT3 => ranges.spider_laser,
+                            RangeUnitKind::Spider
+                            | RangeUnitKind::Walker04
+                            | RangeUnitKind::RazlomT3 => ranges.spider_laser,
                             RangeUnitKind::Artillery => ranges.artillery,
                             RangeUnitKind::ArtilleryT2 | RangeUnitKind::ArtilleryTurretT2 => {
                                 ranges.canister
@@ -304,7 +315,20 @@ mod tests {
             }
         }
         assert_eq!(focus.len(), 17);
-        assert!(RangeUnitKind::ALL.iter().filter(|kind| !matches!(kind, RangeUnitKind::Crawler | RangeUnitKind::Walker04 | RangeUnitKind::RazlomT3 | RangeUnitKind::GrebenStorage | RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4)).all(|kind| focus.contains(kind)));
+        assert!(RangeUnitKind::ALL
+            .iter()
+            .filter(|kind| !matches!(
+                kind,
+                RangeUnitKind::Crawler
+                    | RangeUnitKind::Walker04
+                    | RangeUnitKind::RazlomT3
+                    | RangeUnitKind::GrebenStorage
+                    | RangeUnitKind::KilFactoryT1
+                    | RangeUnitKind::KilFactoryT2
+                    | RangeUnitKind::KilFactoryT3
+                    | RangeUnitKind::KilFactoryT4
+            ))
+            .all(|kind| focus.contains(kind)));
         assert!(stock(STOCK.len()).is_err());
     }
     #[test]
@@ -351,10 +375,23 @@ mod tests {
         for side in [true, false] {
             let army: Vec<_> = preset.units.iter().filter(|u| u.allied == side).collect();
             assert_eq!(army.len(), 31);
-            for kind in RangeUnitKind::ALL
-                .into_iter()
-                .filter(|k| !matches!(k, RangeUnitKind::NuclearSilo | RangeUnitKind::Crawler | RangeUnitKind::LightningTank | RangeUnitKind::EidolonTank | RangeUnitKind::Walker04 | RangeUnitKind::RazlomT3 | RangeUnitKind::GrebenStorage | RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4 | RangeUnitKind::SkobaDrone))
-            {
+            for kind in RangeUnitKind::ALL.into_iter().filter(|k| {
+                !matches!(
+                    k,
+                    RangeUnitKind::NuclearSilo
+                        | RangeUnitKind::Crawler
+                        | RangeUnitKind::LightningTank
+                        | RangeUnitKind::EidolonTank
+                        | RangeUnitKind::Walker04
+                        | RangeUnitKind::RazlomT3
+                        | RangeUnitKind::GrebenStorage
+                        | RangeUnitKind::KilFactoryT1
+                        | RangeUnitKind::KilFactoryT2
+                        | RangeUnitKind::KilFactoryT3
+                        | RangeUnitKind::KilFactoryT4
+                        | RangeUnitKind::SkobaDrone
+                )
+            }) {
                 assert!(
                     army.iter().any(|u| u.kind == kind),
                     "missing {kind:?} on side {side}"

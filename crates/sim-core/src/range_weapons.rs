@@ -417,7 +417,11 @@ impl BlastRange {
 
     /// Authored barrel ends, with independent connectivity for the two guns.
     pub fn stream_muzzles(&self) -> Vec<[Fx; 3]> {
-        if self.point_gun() { vec![self.muzzle()] } else { muzzles(&self.gun, self.turret.angle) }
+        if self.point_gun() {
+            vec![self.muzzle()]
+        } else {
+            muzzles(&self.gun, self.turret.angle)
+        }
     }
     fn emit_laser(&mut self, tuning: &Stream, physics: &(impl Fn(usize, &'static str) + Sync)) {
         for from in self.stream_muzzles() {
@@ -504,20 +508,36 @@ impl BlastRange {
             .collect();
         let serial = self.streams.serial;
         self.streams.serial = serial.wrapping_add(1);
-        let water_active = self.water.has_water_in_x_span(start[0].min(far[0]),start[0].max(far[0]));
+        let water_active = self
+            .water
+            .has_water_in_x_span(start[0].min(far[0]), start[0].max(far[0]));
         let mut effective = tuning.clone();
         completed("orders_laser_setup");
-        if water_active && effective.heat>0 && (0..3).all(|a|start[a]>=0 && start[a]<self.size[a] as i32)
-            && self.water.amount(start.map(|v|v as u32))>0
-            && material(&self.world,start)==0
-            && !near.iter().any(|&id|self.units[id].solid(start)) {
-            let absorbed=self.water.absorb_heat(start.map(|v|v as u32),effective.heat,self.size);
-            effective.heat=effective.heat.saturating_sub(absorbed);
-            effective.work=(u64::from(tuning.work)*u64::from(effective.heat)/u64::from(tuning.heat.max(1))) as u32;
-            if effective.heat==0 && tuning.heat>0 {
-                completed("orders_laser_query");completed("orders_laser_contact_world");
-                drop(beam_task);completed("orders_laser_beam");completed("orders_laser_halo");
-                return Trace{from,to:from,hit:true,serial};
+        if water_active
+            && effective.heat > 0
+            && (0..3).all(|a| start[a] >= 0 && start[a] < self.size[a] as i32)
+            && self.water.amount(start.map(|v| v as u32)) > 0
+            && material(&self.world, start) == 0
+            && !near.iter().any(|&id| self.units[id].solid(start))
+        {
+            let absorbed =
+                self.water
+                    .absorb_heat(start.map(|v| v as u32), effective.heat, self.size);
+            effective.heat = effective.heat.saturating_sub(absorbed);
+            effective.work = (u64::from(tuning.work) * u64::from(effective.heat)
+                / u64::from(tuning.heat.max(1))) as u32;
+            if effective.heat == 0 && tuning.heat > 0 {
+                completed("orders_laser_query");
+                completed("orders_laser_contact_world");
+                drop(beam_task);
+                completed("orders_laser_beam");
+                completed("orders_laser_halo");
+                return Trace {
+                    from,
+                    to: from,
+                    hit: true,
+                    serial,
+                };
             }
         }
         let mut previous = from.map(Fx::to_int_trunc);
@@ -543,25 +563,55 @@ impl BlastRange {
             // Molten matter absorbs the beam until its remaining vaporisation
             // energy is paid. Only the surplus can reach the next cell.
             let m = material(&self.world, p);
-            if let Some(flow) = self.heat_tuning.melt_flow.iter().flatten().find(|f|f.liquid==m).copied().filter(|_| effective.heat>0)
-                .filter(|_| !self.world.on_frame(p[0] as u32,p[1] as u32,p[2] as u32))
-                .filter(|_| !near.iter().any(|&id| { let (lo,hi)=boxes[id]; (0..3).all(|a|p[a]>=lo[a] && p[a]<=hi[a]) && self.units[id].solid(p) })) {
-                let q=p.map(|v|v as u32);
-                let threshold=self.matter.economy.mats.get(flow.solid).map_or(flow.freeze,|m|m.melt.max(flow.freeze))
-                    .saturating_mul(3).max(1);
-                let needed=threshold.saturating_sub(self.heat.cell(q).heat);
-                let absorbed=effective.heat.min(needed);
-                self.heat.add(&self.world,q,absorbed);
-                effective.heat-=absorbed;
-                effective.work=(u64::from(tuning.work)*u64::from(effective.heat)/u64::from(tuning.heat.max(1))) as u32;
-                if self.heat.cell(q).heat<threshold || self.world.has_pending_dig(q[0],q[1],q[2]) || self.matter.debris.claimed(q) {
-                    completed("orders_laser_query");completed("orders_laser_contact_world");
-                    contact=Some(p);hit=true;break;
+            if let Some(flow) = self
+                .heat_tuning
+                .melt_flow
+                .iter()
+                .flatten()
+                .find(|f| f.liquid == m)
+                .copied()
+                .filter(|_| effective.heat > 0)
+                .filter(|_| !self.world.on_frame(p[0] as u32, p[1] as u32, p[2] as u32))
+                .filter(|_| {
+                    !near.iter().any(|&id| {
+                        let (lo, hi) = boxes[id];
+                        (0..3).all(|a| p[a] >= lo[a] && p[a] <= hi[a]) && self.units[id].solid(p)
+                    })
+                })
+            {
+                let q = p.map(|v| v as u32);
+                let threshold = self
+                    .matter
+                    .economy
+                    .mats
+                    .get(flow.solid)
+                    .map_or(flow.freeze, |m| m.melt.max(flow.freeze))
+                    .saturating_mul(3)
+                    .max(1);
+                let needed = threshold.saturating_sub(self.heat.cell(q).heat);
+                let absorbed = effective.heat.min(needed);
+                self.heat.add(&self.world, q, absorbed);
+                effective.heat -= absorbed;
+                effective.work = (u64::from(tuning.work) * u64::from(effective.heat)
+                    / u64::from(tuning.heat.max(1))) as u32;
+                if self.heat.cell(q).heat < threshold
+                    || self.world.has_pending_dig(q[0], q[1], q[2])
+                    || self.matter.debris.claimed(q)
+                {
+                    completed("orders_laser_query");
+                    completed("orders_laser_contact_world");
+                    contact = Some(p);
+                    hit = true;
+                    break;
                 }
-                self.world.queue_dig_by(q[0],q[1],q[2],crate::heat::VAPOR);
-                if effective.heat==0 {
-                    completed("orders_laser_query");completed("orders_laser_contact_world");
-                    contact=Some(p);hit=true;break;
+                self.world
+                    .queue_dig_by(q[0], q[1], q[2], crate::heat::VAPOR);
+                if effective.heat == 0 {
+                    completed("orders_laser_query");
+                    completed("orders_laser_contact_world");
+                    contact = Some(p);
+                    hit = true;
+                    break;
                 }
                 previous = p;
                 free_end = point;
@@ -598,15 +648,17 @@ impl BlastRange {
                 break;
             }
             if water_active && effective.heat > 0 {
-                let q=p.map(|v|v as u32);
-                if self.water.amount(q)>0 {
-                    let absorbed=self.water.absorb_heat(q,effective.heat,self.size);
-                    effective.heat=effective.heat.saturating_sub(absorbed);
-                    effective.work=(u64::from(tuning.work)*u64::from(effective.heat)/u64::from(tuning.heat.max(1))) as u32;
-                    if effective.heat==0 {
+                let q = p.map(|v| v as u32);
+                if self.water.amount(q) > 0 {
+                    let absorbed = self.water.absorb_heat(q, effective.heat, self.size);
+                    effective.heat = effective.heat.saturating_sub(absorbed);
+                    effective.work = (u64::from(tuning.work) * u64::from(effective.heat)
+                        / u64::from(tuning.heat.max(1)))
+                        as u32;
+                    if effective.heat == 0 {
                         completed("orders_laser_query");
                         completed("orders_laser_contact_world");
-                        hit=true;
+                        hit = true;
                         break;
                     }
                 }
@@ -753,7 +805,8 @@ impl BlastRange {
                         tuning.heat_radius,
                         tuning.heat,
                     );
-                    self.water.absorb_radial_heat(&self.world,p,tuning.heat_radius,tuning.heat);
+                    self.water
+                        .absorb_radial_heat(&self.world, p, tuning.heat_radius, tuning.heat);
                 }
             } else {
                 let total = self
@@ -846,12 +899,21 @@ impl BlastRange {
         let step = Fx::from_ratio(1, crate::TICKS_PER_SECOND);
         for mut round in rounds {
             let from = round.pos;
-            let start=from.map(Fx::to_int_trunc);
-            if flame_water && (0..3).all(|a|start[a]>=0 && start[a]<self.size[a] as i32)
-                && self.water.amount(start.map(|v|v as u32))>0 && material(&self.world,start)==0
-                && !self.units.iter().any(|u|u.solid(start)) {
-                self.water.absorb_heat(start.map(|v|v as u32),tuning.heat,self.size);
-                self.streams.traces.push(Trace{from,to:from,hit:true,serial:round.serial});
+            let start = from.map(Fx::to_int_trunc);
+            if flame_water
+                && (0..3).all(|a| start[a] >= 0 && start[a] < self.size[a] as i32)
+                && self.water.amount(start.map(|v| v as u32)) > 0
+                && material(&self.world, start) == 0
+                && !self.units.iter().any(|u| u.solid(start))
+            {
+                self.water
+                    .absorb_heat(start.map(|v| v as u32), tuning.heat, self.size);
+                self.streams.traces.push(Trace {
+                    from,
+                    to: from,
+                    hit: true,
+                    serial: round.serial,
+                });
                 continue;
             }
             // A live tuning change applies to new rounds. Existing packets
@@ -864,7 +926,11 @@ impl BlastRange {
             let travel = length.min(round.distance);
             let fraction = travel.div(length);
             let q = std::array::from_fn::<_, 3, _>(|a| from[a].add(delta[a].mul(fraction)));
-            let water_segment=flame_water && self.water.has_water_in_x_span(from[0].min(q[0]).to_int_trunc(),from[0].max(q[0]).to_int_trunc());
+            let water_segment = flame_water
+                && self.water.has_water_in_x_span(
+                    from[0].min(q[0]).to_int_trunc(),
+                    from[0].max(q[0]).to_int_trunc(),
+                );
             let n = (travel.to_int_trunc() + 1) * 2;
             let mut end = q;
             let mut hit = false;
@@ -886,13 +952,16 @@ impl BlastRange {
                     hit = true;
                     break;
                 }
-                if water_segment && p != previous && p.iter().all(|v| *v >= 0)
-                    && (0..3).all(|a| p[a] < self.size[a] as i32) {
-                    let q=p.map(|v|v as u32);
-                    if self.water.amount(q)>0 {
-                        self.water.absorb_heat(q,tuning.heat,self.size);
-                        end=point;
-                        hit=true;
+                if water_segment
+                    && p != previous
+                    && p.iter().all(|v| *v >= 0)
+                    && (0..3).all(|a| p[a] < self.size[a] as i32)
+                {
+                    let q = p.map(|v| v as u32);
+                    if self.water.amount(q) > 0 {
+                        self.water.absorb_heat(q, tuning.heat, self.size);
+                        end = point;
+                        hit = true;
                         break;
                     }
                 }
@@ -934,7 +1003,8 @@ pub(super) fn flight_velocity(delta: [Fx; 3], speed: i32) -> [Fx; 3] {
 
 pub(super) fn muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
     if u.kind == RangeUnitKind::Walker04 {
-        return u.body
+        return u
+            .body
             .weapon_paths()
             .iter()
             .enumerate()
@@ -965,15 +1035,25 @@ pub(super) fn muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
 }
 
 pub(super) fn razlom_muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
-    let frame = u.aimed_frame(&u.pose, fx::angle::diff(angle, u.motion.drive.head), u.turret_pitch);
-    let Some(path) = u.body.weapon_paths().first() else { return Vec::new(); };
+    let frame = u.aimed_frame(
+        &u.pose,
+        fx::angle::diff(angle, u.motion.drive.head),
+        u.turret_pitch,
+    );
+    let Some(path) = u.body.weapon_paths().first() else {
+        return Vec::new();
+    };
     if !u.body.barrel_connected(path, u.connectivity.reached_cols()) {
         return Vec::new();
     }
     [11usize, 15, 19, 23, 27, 31, 35]
         .into_iter()
         .map(|z| {
-            let cell = [Fx::from_int(i32::from(path.max[0]) + 1), Fx::from_ratio(i32::from(path.min[1]) + i32::from(path.max[1]), 2), Fx::from_int(z as i32)];
+            let cell = [
+                Fx::from_int(i32::from(path.max[0]) + 1),
+                Fx::from_ratio(i32::from(path.min[1]) + i32::from(path.max[1]), 2),
+                Fx::from_int(z as i32),
+            ];
             let v = frame.world(cell);
             [v.x, v.y, v.z]
         })
@@ -992,36 +1072,55 @@ mod tests {
     use super::*;
     #[test]
     fn laser_starting_in_water_evaporates_it_and_stops() {
-        let mut r=laser_range(vec![]);
-        let from=[100,100,336];
-        assert!(r.water.edit_volume(from.map(|v|v as u32),true));
-        let tuning=r.streams.tuning.laser.clone();
-        let config=r.config;
-        let trace=r.laser_ray(from.map(Fx::from_int),[200,100,336],Some(0),&tuning,&config,(&mut |_|{},&|_,_|{}));
+        let mut r = laser_range(vec![]);
+        let from = [100, 100, 336];
+        assert!(r.water.edit_volume(from.map(|v| v as u32), true));
+        let tuning = r.streams.tuning.laser.clone();
+        let config = r.config;
+        let trace = r.laser_ray(
+            from.map(Fx::from_int),
+            [200, 100, 336],
+            Some(0),
+            &tuning,
+            &config,
+            (&mut |_| {}, &|_, _| {}),
+        );
         assert!(trace.hit);
-        assert_eq!(trace.to.map(Fx::to_int_trunc),from);
-        assert!(r.water.stats().vapor_units>0);
+        assert_eq!(trace.to.map(Fx::to_int_trunc), from);
+        assert!(r.water.stats().vapor_units > 0);
     }
     #[test]
     fn laser_spends_heat_on_water_before_reaching_a_solid_surface() {
-        let mut r=laser_range(vec![modding::range::RangeBlock {
-            min:[150,99,335],max:[151,102,338],material:3,
+        let mut r = laser_range(vec![modding::range::RangeBlock {
+            min: [150, 99, 335],
+            max: [151, 102, 338],
+            material: 3,
         }]);
-        let q=[120,100,336];
-        assert!(r.water.edit_volume(q,true));
-        let initial=r.water.stats().units;
-        let mut tuning=r.streams.tuning.laser.clone();
-        let needed=r.water.tuning.units_per_voxel*r.water.tuning.evaporation_heat;
-        tuning.heat=needed+1000;
-        let config=r.config;
-        let trace=r.laser_ray([100,100,336].map(Fx::from_int),[200,100,336],Some(0),&tuning,&config,(&mut |_|{},&|_,_|{}));
+        let q = [120, 100, 336];
+        assert!(r.water.edit_volume(q, true));
+        let initial = r.water.stats().units;
+        let mut tuning = r.streams.tuning.laser.clone();
+        let needed = r.water.tuning.units_per_voxel * r.water.tuning.evaporation_heat;
+        tuning.heat = needed + 1000;
+        let config = r.config;
+        let trace = r.laser_ray(
+            [100, 100, 336].map(Fx::from_int),
+            [200, 100, 336],
+            Some(0),
+            &tuning,
+            &config,
+            (&mut |_| {}, &|_, _| {}),
+        );
         assert!(trace.hit);
-        assert_eq!(trace.to[0].to_int_trunc(),150);
-        assert_eq!(r.water.amount(q),0);
-        assert_eq!(r.water.stats().vapor_units,initial);
-        assert_eq!(r.water.stats().units,initial);
-        assert!(r.heat.cell([150,100,336]).heat>0);
-        assert!(r.heat.cell([150,100,336]).heat<=1000,"beam did not spend heat on water");
+        assert_eq!(trace.to[0].to_int_trunc(), 150);
+        assert_eq!(r.water.amount(q), 0);
+        assert_eq!(r.water.stats().vapor_units, initial);
+        assert_eq!(r.water.stats().units, initial);
+        assert!(r.heat.cell([150, 100, 336]).heat > 0);
+        assert!(
+            r.heat.cell([150, 100, 336]).heat <= 1000,
+            "beam did not spend heat on water"
+        );
     }
     fn kinetic_range(blocks: Vec<modding::range::RangeBlock>) -> BlastRange {
         let mut c =
@@ -1061,35 +1160,86 @@ mod tests {
 
     #[test]
     fn laser_heats_melt_before_vaporising_it_and_passing_to_the_next_layer() {
-        let mut r=laser_range(vec![modding::range::RangeBlock{min:[230,100,336],max:[232,101,337],material:3}]);
-        for x in 230..232 {r.world.queue_transfer(voxel::Edit::put(x,100,336,13));}
-        r.world.flush_transfers();
-        let mut tuning=r.streams.tuning.laser.clone();tuning.heat=200;tuning.heat_radius=0;
-        let config=r.config;let from=[100,100,336].map(Fx::from_int);let q=[230,100,336];
-        for _ in 0..5 {
-            let trace=r.laser_ray(from,[250,100,336],None,&tuning,&config,(&mut |_|{},&|_,_|{}));
-            assert!(trace.hit);assert_eq!(trace.to[0].to_int_trunc(),230);
-            assert!(!r.world.has_pending_dig(q[0],q[1],q[2]));
-            assert_eq!(r.heat.cell([231,100,336]).heat,0,"beam heated through liquid");
+        let mut r = laser_range(vec![modding::range::RangeBlock {
+            min: [230, 100, 336],
+            max: [232, 101, 337],
+            material: 3,
+        }]);
+        for x in 230..232 {
+            r.world.queue_transfer(voxel::Edit::put(x, 100, 336, 13));
         }
-        r.laser_ray(from,[250,100,336],None,&tuning,&config,(&mut |_|{},&|_,_|{}));
-        assert!(r.world.has_pending_dig(q[0],q[1],q[2]));
+        r.world.flush_transfers();
+        let mut tuning = r.streams.tuning.laser.clone();
+        tuning.heat = 200;
+        tuning.heat_radius = 0;
+        let config = r.config;
+        let from = [100, 100, 336].map(Fx::from_int);
+        let q = [230, 100, 336];
+        for _ in 0..5 {
+            let trace = r.laser_ray(
+                from,
+                [250, 100, 336],
+                None,
+                &tuning,
+                &config,
+                (&mut |_| {}, &|_, _| {}),
+            );
+            assert!(trace.hit);
+            assert_eq!(trace.to[0].to_int_trunc(), 230);
+            assert!(!r.world.has_pending_dig(q[0], q[1], q[2]));
+            assert_eq!(
+                r.heat.cell([231, 100, 336]).heat,
+                0,
+                "beam heated through liquid"
+            );
+        }
+        r.laser_ray(
+            from,
+            [250, 100, 336],
+            None,
+            &tuning,
+            &config,
+            (&mut |_| {}, &|_, _| {}),
+        );
+        assert!(r.world.has_pending_dig(q[0], q[1], q[2]));
         r.world.flush();
-        assert_eq!(r.world.material(q[0],q[1],q[2]),0);
-        assert!(r.heat.cell([231,100,336]).heat>0,"surplus did not reach the next layer");
+        assert_eq!(r.world.material(q[0], q[1], q[2]), 0);
+        assert!(
+            r.heat.cell([231, 100, 336]).heat > 0,
+            "surplus did not reach the next layer"
+        );
     }
 
     #[test]
     fn sustained_laser_opens_a_hole_and_accounts_for_vaporised_matter() {
-        let mut r=laser_range(vec![modding::range::RangeBlock{min:[230,0,330],max:[233,60,342],material:3}]);
-        r.heat_tuning.melt_moves_per_tick=0;
-        r.control();r.aim=Some([392,40,336]);assert!(r.refire());
-        let mut first=None;let mut passed=false;
-        for _ in 0..45 {r.step();if let Some(t)=r.streams.traces.first() {
-            let p=t.to.map(Fx::to_int_trunc);first.get_or_insert(p);passed|=p[0]>=233;
-        }}
-        assert!(passed,"laser never opened a passage");
-        assert!(r.matter.economy.ledger.sunk(crate::matter::Sink::Pulverised)>0,"vaporised matter was not accounted for");
+        let mut r = laser_range(vec![modding::range::RangeBlock {
+            min: [230, 0, 330],
+            max: [233, 60, 342],
+            material: 3,
+        }]);
+        r.heat_tuning.melt_moves_per_tick = 0;
+        r.control();
+        r.aim = Some([392, 40, 336]);
+        assert!(r.refire());
+        let mut first = None;
+        let mut passed = false;
+        for _ in 0..45 {
+            r.step();
+            if let Some(t) = r.streams.traces.first() {
+                let p = t.to.map(Fx::to_int_trunc);
+                first.get_or_insert(p);
+                passed |= p[0] >= 233;
+            }
+        }
+        assert!(passed, "laser never opened a passage");
+        assert!(
+            r.matter
+                .economy
+                .ledger
+                .sunk(crate::matter::Sink::Pulverised)
+                > 0,
+            "vaporised matter was not accounted for"
+        );
         assert!(r.matter.economy.ledger.balanced());
     }
 
@@ -1444,9 +1594,15 @@ mod tests {
         }
         let first = *contacts.first().expect("siege laser never fired");
         assert_eq!(first[0], 230);
-        assert_ne!(material(&r.world, [237, first[1], first[2]]), 3,
-            "80 cm steel still blocks the siege beam: {contacts:?}");
-        assert!(contacts.iter().any(|p| p[0] > 238), "beam failed to pass the melt");
+        assert_ne!(
+            material(&r.world, [237, first[1], first[2]]),
+            3,
+            "80 cm steel still blocks the siege beam: {contacts:?}"
+        );
+        assert!(
+            contacts.iter().any(|p| p[0] > 238),
+            "beam failed to pass the melt"
+        );
         assert!(
             r.heat.melted_total >= 8,
             "steel did not melt layer by layer"
@@ -1460,41 +1616,76 @@ mod tests {
     }
     #[test]
     fn spider_laser_delivers_ten_times_the_previous_heat_on_first_contact() {
-        let block=modding::range::RangeBlock {min:[230,100,330],max:[231,101,342],material:3};
-        let mut heat=[0;2];
-        for (i, old) in [true,false].into_iter().enumerate() {
-            let mut r=laser_range(vec![block.clone()]);
-            r.set_physics_workers(1);r.set_navigation_workers(1);
-            let mut tuning=super::super::motion::spider_tuning().laser.clone();
-            if old {tuning.work=1200000;tuning.heat=32000000;tuning.fracture_j=2000;}
-            tuning.heat_radius=0;
-            let config=r.config;
-            let trace=r.laser_ray([200,100,336].map(Fx::from_int),[280,100,336],None,&tuning,&config,(&mut |_|{},&|_,_|{}));
-            assert!(trace.hit);
-            heat[i]=r.heat.cell([230,100,336]).heat;
-            assert!(r.matter.economy.ledger.balanced());
-            if !old {
-                let restored = BlastRange::restore(r.config, &r.snapshot()).expect("high heat snapshot");
-                assert_eq!(restored.state_hash(), r.state_hash());
-            }
-        }
-        assert!(heat[0]>0);
-        assert_eq!(heat[1],heat[0]*10,"first-contact heat: {heat:?}");
-    }
-    #[test]
-    fn electric_laser_deposits_ten_times_previous_contact_heat() {
-        let block = modding::range::RangeBlock { min: [230,100,330], max: [231,101,342], material: 3 };
+        let block = modding::range::RangeBlock {
+            min: [230, 100, 330],
+            max: [231, 101, 342],
+            material: 3,
+        };
         let mut heat = [0; 2];
         for (i, old) in [true, false].into_iter().enumerate() {
             let mut r = laser_range(vec![block.clone()]);
-            r.set_physics_workers(1); r.set_navigation_workers(1);
-            let mut tuning = r.streams.tuning.lightning.clone().unwrap();
-            if old { tuning.work = 500; tuning.heat = 3000; tuning.fracture_j = 1; }
+            r.set_physics_workers(1);
+            r.set_navigation_workers(1);
+            let mut tuning = super::super::motion::spider_tuning().laser.clone();
+            if old {
+                tuning.work = 1200000;
+                tuning.heat = 32000000;
+                tuning.fracture_j = 2000;
+            }
             tuning.heat_radius = 0;
             let config = r.config;
-            assert!(r.laser_ray([200,100,336].map(Fx::from_int), [280,100,336], None,
-                &tuning, &config, (&mut |_| {}, &|_,_| {})).hit);
-            heat[i] = r.heat.cell([230,100,336]).heat;
+            let trace = r.laser_ray(
+                [200, 100, 336].map(Fx::from_int),
+                [280, 100, 336],
+                None,
+                &tuning,
+                &config,
+                (&mut |_| {}, &|_, _| {}),
+            );
+            assert!(trace.hit);
+            heat[i] = r.heat.cell([230, 100, 336]).heat;
+            assert!(r.matter.economy.ledger.balanced());
+            if !old {
+                let restored =
+                    BlastRange::restore(r.config, &r.snapshot()).expect("high heat snapshot");
+                assert_eq!(restored.state_hash(), r.state_hash());
+            }
+        }
+        assert!(heat[0] > 0);
+        assert_eq!(heat[1], heat[0] * 10, "first-contact heat: {heat:?}");
+    }
+    #[test]
+    fn electric_laser_deposits_ten_times_previous_contact_heat() {
+        let block = modding::range::RangeBlock {
+            min: [230, 100, 330],
+            max: [231, 101, 342],
+            material: 3,
+        };
+        let mut heat = [0; 2];
+        for (i, old) in [true, false].into_iter().enumerate() {
+            let mut r = laser_range(vec![block.clone()]);
+            r.set_physics_workers(1);
+            r.set_navigation_workers(1);
+            let mut tuning = r.streams.tuning.lightning.clone().unwrap();
+            if old {
+                tuning.work = 500;
+                tuning.heat = 3000;
+                tuning.fracture_j = 1;
+            }
+            tuning.heat_radius = 0;
+            let config = r.config;
+            assert!(
+                r.laser_ray(
+                    [200, 100, 336].map(Fx::from_int),
+                    [280, 100, 336],
+                    None,
+                    &tuning,
+                    &config,
+                    (&mut |_| {}, &|_, _| {})
+                )
+                .hit
+            );
+            heat[i] = r.heat.cell([230, 100, 336]).heat;
         }
         assert!(heat[0] > 0);
         assert_eq!(heat[1], heat[0] * 10);
@@ -1710,15 +1901,22 @@ mod tests {
 
     #[test]
     fn stock_kinetic_penetrates_less_than_the_previous_round_but_still_damages_cover() {
-        let current = ExplosionConfig::from_ron(include_str!("../../../data/kinetic-shell.ron")).unwrap();
+        let current =
+            ExplosionConfig::from_ron(include_str!("../../../data/kinetic-shell.ron")).unwrap();
         let mut previous = current;
         previous.energy = 48000;
         for mat in [1, 2, 3] {
             let depth = |config: ExplosionConfig| {
                 let mut r = kinetic_range(vec![plate(218, 250, mat)]);
-                r.kinetic_hit([218, 40, 336], [Fx::from_int(config.shell_speed), Fx::ZERO, Fx::ZERO], &config);
+                r.kinetic_hit(
+                    [218, 40, 336],
+                    [Fx::from_int(config.shell_speed), Fx::ZERO, Fx::ZERO],
+                    &config,
+                );
                 r.world.flush();
-                (218..250).take_while(|&x| material(&r.world, [x, 40, 336]) == 0).count()
+                (218..250)
+                    .take_while(|&x| material(&r.world, [x, 40, 336]) == 0)
+                    .count()
             };
             let old = depth(previous);
             let new = depth(current);
@@ -1792,7 +1990,11 @@ mod tests {
                 r.step();
             }
             assert!(r.units[0].status.alive, "shot {}", shot + 1);
-            assert!(r.units[0].removed.len() > removed_before, "shot {} did no damage", shot + 1);
+            assert!(
+                r.units[0].removed.len() > removed_before,
+                "shot {} did no damage",
+                shot + 1
+            );
         }
         assert!(contacts.windows(2).all(|p| p[0] != p[1]));
         assert!(r.matter.economy.ledger.balanced());
@@ -2341,7 +2543,12 @@ mod tests {
         let config = r.config;
         for (x, mat) in [(190, 5), (200, 3), (210, 2)] {
             let p = [x, 100, 336];
-            r.world.queue_edit(voxel::world::Edit::put(p[0] as u32, p[1] as u32, p[2] as u32, mat));
+            r.world.queue_edit(voxel::world::Edit::put(
+                p[0] as u32,
+                p[1] as u32,
+                p[2] as u32,
+                mat,
+            ));
         }
         r.world.flush();
         let water = [201, 100, 336];
@@ -2355,7 +2562,14 @@ mod tests {
         assert_eq!(r.water.stats().vapor_units, expected_vapor);
         let (point, _, cell) = hull_side(&r);
         r.stream_contact(point, &tuning, true, r.gun.at, &config);
-        assert_eq!(r.thermals.heat(thermal::Cell { unit: 0, part: 0, at: cell.map(|v| v as u8) }), tuning.heat);
+        assert_eq!(
+            r.thermals.heat(thermal::Cell {
+                unit: 0,
+                part: 0,
+                at: cell.map(|v| v as u8)
+            }),
+            tuning.heat
+        );
     }
     #[test]
     fn crawler_drill_does_not_turn_the_chassis_into_a_gun() {

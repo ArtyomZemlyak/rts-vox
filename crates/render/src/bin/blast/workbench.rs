@@ -298,7 +298,8 @@ impl Workshop {
         Ok(())
     }
     pub fn crawler_field(&mut self, _config: ExplosionConfig) -> Result<(), String> {
-        let layout = RangeLayout::from_ron(include_str!("../../../../../data/range-crawler-field.ron"))?;
+        let layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-crawler-field.ron"))?;
         let config = ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron"))?;
         self.commit(layout, config)?;
         self.zone = 0;
@@ -912,7 +913,9 @@ fn remove(layout: &mut RangeLayout, selected: Selection) {
     match selected {
         Selection::Unit(i) => {
             layout.units.remove(i);
-            if i < layout.unit_yaws.len() {layout.unit_yaws.remove(i);}
+            if i < layout.unit_yaws.len() {
+                layout.unit_yaws.remove(i);
+            }
             if let Some(c) = &mut layout.course {
                 c.patrols.retain(|p| p.unit != i);
                 for p in &mut c.patrols {
@@ -1042,32 +1045,50 @@ pub(super) fn pick(sim: &BlastRange, ray: Ray3d) -> Option<([i32; 3], Option<Sel
 
 /// The orthographic camera pans in world X/Z. Scaling about the centre of
 /// the unobscured viewport keeps the point below the cursor in place.
-fn editor_zoom_pan(anchor:Vec3, centre:Vec3, ratio:f32)->Vec2 {
-    Vec2::new(anchor.x-centre.x,anchor.z-centre.z)*(1.0-ratio)
+fn editor_zoom_pan(anchor: Vec3, centre: Vec3, ratio: f32) -> Vec2 {
+    Vec2::new(anchor.x - centre.x, anchor.z - centre.z) * (1.0 - ratio)
 }
-fn ray_at_height(ray:Ray3d, y:f32)->Option<Vec3> {
-    let d=ray.direction.y;
-    if d.abs()<0.0001 {return None;}
-    let t=(y-ray.origin.y)/d;
-    (t.is_finite() && t>=0.0).then(||ray.origin+*ray.direction*t)
+fn ray_at_height(ray: Ray3d, y: f32) -> Option<Vec3> {
+    let d = ray.direction.y;
+    if d.abs() < 0.0001 {
+        return None;
+    }
+    let t = (y - ray.origin.y) / d;
+    (t.is_finite() && t >= 0.0).then(|| ray.origin + *ray.direction * t)
 }
-fn editor_zoom_focus(sim:&BlastRange,camera:&Camera,gt:&GlobalTransform,cursor:Vec2,viewport:Vec2,margins:[f32;4])->Option<(Vec3,Vec3)> {
-    let ray=camera.viewport_to_world(gt,cursor).ok()?;
+fn editor_zoom_focus(
+    sim: &BlastRange,
+    camera: &Camera,
+    gt: &GlobalTransform,
+    cursor: Vec2,
+    viewport: Vec2,
+    margins: [f32; 4],
+) -> Option<(Vec3, Vec3)> {
+    let ray = camera.viewport_to_world(gt, cursor).ok()?;
     // Only query the scene on a wheel event; skip units whose bounds are
     // nowhere near the current ray cell and cap the walk through empty air.
-    let units:Vec<_>=sim.units.iter().map(|u|(u,u.bounds())).collect();
-    let mut steps=0;
-    let hit=visit_pick_ray(sim.size(),ray,|p| {
-        steps+=1;if steps>2048 {return Some(None);}
-        let unit=units.iter().any(|(u,(lo,hi))|(0..3).all(|a|p[a]>=lo[a] && p[a]<=hi[a]) && u.solid(p));
-        let water=p.iter().all(|v|*v>=0) && sim.water.amount(p.map(|v|v as u32))>0;
-        (unit || water || sim_core::blast::material(&sim.world,p)!=0).then_some(Some(p))
-    }).flatten();
-    let height=hit.map_or(sim.ground_level() as f32,|p|p[1] as f32+0.5);
-    let [top,bottom,left,right]=margins;
-    let center=Vec2::new((left+viewport.x-right)*0.5,(top+viewport.y-bottom)*0.5);
-    let middle=camera.viewport_to_world(gt,center).ok()?;
-    Some((ray_at_height(ray,height)?,ray_at_height(middle,height)?))
+    let units: Vec<_> = sim.units.iter().map(|u| (u, u.bounds())).collect();
+    let mut steps = 0;
+    let hit = visit_pick_ray(sim.size(), ray, |p| {
+        steps += 1;
+        if steps > 2048 {
+            return Some(None);
+        }
+        let unit = units
+            .iter()
+            .any(|(u, (lo, hi))| (0..3).all(|a| p[a] >= lo[a] && p[a] <= hi[a]) && u.solid(p));
+        let water = p.iter().all(|v| *v >= 0) && sim.water.amount(p.map(|v| v as u32)) > 0;
+        (unit || water || sim_core::blast::material(&sim.world, p) != 0).then_some(Some(p))
+    })
+    .flatten();
+    let height = hit.map_or(sim.ground_level() as f32, |p| p[1] as f32 + 0.5);
+    let [top, bottom, left, right] = margins;
+    let center = Vec2::new(
+        (left + viewport.x - right) * 0.5,
+        (top + viewport.y - bottom) * 0.5,
+    );
+    let middle = camera.viewport_to_world(gt, center).ok()?;
+    Some((ray_at_height(ray, height)?, ray_at_height(middle, height)?))
 }
 
 pub fn issue_battle_group_order(
@@ -1131,13 +1152,17 @@ pub fn input(
     laboratory: Option<Res<laboratory::Laboratory>>,
 ) {
     if pilot.as_ref().is_some_and(|p| p.active()) {
-        edit.camera_drag=false;
+        edit.camera_drag = false;
         edit.drag_start = None;
         edit.drag_current = None;
         wheel.clear();
         return;
     }
-    if laboratory.as_ref().is_some_and(|l|l.flying()) {edit.camera_drag=false;wheel.clear();return;}
+    if laboratory.as_ref().is_some_and(|l| l.flying()) {
+        edit.camera_drag = false;
+        wheel.clear();
+        return;
+    }
     // A release outside the window can miss `just_released`. Do not keep an
     // old drag alive when the mouse button is no longer held.
     if !mouse.pressed(MouseButton::Left) && !mouse.just_released(MouseButton::Left) {
@@ -1166,7 +1191,7 @@ pub fn input(
     }
     let stock = knobs::Overrides::default();
     let overrides = overrides.as_deref().unwrap_or(&stock);
-    let lab_active=laboratory.as_ref().is_some_and(|l|l.active());
+    let lab_active = laboratory.as_ref().is_some_and(|l| l.active());
     if !lab_active && keys.just_pressed(KeyCode::KeyE) {
         edit.editing = !edit.editing;
         scene.paused = true;
@@ -1186,13 +1211,19 @@ pub fn input(
         edit.zoom = 1.0;
         scene.view = 1;
     }
-    let editor=laboratory.as_ref().is_some_and(|l|l.editor_camera());
+    let editor = laboratory.as_ref().is_some_and(|l| l.editor_camera());
     let blocked = panel.as_ref().is_some_and(|p| p.blocked)
-        || laboratory.as_ref().is_some_and(|l|l.active() && l.camera_ui_blocked());
+        || laboratory
+            .as_ref()
+            .is_some_and(|l| l.active() && l.camera_ui_blocked());
     let cursor = window.cursor_position();
     if editor {
-        if !mouse.pressed(MouseButton::Middle) {edit.camera_drag=false;}
-        if mouse.just_pressed(MouseButton::Middle) {edit.camera_drag=!blocked;}
+        if !mouse.pressed(MouseButton::Middle) {
+            edit.camera_drag = false;
+        }
+        if mouse.just_pressed(MouseButton::Middle) {
+            edit.camera_drag = !blocked;
+        }
     }
     for ev in wheel.read() {
         if blocked {
@@ -1204,14 +1235,21 @@ pub fn input(
             } else {
                 1.0
             };
-        let before=edit.zoom;
-        let next=(before * (-y * if editor {0.16}else{0.08}).exp()).clamp(if editor {0.0001}else{0.3}, 32.0);
-        if editor && before>0.0 && next!=before {
-            if let (Some(cursor),Ok((camera,gt)),Some(lab))=(cursor,cameras.single(),laboratory.as_ref()) {
-                let viewport=camera.logical_viewport_size().unwrap_or(Vec2::new(window.width(),window.height()));
-                if let Some(margins)=lab.viewport_margins(viewport) {
-                    if let Some((anchor,centre))=editor_zoom_focus(&scene.sim,camera,gt,cursor,viewport,margins) {
-                        edit.pan_by(editor_zoom_pan(anchor,centre,next/before));
+        let before = edit.zoom;
+        let next = (before * (-y * if editor { 0.16 } else { 0.08 }).exp())
+            .clamp(if editor { 0.0001 } else { 0.3 }, 32.0);
+        if editor && before > 0.0 && next != before {
+            if let (Some(cursor), Ok((camera, gt)), Some(lab)) =
+                (cursor, cameras.single(), laboratory.as_ref())
+            {
+                let viewport = camera
+                    .logical_viewport_size()
+                    .unwrap_or(Vec2::new(window.width(), window.height()));
+                if let Some(margins) = lab.viewport_margins(viewport) {
+                    if let Some((anchor, centre)) =
+                        editor_zoom_focus(&scene.sim, camera, gt, cursor, viewport, margins)
+                    {
+                        edit.pan_by(editor_zoom_pan(anchor, centre, next / before));
                     }
                 }
             }
@@ -1229,11 +1267,11 @@ pub fn input(
     };
     if let (Some(a), Some(b)) = (edit.previous_cursor, cursor) {
         if !blocked && mouse.pressed(MouseButton::Middle) && (!editor || edit.camera_drag) {
-            let shift=keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+            let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
             if shift != editor {
                 edit.orbit = (edit.orbit + (b.x - a.x) * 0.006).rem_euclid(std::f32::consts::TAU);
-                let range=if editor {1.5}else{0.6};
-                edit.pitch = (edit.pitch + (a.y - b.y) * 0.006).clamp(-range,range);
+                let range = if editor { 1.5 } else { 0.6 };
+                edit.pitch = (edit.pitch + (a.y - b.y) * 0.006).clamp(-range, range);
             } else if let (Ok(ra), Ok(rb)) = (
                 camera.viewport_to_world(gt, a),
                 camera.viewport_to_world(gt, b),
@@ -1336,7 +1374,11 @@ pub fn input(
                                 let building = panel.as_ref().and_then(|p| p.construction_kind);
                                 if !fire && building.is_some() {
                                     let kind = building.expect("construction kind");
-                                    scene.notice = if scene.sim.create_construction_site(kind, true, hit).is_some() {
+                                    scene.notice = if scene
+                                        .sim
+                                        .create_construction_site(kind, true, hit)
+                                        .is_some()
+                                    {
                                         "Площадка создана: дроны резервируют и везут сталь. Квоты — в панели приказов.".into()
                                     } else {
                                         "Здесь строить нельзя: место занято, вне карты или исчерпан лимит юнитов".into()
@@ -1346,46 +1388,100 @@ pub fn input(
                                 let ids = edit.battle_selected_ids(&scene.sim);
                                 if !ids.is_empty() {
                                     use sim_core::blast::battle::Order;
-                                    if !fire && panel.as_ref().is_some_and(|p| p.electric_support_target) {
+                                    if !fire
+                                        && panel.as_ref().is_some_and(|p| p.electric_support_target)
+                                    {
                                         if let Some(Selection::Unit(target)) = selection {
                                             let mut accepted = 0;
                                             for &id in &ids {
-                                                if scene.sim.units[id].kind == RangeUnitKind::LightningTank
-                                                    && scene.sim.battle_order(id, Order::Support(target), None) { accepted += 1; }
+                                                if scene.sim.units[id].kind
+                                                    == RangeUnitKind::LightningTank
+                                                    && scene.sim.battle_order(
+                                                        id,
+                                                        Order::Support(target),
+                                                        None,
+                                                    )
+                                                {
+                                                    accepted += 1;
+                                                }
                                             }
                                             if accepted > 0 {
-                                                if let Some(panel) = panel.as_mut() { panel.electric_support_target = false; }
-                                                scene.notice = format!("Поддержку получили {accepted} электротанков");
+                                                if let Some(panel) = panel.as_mut() {
+                                                    panel.electric_support_target = false;
+                                                }
+                                                scene.notice = format!(
+                                                    "Поддержку получили {accepted} электротанков"
+                                                );
                                             } else {
-                                                scene.notice = "Выберите другой живой союзный электротанк".into();
+                                                scene.notice =
+                                                    "Выберите другой живой союзный электротанк"
+                                                        .into();
                                             }
                                         } else {
                                             scene.notice = "Укажите союзный электротанк ПКМ".into();
                                         }
                                         return;
                                     }
-                                    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-                                    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-                                    let mode = panel.as_ref().map_or(panel::CrawlerMode::Move, |p| p.crawler_mode);
-                                    let salvage = if ctrl { shift } else { mode == panel::CrawlerMode::Reclaim };
+                                    let ctrl = keys.pressed(KeyCode::ControlLeft)
+                                        || keys.pressed(KeyCode::ControlRight);
+                                    let shift = keys.pressed(KeyCode::ShiftLeft)
+                                        || keys.pressed(KeyCode::ShiftRight);
+                                    let mode = panel
+                                        .as_ref()
+                                        .map_or(panel::CrawlerMode::Move, |p| p.crawler_mode);
+                                    let salvage = if ctrl {
+                                        shift
+                                    } else {
+                                        mode == panel::CrawlerMode::Reclaim
+                                    };
                                     let dig = !fire
                                         && (ctrl || mode != panel::CrawlerMode::Move)
-                                        && (salvage || !ctrl || !matches!(selection, Some(Selection::Unit(_))))
-                                        && ids.iter().any(|&id| matches!(scene.sim.units[id].kind, RangeUnitKind::Crawler));
+                                        && (salvage
+                                            || !ctrl
+                                            || !matches!(selection, Some(Selection::Unit(_))))
+                                        && ids.iter().any(|&id| {
+                                            matches!(
+                                                scene.sim.units[id].kind,
+                                                RangeUnitKind::Crawler
+                                            )
+                                        });
                                     // Pick the actual rendered fragment on the click,
                                     // rather than the ground behind it.
                                     let reclaim_point = if dig && salvage {
-                                        let limit = Vec3::from(hit.map(|v| v as f32)).distance(ray.origin) + 1.0;
+                                        let limit = Vec3::from(hit.map(|v| v as f32))
+                                            .distance(ray.origin)
+                                            + 1.0;
                                         fragments::picking::pick(&scene, ray, limit)
-                                            .and_then(|picked| scene.sim.matter.debris.fragments.iter()
-                                                .find(|f| f.id == picked.id && f.resting))
-                                            .map(|f| [f.position.x, f.position.y, f.position.z].map(fx::Fx::to_int_trunc))
+                                            .and_then(|picked| {
+                                                scene
+                                                    .sim
+                                                    .matter
+                                                    .debris
+                                                    .fragments
+                                                    .iter()
+                                                    .find(|f| f.id == picked.id && f.resting)
+                                            })
+                                            .map(|f| {
+                                                [f.position.x, f.position.y, f.position.z]
+                                                    .map(fx::Fx::to_int_trunc)
+                                            })
                                             .or_else(|| match selection {
-                                                Some(Selection::Unit(id)) if !scene.sim.units[id].status.alive =>
-                                                    Some(scene.sim.units[id].motion.pos.map(fx::Fx::to_int_trunc)),
+                                                Some(Selection::Unit(id))
+                                                    if !scene.sim.units[id].status.alive =>
+                                                {
+                                                    Some(
+                                                        scene.sim.units[id]
+                                                            .motion
+                                                            .pos
+                                                            .map(fx::Fx::to_int_trunc),
+                                                    )
+                                                }
                                                 _ => None,
-                                            }).unwrap_or(hit)
-                                    } else { hit };
+                                            })
+                                            .unwrap_or(hit)
+                                    } else {
+                                        hit
+                                    };
                                     let order = if fire {
                                         Order::Ground(hit)
                                     } else if dig && salvage {
@@ -1406,7 +1502,13 @@ pub fn input(
                                     };
                                     if scene.sim.battle.phase
                                         == sim_core::blast::battle::Phase::Setup
-                                        && !matches!(order, Order::Move | Order::Hold | Order::Dig(_) | Order::Reclaim(_))
+                                        && !matches!(
+                                            order,
+                                            Order::Move
+                                                | Order::Hold
+                                                | Order::Dig(_)
+                                                | Order::Reclaim(_)
+                                        )
                                     {
                                         scene.notice = if dig {
                                             "Для добычи сначала начните бой или свободное управление."
@@ -1415,25 +1517,43 @@ pub fn input(
                                         }.into();
                                         return;
                                     }
-                                    let eligible = if matches!(order, Order::Dig(_) | Order::Reclaim(_)) {
-                                        ids.iter().filter(|&&id| matches!(scene.sim.units[id].kind, RangeUnitKind::Crawler)).count()
-                                    } else if order == Order::Move {
-                                        ids.iter()
-                                            .filter(|&&id| {
-                                                scene
-                                                    .sim
-                                                    .units
-                                                    .get(id)
-                                                    .is_some_and(|u| !u.kind.emplacement())
-                                            })
-                                            .count()
-                                    } else {
-                                        ids.len()
-                                    };
+                                    let eligible =
+                                        if matches!(order, Order::Dig(_) | Order::Reclaim(_)) {
+                                            ids.iter()
+                                                .filter(|&&id| {
+                                                    matches!(
+                                                        scene.sim.units[id].kind,
+                                                        RangeUnitKind::Crawler
+                                                    )
+                                                })
+                                                .count()
+                                        } else if order == Order::Move {
+                                            ids.iter()
+                                                .filter(|&&id| {
+                                                    scene
+                                                        .sim
+                                                        .units
+                                                        .get(id)
+                                                        .is_some_and(|u| !u.kind.emplacement())
+                                                })
+                                                .count()
+                                        } else {
+                                            ids.len()
+                                        };
                                     let autonomous = scene.sim.battle.autonomous;
                                     let diggers: Vec<_> = if dig {
-                                        ids.iter().copied().filter(|&id| matches!(scene.sim.units[id].kind, RangeUnitKind::Crawler)).collect()
-                                    } else { Vec::new() };
+                                        ids.iter()
+                                            .copied()
+                                            .filter(|&id| {
+                                                matches!(
+                                                    scene.sim.units[id].kind,
+                                                    RangeUnitKind::Crawler
+                                                )
+                                            })
+                                            .collect()
+                                    } else {
+                                        Vec::new()
+                                    };
                                     let accepted = issue_battle_group_order(
                                         &mut scene.sim,
                                         if dig { &diggers } else { &ids },
@@ -1458,7 +1578,12 @@ pub fn input(
                                     if eligible == 0 && order == Order::Move {
                                         scene.notice = "В выделении нет подвижных юнитов".into();
                                     } else if accepted == eligible && accepted > 0 && dig {
-                                        scene.notice = if salvage { "Краулер: выбранный обломок, затем сбор в радиусе 16 м" } else { "Краулер: бурение" }.into();
+                                        scene.notice = if salvage {
+                                            "Краулер: выбранный обломок, затем сбор в радиусе 16 м"
+                                        } else {
+                                            "Краулер: бурение"
+                                        }
+                                        .into();
                                     } else if accepted == eligible && accepted > 0 {
                                         if autonomous && !scene.sim.battle.autonomous {
                                             scene.notice = "Ручное управление: союзный ИИ передал вам управление. ЛКМ — выбор, ПКМ — приказ.".into();
@@ -1820,7 +1945,11 @@ pub fn overlay(
                 Color::srgba(0.48, 0.9, 1.0, 0.38),
             );
         }
-    } else if scene.sim.physical_gun() && scene.sim.gun.status.alive && scene.sim.gun.status.weapon && panel.ranges {
+    } else if scene.sim.physical_gun()
+        && scene.sim.gun.status.alive
+        && scene.sim.gun.status.weapon
+        && panel.ranges
+    {
         // Unit-target admission uses this same SIM-owned tactical radius.
         ground_range(
             &mut giz,
@@ -2096,8 +2225,10 @@ mod tests {
     #[test]
     fn crawler_field_opens_as_a_noncombat_economy_scene() {
         use super::*;
-        let base = RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
-        let config = ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
+        let base =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
         let mut edit = Workshop::new(Some(base), false);
         edit.crawler_field(config).unwrap();
         let layout = edit.layout.as_ref().unwrap();
@@ -2114,62 +2245,133 @@ mod tests {
         use super::*;
         use bevy::camera::{CameraProjection, RenderTargetInfo};
         use sim_core::blast::battle::Order;
-        let layout = RangeLayout::from_ron(include_str!("../../../../../data/range-crawler-field.ron")).unwrap();
-        let config = ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
+        let layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-crawler-field.ron"))
+                .unwrap();
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
         let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
         sim.start_free_control().unwrap();
         let mut workshop = Workshop::new(Some(layout), false);
-        workshop.editing = false; workshop.controlled = Some(0); workshop.selected_units = vec![0];
+        workshop.editing = false;
+        workshop.controlled = Some(0);
+        workshop.selected_units = vec![0];
         let mut app = panel::hud::tests::app_with_scene(sim, workshop);
-        app.init_resource::<ButtonInput<MouseButton>>().add_message::<MouseWheel>().add_systems(Update, input);
-        let projection = OrthographicProjection { area: Rect::from_corners(Vec2::new(-320.0, -240.0), Vec2::new(320.0, 240.0)), near: 1.0, far: 1200.0, ..OrthographicProjection::default_3d() };
+        app.init_resource::<ButtonInput<MouseButton>>()
+            .add_message::<MouseWheel>()
+            .add_systems(Update, input);
+        let projection = OrthographicProjection {
+            area: Rect::from_corners(Vec2::new(-320.0, -240.0), Vec2::new(320.0, 240.0)),
+            near: 1.0,
+            far: 1200.0,
+            ..OrthographicProjection::default_3d()
+        };
         let mut camera = Camera::default();
         camera.computed.clip_from_view = projection.get_clip_from_view();
-        camera.computed.target_info = Some(RenderTargetInfo { physical_size: UVec2::new(1600, 900), scale_factor: 1.0 });
-        let gt = GlobalTransform::from(Transform::from_xyz(320.0, 300.0, 320.0).looking_at(Vec3::new(320.0, 0.0, 320.0), Vec3::NEG_Z));
-        let screen = camera.world_to_viewport(&gt, Vec3::new(416.0, 28.0, 248.0)).unwrap();
-        let mut window = Window { resolution: bevy::window::WindowResolution::new(1600, 900).with_scale_factor_override(1.0), focused: true, ..default() };
+        camera.computed.target_info = Some(RenderTargetInfo {
+            physical_size: UVec2::new(1600, 900),
+            scale_factor: 1.0,
+        });
+        let gt = GlobalTransform::from(
+            Transform::from_xyz(320.0, 300.0, 320.0)
+                .looking_at(Vec3::new(320.0, 0.0, 320.0), Vec3::NEG_Z),
+        );
+        let screen = camera
+            .world_to_viewport(&gt, Vec3::new(416.0, 28.0, 248.0))
+            .unwrap();
+        let mut window = Window {
+            resolution: bevy::window::WindowResolution::new(1600, 900)
+                .with_scale_factor_override(1.0),
+            focused: true,
+            ..default()
+        };
         window.set_cursor_position(Some(screen));
-        app.world_mut().spawn(window); app.world_mut().spawn((camera, gt, GasCamera));
-        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::ControlLeft);
-        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Right);
+        app.world_mut().spawn(window);
+        app.world_mut().spawn((camera, gt, GasCamera));
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ControlLeft);
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Right);
         app.update();
         let scene = app.world().resource::<Scene>();
-        assert!(matches!(scene.sim.battle.actors[0].order, Order::Dig(_)), "{}", scene.notice);
+        assert!(
+            matches!(scene.sim.battle.actors[0].order, Order::Dig(_)),
+            "{}",
+            scene.notice
+        );
     }
     #[test]
     fn crawler_mode_changes_ordinary_right_click_order() {
         use super::*;
         use bevy::camera::{CameraProjection, RenderTargetInfo};
         use sim_core::blast::battle::Order;
-        for mode in [panel::CrawlerMode::Move, panel::CrawlerMode::Reclaim, panel::CrawlerMode::Drill] {
-            let layout = RangeLayout::from_ron(include_str!("../../../../../data/range-crawler-field.ron")).unwrap();
-            let config = ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
+        for mode in [
+            panel::CrawlerMode::Move,
+            panel::CrawlerMode::Reclaim,
+            panel::CrawlerMode::Drill,
+        ] {
+            let layout =
+                RangeLayout::from_ron(include_str!("../../../../../data/range-crawler-field.ron"))
+                    .unwrap();
+            let config =
+                ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron"))
+                    .unwrap();
             let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
             sim.start_free_control().unwrap();
             let mut workshop = Workshop::new(Some(layout), false);
-            workshop.editing = false; workshop.controlled = Some(0); workshop.selected_units = vec![0];
+            workshop.editing = false;
+            workshop.controlled = Some(0);
+            workshop.selected_units = vec![0];
             let mut app = panel::hud::tests::app_with_scene(sim, workshop);
             app.world_mut().resource_mut::<panel::Panel>().crawler_mode = mode;
-            app.init_resource::<ButtonInput<MouseButton>>().add_message::<MouseWheel>().add_systems(Update, input);
-            let projection = OrthographicProjection { area: Rect::from_corners(Vec2::new(-320.0, -240.0), Vec2::new(320.0, 240.0)), near: 1.0, far: 1200.0, ..OrthographicProjection::default_3d() };
+            app.init_resource::<ButtonInput<MouseButton>>()
+                .add_message::<MouseWheel>()
+                .add_systems(Update, input);
+            let projection = OrthographicProjection {
+                area: Rect::from_corners(Vec2::new(-320.0, -240.0), Vec2::new(320.0, 240.0)),
+                near: 1.0,
+                far: 1200.0,
+                ..OrthographicProjection::default_3d()
+            };
             let mut camera = Camera::default();
             camera.computed.clip_from_view = projection.get_clip_from_view();
-            camera.computed.target_info = Some(RenderTargetInfo { physical_size: UVec2::new(1600, 900), scale_factor: 1.0 });
-            let gt = GlobalTransform::from(Transform::from_xyz(320.0, 300.0, 320.0).looking_at(Vec3::new(320.0, 0.0, 320.0), Vec3::NEG_Z));
-            let screen = camera.world_to_viewport(&gt, Vec3::new(416.0, 28.0, 248.0)).unwrap();
-            let mut window = Window { resolution: bevy::window::WindowResolution::new(1600, 900).with_scale_factor_override(1.0), focused: true, ..default() };
+            camera.computed.target_info = Some(RenderTargetInfo {
+                physical_size: UVec2::new(1600, 900),
+                scale_factor: 1.0,
+            });
+            let gt = GlobalTransform::from(
+                Transform::from_xyz(320.0, 300.0, 320.0)
+                    .looking_at(Vec3::new(320.0, 0.0, 320.0), Vec3::NEG_Z),
+            );
+            let screen = camera
+                .world_to_viewport(&gt, Vec3::new(416.0, 28.0, 248.0))
+                .unwrap();
+            let mut window = Window {
+                resolution: bevy::window::WindowResolution::new(1600, 900)
+                    .with_scale_factor_override(1.0),
+                focused: true,
+                ..default()
+            };
             window.set_cursor_position(Some(screen));
-            app.world_mut().spawn(window); app.world_mut().spawn((camera, gt, GasCamera));
-            app.world_mut().resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Right);
+            app.world_mut().spawn(window);
+            app.world_mut().spawn((camera, gt, GasCamera));
+            app.world_mut()
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(MouseButton::Right);
             app.update();
             let scene = app.world().resource::<Scene>();
             let order = scene.sim.battle.actors[0].order;
-            assert!(match mode {
-                panel::CrawlerMode::Move => matches!(order, Order::Move),
-                panel::CrawlerMode::Reclaim => matches!(order, Order::Reclaim(_)),
-                panel::CrawlerMode::Drill => matches!(order, Order::Dig(_)),
-            }, "mode {mode:?}, order {order:?}: {}", scene.notice);
+            assert!(
+                match mode {
+                    panel::CrawlerMode::Move => matches!(order, Order::Move),
+                    panel::CrawlerMode::Reclaim => matches!(order, Order::Reclaim(_)),
+                    panel::CrawlerMode::Drill => matches!(order, Order::Dig(_)),
+                },
+                "mode {mode:?}, order {order:?}: {}",
+                scene.notice
+            );
         }
     }
     #[test]
@@ -2177,55 +2379,121 @@ mod tests {
         use super::*;
         use bevy::camera::{CameraProjection, RenderTargetInfo};
         use sim_core::blast::battle::Order;
-        let mut layout = RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
         layout.battle = true;
-        layout.blocks.clear(); layout.shields.clear(); layout.course = None;
-        layout.clear_min = [1, 1]; layout.clear_max = [639, 639];
+        layout.blocks.clear();
+        layout.shields.clear();
+        layout.course = None;
+        layout.clear_min = [1, 1];
+        layout.clear_max = [639, 639];
         layout.units = vec![
-            modding::range::RangeUnitDef { kind: RangeUnitKind::LightningTank, at: [200,16,300], allied: true, weapon: None },
-            modding::range::RangeUnitDef { kind: RangeUnitKind::LightningTank, at: [200,16,450], allied: true, weapon: None },
-            modding::range::RangeUnitDef { kind: RangeUnitKind::Tank, at: [500,16,400], allied: false, weapon: None },
+            modding::range::RangeUnitDef {
+                kind: RangeUnitKind::LightningTank,
+                at: [200, 16, 300],
+                allied: true,
+                weapon: None,
+            },
+            modding::range::RangeUnitDef {
+                kind: RangeUnitKind::LightningTank,
+                at: [200, 16, 450],
+                allied: true,
+                weapon: None,
+            },
+            modding::range::RangeUnitDef {
+                kind: RangeUnitKind::Tank,
+                at: [500, 16, 400],
+                allied: false,
+                weapon: None,
+            },
         ];
-        let config = ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
         let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
         sim.start_free_control().unwrap();
         let mut workshop = Workshop::new(Some(layout), false);
-        workshop.editing = false; workshop.controlled = Some(0); workshop.selected_units = vec![0];
+        workshop.editing = false;
+        workshop.controlled = Some(0);
+        workshop.selected_units = vec![0];
         let mut app = panel::hud::tests::app_with_scene(sim, workshop);
-        app.world_mut().resource_mut::<panel::Panel>().electric_support_target = true;
-        app.init_resource::<ButtonInput<MouseButton>>().add_message::<MouseWheel>().add_systems(Update, input);
-        let projection = OrthographicProjection { area: Rect::from_corners(Vec2::new(-320.0, -240.0), Vec2::new(320.0, 240.0)), near: 1.0, far: 1200.0, ..OrthographicProjection::default_3d() };
+        app.world_mut()
+            .resource_mut::<panel::Panel>()
+            .electric_support_target = true;
+        app.init_resource::<ButtonInput<MouseButton>>()
+            .add_message::<MouseWheel>()
+            .add_systems(Update, input);
+        let projection = OrthographicProjection {
+            area: Rect::from_corners(Vec2::new(-320.0, -240.0), Vec2::new(320.0, 240.0)),
+            near: 1.0,
+            far: 1200.0,
+            ..OrthographicProjection::default_3d()
+        };
         let mut camera = Camera::default();
         camera.computed.clip_from_view = projection.get_clip_from_view();
-        camera.computed.target_info = Some(RenderTargetInfo { physical_size: UVec2::new(1600, 900), scale_factor: 1.0 });
-        let gt = GlobalTransform::from(Transform::from_xyz(320.0, 300.0, 320.0).looking_at(Vec3::new(320.0, 0.0, 320.0), Vec3::NEG_Z));
-        let screen = camera.world_to_viewport(&gt, Vec3::new(200.0, 40.0, 450.0)).unwrap();
-        let mut window = Window { resolution: bevy::window::WindowResolution::new(1600, 900).with_scale_factor_override(1.0), focused: true, ..default() };
+        camera.computed.target_info = Some(RenderTargetInfo {
+            physical_size: UVec2::new(1600, 900),
+            scale_factor: 1.0,
+        });
+        let gt = GlobalTransform::from(
+            Transform::from_xyz(320.0, 300.0, 320.0)
+                .looking_at(Vec3::new(320.0, 0.0, 320.0), Vec3::NEG_Z),
+        );
+        let screen = camera
+            .world_to_viewport(&gt, Vec3::new(200.0, 40.0, 450.0))
+            .unwrap();
+        let mut window = Window {
+            resolution: bevy::window::WindowResolution::new(1600, 900)
+                .with_scale_factor_override(1.0),
+            focused: true,
+            ..default()
+        };
         window.set_cursor_position(Some(screen));
-        app.world_mut().spawn(window); app.world_mut().spawn((camera, gt, GasCamera));
-        app.world_mut().resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Right);
+        app.world_mut().spawn(window);
+        app.world_mut().spawn((camera, gt, GasCamera));
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Right);
         app.update();
         let scene = app.world().resource::<Scene>();
-        assert_eq!(scene.sim.battle.actors[0].order, Order::Support(1), "{}", scene.notice);
-        assert!(!app.world().resource::<panel::Panel>().electric_support_target);
+        assert_eq!(
+            scene.sim.battle.actors[0].order,
+            Order::Support(1),
+            "{}",
+            scene.notice
+        );
+        assert!(
+            !app.world()
+                .resource::<panel::Panel>()
+                .electric_support_target
+        );
     }
     #[test]
     fn group_dig_command_reaches_a_real_crawler() {
         use super::*;
         use sim_core::blast::battle::Order;
-        let e = modding::laboratory::experiments::stock().into_iter()
-            .find(|e| e.id == "crawler-base").unwrap();
+        let e = modding::laboratory::experiments::stock()
+            .into_iter()
+            .find(|e| e.id == "crawler-base")
+            .unwrap();
         let mut layout = e.layout;
         layout.size = [512, 128, 512];
-        layout.clear_min = [1, 1]; layout.clear_max = [511, 511];
-        layout.gun = [120, 24, 256]; layout.target = [310, 18, 256];
-        layout.units[0].at = [220, 16, 256]; layout.units[1].at = [70, 16, 256];
-        layout.blocks[0].min = [300, 1, 248]; layout.blocks[0].max = [322, 16, 264];
-        let config = ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
+        layout.clear_min = [1, 1];
+        layout.clear_max = [511, 511];
+        layout.gun = [120, 24, 256];
+        layout.target = [310, 18, 256];
+        layout.units[0].at = [220, 16, 256];
+        layout.units[1].at = [70, 16, 256];
+        layout.blocks[0].min = [300, 1, 248];
+        layout.blocks[0].max = [322, 16, 264];
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
         let mut sim = BlastRange::with_layout(config, layout).unwrap();
         sim.start_free_control().unwrap();
         let face = [310, 8, 256];
-        assert_eq!(issue_battle_group_order(&mut sim, &[0], Order::Dig(face), None), 1);
+        assert_eq!(
+            issue_battle_group_order(&mut sim, &[0], Order::Dig(face), None),
+            1
+        );
         assert_eq!(sim.battle.actors[0].order, Order::Dig(face));
     }
     use super::*;
@@ -3259,14 +3527,30 @@ mod tests {
             let mut q = world.query::<&mut Window>();
             q.single_mut(world).unwrap().focused = false;
         }
-        let zoom=app.world().resource::<Workshop>().zoom;
-        let window_entity={let world=app.world_mut();world.query_filtered::<Entity,With<Window>>().single(world).unwrap()};
-        app.world_mut().write_message(MouseWheel{unit:MouseScrollUnit::Line,x:0.0,y:3.0,window:window_entity,phase:bevy::input::touch::TouchPhase::Moved});
+        let zoom = app.world().resource::<Workshop>().zoom;
+        let window_entity = {
+            let world = app.world_mut();
+            world
+                .query_filtered::<Entity, With<Window>>()
+                .single(world)
+                .unwrap()
+        };
+        app.world_mut().write_message(MouseWheel {
+            unit: MouseScrollUnit::Line,
+            x: 0.0,
+            y: 3.0,
+            window: window_entity,
+            phase: bevy::input::touch::TouchPhase::Moved,
+        });
         app.update();
         assert!(app.world().resource::<Workshop>().drag_start.is_none());
         assert!(app.world().resource::<Workshop>().drag_current.is_none());
         assert_eq!(app.world().resource::<Workshop>().selected_units, [0, 1]);
-        assert_eq!(app.world().resource::<Workshop>().zoom,zoom,"unfocused wheel must not change the camera");
+        assert_eq!(
+            app.world().resource::<Workshop>().zoom,
+            zoom,
+            "unfocused wheel must not change the camera"
+        );
         app.world_mut()
             .resource_mut::<ButtonInput<MouseButton>>()
             .clear();

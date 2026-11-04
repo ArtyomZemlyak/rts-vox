@@ -33,13 +33,17 @@ pub fn spawn(
             if buf.idx.is_empty() {
                 continue;
             }
-            if scene.sim.gun.kind == RangeUnitKind::ArtilleryTurretT3 && k == usize::from(voxel::unit::FINISH_STEEL - 1) { witness::siege_steel(buf); }
+            if scene.sim.gun.kind == RangeUnitKind::ArtilleryTurretT3
+                && k == usize::from(voxel::unit::FINISH_STEEL - 1)
+            {
+                witness::siege_steel(buf);
+            }
             weather(buf, k);
             let base = Transform::from_translation(
                 Vec3::new(GUN[0] as f32, GUN[1] as f32, GUN[2] as f32) + pos,
             )
             .with_rotation(rot);
-            let mut model=mesh(buf);
+            let mut model = mesh(buf);
             model.asset_usage |= RenderAssetUsages::MAIN_WORLD;
             commands.spawn((
                 Mesh3d(meshes.add(model)),
@@ -116,7 +120,10 @@ pub fn emitters(
         RangeUnitKind::TurretT2 => 3.5,
         RangeUnitKind::Base => 4.0,
         RangeUnitKind::GrebenStorage => 60.0,
-        RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4 => 60.0,
+        RangeUnitKind::KilFactoryT1
+        | RangeUnitKind::KilFactoryT2
+        | RangeUnitKind::KilFactoryT3
+        | RangeUnitKind::KilFactoryT4 => 60.0,
         RangeUnitKind::SkobaDrone => 2.0,
     };
     for (barrel, path) in body.weapon_paths().iter().enumerate() {

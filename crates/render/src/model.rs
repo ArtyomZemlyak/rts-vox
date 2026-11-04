@@ -94,7 +94,7 @@ pub const DAMAGE_BEVEL: f32 = 0.12;
 pub fn fragment_to_mesh(shape: u64, side: u8, colour: [f32; 4]) -> MeshBuf {
     // A half-cell bevel turns a single debris voxel into an octahedron. Keep
     // debris cubic, with fewer triangles and the same physical bounds.
-    const FRAGMENT_BEVEL:f32=0.0;
+    const FRAGMENT_BEVEL: f32 = 0.0;
     let side = i32::from(side.clamp(1, 4));
     let solid = |p: [i32; 3]| {
         p.iter().all(|&v| v >= 0 && v < side)
@@ -142,7 +142,15 @@ pub fn fragment_to_mesh(shape: u64, side: u8, colour: [f32; 4]) -> MeshBuf {
         };
         for (d, axis, positive) in SIDES {
             if !solid(std::array::from_fn(|a| at[a] + d[a])) {
-                face(axis, positive, FRAGMENT_BEVEL, colour, &free, &put, &mut out);
+                face(
+                    axis,
+                    positive,
+                    FRAGMENT_BEVEL,
+                    colour,
+                    &free,
+                    &put,
+                    &mut out,
+                );
             }
         }
         corners(FRAGMENT_BEVEL, colour, &free, &put, &mut out);
@@ -196,12 +204,22 @@ pub fn body_to_mesh(
 
 /// Small surface excerpt for a presentation-only voxel inspector. Two cells
 /// of padding keep the clipping box away from artificial region boundaries.
-pub fn inspection_cell_mesh(b: &UnitBody, cell: [usize;3]) -> Vec<MeshBuf> {
-    let mut buffers=std::array::from_fn(|_|MeshBuf::default());
-    let lo=cell.map(|v|v.saturating_sub(2));
-    let hi=cell.map(|v|v.saturating_add(3));
-    body_to_mesh_region(b,[1.0;3],1.0,(0,usize::MAX),0.35,[0.0;3],&mut buffers,(lo,hi),|x,y,z|b.vol.get(x,y,z));
-    buffers.into_iter().filter(|b|!b.is_empty()).collect()
+pub fn inspection_cell_mesh(b: &UnitBody, cell: [usize; 3]) -> Vec<MeshBuf> {
+    let mut buffers = std::array::from_fn(|_| MeshBuf::default());
+    let lo = cell.map(|v| v.saturating_sub(2));
+    let hi = cell.map(|v| v.saturating_add(3));
+    body_to_mesh_region(
+        b,
+        [1.0; 3],
+        1.0,
+        (0, usize::MAX),
+        0.35,
+        [0.0; 3],
+        &mut buffers,
+        (lo, hi),
+        |x, y, z| b.vol.get(x, y, z),
+    );
+    buffers.into_iter().filter(|b| !b.is_empty()).collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -405,7 +423,11 @@ fn section_to_mesh_impl<const BOUNDED: bool>(
                 tint,
                 scale,
                 (0, source.vol.ny as usize),
-                if corpse.is_some() {BEVEL}else{DAMAGE_BEVEL},
+                if corpse.is_some() {
+                    BEVEL
+                } else {
+                    DAMAGE_BEVEL
+                },
                 centre,
                 &mut buffers,
                 region,
@@ -434,7 +456,11 @@ fn section_to_mesh_impl<const BOUNDED: bool>(
                 tint,
                 scale,
                 (0, part.vol.ny as usize),
-                if corpse.is_some() {BEVEL}else{DAMAGE_BEVEL},
+                if corpse.is_some() {
+                    BEVEL
+                } else {
+                    DAMAGE_BEVEL
+                },
                 centre,
                 &mut buffers,
                 region,

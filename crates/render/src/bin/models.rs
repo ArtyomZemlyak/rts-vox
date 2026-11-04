@@ -264,7 +264,10 @@ fn setup(
     all.push(("краулер Старатель", voxel::unit::crawler()));
     all.push(("Гребень · хранилище", voxel::unit::greben_storage()));
     all.push(("Скоба · открытая рама", voxel::unit::skoba_drone(false)));
-    all.push(("Скоба · со стальным грузом", voxel::unit::skoba_with_cargo()));
+    all.push((
+        "Скоба · со стальным грузом",
+        voxel::unit::skoba_with_cargo(),
+    ));
     all.push(("Скоба · компактный возврат", voxel::unit::skoba_drone(true)));
     all.push(("Киль T1", voxel::unit::kil_factory(1)));
     all.push(("Киль T2", voxel::unit::kil_factory(2)));
@@ -331,7 +334,9 @@ fn setup(
             );
             for (finish, buf) in bufs.iter_mut().enumerate() {
                 if !buf.is_empty() {
-                    if *name == "осадная турель T3" && finish == usize::from(voxel::unit::FINISH_STEEL - 1) {
+                    if *name == "осадная турель T3"
+                        && finish == usize::from(voxel::unit::FINISH_STEEL - 1)
+                    {
                         let ivory = look::to_linear([0.84, 0.82, 0.77]);
                         for colour in &mut buf.col {
                             colour[0] = ivory[0];

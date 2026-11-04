@@ -45,15 +45,27 @@ pub fn active(lab: &Laboratory) -> Option<&Source> {
         .sources
         .get(lab.constructor.workspace.selected)
 }
-pub fn ensure_weapon(lab:&mut Laboratory)->Result<(),String> {
+pub fn ensure_weapon(lab: &mut Laboratory) -> Result<(), String> {
     ensure(lab)?;
     if lab.constructor.workspace.sources.is_empty() {
-        if lab.constructor.experiment.as_ref().is_some_and(|p|p.inputs.len()>=32) {return Err("Не более 32 команд в сценарии".into());}
-        if lab.constructor.base.as_ref().is_some_and(|b|b.battle) {return Err("В боевой сцене используйте штатное оружие участника в командах сценария".into());}
-        let plan=lab.constructor.experiment.take();
-        let result=ensure(lab);
-        lab.constructor.experiment=plan;
-        result?;scenario::attach_selected(lab)?;
+        if lab
+            .constructor
+            .experiment
+            .as_ref()
+            .is_some_and(|p| p.inputs.len() >= 32)
+        {
+            return Err("Не более 32 команд в сценарии".into());
+        }
+        if lab.constructor.base.as_ref().is_some_and(|b| b.battle) {
+            return Err(
+                "В боевой сцене используйте штатное оружие участника в командах сценария".into(),
+            );
+        }
+        let plan = lab.constructor.experiment.take();
+        let result = ensure(lab);
+        lab.constructor.experiment = plan;
+        result?;
+        scenario::attach_selected(lab)?;
     }
     Ok(())
 }
@@ -156,7 +168,9 @@ pub fn arm(lab: &Laboratory, scene: &mut Scene) -> Result<(), String> {
     source.resolved().validate()?;
     // A scenario source is authoring data. Its next launch reads these exact
     // values; selecting/editing it must not replace an ongoing scenario shot.
-    if lab.constructor.experiment.is_some() { return Ok(()); }
+    if lab.constructor.experiment.is_some() {
+        return Ok(());
+    }
     if !scene.sim.ready() {
         return Err("Дождитесь завершения воздействия перед изменением источника".into());
     }
@@ -197,11 +211,13 @@ pub fn arm(lab: &Laboratory, scene: &mut Scene) -> Result<(), String> {
 }
 pub fn action(lab: &mut Laboratory, action: LabAction, scene: &mut Scene) -> Result<bool, String> {
     ensure(lab)?;
-    if action==LabAction::AddSource && lab.constructor.workspace.sources.is_empty() {
-        ensure_weapon(lab)?;lab.ui.tab=10;return Ok(true);
+    if action == LabAction::AddSource && lab.constructor.workspace.sources.is_empty() {
+        ensure_weapon(lab)?;
+        lab.ui.tab = 10;
+        return Ok(true);
     }
     let before = lab.constructor.workspace.clone();
-    let old_plan=lab.constructor.experiment.clone();
+    let old_plan = lab.constructor.experiment.clone();
     let old_aim = lab.constructor.aim;
     let old_mode = lab.constructor.mode;
     match action {
@@ -212,15 +228,22 @@ pub fn action(lab: &mut Laboratory, action: LabAction, scene: &mut Scene) -> Res
             lab.constructor.workspace.selected = i;
             lab.constructor.aim = None;
             lab.constructor.mode = constructor::Mode::Select;
-            lab.ui.tab=10;
+            lab.ui.tab = 10;
         }
         LabAction::AddSource => {
             if before.sources.len() >= 32 {
                 return Err("В сцене не более 32 источников".into());
             }
-            if lab.constructor.experiment.as_ref().is_some_and(|p|p.inputs.len()>=32) {return Err("Не более 32 команд в сценарии".into());}
+            if lab
+                .constructor
+                .experiment
+                .as_ref()
+                .is_some_and(|p| p.inputs.len() >= 32)
+            {
+                return Err("Не более 32 команд в сценарии".into());
+            }
             let mut s = active(lab).ok_or("Выберите свободное оружие")?.clone();
-            s.input=None;
+            s.input = None;
             s.name = format!("Источник {}", before.sources.len() + 1);
             s.binding = None;
             s.at[2] = (s.at[2] + 32).min(scene.sim.size()[2] as i32 - 33);
@@ -232,9 +255,14 @@ pub fn action(lab: &mut Laboratory, action: LabAction, scene: &mut Scene) -> Res
             if before.sources.len() <= 1 && lab.constructor.experiment.is_none() {
                 return Err("Оставьте хотя бы один источник".into());
             }
-            if let Some(input)=before.sources[before.selected].input {scenario::remove_input(lab,input);}
-            else {lab.constructor.workspace.sources.remove(before.selected);}
-            lab.constructor.workspace.selected=before.selected.min(lab.constructor.workspace.sources.len().saturating_sub(1));
+            if let Some(input) = before.sources[before.selected].input {
+                scenario::remove_input(lab, input);
+            } else {
+                lab.constructor.workspace.sources.remove(before.selected);
+            }
+            lab.constructor.workspace.selected = before
+                .selected
+                .min(lab.constructor.workspace.sources.len().saturating_sub(1));
         }
         LabAction::BindSource(bind) => {
             let detached = if !bind {
@@ -257,14 +285,16 @@ pub fn action(lab: &mut Laboratory, action: LabAction, scene: &mut Scene) -> Res
             };
             let source = active_mut(lab).ok_or("Нет источника")?;
             source.binding = index;
-            if bind { source.detonate = false; }
+            if bind {
+                source.detonate = false;
+            }
             if let Some(at) = detached {
                 source.at = at;
             }
         }
         LabAction::SourcePosition => {
             lab.constructor.mode = constructor::Mode::Source;
-            lab.constructor.elevation=0;
+            lab.constructor.elevation = 0;
             lab.ui.tab = 10;
             return Ok(false);
         }
@@ -279,13 +309,18 @@ pub fn action(lab: &mut Laboratory, action: LabAction, scene: &mut Scene) -> Res
     scenario::sync_sources(lab);
     if let Err(e) = arm(lab, scene) {
         lab.constructor.workspace = before;
-        lab.constructor.experiment=old_plan;
+        lab.constructor.experiment = old_plan;
         lab.constructor.aim = old_aim;
         lab.constructor.mode = old_mode;
         return Err(e);
     }
     lab.constructor.revision += 1;
-    lab.notice = if lab.constructor.experiment.is_some() {"Источник настроен; «Пуск» запускает команды сценария по порядку"}else{"Источник настроен; «Пуск» запускает выбранный источник"}.into();
+    lab.notice = if lab.constructor.experiment.is_some() {
+        "Источник настроен; «Пуск» запускает команды сценария по порядку"
+    } else {
+        "Источник настроен; «Пуск» запускает выбранный источник"
+    }
+    .into();
     Ok(false)
 }
 
@@ -303,8 +338,12 @@ pub fn draw(lab: &Laboratory, scene: &Scene, gizmos: &mut Gizmos) {
             colour,
         );
         if s.detonate && p.y < scene.sim.ground_level() as f32 {
-            gizmos.line(p,p.with_y(scene.sim.ground_level() as f32+0.5),colour.with_alpha(0.6));
-            gizmos.cross(p.with_y(scene.sim.ground_level() as f32+0.5),3.0,colour);
+            gizmos.line(
+                p,
+                p.with_y(scene.sim.ground_level() as f32 + 0.5),
+                colour.with_alpha(0.6),
+            );
+            gizmos.cross(p.with_y(scene.sim.ground_level() as f32 + 0.5), 3.0, colour);
         }
         if i == lab.constructor.workspace.selected && !s.detonate {
             gizmos.line(

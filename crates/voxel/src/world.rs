@@ -76,7 +76,13 @@ impl Edit {
 
     /// Replace only the material that was observed by the producer.
     pub fn replace_if(x: u32, y: u32, z: u32, expected: Mat, mat: Mat) -> Edit {
-        Edit { x, y, z, mat, by: 0xfffe0000 | expected as u32 }
+        Edit {
+            x,
+            y,
+            z,
+            mat,
+            by: 0xfffe0000 | expected as u32,
+        }
     }
 
     /// Снятие воксела без заказчика — обвал, воронка, оснастка теста.

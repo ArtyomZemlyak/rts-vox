@@ -4,55 +4,116 @@ use voxel::{bodies::Bodies, Edit};
 
 #[test]
 fn dune_large_rock_keeps_moving_after_contact_with_other_rocks() {
-    let e=modding::laboratory::experiments::stock().into_iter().find(|e|e.id=="dune-rockfall").unwrap();
-    let config=ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
-    let mut r=BlastRange::with_layout(config,e.layout).unwrap();r.control();r.set_physics_workers(1);r.set_navigation_workers(1);
-    let mut previous=None; let mut still=0; let mut max_still=0; let mut descended=false;
+    let e = modding::laboratory::experiments::stock()
+        .into_iter()
+        .find(|e| e.id == "dune-rockfall")
+        .unwrap();
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, e.layout).unwrap();
+    r.control();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    let mut previous = None;
+    let mut still = 0;
+    let mut max_still = 0;
+    let mut descended = false;
     for _ in 0..55 {
         r.step();
-        if let Some(b)=r.bodies.list.iter().find(|b|b.voxels.len()==729) {
-            let pos=(b.ox,b.oy,b.oz,b.tilt_angle);
-            if b.fallen>5 && b.oy>25 && previous==Some(pos) {still+=1;}else{still=0;}
-            max_still=max_still.max(still); previous=Some(pos);
+        if let Some(b) = r.bodies.list.iter().find(|b| b.voxels.len() == 729) {
+            let pos = (b.ox, b.oy, b.oz, b.tilt_angle);
+            if b.fallen > 5 && b.oy > 25 && previous == Some(pos) {
+                still += 1;
+            } else {
+                still = 0;
+            }
+            max_still = max_still.max(still);
+            previous = Some(pos);
             descended |= b.oy <= 25 && b.ox > 395;
         }
         assert!(r.matter.economy.ledger.balanced());
     }
-    assert!(descended, "the largest rock must continue downhill after contact");
-    assert!(max_still <= 5, "the largest rock stalled for {max_still} ticks above the foot of the dune");
+    assert!(
+        descended,
+        "the largest rock must continue downhill after contact"
+    );
+    assert!(
+        max_still <= 5,
+        "the largest rock stalled for {max_still} ticks above the foot of the dune"
+    );
 }
 
 #[test]
 fn dune_rockfall_authored_scene_falls_descends_and_restores_without_losing_material() {
-    let e=modding::laboratory::experiments::stock().into_iter().find(|e|e.id=="dune-rockfall").unwrap();
-    let config=ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
-    let mut r=BlastRange::with_layout(config,e.layout).unwrap();r.control();
-    r.set_physics_workers(1);r.set_navigation_workers(1);
-    let mut tracks:BTreeMap<usize,(i64,i64,u32)>=BTreeMap::new();
-    let mut back=None;
+    let e = modding::laboratory::experiments::stock()
+        .into_iter()
+        .find(|e| e.id == "dune-rockfall")
+        .unwrap();
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, e.layout).unwrap();
+    r.control();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    let mut tracks: BTreeMap<usize, (i64, i64, u32)> = BTreeMap::new();
+    let mut back = None;
     for tick in 0..360 {
         r.step();
-        if tick==35 {assert!(!r.bodies.list.is_empty(),"snapshot must capture active descent");let mut copy=BlastRange::restore(config,&r.snapshot()).unwrap();copy.set_physics_workers(1);copy.set_navigation_workers(1);back=Some(copy);}
-        else if let Some(copy)=&mut back {copy.step();assert_eq!(r.state_hash(),copy.state_hash(),"tick {tick}");}
+        if tick == 35 {
+            assert!(
+                !r.bodies.list.is_empty(),
+                "snapshot must capture active descent"
+            );
+            let mut copy = BlastRange::restore(config, &r.snapshot()).unwrap();
+            copy.set_physics_workers(1);
+            copy.set_navigation_workers(1);
+            back = Some(copy);
+        } else if let Some(copy) = &mut back {
+            copy.step();
+            assert_eq!(r.state_hash(), copy.state_hash(), "tick {tick}");
+        }
         for b in &r.bodies.list {
-            if b.voxels.iter().all(|v|v.mat==6) {
-                let track=tracks.entry(b.voxels.len()).or_insert((b.ox,b.ox,0));
-                track.1=track.1.max(b.ox);track.2=track.2.max(b.fallen);
+            if b.voxels.iter().all(|v| v.mat == 6) {
+                let track = tracks.entry(b.voxels.len()).or_insert((b.ox, b.ox, 0));
+                track.1 = track.1.max(b.ox);
+                track.2 = track.2.max(b.fallen);
             }
         }
         assert!(r.matter.economy.ledger.balanced());
     }
-    let mut counts=[0;2];
-    for z in 270..420 {for y in 16..110 {for x in 270..440 {
-        match r.world.material(x,y,z) {6=>counts[0]+=1,10=>counts[1]+=1,_=>{}}
-    }}}
-    for b in &r.bodies.list {for v in &b.voxels {match v.mat {6=>counts[0]+=1,10=>counts[1]+=1,_=>{}}}}
-    let expected_sand:i32= (0..28).map(|h|(128-4*h)*(112-2*h)).sum();
-    println!("dune tracks={tracks:?} counts={counts:?} sand={expected_sand} flow={:?}",r.material_flow());
-    assert_eq!(counts,[1224,expected_sand]);
-    assert_eq!(tracks.len(),4,"four independent coherent rocks must fall");
-    assert!(tracks.values().all(|&(first,last,fallen)|last-first>=6 && fallen>=12),"rocks did not descend: {tracks:?}");
-    assert!(r.material_flow().0>0 && r.material_flow().1>0);
+    let mut counts = [0; 2];
+    for z in 270..420 {
+        for y in 16..110 {
+            for x in 270..440 {
+                match r.world.material(x, y, z) {
+                    6 => counts[0] += 1,
+                    10 => counts[1] += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    for b in &r.bodies.list {
+        for v in &b.voxels {
+            match v.mat {
+                6 => counts[0] += 1,
+                10 => counts[1] += 1,
+                _ => {}
+            }
+        }
+    }
+    let expected_sand: i32 = (0..28).map(|h| (128 - 4 * h) * (112 - 2 * h)).sum();
+    println!(
+        "dune tracks={tracks:?} counts={counts:?} sand={expected_sand} flow={:?}",
+        r.material_flow()
+    );
+    assert_eq!(counts, [1224, expected_sand]);
+    assert_eq!(tracks.len(), 4, "four independent coherent rocks must fall");
+    assert!(
+        tracks
+            .values()
+            .all(|&(first, last, fallen)| last - first >= 6 && fallen >= 12),
+        "rocks did not descend: {tracks:?}"
+    );
+    assert!(r.material_flow().0 > 0 && r.material_flow().1 > 0);
 }
 
 struct Flat;
@@ -86,56 +147,98 @@ fn put(w: &mut World, min: [u32; 3], max: [u32; 3], mat: u16) {
 
 #[test]
 fn dune_contact_respects_walls_other_bodies_and_the_shared_query_budget() {
-    let mut w=world();
-    for x in 24..40 {put(&mut w,[x,4,24],[x+1,(40-x).min(12),40],10);}
-    put(&mut w,[28,12,28],[31,15,31],6);
-    let cells:Vec<_>=(28..31).flat_map(|z|(12..15).flat_map(move|y|(28..31).map(move|x|(x,y,z)))).collect();
-    let mut b=voxel::bodies::Body::from_world_cells(&w,&cells).unwrap();
-    for &(x,y,z) in &cells {w.queue_transfer(Edit::dig(x,y,z));}w.flush_transfers();
-    b.fallen=8;b.fresh=false;
-    let mut f=Flow::new();
-    let start=(b.ox,b.oy,b.oz);
-    let mut checks=0;
-    assert!(f.slide_body(&mut b,&mut w,&mut checks,&[]));
-    assert_eq!((b.ox,b.oy,b.oz),start,"budget exhaustion must defer, not teleport or bake");
-    let wall=[(99,[31,4,24],[32,24,40])];
-    let mut checks=f.tuning.slope.checks_per_tick;
-    assert!(!f.slide_body(&mut b,&mut w,&mut checks,&wall));
-    assert_eq!((b.ox,b.oy,b.oz),start,"a downhill wall must block the entire swept hull");
-    for _ in 0..8 {let mut checks=f.tuning.slope.checks_per_tick;if !f.slide_body(&mut b,&mut w,&mut checks,&[]) {assert!(b.can_fall(&w));break;}}
-    assert!(b.ox>start.0&&b.oy<start.1);
-    assert!(f.pushed>0,"sliding contact must disturb real sand");
-    assert!(b.tilt_axis>=3 && b.tilt_angle!=0,"unsupported rock should roll");
+    let mut w = world();
+    for x in 24..40 {
+        put(&mut w, [x, 4, 24], [x + 1, (40 - x).min(12), 40], 10);
+    }
+    put(&mut w, [28, 12, 28], [31, 15, 31], 6);
+    let cells: Vec<_> = (28..31)
+        .flat_map(|z| (12..15).flat_map(move |y| (28..31).map(move |x| (x, y, z))))
+        .collect();
+    let mut b = voxel::bodies::Body::from_world_cells(&w, &cells).unwrap();
+    for &(x, y, z) in &cells {
+        w.queue_transfer(Edit::dig(x, y, z));
+    }
+    w.flush_transfers();
+    b.fallen = 8;
+    b.fresh = false;
+    let mut f = Flow::new();
+    let start = (b.ox, b.oy, b.oz);
+    let mut checks = 0;
+    assert!(f.slide_body(&mut b, &mut w, &mut checks, &[]));
+    assert_eq!(
+        (b.ox, b.oy, b.oz),
+        start,
+        "budget exhaustion must defer, not teleport or bake"
+    );
+    let wall = [(99, [31, 4, 24], [32, 24, 40])];
+    let mut checks = f.tuning.slope.checks_per_tick;
+    assert!(!f.slide_body(&mut b, &mut w, &mut checks, &wall));
+    assert_eq!(
+        (b.ox, b.oy, b.oz),
+        start,
+        "a downhill wall must block the entire swept hull"
+    );
+    for _ in 0..8 {
+        let mut checks = f.tuning.slope.checks_per_tick;
+        if !f.slide_body(&mut b, &mut w, &mut checks, &[]) {
+            assert!(b.can_fall(&w));
+            break;
+        }
+    }
+    assert!(b.ox > start.0 && b.oy < start.1);
+    assert!(f.pushed > 0, "sliding contact must disturb real sand");
+    assert!(
+        b.tilt_axis >= 3 && b.tilt_angle != 0,
+        "unsupported rock should roll"
+    );
 }
 
 #[test]
 fn rolling_rock_pushes_a_chain_of_sand_without_losing_cells() {
-    let mut w=world();
-    put(&mut w,[24,4,26],[40,12,33],10);
-    put(&mut w,[28,12,28],[31,15,31],6);
-    let cells:Vec<_>=(28..31).flat_map(|z|(12..15).flat_map(move|y|(28..31).map(move|x|(x,y,z)))).collect();
-    let b=voxel::bodies::Body::from_world_cells(&w,&cells).unwrap();
-    for &(x,y,z) in &cells {w.queue_transfer(Edit::dig(x,y,z));}w.flush_transfers();
-    let before=count(&w,10).0;
-    let mut f=Flow::new(); let mut checks=f.tuning.slope.checks_per_tick;
-    f.scuff(&b,&mut w,[29,11,28],&mut checks,&[]);
-    assert!(f.pushed>=2,"contact should transmit movement through adjacent sand");
-    assert_eq!(count(&w,10).0,before,"contact lost sand");
-    assert!(f.pending()>0,"moved sand must wake normal granular flow");
+    let mut w = world();
+    put(&mut w, [24, 4, 26], [40, 12, 33], 10);
+    put(&mut w, [28, 12, 28], [31, 15, 31], 6);
+    let cells: Vec<_> = (28..31)
+        .flat_map(|z| (12..15).flat_map(move |y| (28..31).map(move |x| (x, y, z))))
+        .collect();
+    let b = voxel::bodies::Body::from_world_cells(&w, &cells).unwrap();
+    for &(x, y, z) in &cells {
+        w.queue_transfer(Edit::dig(x, y, z));
+    }
+    w.flush_transfers();
+    let before = count(&w, 10).0;
+    let mut f = Flow::new();
+    let mut checks = f.tuning.slope.checks_per_tick;
+    f.scuff(&b, &mut w, [29, 11, 28], &mut checks, &[]);
+    assert!(
+        f.pushed >= 2,
+        "contact should transmit movement through adjacent sand"
+    );
+    assert_eq!(count(&w, 10).0, before, "contact lost sand");
+    assert!(f.pending() > 0, "moved sand must wake normal granular flow");
 }
 
 #[test]
 fn dune_contact_does_not_make_flat_beds_or_hard_ground_slide() {
-    for material in [10,6] {
-        let mut w=world();put(&mut w,[20,4,20],[44,12,44],material);
-        put(&mut w,[28,12,28],[31,15,31],6);
-        let cells:Vec<_>=(28..31).flat_map(|z|(12..15).flat_map(move|y|(28..31).map(move|x|(x,y,z)))).collect();
-        let mut b=voxel::bodies::Body::from_world_cells(&w,&cells).unwrap();
-        for &(x,y,z) in &cells {w.queue_transfer(Edit::dig(x,y,z));}w.flush_transfers();
-        b.fallen=8;b.fresh=false;
-        let mut f=Flow::new();let mut checks=f.tuning.slope.checks_per_tick;
-        assert!(!f.slide_body(&mut b,&mut w,&mut checks,&[]));
-        assert_eq!((b.ox,b.oy,b.oz),(28,12,28));
+    for material in [10, 6] {
+        let mut w = world();
+        put(&mut w, [20, 4, 20], [44, 12, 44], material);
+        put(&mut w, [28, 12, 28], [31, 15, 31], 6);
+        let cells: Vec<_> = (28..31)
+            .flat_map(|z| (12..15).flat_map(move |y| (28..31).map(move |x| (x, y, z))))
+            .collect();
+        let mut b = voxel::bodies::Body::from_world_cells(&w, &cells).unwrap();
+        for &(x, y, z) in &cells {
+            w.queue_transfer(Edit::dig(x, y, z));
+        }
+        w.flush_transfers();
+        b.fallen = 8;
+        b.fresh = false;
+        let mut f = Flow::new();
+        let mut checks = f.tuning.slope.checks_per_tick;
+        assert!(!f.slide_body(&mut b, &mut w, &mut checks, &[]));
+        assert_eq!((b.ox, b.oy, b.oz), (28, 12, 28));
     }
 }
 fn count(w: &World, mat: u16) -> (usize, u64, usize) {
@@ -165,17 +268,21 @@ fn pile(mat: u16) -> (World, Flow) {
 
 #[test]
 fn dry_sand_slides_promptly_and_preserves_its_volume() {
-    let (mut w,mut f)=pile(10);
+    let (mut w, mut f) = pile(10);
     for tick in 1..=40 {
-        f.step(&mut w,|_|false);
-        if tick==20 {
-            let (n,_,spread)=count(&w,10);
-            assert_eq!(n,768);
-            assert!(spread>=225,"sand spread too slowly: {spread}");
+        f.step(&mut w, |_| false);
+        if tick == 20 {
+            let (n, _, spread) = count(&w, 10);
+            assert_eq!(n, 768);
+            assert!(spread >= 225, "sand spread too slowly: {spread}");
         }
     }
-    assert_eq!(count(&w,10).0,768);
-    assert!(f.pending()<20,"sand is still slowly settling: {}",f.pending());
+    assert_eq!(count(&w, 10).0, 768);
+    assert!(
+        f.pending() < 20,
+        "sand is still slowly settling: {}",
+        f.pending()
+    );
 }
 
 #[test]
@@ -386,7 +493,9 @@ fn granular_free_sand_and_soil_accelerate_with_the_same_gravity() {
         f.observe(w.edits(), [64; 3]);
         for _ in 0..20 {
             f.step(&mut w, |_| false);
-            if f.has_motion() { break; }
+            if f.has_motion() {
+                break;
+            }
         }
         assert!(f.has_motion());
         let mut y = Vec::new();
@@ -398,7 +507,9 @@ fn granular_free_sand_and_soil_accelerate_with_the_same_gravity() {
         assert_eq!(y.last(), Some(&23));
         assert!(y[0] - y[2] < y[6] - y[8], "fall did not accelerate: {y:?}");
         trajectories.push(y);
-        for _ in 0..30 { f.step(&mut w, |_| false); }
+        for _ in 0..30 {
+            f.step(&mut w, |_| false);
+        }
         assert_eq!(w.material(30, 4, 30), mat);
         assert_eq!(count(&w, mat).0, 1);
     }
@@ -413,7 +524,9 @@ fn granular_airborne_columns_fall_together_with_a_stone_instead_of_hanging() {
     }
     let tuning = crate::test_tuning();
     let mut bodies = Bodies::new(8, crate::gravity_per_tick(&tuning));
-    let cells: Vec<_> = (30..33).flat_map(|z| (24..40).flat_map(move |y| (44..47).map(move |x| (x, y, z)))).collect();
+    let cells: Vec<_> = (30..33)
+        .flat_map(|z| (24..40).flat_map(move |y| (44..47).map(move |x| (x, y, z))))
+        .collect();
     assert!(bodies.detach(&mut w, &cells));
     w.flush_transfers();
     bodies.list[0].fresh = false;
@@ -449,15 +562,24 @@ fn granular_mixed_falling_columns_preserve_layers_and_stop_at_reserved_floor() {
         height = height.add(speed);
         let distance = height.to_int_trunc() as u32;
         for y in 24..40 {
-            assert_eq!(w.material(29, y - distance, 31), if y < 32 { 10 } else { 1 });
+            assert_eq!(
+                w.material(29, y - distance, 31),
+                if y < 32 { 10 } else { 1 }
+            );
         }
         assert_eq!(count(&w, 10).0, 72);
         assert_eq!(count(&w, 1).0, 72);
     }
-    for _ in 0..100 { f.step(&mut w, |p| p[1] == 12); }
-    for z in 1..63 { for x in 1..63 { for y in 4..=12 {
-        assert!(!matches!(w.material(x, y, z), 1 | 10));
-    } } }
+    for _ in 0..100 {
+        f.step(&mut w, |p| p[1] == 12);
+    }
+    for z in 1..63 {
+        for x in 1..63 {
+            for y in 4..=12 {
+                assert!(!matches!(w.material(x, y, z), 1 | 10));
+            }
+        }
+    }
     assert_eq!(count(&w, 10).0, 72);
     assert_eq!(count(&w, 1).0, 72);
 }
@@ -469,8 +591,13 @@ fn granular_column_absorbs_old_grain_queue_and_restores_after_losing_support() {
     put(&mut w, [28, 24, 30], [31, 40, 33], 10);
     let mut f = Flow::new();
     f.observe(w.edits(), [64; 3]);
-    for _ in 0..2 { f.step(&mut w, |_| false); }
-    assert!(f.has_motion(), "edges must already have individual motion entries");
+    for _ in 0..2 {
+        f.step(&mut w, |_| false);
+    }
+    assert!(
+        f.has_motion(),
+        "edges must already have individual motion entries"
+    );
     put(&mut w, [28, 23, 30], [31, 24, 33], 0);
     f.observe(w.edits(), [64; 3]);
     f.tuning.motion.active_per_tick = 1;
@@ -480,7 +607,8 @@ fn granular_column_absorbs_old_grain_queue_and_restores_after_losing_support() {
         f.save(&mut saved);
         let mut copy = Flow::new();
         copy.tuning = f.tuning.clone();
-        copy.load(&mut fx::blob::Scan::new(&saved.v), [64; 3]).expect("column queue snapshot");
+        copy.load(&mut fx::blob::Scan::new(&saved.v), [64; 3])
+            .expect("column queue snapshot");
         let mut other = world();
         assert!(other.load(&mut fx::blob::Scan::new(&bytes(&w))));
         copy.step(&mut other, |_| false);
@@ -494,7 +622,9 @@ fn granular_column_absorbs_old_grain_queue_and_restores_after_losing_support() {
 fn granular_fast_fall_sweeps_reserved_cells_and_solid_floors() {
     for reserved in [false, true] {
         let mut w = world();
-        if !reserved { put(&mut w, [1, 20, 1], [63, 21, 63], 6); }
+        if !reserved {
+            put(&mut w, [1, 20, 1], [63, 21, 63], 6);
+        }
         put(&mut w, [30, 36, 30], [31, 37, 31], 10);
         let mut f = Flow::new();
         f.observe(w.edits(), [64; 3]);
@@ -523,29 +653,39 @@ fn granular_path_budget_and_active_capacity_remain_bounded_and_fair() {
     }
     let after = count(&w, 10);
     assert_eq!(after.0, before.0);
-    assert!(after.1 < before.1 && after.2 > 100, "queue starved: {after:?}");
+    assert!(
+        after.1 < before.1 && after.2 > 100,
+        "queue starved: {after:?}"
+    );
 }
 
 #[test]
 fn granular_accelerating_shared_scene_restores_velocity_and_rejects_corrupt_motion() {
-    let e = modding::laboratory::experiments::stock().into_iter()
-        .find(|e| e.id == "sand-flow").unwrap();
+    let e = modding::laboratory::experiments::stock()
+        .into_iter()
+        .find(|e| e.id == "sand-flow")
+        .unwrap();
     let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
     let mut r = BlastRange::with_layout(c, e.layout).unwrap();
     r.control();
-    for _ in 0..8 { r.step(); }
+    for _ in 0..8 {
+        r.step();
+    }
     assert!(r.granular.has_motion());
     let snapshot = r.snapshot();
     assert_eq!(u32::from_le_bytes(snapshot[8..12].try_into().unwrap()), 71);
     let mut restored = BlastRange::restore(c, &snapshot).unwrap();
     for _ in 0..60 {
-        r.step(); restored.step();
+        r.step();
+        restored.step();
         assert_eq!(r.state_hash(), restored.state_hash());
     }
     let mut motion = fx::blob::Blob::new();
     r.granular.save_motion(&mut motion);
     motion.v[..4].copy_from_slice(&u32::MAX.to_le_bytes());
-    assert!(Flow::new().load_motion(&mut fx::blob::Scan::new(&motion.v), r.size).is_none());
+    assert!(Flow::new()
+        .load_motion(&mut fx::blob::Scan::new(&motion.v), r.size)
+        .is_none());
     // The old granular wire section remains independently readable.
     let mut legacy = fx::blob::Blob::new();
     r.granular.save_legacy(&mut legacy);
@@ -585,91 +725,183 @@ fn granular_same_contact_moves_sand_but_is_held_by_cohesive_soil() {
 
 #[test]
 fn rolling_body_descends_and_lands_with_all_its_stone_and_sand() {
-    let mut w=world();
-    for x in 24..40 {put(&mut w,[x,4,24],[x+1,(40-x).min(12),40],10);}
-    put(&mut w,[28,12,28],[31,15,31],6);
-    let cells:Vec<_>=(28..31).flat_map(|z|(12..15).flat_map(move|y|(28..31).map(move|x|(x,y,z)))).collect();
-    let mut b=voxel::bodies::Body::from_world_cells(&w,&cells).unwrap();
-    for &(x,y,z) in &cells {w.queue_transfer(Edit::dig(x,y,z));}w.flush_transfers();
-    b.fallen=8;b.fresh=false;
-    let original_sand=count(&w,10).0;
-    let original_stone=count(&w,6).0+cells.len();
-    let mut bodies=Bodies::new(8,Fx::from_ratio(245,1000));bodies.list.push(b);
-    let mut f=Flow::new();let mut rolled=false;let mut restored=false;let mut max_x=28;
-    for _ in 0..100 {
-        let mut checks=f.tuning.slope.checks_per_tick;
-        bodies.step_contact(&mut w,|_,_|false,|body,world|f.slide_body(body,world,&mut checks,&[]));
-        w.flush_transfers();
-        for b in &bodies.list {rolled |= b.tilt_axis>=3 && b.tilt_angle!=0;max_x=max_x.max(b.ox);}
-        if rolled && !restored {
-            let mut data=fx::blob::Blob::new();bodies.save(&mut data);
-            let mut copy=Bodies::new(8,Fx::from_ratio(245,1000));
-            assert!(copy.load(&mut fx::blob::Scan::new(&data.v)));
-            let a=&bodies.list[0];let b=&copy.list[0];
-            assert_eq!((a.tilt_axis,a.tilt_angle,a.ox,a.oy,a.oz),(b.tilt_axis,b.tilt_angle,b.ox,b.oy,b.oz));
-            for &v in &a.voxels {assert_eq!(a.world_of(v),b.world_of(v));}
-            restored=true;
-        }
-        if bodies.list.is_empty(){break;}
+    let mut w = world();
+    for x in 24..40 {
+        put(&mut w, [x, 4, 24], [x + 1, (40 - x).min(12), 40], 10);
     }
-    assert!(rolled && restored && max_x>28,"the unsupported body should roll downhill and restore");
-    let stone_in_bodies:usize=bodies.list.iter().map(|b|b.voxels.iter().filter(|v|v.mat==6).count()).sum();
-    assert_eq!(count(&w,6).0+stone_in_bodies,original_stone);
-    assert_eq!(count(&w,10).0,original_sand);
+    put(&mut w, [28, 12, 28], [31, 15, 31], 6);
+    let cells: Vec<_> = (28..31)
+        .flat_map(|z| (12..15).flat_map(move |y| (28..31).map(move |x| (x, y, z))))
+        .collect();
+    let mut b = voxel::bodies::Body::from_world_cells(&w, &cells).unwrap();
+    for &(x, y, z) in &cells {
+        w.queue_transfer(Edit::dig(x, y, z));
+    }
+    w.flush_transfers();
+    b.fallen = 8;
+    b.fresh = false;
+    let original_sand = count(&w, 10).0;
+    let original_stone = count(&w, 6).0 + cells.len();
+    let mut bodies = Bodies::new(8, Fx::from_ratio(245, 1000));
+    bodies.list.push(b);
+    let mut f = Flow::new();
+    let mut rolled = false;
+    let mut restored = false;
+    let mut max_x = 28;
+    for _ in 0..100 {
+        let mut checks = f.tuning.slope.checks_per_tick;
+        bodies.step_contact(
+            &mut w,
+            |_, _| false,
+            |body, world| f.slide_body(body, world, &mut checks, &[]),
+        );
+        w.flush_transfers();
+        for b in &bodies.list {
+            rolled |= b.tilt_axis >= 3 && b.tilt_angle != 0;
+            max_x = max_x.max(b.ox);
+        }
+        if rolled && !restored {
+            let mut data = fx::blob::Blob::new();
+            bodies.save(&mut data);
+            let mut copy = Bodies::new(8, Fx::from_ratio(245, 1000));
+            assert!(copy.load(&mut fx::blob::Scan::new(&data.v)));
+            let a = &bodies.list[0];
+            let b = &copy.list[0];
+            assert_eq!(
+                (a.tilt_axis, a.tilt_angle, a.ox, a.oy, a.oz),
+                (b.tilt_axis, b.tilt_angle, b.ox, b.oy, b.oz)
+            );
+            for &v in &a.voxels {
+                assert_eq!(a.world_of(v), b.world_of(v));
+            }
+            restored = true;
+        }
+        if bodies.list.is_empty() {
+            break;
+        }
+    }
+    assert!(
+        rolled && restored && max_x > 28,
+        "the unsupported body should roll downhill and restore"
+    );
+    let stone_in_bodies: usize = bodies
+        .list
+        .iter()
+        .map(|b| b.voxels.iter().filter(|v| v.mat == 6).count())
+        .sum();
+    assert_eq!(count(&w, 6).0 + stone_in_bodies, original_stone);
+    assert_eq!(count(&w, 10).0, original_sand);
 }
 
 #[test]
 fn small_dune_world_rolls_a_falling_rock_and_replays() {
     use modding::range::RangeBlock;
-    let e=modding::laboratory::experiments::stock().into_iter().find(|e|e.id=="dune-rockfall").unwrap();
-    let mut l=e.layout;l.size=[128,128,128];l.clear_min=[1,1];l.clear_max=[127,127];
-    l.gun=[32,24,64];l.target=[64,16,64];l.blocks.clear();
+    let e = modding::laboratory::experiments::stock()
+        .into_iter()
+        .find(|e| e.id == "dune-rockfall")
+        .unwrap();
+    let mut l = e.layout;
+    l.size = [128, 128, 128];
+    l.clear_min = [1, 1];
+    l.clear_max = [127, 127];
+    l.gun = [32, 24, 64];
+    l.target = [64, 16, 64];
+    l.blocks.clear();
     for h in 0..12 {
-        l.blocks.push(RangeBlock {min:[40+2*h,16+h,48],max:[88-h,17+h,80],material:10});
+        l.blocks.push(RangeBlock {
+            min: [40 + 2 * h, 16 + h, 48],
+            max: [88 - h, 17 + h, 80],
+            material: 10,
+        });
     }
-    l.blocks.push(RangeBlock {min:[75,37,60],max:[78,40,63],material:6});
-    let config=ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
-    let mut r=BlastRange::with_layout(config,l).unwrap();r.control();r.set_physics_workers(1);r.set_navigation_workers(1);
-    let mut rotated=false;let mut moved=false;let mut replay=false;
+    l.blocks.push(RangeBlock {
+        min: [75, 37, 60],
+        max: [78, 40, 63],
+        material: 6,
+    });
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, l).unwrap();
+    r.control();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    let mut rotated = false;
+    let mut moved = false;
+    let mut replay = false;
     for _ in 0..240 {
         r.step();
         for b in &r.bodies.list {
-            if b.voxels.iter().all(|v|v.mat==6) {
-                rotated |= b.tilt_axis>=3 && b.tilt_angle!=0;
-                moved |= b.ox!=75;
+            if b.voxels.iter().all(|v| v.mat == 6) {
+                rotated |= b.tilt_axis >= 3 && b.tilt_angle != 0;
+                moved |= b.ox != 75;
             }
         }
         if rotated && !replay {
-            let mut copy=BlastRange::restore(config,&r.snapshot()).unwrap();
-            copy.set_physics_workers(1);copy.set_navigation_workers(1);
-            for _ in 0..5 {r.step();copy.step();assert_eq!(r.state_hash(),copy.state_hash());}
-            replay=true;
+            let mut copy = BlastRange::restore(config, &r.snapshot()).unwrap();
+            copy.set_physics_workers(1);
+            copy.set_navigation_workers(1);
+            for _ in 0..5 {
+                r.step();
+                copy.step();
+                assert_eq!(r.state_hash(), copy.state_hash());
+            }
+            replay = true;
         }
         assert!(r.matter.economy.ledger.balanced());
-        if rotated && moved && replay {break;}
+        if rotated && moved && replay {
+            break;
+        }
     }
-    assert!(rotated && moved && replay,"rock did not roll in the actual simulation: rotated={rotated}, moved={moved}");
+    assert!(
+        rotated && moved && replay,
+        "rock did not roll in the actual simulation: rotated={rotated}, moved={moved}"
+    );
 }
 
 #[test]
 fn rocks_of_each_dune_size_roll_within_the_shared_budget() {
-    for side in [3u32,5,7,9] {
-        let mut w=world();
-        for x in 24..44 {put(&mut w,[x,4,20],[x+1,(40u32.saturating_sub(x)).clamp(4,12),48],10);}
-        put(&mut w,[28,12,28],[28+side,12+side,28+side],6);
-        let cells:Vec<_>=(28..28+side).flat_map(|z|(12..12+side).flat_map(move|y|(28..28+side).map(move|x|(x,y,z)))).collect();
-        let mut b=voxel::bodies::Body::from_world_cells(&w,&cells).unwrap();
-        for &(x,y,z) in &cells {w.queue_transfer(Edit::dig(x,y,z));}w.flush_transfers();
-        b.fallen=8;b.fresh=false;
-        let mut bodies=Bodies::new(8,Fx::from_ratio(245,1000));bodies.list.push(b);
-        let mut f=Flow::new();let mut rolled=false;
-        for _ in 0..80 {
-            let mut checks=f.tuning.slope.checks_per_tick;
-            bodies.step_contact(&mut w,|_,_|false,|body,world|f.slide_body(body,world,&mut checks,&[]));
-            w.flush_transfers();
-            rolled |= bodies.list.iter().any(|b|b.tilt_axis>=3 && b.tilt_angle!=0);
-            if rolled || bodies.list.is_empty() {break;}
+    for side in [3u32, 5, 7, 9] {
+        let mut w = world();
+        for x in 24..44 {
+            put(
+                &mut w,
+                [x, 4, 20],
+                [x + 1, (40u32.saturating_sub(x)).clamp(4, 12), 48],
+                10,
+            );
         }
-        assert!(rolled,"rock of {side} cells did not roll");
+        put(&mut w, [28, 12, 28], [28 + side, 12 + side, 28 + side], 6);
+        let cells: Vec<_> = (28..28 + side)
+            .flat_map(|z| {
+                (12..12 + side).flat_map(move |y| (28..28 + side).map(move |x| (x, y, z)))
+            })
+            .collect();
+        let mut b = voxel::bodies::Body::from_world_cells(&w, &cells).unwrap();
+        for &(x, y, z) in &cells {
+            w.queue_transfer(Edit::dig(x, y, z));
+        }
+        w.flush_transfers();
+        b.fallen = 8;
+        b.fresh = false;
+        let mut bodies = Bodies::new(8, Fx::from_ratio(245, 1000));
+        bodies.list.push(b);
+        let mut f = Flow::new();
+        let mut rolled = false;
+        for _ in 0..80 {
+            let mut checks = f.tuning.slope.checks_per_tick;
+            bodies.step_contact(
+                &mut w,
+                |_, _| false,
+                |body, world| f.slide_body(body, world, &mut checks, &[]),
+            );
+            w.flush_transfers();
+            rolled |= bodies
+                .list
+                .iter()
+                .any(|b| b.tilt_axis >= 3 && b.tilt_angle != 0);
+            if rolled || bodies.list.is_empty() {
+                break;
+            }
+        }
+        assert!(rolled, "rock of {side} cells did not roll");
     }
 }

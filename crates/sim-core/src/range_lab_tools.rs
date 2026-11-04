@@ -7,32 +7,63 @@ use voxel::Edit;
 const ERASE: u32 = 0xfffc_0000;
 const DRILL: u32 = 0xfffb_0000;
 impl BlastRange {
-    pub(super) fn lab_stream(&mut self, origin: [i32; 3], target: [i32; 3], enabled: bool) -> Outcome {
+    pub(super) fn lab_stream(
+        &mut self,
+        origin: [i32; 3],
+        target: [i32; 3],
+        enabled: bool,
+    ) -> Outcome {
         use modding::explosion::Delivery;
         if !self.layout.as_ref().is_some_and(|l| l.laboratory) || self.battle_mode() {
             return Outcome::Rejected;
         }
         if !enabled {
-            let changed = self.streams.left != 0 || !self.streams.traces.is_empty() || self.fire_tick != u32::MAX;
+            let changed = self.streams.left != 0
+                || !self.streams.traces.is_empty()
+                || self.fire_tick != u32::MAX;
             self.streams.left = 0;
             self.streams.traces.clear();
             self.fire_tick = u32::MAX;
-            return if changed { Outcome::Applied } else { Outcome::Unchanged };
+            return if changed {
+                Outcome::Applied
+            } else {
+                Outcome::Unchanged
+            };
         }
-        if (0..3).any(|a| origin[a] < 1 || origin[a] >= self.size[a] as i32 - 1
-            || target[a] < 0 || target[a] >= self.size[a] as i32)
-            || origin[0] < 32 || origin[0] >= self.size[0] as i32 - 32
-            || origin[2] < 32 || origin[2] >= self.size[2] as i32 - 32
-            || origin == target {
+        if (0..3).any(|a| {
+            origin[a] < 1
+                || origin[a] >= self.size[a] as i32 - 1
+                || target[a] < 0
+                || target[a] >= self.size[a] as i32
+        }) || origin[0] < 32
+            || origin[0] >= self.size[0] as i32 - 32
+            || origin[2] < 32
+            || origin[2] >= self.size[2] as i32 - 32
+            || origin == target
+        {
             return Outcome::Rejected;
         }
         let solid = matches!(self.config.delivery, Delivery::Blast | Delivery::Kinetic);
-        let charging = solid && self.shell.is_none() && self.fire_tick != u32::MAX && self.tick <= self.fire_tick;
+        let charging = solid
+            && self.shell.is_none()
+            && self.fire_tick != u32::MAX
+            && self.tick <= self.fire_tick;
         // Streams can heat/cut while a previous blast is still settling. Solid
         // rounds retain ordinary bounded flight/wave admission and reload.
-        if solid && !charging && (!self.shot_ready() || self.tick.checked_add(self.config.charge_ticks)
-            .and_then(|t|t.checked_add(1)).is_none_or(|t| t==u32::MAX)) { return Outcome::Busy; }
-        if self.shell.is_some() { return Outcome::Busy; }
+        if solid
+            && !charging
+            && (!self.shot_ready()
+                || self
+                    .tick
+                    .checked_add(self.config.charge_ticks)
+                    .and_then(|t| t.checked_add(1))
+                    .is_none_or(|t| t == u32::MAX))
+        {
+            return Outcome::Busy;
+        }
+        if self.shell.is_some() {
+            return Outcome::Busy;
+        }
         let layout = self.layout.as_mut().unwrap();
         layout.gun_point = true;
         layout.gun = origin;
@@ -40,8 +71,12 @@ impl BlastRange {
         self.attack = None;
         self.player = true;
         if solid {
-            if charging {return Outcome::Applied;}
-            if !self.refire_inner() { return Outcome::Busy; }
+            if charging {
+                return Outcome::Applied;
+            }
+            if !self.refire_inner() {
+                return Outcome::Busy;
+            }
             // Input is already sampled for this fixed tick. Preserve charge
             // duration; a zero-charge tool fires during the upcoming step.
             self.fire_tick -= 1;
@@ -132,7 +167,9 @@ impl BlastRange {
         for turn in 0..count {
             let i = (first + turn) % count;
             let d = &mut layout.lab_devices[i];
-            if d.kind==DeviceKind::Collector {continue;}
+            if d.kind == DeviceKind::Collector {
+                continue;
+            }
             if d.container.is_some_and(|id| {
                 self.matter
                     .economy

@@ -5,112 +5,174 @@ use modding::laboratory::{Definition, Recipe};
 use modding::range::RangeBlock;
 use panel::theme;
 use sim_core::blast::battle::commands::{Command, GunCommand, MaterialField};
+#[path = "laboratory/collectors.rs"]
+mod collectors;
 #[path = "laboratory/constructor.rs"]
 mod constructor;
+#[path = "laboratory/events.rs"]
+mod events;
 #[path = "laboratory/experiments.rs"]
 mod experiments;
+#[path = "laboratory/first_person.rs"]
+pub(super) mod first_person;
+#[path = "laboratory/orbit.rs"]
+mod orbit;
+#[path = "laboratory/parameters.rs"]
+mod parameters;
 #[path = "laboratory/scenario.rs"]
 mod scenario;
-#[path = "laboratory/ui.rs"]
-mod ui;
 #[path = "laboratory/scrolling.rs"]
 mod scrolling;
 #[path = "laboratory/sources.rs"]
 mod sources;
-#[path = "laboratory/parameters.rs"]
-mod parameters;
-#[path = "laboratory/events.rs"]
-mod events;
+#[path = "laboratory/tools.rs"]
+pub(super) mod tools;
+#[path = "laboratory/ui.rs"]
+mod ui;
 #[path = "laboratory/visuals.rs"]
 mod visuals;
-#[path="laboratory/tools.rs"]
-pub(super) mod tools;
-#[path="laboratory/first_person.rs"]
-pub(super) mod first_person;
-#[path="laboratory/orbit.rs"]
-mod orbit;
-#[path="laboratory/collectors.rs"]
-mod collectors;
 pub use collectors::draw as collectors_draw;
-pub use first_person::{input as first_person_input, draw as first_person_draw, flush as flush_live};
-#[path="laboratory/live_tools.rs"]
+pub use first_person::{
+    draw as first_person_draw, flush as flush_live, input as first_person_input,
+};
+#[path = "laboratory/live_tools.rs"]
 mod live_tools;
-pub fn tick_live(lab:&mut Laboratory,scene:&mut Scene) -> bool {
+pub fn tick_live(lab: &mut Laboratory, scene: &mut Scene) -> bool {
     if lab.replay.playing {
-        if let Err(e)=lab.replay.before_tick(&mut scene.sim) {scene.paused=true;lab.replay.playing=false;lab.notice=e;return false;}
-    } else {scenario::advance(lab,scene);live_tools::tick(lab,scene);}
+        if let Err(e) = lab.replay.before_tick(&mut scene.sim) {
+            scene.paused = true;
+            lab.replay.playing = false;
+            lab.notice = e;
+            return false;
+        }
+    } else {
+        scenario::advance(lab, scene);
+        live_tools::tick(lab, scene);
+    }
     true
 }
-pub fn replay_playing(lab:&Laboratory)->bool {lab.replay.playing}
-pub fn finish_replay_tick(lab:&mut Laboratory,scene:&mut Scene)->bool {
-    if !lab.replay.playing{return false;}
+pub fn replay_playing(lab: &Laboratory) -> bool {
+    lab.replay.playing
+}
+pub fn finish_replay_tick(lab: &mut Laboratory, scene: &mut Scene) -> bool {
+    if !lab.replay.playing {
+        return false;
+    }
     match lab.replay.after_tick(&mut scene.sim) {
-        Ok(true)=>{scene.paused=true;lab.notice="Воспроизведение завершено".into();true},
-        Ok(false)=>false,
-        Err(e)=>{scene.paused=true;lab.replay.playing=false;lab.notice=e;true},
+        Ok(true) => {
+            scene.paused = true;
+            lab.notice = "Воспроизведение завершено".into();
+            true
+        }
+        Ok(false) => false,
+        Err(e) => {
+            scene.paused = true;
+            lab.replay.playing = false;
+            lab.notice = e;
+            true
+        }
     }
 }
-#[path="laboratory/highlight.rs"]
+#[path = "laboratory/highlight.rs"]
 mod highlight;
-#[path="laboratory/section.rs"]
-mod section;
-#[path="laboratory/metrics.rs"]
-mod metrics;
-#[path="laboratory/metric_fragments.rs"]
+#[path = "laboratory/metric_fragments.rs"]
 mod metric_fragments;
-#[path="laboratory/replay.rs"]
+#[path = "laboratory/metrics.rs"]
+mod metrics;
+#[path = "laboratory/replay.rs"]
 mod replay;
-pub use metrics::{draw as metrics_draw,terrain_offset as metrics_terrain_offset};
-pub(crate) use metrics::{scale as metric_colour,UNKNOWN as METRIC_UNKNOWN};
+#[path = "laboratory/section.rs"]
+mod section;
 pub use metric_fragments::draw as metric_fragments_draw;
+pub use metrics::{draw as metrics_draw, terrain_offset as metrics_terrain_offset};
+pub(crate) use metrics::{scale as metric_colour, UNKNOWN as METRIC_UNKNOWN};
 pub use replay::input as replay_input;
 pub use section::camera as section_camera;
 pub use section::clip_units as section_clip_units;
 pub use section::unit_caps as section_unit_caps;
-pub fn section_effect_mesh(source:Mesh,cut:Option<(usize,i32,bool)>)->Mesh {
-    let Some((axis,at,positive))=cut else {return source;};
-    let mut n=Vec3::ZERO;n[axis]=if positive {1.0}else{-1.0};
-    let plane=n.extend(-n[axis]*at as f32);
-    if let Some(mut clipped)=section::clip_mesh(&source,&Transform::IDENTITY,plane,None) {
-        clipped.asset_usage|=RenderAssetUsages::MAIN_WORLD;
+pub fn section_effect_mesh(source: Mesh, cut: Option<(usize, i32, bool)>) -> Mesh {
+    let Some((axis, at, positive)) = cut else {
+        return source;
+    };
+    let mut n = Vec3::ZERO;
+    n[axis] = if positive { 1.0 } else { -1.0 };
+    let plane = n.extend(-n[axis] * at as f32);
+    if let Some(mut clipped) = section::clip_mesh(&source, &Transform::IDENTITY, plane, None) {
+        clipped.asset_usage |= RenderAssetUsages::MAIN_WORLD;
         clipped
-    } else {source}
+    } else {
+        source
+    }
 }
-pub use highlight::update as highlight;
-pub use tools::input as tools_input;
 pub use constructor::pointer;
-pub use ui::{capture_ready, sync as sync_ui};
-pub use scrolling::update as scroll_ui;
+pub use highlight::update as highlight;
 pub use parameters::sync as sync_parameters;
 pub use scenario::sync as sync_scenario;
+pub use scrolling::update as scroll_ui;
+pub use tools::input as tools_input;
+pub use ui::{capture_ready, sync as sync_ui};
 #[cfg(test)]
 #[path = "laboratory/tests.rs"]
 mod integration_tests;
 #[cfg(test)]
-#[path="laboratory/material_tests.rs"]
+#[path = "laboratory/material_tests.rs"]
 mod material_tests;
 
 #[cfg(test)]
-#[path="laboratory/inspector_tests.rs"]
+#[path = "laboratory/inspector_tests.rs"]
 mod inspector_tests;
 
 #[cfg(test)]
-#[path="laboratory/voxel_editor_tests.rs"]
+#[path = "laboratory/voxel_editor_tests.rs"]
 mod voxel_editor_tests;
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub enum LabAction {
-    SectionToggle,SectionShift(i32),SectionFocus,SectionAxis(u8),SectionSide,Metric(u8),MetricScale,
-    ReplayStart,ReplayStop,ReplaySeek(u32),ReplayJump(i32),ReplaySave,ReplayOpen,ReplayBrowse(i32),ReplayPlay,ReplayLeave,
-    LiveTools,LiveTool(u8),LivePoint,LivePower(i32),LiveApply([i32;3],[i32;3]),LiveRelease,LiveCapture,LiveSpeed(i32),LiveLook(i32),LiveFov(i32),
-    SurfaceSnap,AllowOverlap,Flying,
-    ProbeMove(u8,i32),ClearProbe,ProbeFocus,
-    BeginVoxelEdit,VoxelTool(u8),VoxelStroke,VoxelFinish(bool),VoxelUndo,VoxelRedo,SavePart,
-    BrushSize(i32),BrushDistance(i32),
-    Sculpt([i32;3],bool),
-    DeviceAt(modding::lab_tools::DeviceKind,[i32;3]),
+    SectionToggle,
+    SectionShift(i32),
+    SectionFocus,
+    SectionAxis(u8),
+    SectionSide,
+    Metric(u8),
+    MetricScale,
+    ReplayStart,
+    ReplayStop,
+    ReplaySeek(u32),
+    ReplayJump(i32),
+    ReplaySave,
+    ReplayOpen,
+    ReplayBrowse(i32),
+    ReplayPlay,
+    ReplayLeave,
+    LiveTools,
+    LiveTool(u8),
+    LivePoint,
+    LivePower(i32),
+    LiveApply([i32; 3], [i32; 3]),
+    LiveRelease,
+    LiveCapture,
+    LiveSpeed(i32),
+    LiveLook(i32),
+    LiveFov(i32),
+    SurfaceSnap,
+    AllowOverlap,
+    Flying,
+    ProbeMove(u8, i32),
+    ClearProbe,
+    ProbeFocus,
+    BeginVoxelEdit,
+    VoxelTool(u8),
+    VoxelStroke,
+    VoxelFinish(bool),
+    VoxelUndo,
+    VoxelRedo,
+    SavePart,
+    BrushSize(i32),
+    BrushDistance(i32),
+    Sculpt([i32; 3], bool),
+    DeviceAt(modding::lab_tools::DeviceKind, [i32; 3]),
     PickEvent(usize),
-    PlaceEvent(usize, [i32;3]),
+    PlaceEvent(usize, [i32; 3]),
     LocalCharge(bool),
     ReturnConstruction,
     Source(usize),
@@ -118,9 +180,14 @@ pub enum LabAction {
     RemoveSource,
     BindSource(bool),
     SourcePosition,
-    SourceAt([i32;3]),
-    ScenarioInput(usize),ScenarioAdd(u8),ScenarioRemove,ScenarioMove(i32),ScenarioAt([i32;3]),
-    Device(usize),RemoveDevice,
+    SourceAt([i32; 3]),
+    ScenarioInput(usize),
+    ScenarioAdd(u8),
+    ScenarioRemove,
+    ScenarioMove(i32),
+    ScenarioAt([i32; 3]),
+    Device(usize),
+    RemoveDevice,
     EditNumber(u8),
     ApplyNumber,
     CancelNumber,
@@ -242,14 +309,21 @@ pub struct Laboratory {
     metrics: String,
     replay: replay::Replay,
     ui: ui::State,
-    tools:tools::State,
+    tools: tools::State,
 }
 impl Laboratory {
-    pub fn metric_mode(&self)->u8 {if self.active(){self.tools.metric}else{0}}
-    pub fn section_cut(&self)->Option<(usize,i32,bool)> {
+    pub fn metric_mode(&self) -> u8 {
+        if self.active() {
+            self.tools.metric
+        } else {
+            0
+        }
+    }
+    pub fn section_cut(&self) -> Option<(usize, i32, bool)> {
         (self.active() && self.tools.section.enabled).then(|| {
-            let s=&self.tools.section;let axis=s.axis.min(2) as usize;
-            (axis,s.point()[axis],s.positive)
+            let s = &self.tools.section;
+            let axis = s.axis.min(2) as usize;
+            (axis, s.point()[axis], s.positive)
         })
     }
     pub fn new(requested: bool) -> Self {
@@ -267,7 +341,7 @@ impl Laboratory {
             shots: 0,
             observing: false,
             deadline: None,
-            launch:Default::default(),
+            launch: Default::default(),
             step_requested: false,
             baseline: None,
             hidden: Vec::new(),
@@ -279,7 +353,7 @@ impl Laboratory {
             metrics: String::new(),
             replay: replay::Replay::default(),
             ui: ui::State::default(),
-            tools:tools::State::default(),
+            tools: tools::State::default(),
         }
     }
     pub fn active(&self) -> bool {
@@ -293,7 +367,10 @@ impl Laboratory {
             .map_or(steps, |end| steps.min(end.saturating_sub(tick).max(1)))
     }
     fn config(&self) -> ExplosionConfig {
-        self.constructor.workspace.sources.get(self.constructor.workspace.selected)
+        self.constructor
+            .workspace
+            .sources
+            .get(self.constructor.workspace.selected)
             .map_or_else(|| self.preset_config(), |s| s.resolved())
     }
     fn preset_config(&self) -> ExplosionConfig {
@@ -325,7 +402,7 @@ impl Laboratory {
         sources::ensure(self)?;
         scenario::sync_sources(self);
         let layout = self.constructor.layout(&self.definition, self.recipe)?;
-        scenario::validate(self,&layout)?;
+        scenario::validate(self, &layout)?;
         if let Some(plan) = &self.constructor.experiment {
             plan.validate(&layout)?;
         }
@@ -337,8 +414,19 @@ impl Laboratory {
         let mut sim = BlastRange::with_layout(self.config(), layout.clone())?;
         sim.execute_command(Command::Gun(GunCommand::Control));
         for &(material, field, value) in &self.constructor.workspace.material {
-            let field = match field { 0 => MaterialField::Strength, 1 => MaterialField::Density, _ => MaterialField::Melt };
-            if !sim.execute_command(Command::TuneMaterial { material, field, value }).admitted() {
+            let field = match field {
+                0 => MaterialField::Strength,
+                1 => MaterialField::Density,
+                _ => MaterialField::Melt,
+            };
+            if !sim
+                .execute_command(Command::TuneMaterial {
+                    material,
+                    field,
+                    value,
+                })
+                .admitted()
+            {
                 return Err("Движок отклонил параметр материала".into());
             }
         }
@@ -397,23 +485,45 @@ impl Laboratory {
         }
     }
     fn fire(&mut self, scene: &mut Scene) {
-        if self.constructor.mode==constructor::Mode::Event {self.notice="Сначала разместите воздействие кликом; Esc — отмена".into();return;}
-        if let Some(plan) = &self.constructor.experiment {
-            if !self.launch.is_empty() {self.notice="Сценарий ещё выполняет предыдущие команды".into();return;}
-            let duration=self.constructor.workspace.observation_ticks.unwrap_or(plan.duration_ticks);
-            match scenario::queue(self,scene) {Ok(q)=>self.launch=q,Err(e)=>{self.notice=e;return;}}
-            self.begin_observation(scene,duration);
+        if self.constructor.mode == constructor::Mode::Event {
+            self.notice = "Сначала разместите воздействие кликом; Esc — отмена".into();
             return;
         }
-        if let Err(e) = sources::arm(self, scene) { self.notice = e; return; }
-        let command = sources::active(self).filter(|s| s.detonate)
+        if let Some(plan) = &self.constructor.experiment {
+            if !self.launch.is_empty() {
+                self.notice = "Сценарий ещё выполняет предыдущие команды".into();
+                return;
+            }
+            let duration = self
+                .constructor
+                .workspace
+                .observation_ticks
+                .unwrap_or(plan.duration_ticks);
+            match scenario::queue(self, scene) {
+                Ok(q) => self.launch = q,
+                Err(e) => {
+                    self.notice = e;
+                    return;
+                }
+            }
+            self.begin_observation(scene, duration);
+            return;
+        }
+        if let Err(e) = sources::arm(self, scene) {
+            self.notice = e;
+            return;
+        }
+        let command = sources::active(self)
+            .filter(|s| s.detonate)
             .map_or(GunCommand::Refire, |s| GunCommand::Detonate { at: s.at });
-        if scene
-            .sim
-            .execute_command(Command::Gun(command))
-            .accepted()
-        {
-            self.begin_observation(scene, self.constructor.workspace.observation_ticks.unwrap_or(self.definition.observation_ticks));
+        if scene.sim.execute_command(Command::Gun(command)).accepted() {
+            self.begin_observation(
+                scene,
+                self.constructor
+                    .workspace
+                    .observation_ticks
+                    .unwrap_or(self.definition.observation_ticks),
+            );
         } else {
             self.notice = "Предыдущее воздействие ещё не завершено".into();
         }
@@ -508,8 +618,9 @@ fn root(node: Node, camera: Entity) -> impl Bundle {
 }
 pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
     ui::build(commands, camera, font);
-    let mut live_font=font.clone();live_font.font_size=14.0.into();
-    first_person::build_ui(commands,camera,&live_font);
+    let mut live_font = font.clone();
+    live_font.font_size = 14.0.into();
+    first_person::build_ui(commands, camera, &live_font);
 }
 
 /// All changes go through the same scene boundary; no second tick loop.
@@ -557,66 +668,173 @@ pub fn actions(
             }
             Ok((mut sim, workshop)) => {
                 if capture_fixture {
-                    let case=std::env::var("RTS_LAB_CAPTURE_CASE").unwrap_or_default();
-                    if matches!(case.as_str(),"section-unit"|"section-unit-metric"|"unit-metric"|"section-unit-laser") {
-                        let (lo,hi)=sim.units.first().expect("section tank").bounds();
-                        lab.tools.section.enabled=case!="unit-metric";lab.tools.section.axis=0;lab.tools.section.positive=true;
-                        lab.tools.metric=if matches!(case.as_str(),"section-unit"|"section-unit-laser") {0}else{1};
-                        lab.tools.section.anchor=std::array::from_fn(|i|(lo[i]+hi[i])/2);
-                        if case=="section-unit-laser" {
-                            let y=(lo[1]+hi[1])/2;let z=(lo[2]+hi[2])/2;
-                            sim.set_physics_workers(1);sim.set_navigation_workers(1);
-                            sim.execute_command(Command::ConfigureWeapon{config:weapon_config(false,false,1000,Delivery::Laser)});
-                            assert!(sim.execute_command(Command::Gun(GunCommand::LabStream{origin:[lo[0]-20,y,z],target:[hi[0]+20,y,z],enabled:true})).accepted());
-                            for _ in 0..24 {sim.step();}
-                            println!("UNIT_LASER_FIXTURE melted={} debris={}",sim.thermals.melted,sim.matter.debris.fragments.len());
+                    let case = std::env::var("RTS_LAB_CAPTURE_CASE").unwrap_or_default();
+                    if matches!(
+                        case.as_str(),
+                        "section-unit"
+                            | "section-unit-metric"
+                            | "unit-metric"
+                            | "section-unit-laser"
+                    ) {
+                        let (lo, hi) = sim.units.first().expect("section tank").bounds();
+                        lab.tools.section.enabled = case != "unit-metric";
+                        lab.tools.section.axis = 0;
+                        lab.tools.section.positive = true;
+                        lab.tools.metric =
+                            if matches!(case.as_str(), "section-unit" | "section-unit-laser") {
+                                0
+                            } else {
+                                1
+                            };
+                        lab.tools.section.anchor = std::array::from_fn(|i| (lo[i] + hi[i]) / 2);
+                        if case == "section-unit-laser" {
+                            let y = (lo[1] + hi[1]) / 2;
+                            let z = (lo[2] + hi[2]) / 2;
+                            sim.set_physics_workers(1);
+                            sim.set_navigation_workers(1);
+                            sim.execute_command(Command::ConfigureWeapon {
+                                config: weapon_config(false, false, 1000, Delivery::Laser),
+                            });
+                            assert!(sim
+                                .execute_command(Command::Gun(GunCommand::LabStream {
+                                    origin: [lo[0] - 20, y, z],
+                                    target: [hi[0] + 20, y, z],
+                                    enabled: true
+                                }))
+                                .accepted());
+                            for _ in 0..24 {
+                                sim.step();
+                            }
+                            println!(
+                                "UNIT_LASER_FIXTURE melted={} debris={}",
+                                sim.thermals.melted,
+                                sim.matter.debris.fragments.len()
+                            );
                         }
                     }
-                    if case=="melt-steel" {
-                        sim.set_physics_workers(1);sim.set_navigation_workers(1);
-                        sim.execute_command(Command::ConfigureWeapon{config:weapon_config(false,false,1000,Delivery::Laser)});
-                        sim.execute_command(Command::Gun(GunCommand::LabStream{origin:[350,30,345],target:[410,30,345],enabled:true}));
-                        for _ in 0..24 {sim.step();}
-                        println!("MELT_CAPTURE melted={} hot={}",sim.heat.melted_total,sim.heat.hot());
+                    if case == "melt-steel" {
+                        sim.set_physics_workers(1);
+                        sim.set_navigation_workers(1);
+                        sim.execute_command(Command::ConfigureWeapon {
+                            config: weapon_config(false, false, 1000, Delivery::Laser),
+                        });
+                        sim.execute_command(Command::Gun(GunCommand::LabStream {
+                            origin: [350, 30, 345],
+                            target: [410, 30, 345],
+                            enabled: true,
+                        }));
+                        for _ in 0..24 {
+                            sim.step();
+                        }
+                        println!(
+                            "MELT_CAPTURE melted={} hot={}",
+                            sim.heat.melted_total,
+                            sim.heat.hot()
+                        );
                     }
-                    if case=="metric-section" || case=="metric-surface" || case=="metric-live" || case=="metric-fragment" {
-                        sim.heat.deposit(&sim.world,&sim.matter.economy.mats,[385,31,345],12,900);
+                    if case == "metric-section"
+                        || case == "metric-surface"
+                        || case == "metric-live"
+                        || case == "metric-fragment"
+                    {
+                        sim.heat.deposit(
+                            &sim.world,
+                            &sim.matter.economy.mats,
+                            [385, 31, 345],
+                            12,
+                            900,
+                        );
                     }
                     if case.starts_with("collector-") {
-                        sim.set_physics_workers(1);sim.set_navigation_workers(1);
-                        experiments::launch(lab.constructor.experiment.as_ref().unwrap(),&mut sim).expect("salvage scenario");
-                        for _ in 0..match case.as_str(){"collector-before"=>20,"collector-profile"=>180,_=>900} {sim.step();}
-                    }
-                    if case.starts_with("dune-") {
-                        sim.set_physics_workers(1);sim.set_navigation_workers(1);
-                        experiments::launch(lab.constructor.experiment.as_ref().unwrap(),&mut sim).expect("dune scenario");
-                        for _ in 0..match case.as_str(){"dune-during"=>35,"dune-after"=>180,_=>0} {sim.step();}
-                    }
-                    if case.starts_with("water-gravity-") {
-                        sim.set_physics_workers(1);sim.set_navigation_workers(1);
-                        for _ in 0..match case.as_str(){"water-gravity-during"=>8,"water-gravity-after"=>60,_=>0} {sim.step();}
-                    }
-                    let ticks=match case.as_str(){"material-result"|"water-result"|"water-float"=>300,"physics-wetting"=>120,"physics-erosion"=>300,"physics-devices"=>40,"physics-dome"=>8,"physics-glass"=>100,_=>0};
-                    if case.starts_with("he-fragments-") {
-                        sim.set_physics_workers(1);sim.set_navigation_workers(1);
-                        sim.execute_command(Command::ConfigureWeapon{config:weapon_config(false,false,1000,Delivery::Blast)});
-                        assert!(sim.execute_command(Command::Gun(GunCommand::Detonate{at:[392,20,344]})).accepted());
-                        for _ in 0..if case.ends_with("flight") {16}else{140} {sim.step();}
-                        let pieces=&sim.matter.debris.fragments;
-                        println!("HE_LANDING case={case} fragments={} flying={} resting={} inventory={} geometry={}",pieces.len(),pieces.iter().filter(|f|!f.resting).count(),pieces.iter().filter(|f|f.resting).count(),pieces.iter().map(|f|u64::from(f.count)).sum::<u64>(),pieces.iter().map(|f|u64::from(f.shape.count_ones())).sum::<u64>());
-                        if case=="he-fragments-heat-flight" {
-                            lab.tools.metric=1;lab.tools.section.enabled=true;lab.tools.section.axis=0;
-                            lab.tools.section.anchor=[392,20,344];lab.ui.tab=30;
-                            if std::env::var("RTS_LAB_CAPTURE_HEAT_STRESS").as_deref()==Ok("1") {
-                                for x in 350..430 {for z in 300..380 {sim.heat.add(&sim.world,[x,5,z],900);}}
-                            }
-                            println!("HE_HEAT_FIXTURE hot={}",sim.heat.hot());
+                        sim.set_physics_workers(1);
+                        sim.set_navigation_workers(1);
+                        experiments::launch(lab.constructor.experiment.as_ref().unwrap(), &mut sim)
+                            .expect("salvage scenario");
+                        for _ in 0..match case.as_str() {
+                            "collector-before" => 20,
+                            "collector-profile" => 180,
+                            _ => 900,
+                        } {
+                            sim.step();
                         }
                     }
-                    if ticks>0 {
-                        sim.set_physics_workers(1);sim.set_navigation_workers(1);
-                        if case.starts_with("physics-") {if let Some(plan)=&lab.constructor.experiment {experiments::launch(plan,&mut sim).expect("capture experiment input");}}
-                        for _ in 0..ticks {sim.step();}
+                    if case.starts_with("dune-") {
+                        sim.set_physics_workers(1);
+                        sim.set_navigation_workers(1);
+                        experiments::launch(lab.constructor.experiment.as_ref().unwrap(), &mut sim)
+                            .expect("dune scenario");
+                        for _ in 0..match case.as_str() {
+                            "dune-during" => 35,
+                            "dune-after" => 180,
+                            _ => 0,
+                        } {
+                            sim.step();
+                        }
+                    }
+                    if case.starts_with("water-gravity-") {
+                        sim.set_physics_workers(1);
+                        sim.set_navigation_workers(1);
+                        for _ in 0..match case.as_str() {
+                            "water-gravity-during" => 8,
+                            "water-gravity-after" => 60,
+                            _ => 0,
+                        } {
+                            sim.step();
+                        }
+                    }
+                    let ticks = match case.as_str() {
+                        "material-result" | "water-result" | "water-float" => 300,
+                        "physics-wetting" => 120,
+                        "physics-erosion" => 300,
+                        "physics-devices" => 40,
+                        "physics-dome" => 8,
+                        "physics-glass" => 100,
+                        _ => 0,
+                    };
+                    if case.starts_with("he-fragments-") {
+                        sim.set_physics_workers(1);
+                        sim.set_navigation_workers(1);
+                        sim.execute_command(Command::ConfigureWeapon {
+                            config: weapon_config(false, false, 1000, Delivery::Blast),
+                        });
+                        assert!(sim
+                            .execute_command(Command::Gun(GunCommand::Detonate {
+                                at: [392, 20, 344]
+                            }))
+                            .accepted());
+                        for _ in 0..if case.ends_with("flight") { 16 } else { 140 } {
+                            sim.step();
+                        }
+                        let pieces = &sim.matter.debris.fragments;
+                        println!("HE_LANDING case={case} fragments={} flying={} resting={} inventory={} geometry={}",pieces.len(),pieces.iter().filter(|f|!f.resting).count(),pieces.iter().filter(|f|f.resting).count(),pieces.iter().map(|f|u64::from(f.count)).sum::<u64>(),pieces.iter().map(|f|u64::from(f.shape.count_ones())).sum::<u64>());
+                        if case == "he-fragments-heat-flight" {
+                            lab.tools.metric = 1;
+                            lab.tools.section.enabled = true;
+                            lab.tools.section.axis = 0;
+                            lab.tools.section.anchor = [392, 20, 344];
+                            lab.ui.tab = 30;
+                            if std::env::var("RTS_LAB_CAPTURE_HEAT_STRESS").as_deref() == Ok("1") {
+                                for x in 350..430 {
+                                    for z in 300..380 {
+                                        sim.heat.add(&sim.world, [x, 5, z], 900);
+                                    }
+                                }
+                            }
+                            println!("HE_HEAT_FIXTURE hot={}", sim.heat.hot());
+                        }
+                    }
+                    if ticks > 0 {
+                        sim.set_physics_workers(1);
+                        sim.set_navigation_workers(1);
+                        if case.starts_with("physics-") {
+                            if let Some(plan) = &lab.constructor.experiment {
+                                experiments::launch(plan, &mut sim)
+                                    .expect("capture experiment input");
+                            }
+                        }
+                        for _ in 0..ticks {
+                            sim.step();
+                        }
                     }
                 }
                 let mut replacement = fresh_scene(sim, &scene);
@@ -651,122 +869,309 @@ pub fn actions(
                 lab.constructor.pending.clear();
                 lab.browser = false;
                 lab.notice = "Лаборатория готова. Соберите сцену и выберите воздействие.".into();
-                if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").is_ok_and(|s|s.starts_with("collector-")) {
-                    let profile=std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("collector-profile");
-                    let centre=Vec3::new(367.0,20.0,336.0);
-                    lab.tools.camera=Some(Transform::from_translation(centre+Vec3::new(-64.0,62.0,90.0)).looking_at(centre,Vec3::Y));
-                    lab.tools.flying=true;lab.tools.flight.preview=true;lab.tools.flight.profile=profile;
-                    scene.paused=!profile;scene.realtime=true;scene.acc=0.0;scene.skip_delta=true;
+                if capture_fixture
+                    && std::env::var("RTS_LAB_CAPTURE_CASE")
+                        .is_ok_and(|s| s.starts_with("collector-"))
+                {
+                    let profile =
+                        std::env::var("RTS_LAB_CAPTURE_CASE").as_deref() == Ok("collector-profile");
+                    let centre = Vec3::new(367.0, 20.0, 336.0);
+                    lab.tools.camera = Some(
+                        Transform::from_translation(centre + Vec3::new(-64.0, 62.0, 90.0))
+                            .looking_at(centre, Vec3::Y),
+                    );
+                    lab.tools.flying = true;
+                    lab.tools.flight.preview = true;
+                    lab.tools.flight.profile = profile;
+                    scene.paused = !profile;
+                    scene.realtime = true;
+                    scene.acc = 0.0;
+                    scene.skip_delta = true;
                 }
-                if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").is_ok_and(|s|s.starts_with("dune-")) {
-                    let profile=std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("dune-profile");
-                    let centre=Vec3::new(360.0,28.0,344.0);
-                    lab.tools.camera=Some(Transform::from_translation(centre+Vec3::new(100.0,95.0,112.0)).looking_at(centre,Vec3::Y));
-                    lab.tools.flying=true;lab.tools.flight.preview=true;lab.tools.flight.profile=profile;
-                    scene.paused=!profile;scene.realtime=true;scene.acc=0.0;scene.skip_delta=true;
+                if capture_fixture
+                    && std::env::var("RTS_LAB_CAPTURE_CASE").is_ok_and(|s| s.starts_with("dune-"))
+                {
+                    let profile =
+                        std::env::var("RTS_LAB_CAPTURE_CASE").as_deref() == Ok("dune-profile");
+                    let centre = Vec3::new(360.0, 28.0, 344.0);
+                    lab.tools.camera = Some(
+                        Transform::from_translation(centre + Vec3::new(100.0, 95.0, 112.0))
+                            .looking_at(centre, Vec3::Y),
+                    );
+                    lab.tools.flying = true;
+                    lab.tools.flight.preview = true;
+                    lab.tools.flight.profile = profile;
+                    scene.paused = !profile;
+                    scene.realtime = true;
+                    scene.acc = 0.0;
+                    scene.skip_delta = true;
                 }
-                if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("melt-steel") {
-                    lab.tools.flight.preview=true;scene.paused=true;scene.realtime=true;
+                if capture_fixture
+                    && std::env::var("RTS_LAB_CAPTURE_CASE").as_deref() == Ok("melt-steel")
+                {
+                    lab.tools.flight.preview = true;
+                    scene.paused = true;
+                    scene.realtime = true;
                 }
-                if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("replay-ui") {
-                    scene.sim.set_physics_workers(1);scene.sim.set_navigation_workers(1);
-                    lab.replay.start(&mut scene.sim).expect("replay fixture start");
-                    let outcome=scene.sim.execute_command(Command::Sculpt{at:[380,25,345],edge:1,material:11,erase:false});assert!(outcome.accepted());
-                    for _ in 0..8 {scene.sim.step();}
-                    lab.replay.stop(&mut scene.sim).expect("replay fixture stop");
-                    scene.paused=true;scene.realtime=true;scene.acc=0.0;scene.skip_delta=true;
-                }
-                if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("replay-effects") {
-                    scene.sim.set_physics_workers(1);scene.sim.set_navigation_workers(1);
-                    scene.sim.execute_command(Command::ConfigureWeapon{config:weapon_config(false,false,1000,Delivery::Blast)});
-                    lab.replay.start(&mut scene.sim).expect("replay effects fixture start");
-                    assert!(scene.sim.execute_command(Command::Gun(GunCommand::Detonate{at:[380,22,345]})).accepted());
-                    for _ in 0..8 {scene.sim.step();}
-                    lab.replay.stop(&mut scene.sim).expect("replay effects fixture stop");
-                    lab.replay.seek(4).expect("replay effects fixture seek");
-                    scene.paused=true;scene.realtime=true;scene.acc=0.0;scene.skip_delta=true;
-                }
-                if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").is_ok_and(|s|s=="metric-section"||s=="metric-surface"||s=="metric-live"||s=="metric-fragment") {
-                    lab.tools.section.enabled=std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("metric-section");lab.tools.section.anchor=[385,31,345];lab.tools.selected=Some([385,31,345]);lab.tools.metric=1;
-                    lab.tools.flight.preview=true;
-                    if std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("metric-live") {lab.tools.live=true;lab.tools.distance=88.0;}
-                    if std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("metric-fragment") {
-                        let sim=&mut scene.sim;
-                        let (made,returned)=sim.matter.debris.pieces_from_cells(&mut sim.world,&[([380,25,345],3)],&mut sim.matter.economy,&sim.matter.tuning,2);
-                        assert_eq!((made,returned),(1,0));
-                        let f=&mut sim.matter.debris.fragments[0];f.velocity.x=fx::Fx::from_int(2);f.resting=false;
-                        let centre=fragments::pos([f.position.x,f.position.y,f.position.z]);
-                        lab.tools.selected=Some(centre.floor().to_array().map(|v|v as i32));
-                        lab.tools.camera=Some(Transform::from_translation(centre+Vec3::new(-8.0,6.0,8.0)).looking_at(centre,Vec3::Y));
-                        println!("METRIC_FRAGMENT_FIXTURE id={} material={} x={:.2} y={:.2} z={:.2}",f.id,f.material,centre.x,centre.y,centre.z);
-                        lab.tools.metric=6;
+                if capture_fixture
+                    && std::env::var("RTS_LAB_CAPTURE_CASE").as_deref() == Ok("replay-ui")
+                {
+                    scene.sim.set_physics_workers(1);
+                    scene.sim.set_navigation_workers(1);
+                    lab.replay
+                        .start(&mut scene.sim)
+                        .expect("replay fixture start");
+                    let outcome = scene.sim.execute_command(Command::Sculpt {
+                        at: [380, 25, 345],
+                        edge: 1,
+                        material: 11,
+                        erase: false,
+                    });
+                    assert!(outcome.accepted());
+                    for _ in 0..8 {
+                        scene.sim.step();
                     }
-                    if let Some(mode)=std::env::var("RTS_LAB_CAPTURE_METRIC").ok().and_then(|v|v.parse::<u8>().ok()).filter(|v|*v<=10) {lab.tools.metric=mode;}
-                    scene.paused=true;scene.realtime=true;scene.acc=0.0;scene.skip_delta=true;
+                    lab.replay
+                        .stop(&mut scene.sim)
+                        .expect("replay fixture stop");
+                    scene.paused = true;
+                    scene.realtime = true;
+                    scene.acc = 0.0;
+                    scene.skip_delta = true;
                 }
-                if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").is_ok_and(|s|s.starts_with("water-gravity-")) {
-                    let profile=std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("water-gravity-profile");
-                    let centre=Vec3::new(384.0,22.0,336.0);
-                    lab.tools.camera=Some(Transform::from_translation(centre+Vec3::new(52.0,48.0,66.0)).looking_at(centre,Vec3::Y));
-                    lab.tools.flying=true;lab.tools.flight.preview=true;lab.tools.flight.profile=profile;
-                    scene.paused=!profile;scene.realtime=true;scene.acc=0.0;scene.skip_delta=true;
+                if capture_fixture
+                    && std::env::var("RTS_LAB_CAPTURE_CASE").as_deref() == Ok("replay-effects")
+                {
+                    scene.sim.set_physics_workers(1);
+                    scene.sim.set_navigation_workers(1);
+                    scene.sim.execute_command(Command::ConfigureWeapon {
+                        config: weapon_config(false, false, 1000, Delivery::Blast),
+                    });
+                    lab.replay
+                        .start(&mut scene.sim)
+                        .expect("replay effects fixture start");
+                    assert!(scene
+                        .sim
+                        .execute_command(Command::Gun(GunCommand::Detonate { at: [380, 22, 345] }))
+                        .accepted());
+                    for _ in 0..8 {
+                        scene.sim.step();
+                    }
+                    lab.replay
+                        .stop(&mut scene.sim)
+                        .expect("replay effects fixture stop");
+                    lab.replay.seek(4).expect("replay effects fixture seek");
+                    scene.paused = true;
+                    scene.realtime = true;
+                    scene.acc = 0.0;
+                    scene.skip_delta = true;
                 }
-                if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("surround") {
+                if capture_fixture
+                    && std::env::var("RTS_LAB_CAPTURE_CASE").is_ok_and(|s| {
+                        s == "metric-section"
+                            || s == "metric-surface"
+                            || s == "metric-live"
+                            || s == "metric-fragment"
+                    })
+                {
+                    lab.tools.section.enabled =
+                        std::env::var("RTS_LAB_CAPTURE_CASE").as_deref() == Ok("metric-section");
+                    lab.tools.section.anchor = [385, 31, 345];
+                    lab.tools.selected = Some([385, 31, 345]);
+                    lab.tools.metric = 1;
+                    lab.tools.flight.preview = true;
+                    if std::env::var("RTS_LAB_CAPTURE_CASE").as_deref() == Ok("metric-live") {
+                        lab.tools.live = true;
+                        lab.tools.distance = 88.0;
+                    }
+                    if std::env::var("RTS_LAB_CAPTURE_CASE").as_deref() == Ok("metric-fragment") {
+                        let sim = &mut scene.sim;
+                        let (made, returned) = sim.matter.debris.pieces_from_cells(
+                            &mut sim.world,
+                            &[([380, 25, 345], 3)],
+                            &mut sim.matter.economy,
+                            &sim.matter.tuning,
+                            2,
+                        );
+                        assert_eq!((made, returned), (1, 0));
+                        let f = &mut sim.matter.debris.fragments[0];
+                        f.velocity.x = fx::Fx::from_int(2);
+                        f.resting = false;
+                        let centre = fragments::pos([f.position.x, f.position.y, f.position.z]);
+                        lab.tools.selected = Some(centre.floor().to_array().map(|v| v as i32));
+                        lab.tools.camera = Some(
+                            Transform::from_translation(centre + Vec3::new(-8.0, 6.0, 8.0))
+                                .looking_at(centre, Vec3::Y),
+                        );
+                        println!(
+                            "METRIC_FRAGMENT_FIXTURE id={} material={} x={:.2} y={:.2} z={:.2}",
+                            f.id, f.material, centre.x, centre.y, centre.z
+                        );
+                        lab.tools.metric = 6;
+                    }
+                    if let Some(mode) = std::env::var("RTS_LAB_CAPTURE_METRIC")
+                        .ok()
+                        .and_then(|v| v.parse::<u8>().ok())
+                        .filter(|v| *v <= 10)
+                    {
+                        lab.tools.metric = mode;
+                    }
+                    scene.paused = true;
+                    scene.realtime = true;
+                    scene.acc = 0.0;
+                    scene.skip_delta = true;
+                }
+                if capture_fixture
+                    && std::env::var("RTS_LAB_CAPTURE_CASE")
+                        .is_ok_and(|s| s.starts_with("water-gravity-"))
+                {
+                    let profile = std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()
+                        == Ok("water-gravity-profile");
+                    let centre = Vec3::new(384.0, 22.0, 336.0);
+                    lab.tools.camera = Some(
+                        Transform::from_translation(centre + Vec3::new(52.0, 48.0, 66.0))
+                            .looking_at(centre, Vec3::Y),
+                    );
+                    lab.tools.flying = true;
+                    lab.tools.flight.preview = true;
+                    lab.tools.flight.profile = profile;
+                    scene.paused = !profile;
+                    scene.realtime = true;
+                    scene.acc = 0.0;
+                    scene.skip_delta = true;
+                }
+                if capture_fixture
+                    && std::env::var("RTS_LAB_CAPTURE_CASE").as_deref() == Ok("surround")
+                {
                     scene.view = 6;
                     edit.zoom = 0.82;
                 }
-                if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").is_ok_and(|v|v.starts_with("fps-")) {
-                    let case=std::env::var("RTS_LAB_CAPTURE_CASE").unwrap();
-                    let target=Vec3::new(384.0,26.0,400.0);
-                    lab.tools.camera=Some(Transform::from_translation(Vec3::new(324.0,70.0,494.0)).looking_at(target,Vec3::Y));
-                    live_tools::action(&mut lab,&mut scene,LabAction::LiveTools);
-                    live_tools::action(&mut lab,&mut scene,LabAction::LiveTool(if case.starts_with("fps-water"){2}else if case.starts_with("fps-fire"){3}else if case.starts_with("fps-mg"){5}else if case.starts_with("fps-he"){6}else if case.starts_with("fps-ap"){7}else{4}));
-                    lab.tools.flight.preview=true;
-                    lab.tools.flight.profile=case.ends_with("profile");
-                    if case=="fps-water-profile" {lab.tools.point=true;}
-                    lab.tools.flight.captured=case!="fps-menu";
-                    lab.tools.flight.request=false;
-                    lab.tools.flight.trigger_ready=true;
-                    let pose=lab.tools.camera.unwrap();
-                    if case!="fps-menu" {
-                        if let Some((at,origin))=live_tools::target(&lab,&scene,Ray3d::new(pose.translation,pose.forward())) {
-                            for _ in 0..if case=="fps-fire" {6}else{1} {
+                if capture_fixture
+                    && std::env::var("RTS_LAB_CAPTURE_CASE").is_ok_and(|v| v.starts_with("fps-"))
+                {
+                    let case = std::env::var("RTS_LAB_CAPTURE_CASE").unwrap();
+                    let target = Vec3::new(384.0, 26.0, 400.0);
+                    lab.tools.camera = Some(
+                        Transform::from_translation(Vec3::new(324.0, 70.0, 494.0))
+                            .looking_at(target, Vec3::Y),
+                    );
+                    live_tools::action(&mut lab, &mut scene, LabAction::LiveTools);
+                    live_tools::action(
+                        &mut lab,
+                        &mut scene,
+                        LabAction::LiveTool(if case.starts_with("fps-water") {
+                            2
+                        } else if case.starts_with("fps-fire") {
+                            3
+                        } else if case.starts_with("fps-mg") {
+                            5
+                        } else if case.starts_with("fps-he") {
+                            6
+                        } else if case.starts_with("fps-ap") {
+                            7
+                        } else {
+                            4
+                        }),
+                    );
+                    lab.tools.flight.preview = true;
+                    lab.tools.flight.profile = case.ends_with("profile");
+                    if case == "fps-water-profile" {
+                        lab.tools.point = true;
+                    }
+                    lab.tools.flight.captured = case != "fps-menu";
+                    lab.tools.flight.request = false;
+                    lab.tools.flight.trigger_ready = true;
+                    let pose = lab.tools.camera.unwrap();
+                    if case != "fps-menu" {
+                        if let Some((at, origin)) = live_tools::target(
+                            &lab,
+                            &scene,
+                            Ray3d::new(pose.translation, pose.forward()),
+                        ) {
+                            for _ in 0..if case == "fps-fire" { 6 } else { 1 } {
                                 effects.before(&scene.sim);
-                                live_tools::action(&mut lab,&mut scene,LabAction::LiveApply(at,origin));
-                                live_tools::tick(&mut lab,&mut scene);
+                                live_tools::action(
+                                    &mut lab,
+                                    &mut scene,
+                                    LabAction::LiveApply(at, origin),
+                                );
+                                live_tools::tick(&mut lab, &mut scene);
                                 scene.sim.step();
                                 effects.capture(&scene.sim);
                             }
                         }
                     }
-                    scene.paused=!case.ends_with("profile");
-                    if case=="fps-overview" {lab.constructor.pending.push(LabAction::Frame);}
+                    scene.paused = !case.ends_with("profile");
+                    if case == "fps-overview" {
+                        lab.constructor.pending.push(LabAction::Frame);
+                    }
                 }
-                if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("live-tools") {
-                    let p=Vec3::new(378.0,24.0,398.0);
-                    lab.tools.camera=Some(Transform::from_translation(p+Vec3::new(-30.0,28.0,38.0)).looking_at(p,Vec3::Y));
-                    live_tools::action(&mut lab,&mut scene,LabAction::LiveTools);
-                    live_tools::action(&mut lab,&mut scene,LabAction::LiveTool(2));
-                    lab.tools.point=true;
+                if capture_fixture
+                    && std::env::var("RTS_LAB_CAPTURE_CASE").as_deref() == Ok("live-tools")
+                {
+                    let p = Vec3::new(378.0, 24.0, 398.0);
+                    lab.tools.camera = Some(
+                        Transform::from_translation(p + Vec3::new(-30.0, 28.0, 38.0))
+                            .looking_at(p, Vec3::Y),
+                    );
+                    live_tools::action(&mut lab, &mut scene, LabAction::LiveTools);
+                    live_tools::action(&mut lab, &mut scene, LabAction::LiveTool(2));
+                    lab.tools.point = true;
                     for i in 0..16 {
-                        live_tools::action(&mut lab,&mut scene,LabAction::LiveApply([374+i/4,40,398],[350,50,430]));
-                        live_tools::tick(&mut lab,&mut scene);
+                        live_tools::action(
+                            &mut lab,
+                            &mut scene,
+                            LabAction::LiveApply([374 + i / 4, 40, 398], [350, 50, 430]),
+                        );
+                        live_tools::tick(&mut lab, &mut scene);
                         scene.sim.step();
                     }
                 }
-                if capture_fixture && std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("fragment-inspector") {
-                    let sim=&mut scene.sim;
-                    sim.world.queue_transfer(voxel::Edit::put(384,16,336,7));sim.world.flush_transfers();
-                    let (made,returned)=sim.matter.debris.pieces_from_cells(&mut sim.world,&[([384,20,336],3)],&mut sim.matter.economy,&sim.matter.tuning,2);
-                    assert_eq!((made,returned),(1,0));
-                    for _ in 0..30 {sim.step();}
-                    let f=&sim.matter.debris.fragments[0];let centre=Vec3::from([f.position.x,f.position.y,f.position.z].map(|v|v.raw() as f32/fx::ONE_RAW as f32));
-                    let origin=centre+Vec3::new(5.0,4.0,7.0);let direction=(centre-origin).normalize();
-                    let hit=fragments::picking::pick(&scene,Ray3d::new(origin,Dir3::new(direction).unwrap()),f32::INFINITY).expect("steel fragment probe");
-                    let at=centre.floor().to_array().map(|v|v as i32);
-                    tools::inspector::select(&mut lab,&scene,at);lab.tools.fragment=Some(hit);lab.tools.probe_stamp=None;lab.tools.probe_direction=Some(direction);tools::inspector::refresh(&mut lab,&scene);
-                    lab.tools.camera=Some(Transform::from_translation(origin).looking_at(centre,Vec3::Y));lab.tools.flying=true;
-                    println!("FRAGMENT_PROBE id={} material={} label_steel={}",hit.id,scene.sim.matter.debris.fragments[0].material,lab.tools.probe.contains("Сталь · ID 3"));
+                if capture_fixture
+                    && std::env::var("RTS_LAB_CAPTURE_CASE").as_deref() == Ok("fragment-inspector")
+                {
+                    let sim = &mut scene.sim;
+                    sim.world.queue_transfer(voxel::Edit::put(384, 16, 336, 7));
+                    sim.world.flush_transfers();
+                    let (made, returned) = sim.matter.debris.pieces_from_cells(
+                        &mut sim.world,
+                        &[([384, 20, 336], 3)],
+                        &mut sim.matter.economy,
+                        &sim.matter.tuning,
+                        2,
+                    );
+                    assert_eq!((made, returned), (1, 0));
+                    for _ in 0..30 {
+                        sim.step();
+                    }
+                    let f = &sim.matter.debris.fragments[0];
+                    let centre = Vec3::from(
+                        [f.position.x, f.position.y, f.position.z]
+                            .map(|v| v.raw() as f32 / fx::ONE_RAW as f32),
+                    );
+                    let origin = centre + Vec3::new(5.0, 4.0, 7.0);
+                    let direction = (centre - origin).normalize();
+                    let hit = fragments::picking::pick(
+                        &scene,
+                        Ray3d::new(origin, Dir3::new(direction).unwrap()),
+                        f32::INFINITY,
+                    )
+                    .expect("steel fragment probe");
+                    let at = centre.floor().to_array().map(|v| v as i32);
+                    tools::inspector::select(&mut lab, &scene, at);
+                    lab.tools.fragment = Some(hit);
+                    lab.tools.probe_stamp = None;
+                    lab.tools.probe_direction = Some(direction);
+                    tools::inspector::refresh(&mut lab, &scene);
+                    lab.tools.camera =
+                        Some(Transform::from_translation(origin).looking_at(centre, Vec3::Y));
+                    lab.tools.flying = true;
+                    println!(
+                        "FRAGMENT_PROBE id={} material={} label_steel={}",
+                        hit.id,
+                        scene.sim.matter.debris.fragments[0].material,
+                        lab.tools.probe.contains("Сталь · ID 3")
+                    );
                 }
                 transition = true;
             }
@@ -775,18 +1180,32 @@ pub fn actions(
     if !lab.active() {
         return;
     }
-    let mut replay_effects=None;
-    let mut replay_restored=false;
+    let mut replay_effects = None;
+    let mut replay_restored = false;
     match lab.replay.advance() {
-        Ok(Some((sim,restored_effects))) => {
-            if scene.generation < u64::MAX-1 {
-                scene.sim=sim;scene.generation+=1;scene.paused=true;scene.frame=scene.sim.tick;
-                scene.skip_delta=true;scene.acc=0.0;scene.previous_shell=None;
-                lab.sampled=None;lab.notice=format!("Показан тик {}",scene.sim.tick);transition=true;replay_effects=Some(restored_effects);replay_restored=true;
-            } else {lab.notice="Исчерпан номер сцены".into();}
+        Ok(Some((sim, restored_effects))) => {
+            if scene.generation < u64::MAX - 1 {
+                scene.sim = sim;
+                scene.generation += 1;
+                scene.paused = true;
+                scene.frame = scene.sim.tick;
+                scene.skip_delta = true;
+                scene.acc = 0.0;
+                scene.previous_shell = None;
+                lab.sampled = None;
+                lab.notice = format!("Показан тик {}", scene.sim.tick);
+                transition = true;
+                replay_effects = Some(restored_effects);
+                replay_restored = true;
+            } else {
+                lab.notice = "Исчерпан номер сцены".into();
+            }
         }
-        Ok(None)=>{},
-        Err(e)=>{lab.replay.cancel();lab.notice=e;},
+        Ok(None) => {}
+        Err(e) => {
+            lab.replay.cancel();
+            lab.notice = e;
+        }
     }
     parameters::keyboard(&mut lab, &mut keys);
     let mut actions = std::mem::take(&mut lab.constructor.pending);
@@ -813,7 +1232,14 @@ pub fn actions(
         }
     }
     for (key, action) in [
-        (KeyCode::KeyF, if lab.constructor.voxel_editing() {LabAction::Frame}else{LabAction::Fire}),
+        (
+            KeyCode::KeyF,
+            if lab.constructor.voxel_editing() {
+                LabAction::Frame
+            } else {
+                LabAction::Fire
+            },
+        ),
         (KeyCode::NumpadDecimal, LabAction::Frame),
         (KeyCode::F5, LabAction::Repeat),
         (KeyCode::Space, LabAction::Pause),
@@ -866,7 +1292,9 @@ pub fn actions(
             continue;
         }
         if action == LabAction::Back {
-            if lab.replay.recording {let _=lab.replay.stop(&mut scene.sim);}
+            if lab.replay.recording {
+                let _ = lab.replay.stop(&mut scene.sim);
+            }
             lab.replay.leave();
             let generation = scene
                 .generation
@@ -903,154 +1331,422 @@ pub fn actions(
             break;
         }
         if !lab.constructor.voxel_allowed(action) {
-            lab.notice="Завершите редактирование детали кнопкой «Готово» или «Отмена»".into();
+            lab.notice = "Завершите редактирование детали кнопкой «Готово» или «Отмена»".into();
             continue;
         }
-        let replay_view_action=matches!(action,LabAction::Tab(31)|LabAction::Tab(30)|LabAction::Tab(14)|LabAction::Tab(3)|LabAction::Tab(16)|LabAction::Tab(21)|LabAction::Frame|LabAction::Camera|LabAction::Help|LabAction::SectionToggle|LabAction::SectionShift(_)|LabAction::SectionFocus|LabAction::SectionAxis(_)|LabAction::SectionSide|LabAction::Metric(_)|LabAction::MetricScale|LabAction::Tool(4)|LabAction::ProbeMove(_,_)|LabAction::ClearProbe|LabAction::ProbeFocus|LabAction::Grid);
-        if lab.replay.target.is_some() && !replay_view_action && !matches!(action,LabAction::ReplaySeek(_)|LabAction::ReplayJump(_)|LabAction::ReplayLeave) {
-            lab.notice="Дождитесь окончания перемотки".into();continue;
-        }
-        if lab.replay.position.is_some() && !lab.replay.recording && !matches!(action,
-            LabAction::ReplayStart|LabAction::ReplaySeek(_)|LabAction::ReplayJump(_)|LabAction::ReplaySave|LabAction::ReplayOpen|LabAction::ReplayBrowse(_)|LabAction::ReplayPlay|LabAction::ReplayLeave)
+        let replay_view_action = matches!(
+            action,
+            LabAction::Tab(31)
+                | LabAction::Tab(30)
+                | LabAction::Tab(14)
+                | LabAction::Tab(3)
+                | LabAction::Tab(16)
+                | LabAction::Tab(21)
+                | LabAction::Frame
+                | LabAction::Camera
+                | LabAction::Help
+                | LabAction::SectionToggle
+                | LabAction::SectionShift(_)
+                | LabAction::SectionFocus
+                | LabAction::SectionAxis(_)
+                | LabAction::SectionSide
+                | LabAction::Metric(_)
+                | LabAction::MetricScale
+                | LabAction::Tool(4)
+                | LabAction::ProbeMove(_, _)
+                | LabAction::ClearProbe
+                | LabAction::ProbeFocus
+                | LabAction::Grid
+        );
+        if lab.replay.target.is_some()
             && !replay_view_action
-            && !(lab.replay.playing && matches!(action,LabAction::Pause|LabAction::Step)) {
-            lab.notice="Режим записи: используйте «Воспроизвести» или «Продолжить отсюда»".into();continue;
+            && !matches!(
+                action,
+                LabAction::ReplaySeek(_) | LabAction::ReplayJump(_) | LabAction::ReplayLeave
+            )
+        {
+            lab.notice = "Дождитесь окончания перемотки".into();
+            continue;
         }
-        if !live_tools::allowed(&lab,action) {lab.notice="Завершите режим «Живые инструменты» кнопкой «Готово» или Esc".into();continue;}
-        if lab.tools.live && !(lab.replay.position.is_some() && replay_view_action) && !matches!(action,LabAction::LiveApply(_,_)|LabAction::LiveRelease|LabAction::ReplayStart|LabAction::ReplaySeek(_)|LabAction::ReplayJump(_)|LabAction::ReplayPlay|LabAction::ReplayLeave|LabAction::ReplaySave|LabAction::ReplayOpen|LabAction::ReplayBrowse(_)) {
-            live_tools::stop(&mut lab,&mut scene);lab.tools.live_tick=None;
+        if lab.replay.position.is_some()
+            && !lab.replay.recording
+            && !matches!(
+                action,
+                LabAction::ReplayStart
+                    | LabAction::ReplaySeek(_)
+                    | LabAction::ReplayJump(_)
+                    | LabAction::ReplaySave
+                    | LabAction::ReplayOpen
+                    | LabAction::ReplayBrowse(_)
+                    | LabAction::ReplayPlay
+                    | LabAction::ReplayLeave
+            )
+            && !replay_view_action
+            && !(lab.replay.playing && matches!(action, LabAction::Pause | LabAction::Step))
+        {
+            lab.notice = "Режим записи: используйте «Воспроизвести» или «Продолжить отсюда»".into();
+            continue;
+        }
+        if !live_tools::allowed(&lab, action) {
+            lab.notice = "Завершите режим «Живые инструменты» кнопкой «Готово» или Esc".into();
+            continue;
+        }
+        if lab.tools.live
+            && !(lab.replay.position.is_some() && replay_view_action)
+            && !matches!(
+                action,
+                LabAction::LiveApply(_, _)
+                    | LabAction::LiveRelease
+                    | LabAction::ReplayStart
+                    | LabAction::ReplaySeek(_)
+                    | LabAction::ReplayJump(_)
+                    | LabAction::ReplayPlay
+                    | LabAction::ReplayLeave
+                    | LabAction::ReplaySave
+                    | LabAction::ReplayOpen
+                    | LabAction::ReplayBrowse(_)
+            )
+        {
+            live_tools::stop(&mut lab, &mut scene);
+            lab.tools.live_tick = None;
         }
         let before = lab.recipe;
-        if !matches!(action,LabAction::EditNumber(_) | LabAction::ApplyNumber){lab.ui.editing=None;lab.ui.edit_error=None;}
+        if !matches!(action, LabAction::EditNumber(_) | LabAction::ApplyNumber) {
+            lab.ui.editing = None;
+            lab.ui.edit_error = None;
+        }
         let mut rebuild = false;
         let mut fire = false;
         match action {
-            LabAction::ReplayStart => {
-                match lab.replay.start(&mut scene.sim) {Ok(())=>lab.notice="Запись начата".into(),Err(e)=>lab.notice=e}
+            LabAction::ReplayStart => match lab.replay.start(&mut scene.sim) {
+                Ok(()) => lab.notice = "Запись начата".into(),
+                Err(e) => lab.notice = e,
             },
-            LabAction::ReplayStop => {
-                match lab.replay.stop(&mut scene.sim) {Ok(())=>{scene.paused=true;lab.notice="Запись остановлена; перемещайте ползунок".into();},Err(e)=>lab.notice=e}
+            LabAction::ReplayStop => match lab.replay.stop(&mut scene.sim) {
+                Ok(()) => {
+                    scene.paused = true;
+                    lab.notice = "Запись остановлена; перемещайте ползунок".into();
+                }
+                Err(e) => lab.notice = e,
             },
             LabAction::ReplaySave => {
-                lab.notice=lab.replay.save().map_or_else(|e|format!("Не удалось сохранить: {e}"),|p|format!("Запись сохранена: {p}"));
-            },
+                lab.notice = lab.replay.save().map_or_else(
+                    |e| format!("Не удалось сохранить: {e}"),
+                    |p| format!("Запись сохранена: {p}"),
+                );
+            }
             LabAction::ReplayOpen | LabAction::ReplayBrowse(_) => {
-                let delta=if let LabAction::ReplayBrowse(d)=action {d}else{0};
+                let delta = if let LabAction::ReplayBrowse(d) = action {
+                    d
+                } else {
+                    0
+                };
                 match lab.replay.open(delta) {
-                    Ok(path)=>{let start=lab.replay.bounds().unwrap().0;scene.paused=true;lab.step_requested=false;lab.launch.clear();lab.observing=false;lab.tools.live_target=None;
-                        match lab.replay.seek(start){Ok(())=>lab.notice=format!("Открыта запись: {path}"),Err(e)=>lab.notice=e}}
-                    Err(e)=>lab.notice=format!("Не удалось открыть запись: {e}"),
+                    Ok(path) => {
+                        let start = lab.replay.bounds().unwrap().0;
+                        scene.paused = true;
+                        lab.step_requested = false;
+                        lab.launch.clear();
+                        lab.observing = false;
+                        lab.tools.live_target = None;
+                        match lab.replay.seek(start) {
+                            Ok(()) => lab.notice = format!("Открыта запись: {path}"),
+                            Err(e) => lab.notice = e,
+                        }
+                    }
+                    Err(e) => lab.notice = format!("Не удалось открыть запись: {e}"),
                 }
+            }
+            LabAction::ReplayPlay => match lab.replay.play(&scene.sim) {
+                Ok(()) => {
+                    scene.paused = false;
+                    lab.launch.clear();
+                    lab.observing = false;
+                    lab.tools.live_target = None;
+                    lab.notice = "Воспроизведение записи".into();
+                }
+                Err(e) => lab.notice = e,
             },
-            LabAction::ReplayPlay => {
-                match lab.replay.play(&scene.sim) {Ok(())=>{scene.paused=false;lab.launch.clear();lab.observing=false;lab.tools.live_target=None;lab.notice="Воспроизведение записи".into();},Err(e)=>lab.notice=e}
-            },
-            LabAction::ReplayLeave => {lab.replay.leave();scene.paused=true;lab.notice="Можно продолжить симуляцию с текущего состояния".into();},
+            LabAction::ReplayLeave => {
+                lab.replay.leave();
+                scene.paused = true;
+                lab.notice = "Можно продолжить симуляцию с текущего состояния".into();
+            }
             LabAction::ReplaySeek(tick) => {
-                scene.paused=true;lab.step_requested=false;lab.launch.clear();lab.observing=false;lab.tools.live_target=None;
-                if let Err(e)=lab.replay.seek(tick) {lab.notice=e;}
-            },
-            LabAction::ReplayJump(delta) => {
-                if let Some((a,b))=lab.replay.bounds() {
-                    let at=lab.replay.target.or(lab.replay.position).unwrap_or(scene.sim.tick);
-                    let target=if delta==i32::MIN {a}else if delta==i32::MAX {b}else{(i64::from(at)+i64::from(delta)).clamp(i64::from(a),i64::from(b)) as u32};
-                    scene.paused=true;lab.step_requested=false;lab.launch.clear();lab.observing=false;lab.tools.live_target=None;
-                    if let Err(e)=lab.replay.seek(target) {lab.notice=e;}
+                scene.paused = true;
+                lab.step_requested = false;
+                lab.launch.clear();
+                lab.observing = false;
+                lab.tools.live_target = None;
+                if let Err(e) = lab.replay.seek(tick) {
+                    lab.notice = e;
                 }
-            },
+            }
+            LabAction::ReplayJump(delta) => {
+                if let Some((a, b)) = lab.replay.bounds() {
+                    let at = lab
+                        .replay
+                        .target
+                        .or(lab.replay.position)
+                        .unwrap_or(scene.sim.tick);
+                    let target = if delta == i32::MIN {
+                        a
+                    } else if delta == i32::MAX {
+                        b
+                    } else {
+                        (i64::from(at) + i64::from(delta)).clamp(i64::from(a), i64::from(b)) as u32
+                    };
+                    scene.paused = true;
+                    lab.step_requested = false;
+                    lab.launch.clear();
+                    lab.observing = false;
+                    lab.tools.live_target = None;
+                    if let Err(e) = lab.replay.seek(target) {
+                        lab.notice = e;
+                    }
+                }
+            }
             LabAction::SectionToggle => section::toggle(&mut lab, &scene),
             LabAction::SectionShift(delta) => section::shift(&mut lab, delta),
             LabAction::SectionFocus => section::focus(&mut lab, &scene),
             LabAction::SectionAxis(axis) => lab.tools.section.set_axis(axis),
-            LabAction::SectionSide => lab.tools.section.positive=!lab.tools.section.positive,
+            LabAction::SectionSide => lab.tools.section.positive = !lab.tools.section.positive,
             LabAction::Metric(mode) => {
-                lab.tools.metric=mode.min(10);
-            },
-            LabAction::MetricScale => lab.tools.metric_scale=match lab.tools.metric_scale {1=>2,2=>4,_=>1},
-            LabAction::LiveTools|LabAction::LiveTool(_)|LabAction::LivePoint|LabAction::LivePower(_)|LabAction::LiveApply(_,_)|LabAction::LiveRelease|LabAction::LiveCapture|LabAction::LiveSpeed(_)|LabAction::LiveLook(_)|LabAction::LiveFov(_)=> {
-                live_tools::action(&mut lab,&mut scene,action);
-                configure_gas(&scene.sim,scene.energy,scene.anni,&mut gas);
-            },
-            LabAction::BeginVoxelEdit | LabAction::Tab(17) => {
-                let l=&mut *lab;
-                match l.constructor.action(LabAction::BeginVoxelEdit,&l.definition,&mut l.recipe) {
-                    Ok((changed,message))=>{
-                        rebuild=changed;l.ui.tab=17;l.notice=message;
-                        if changed {if let Some(item)=l.constructor.selected.and_then(|i|l.constructor.placed.get(i)) {
-                            if let Some(b)=item.element.blocks.iter().find(|b|b.material!=0) {
-                                l.tools.selected=Some(modding::laboratory::catalog::voxels::world_cell(item,b.min));
-                                let rotation=Quat::from_rotation_y(-(item.turns as f32)*std::f32::consts::FRAC_PI_2);
-                                l.tools.probe_direction=Some(rotation*Vec3::new(6.0,-5.0,6.0).normalize());
-                                orbit::frame(l);
-                            }
-                        }}
-                    },
-                    Err(e)=>{l.notice=e;continue;}
+                lab.tools.metric = mode.min(10);
+            }
+            LabAction::MetricScale => {
+                lab.tools.metric_scale = match lab.tools.metric_scale {
+                    1 => 2,
+                    2 => 4,
+                    _ => 1,
                 }
-            },
-            LabAction::Tool(4)=> {
-                lab.constructor.mode=constructor::Mode::Inspect;lab.constructor.hover=None;lab.constructor.selected=None;
-                lab.ui.tab=14;lab.browser=false;lab.notice="Пипетка: ЛКМ — выбрать куб мира 10 × 10 × 10 см".into();
-            },
-            LabAction::ProbeMove(axis,delta)=>tools::inspector::shift(&mut lab,&scene,axis as usize,delta),
-            LabAction::ProbeFocus=>if lab.constructor.voxel_editing() {orbit::frame(&mut lab)}else{tools::inspector::focus(&mut lab)},
-            LabAction::ClearProbe=> {lab.tools.selected=None;lab.tools.falling=None;lab.tools.fragment=None;lab.tools.probe_stamp=None;lab.tools.probe="Выберите кубик кликом в сцене".into();},
-            LabAction::SurfaceSnap=> {let v=lab.constructor.workspace.surface_snap.unwrap_or(true);lab.constructor.workspace.surface_snap=Some(!v);lab.constructor.revision+=1;},
-            LabAction::AllowOverlap=> {lab.constructor.workspace.allow_overlap=!lab.constructor.workspace.allow_overlap;lab.constructor.revision+=1;},
-            LabAction::Flying=> {lab.tools.flying=!lab.tools.flying;lab.tools.camera=None;},
-            LabAction::BrushSize(delta)=> {lab.tools.edge=(lab.tools.edge as i32+delta).clamp(1,8) as u32;},
-            LabAction::BrushDistance(delta)=> {lab.tools.distance=(lab.tools.distance+delta as f32*4.0).clamp(4.0,256.0);},
-            LabAction::Sculpt(at,erase)=> {
-                let material=lab.constructor.material(&lab.definition,lab.recipe);
-                let outcome=scene.sim.execute_command(Command::Sculpt{at,edge:lab.tools.edge,material,erase});
-                if outcome==sim_core::blast::battle::commands::Outcome::Queued {lab.step_requested=true;}
-                lab.tools.last_tick=Some(scene.sim.tick);
-            },
-            LabAction::DeviceAt(kind,at)=> {
-                if lab.constructor.workspace.devices.len()>=modding::lab_tools::Tuning::stock().devices {lab.notice="Достигнут лимит устройств".into();continue;}
-                let turns=lab.constructor.turns;
-                lab.constructor.workspace.devices.push(modding::lab_tools::Device{kind,at,turns,work:0,dug:0,container:None,
-                    collector:(kind==modding::lab_tools::DeviceKind::Collector).then(||modding::lab_tools::Collector::at(at))});
-                lab.constructor.revision+=1;rebuild=true;
-            },
+            }
+            LabAction::LiveTools
+            | LabAction::LiveTool(_)
+            | LabAction::LivePoint
+            | LabAction::LivePower(_)
+            | LabAction::LiveApply(_, _)
+            | LabAction::LiveRelease
+            | LabAction::LiveCapture
+            | LabAction::LiveSpeed(_)
+            | LabAction::LiveLook(_)
+            | LabAction::LiveFov(_) => {
+                live_tools::action(&mut lab, &mut scene, action);
+                configure_gas(&scene.sim, scene.energy, scene.anni, &mut gas);
+            }
+            LabAction::BeginVoxelEdit | LabAction::Tab(17) => {
+                let l = &mut *lab;
+                match l
+                    .constructor
+                    .action(LabAction::BeginVoxelEdit, &l.definition, &mut l.recipe)
+                {
+                    Ok((changed, message)) => {
+                        rebuild = changed;
+                        l.ui.tab = 17;
+                        l.notice = message;
+                        if changed {
+                            if let Some(item) = l
+                                .constructor
+                                .selected
+                                .and_then(|i| l.constructor.placed.get(i))
+                            {
+                                if let Some(b) =
+                                    item.element.blocks.iter().find(|b| b.material != 0)
+                                {
+                                    l.tools.selected =
+                                        Some(modding::laboratory::catalog::voxels::world_cell(
+                                            item, b.min,
+                                        ));
+                                    let rotation = Quat::from_rotation_y(
+                                        -(item.turns as f32) * std::f32::consts::FRAC_PI_2,
+                                    );
+                                    l.tools.probe_direction =
+                                        Some(rotation * Vec3::new(6.0, -5.0, 6.0).normalize());
+                                    orbit::frame(l);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        l.notice = e;
+                        continue;
+                    }
+                }
+            }
+            LabAction::Tool(4) => {
+                lab.constructor.mode = constructor::Mode::Inspect;
+                lab.constructor.hover = None;
+                lab.constructor.selected = None;
+                lab.ui.tab = 14;
+                lab.browser = false;
+                lab.notice = "Пипетка: ЛКМ — выбрать куб мира 10 × 10 × 10 см".into();
+            }
+            LabAction::ProbeMove(axis, delta) => {
+                tools::inspector::shift(&mut lab, &scene, axis as usize, delta)
+            }
+            LabAction::ProbeFocus => {
+                if lab.constructor.voxel_editing() {
+                    orbit::frame(&mut lab)
+                } else {
+                    tools::inspector::focus(&mut lab)
+                }
+            }
+            LabAction::ClearProbe => {
+                lab.tools.selected = None;
+                lab.tools.falling = None;
+                lab.tools.fragment = None;
+                lab.tools.probe_stamp = None;
+                lab.tools.probe = "Выберите кубик кликом в сцене".into();
+            }
+            LabAction::SurfaceSnap => {
+                let v = lab.constructor.workspace.surface_snap.unwrap_or(true);
+                lab.constructor.workspace.surface_snap = Some(!v);
+                lab.constructor.revision += 1;
+            }
+            LabAction::AllowOverlap => {
+                lab.constructor.workspace.allow_overlap = !lab.constructor.workspace.allow_overlap;
+                lab.constructor.revision += 1;
+            }
+            LabAction::Flying => {
+                lab.tools.flying = !lab.tools.flying;
+                lab.tools.camera = None;
+            }
+            LabAction::BrushSize(delta) => {
+                lab.tools.edge = (lab.tools.edge as i32 + delta).clamp(1, 8) as u32;
+            }
+            LabAction::BrushDistance(delta) => {
+                lab.tools.distance = (lab.tools.distance + delta as f32 * 4.0).clamp(4.0, 256.0);
+            }
+            LabAction::Sculpt(at, erase) => {
+                let material = lab.constructor.material(&lab.definition, lab.recipe);
+                let outcome = scene.sim.execute_command(Command::Sculpt {
+                    at,
+                    edge: lab.tools.edge,
+                    material,
+                    erase,
+                });
+                if outcome == sim_core::blast::battle::commands::Outcome::Queued {
+                    lab.step_requested = true;
+                }
+                lab.tools.last_tick = Some(scene.sim.tick);
+            }
+            LabAction::DeviceAt(kind, at) => {
+                if lab.constructor.workspace.devices.len()
+                    >= modding::lab_tools::Tuning::stock().devices
+                {
+                    lab.notice = "Достигнут лимит устройств".into();
+                    continue;
+                }
+                let turns = lab.constructor.turns;
+                lab.constructor
+                    .workspace
+                    .devices
+                    .push(modding::lab_tools::Device {
+                        kind,
+                        at,
+                        turns,
+                        work: 0,
+                        dug: 0,
+                        container: None,
+                        collector: (kind == modding::lab_tools::DeviceKind::Collector)
+                            .then(|| modding::lab_tools::Collector::at(at)),
+                    });
+                lab.constructor.revision += 1;
+                rebuild = true;
+            }
             LabAction::ReturnConstruction => {
-                let l=&mut *lab;
+                let l = &mut *lab;
                 match l.constructor.return_scene(&mut l.recipe) {
-                    Ok(())=>{rebuild=true;if let Some(step)=lab.constructor.workspace.editor_step {lab.definition.editor_step=step;} lab.ui.tab=0;lab.browser=false;lab.notice="Вернулись к вашей сборке и её воздействиям".into();},
-                    Err(e)=>{lab.notice=e;continue;}
+                    Ok(()) => {
+                        rebuild = true;
+                        if let Some(step) = lab.constructor.workspace.editor_step {
+                            lab.definition.editor_step = step;
+                        }
+                        lab.ui.tab = 0;
+                        lab.browser = false;
+                        lab.notice = "Вернулись к вашей сборке и её воздействиям".into();
+                    }
+                    Err(e) => {
+                        lab.notice = e;
+                        continue;
+                    }
                 }
             }
             LabAction::PickEvent(i) | LabAction::PlaceEvent(i, _) => {
                 match events::action(&mut lab, action, &mut scene) {
-                    Ok(changed) => {rebuild=changed; configure_gas(&scene.sim,scene.energy,scene.anni,&mut gas);},
-                    Err(e) => {lab.notice=e;continue;}
+                    Ok(changed) => {
+                        rebuild = changed;
+                        configure_gas(&scene.sim, scene.energy, scene.anni, &mut gas);
+                    }
+                    Err(e) => {
+                        lab.notice = e;
+                        continue;
+                    }
                 }
-                let _=i;
+                let _ = i;
             }
             LabAction::LocalCharge(local) => {
-                let before=lab.constructor.workspace.clone();
-                if let Some(source)=sources::active_mut(&mut lab) {
-                    source.detonate=local;
-                    if local {source.binding=None;}
+                let before = lab.constructor.workspace.clone();
+                if let Some(source) = sources::active_mut(&mut lab) {
+                    source.detonate = local;
+                    if local {
+                        source.binding = None;
+                    }
                 }
-                if let Err(e)=sources::arm(&lab,&mut scene) {lab.constructor.workspace=before;lab.notice=e;continue;}
+                if let Err(e) = sources::arm(&lab, &mut scene) {
+                    lab.constructor.workspace = before;
+                    lab.notice = e;
+                    continue;
+                }
                 scenario::sync_sources(&mut lab);
-                lab.constructor.revision+=1;
-                if !local {lab.constructor.mode=constructor::Mode::Aim;lab.notice="Выберите цель выстрела кликом, затем нажмите F".into();}
-            }
-            LabAction::Source(_) | LabAction::AddSource | LabAction::RemoveSource | LabAction::BindSource(_) | LabAction::SourcePosition | LabAction::SourceAt(_) => {
-                match sources::action(&mut lab, action, &mut scene) {
-                    Ok(changed) => { rebuild=changed; configure_gas(&scene.sim,scene.energy,scene.anni,&mut gas); },
-                    Err(e) => {lab.notice=e;continue;}
+                lab.constructor.revision += 1;
+                if !local {
+                    lab.constructor.mode = constructor::Mode::Aim;
+                    lab.notice = "Выберите цель выстрела кликом, затем нажмите F".into();
                 }
             }
-            LabAction::ScenarioInput(_)|LabAction::ScenarioAdd(_)|LabAction::ScenarioRemove|LabAction::ScenarioMove(_)|LabAction::ScenarioAt(_)|LabAction::Device(_)|LabAction::RemoveDevice=> {
-                match scenario::action(&mut lab,action,&scene) {Ok(changed)=>rebuild=changed,Err(e)=>{lab.notice=e;continue;}}
-            }
-            LabAction::EditNumber(_) | LabAction::ApplyNumber | LabAction::CancelNumber | LabAction::SetNumber(_,_) | LabAction::AdjustNumber(_,_) => {
-                match parameters::action(&mut lab,action,&mut scene) {
-                    Ok(changed) => {rebuild=changed; configure_gas(&scene.sim,scene.energy,scene.anni,&mut gas);},
-                    Err(e) => {lab.notice=e;continue;}
+            LabAction::Source(_)
+            | LabAction::AddSource
+            | LabAction::RemoveSource
+            | LabAction::BindSource(_)
+            | LabAction::SourcePosition
+            | LabAction::SourceAt(_) => match sources::action(&mut lab, action, &mut scene) {
+                Ok(changed) => {
+                    rebuild = changed;
+                    configure_gas(&scene.sim, scene.energy, scene.anni, &mut gas);
+                }
+                Err(e) => {
+                    lab.notice = e;
+                    continue;
+                }
+            },
+            LabAction::ScenarioInput(_)
+            | LabAction::ScenarioAdd(_)
+            | LabAction::ScenarioRemove
+            | LabAction::ScenarioMove(_)
+            | LabAction::ScenarioAt(_)
+            | LabAction::Device(_)
+            | LabAction::RemoveDevice => match scenario::action(&mut lab, action, &scene) {
+                Ok(changed) => rebuild = changed,
+                Err(e) => {
+                    lab.notice = e;
+                    continue;
+                }
+            },
+            LabAction::EditNumber(_)
+            | LabAction::ApplyNumber
+            | LabAction::CancelNumber
+            | LabAction::SetNumber(_, _)
+            | LabAction::AdjustNumber(_, _) => {
+                match parameters::action(&mut lab, action, &mut scene) {
+                    Ok(changed) => {
+                        rebuild = changed;
+                        configure_gas(&scene.sim, scene.energy, scene.anni, &mut gas);
+                    }
+                    Err(e) => {
+                        lab.notice = e;
+                        continue;
+                    }
                 }
             }
             LabAction::Category(category) => {
@@ -1060,10 +1756,21 @@ pub fn actions(
             LabAction::Page(delta) => {
                 lab.ui.page = (lab.ui.page as i32 + delta).max(0) as usize;
             }
-            LabAction::Tab(tab) => {if tab==14 {lab.constructor.mode=constructor::Mode::Inspect;lab.constructor.selected=None;lab.browser=false;} if tab==1 {let l=&mut *lab;l.constructor.open_materials(&l.definition);}lab.ui.tab=tab;},
+            LabAction::Tab(tab) => {
+                if tab == 14 {
+                    lab.constructor.mode = constructor::Mode::Inspect;
+                    lab.constructor.selected = None;
+                    lab.browser = false;
+                }
+                if tab == 1 {
+                    let l = &mut *lab;
+                    l.constructor.open_materials(&l.definition);
+                }
+                lab.ui.tab = tab;
+            }
             LabAction::Grid => lab.ui.grid = !lab.ui.grid,
             LabAction::Help => lab.ui.help = !lab.ui.help,
-            LabAction::ParameterDetails => lab.ui.parameter_details=!lab.ui.parameter_details,
+            LabAction::ParameterDetails => lab.ui.parameter_details = !lab.ui.parameter_details,
             LabAction::Form(delta) => {
                 lab.recipe.form = (lab.recipe.form as i32 + delta)
                     .rem_euclid(lab.definition.forms.len() as i32)
@@ -1082,8 +1789,10 @@ pub fn actions(
             }
             LabAction::Power => {
                 lab.recipe.power = (lab.recipe.power + 1) % lab.definition.layout.power_milli.len();
-                let power=lab.definition.layout.power_milli[lab.recipe.power];
-                if let Some(source)=sources::active_mut(&mut lab){source.power_milli=power;}
+                let power = lab.definition.layout.power_milli[lab.recipe.power];
+                if let Some(source) = sources::active_mut(&mut lab) {
+                    source.power_milli = power;
+                }
             }
             LabAction::Effect(effect) => {
                 if !scene.paused && !scene.sim.ready() {
@@ -1097,16 +1806,43 @@ pub fn actions(
                     continue;
                 }
                 lab.constructor.weapon = None;
-                if lab.constructor.base.as_ref().is_some_and(|b|b.battle) {lab.notice="Штатное оружие участника настраивается командой сценария и самим юнитом".into();continue;}
+                if lab.constructor.base.as_ref().is_some_and(|b| b.battle) {
+                    lab.notice =
+                        "Штатное оружие участника настраивается командой сценария и самим юнитом"
+                            .into();
+                    continue;
+                }
                 lab.constructor.variant = None;
                 lab.recipe.effect = effect;
-                rebuild=true;
-                let power=lab.recipe.power;
-                lab.recipe.power=lab.definition.layout.power_milli.iter().position(|p|*p==1000).unwrap_or(0);
-                let config=lab.preset_config();
-                lab.recipe.power=power;
-                if let Err(e)=sources::ensure_weapon(&mut lab){lab.notice=e;continue;}
-                if let Some(source)=sources::active_mut(&mut lab) {source.config=config;source.effect=Some(effect);source.visual=if effect==6{2}else if effect==2{1}else{0};if config.delivery!=Delivery::Blast{source.detonate=false;}}
+                rebuild = true;
+                let power = lab.recipe.power;
+                lab.recipe.power = lab
+                    .definition
+                    .layout
+                    .power_milli
+                    .iter()
+                    .position(|p| *p == 1000)
+                    .unwrap_or(0);
+                let config = lab.preset_config();
+                lab.recipe.power = power;
+                if let Err(e) = sources::ensure_weapon(&mut lab) {
+                    lab.notice = e;
+                    continue;
+                }
+                if let Some(source) = sources::active_mut(&mut lab) {
+                    source.config = config;
+                    source.effect = Some(effect);
+                    source.visual = if effect == 6 {
+                        2
+                    } else if effect == 2 {
+                        1
+                    } else {
+                        0
+                    };
+                    if config.delivery != Delivery::Blast {
+                        source.detonate = false;
+                    }
+                }
                 scenario::sync_sources(&mut lab);
             }
             LabAction::Fire => lab.fire(&mut scene),
@@ -1157,20 +1893,25 @@ pub fn actions(
                 edit.pitch = 0.0;
             }
             LabAction::Frame => {
-                if lab.constructor.voxel_editing() {orbit::frame(&mut lab);continue;}
-                if lab.tools.live && lab.tools.flying {lab.tools.flight.overview_return=lab.tools.camera;}
+                if lab.constructor.voxel_editing() {
+                    orbit::frame(&mut lab);
+                    continue;
+                }
+                if lab.tools.live && lab.tools.flying {
+                    lab.tools.flight.overview_return = lab.tools.camera;
+                }
                 first_person::release(&mut lab);
-                lab.tools.flying=false;
-                lab.tools.camera=None;
+                lab.tools.flying = false;
+                lab.tools.camera = None;
                 for mut projection in &mut projections {
-                    *projection=Projection::Orthographic(OrthographicProjection::default_3d());
+                    *projection = Projection::Orthographic(OrthographicProjection::default_3d());
                 }
                 scene.view = 1;
                 edit.pan = Vec2::ZERO;
                 edit.zoom = 0.9;
                 edit.orbit = 0.0;
                 edit.pitch = 0.0;
-                lab.notice="Общий вид · живые инструменты доступны в панели".into();
+                lab.notice = "Общий вид · живые инструменты доступны в панели".into();
             }
             LabAction::Camera => {
                 edit.orbit += std::f32::consts::FRAC_PI_4;
@@ -1188,7 +1929,9 @@ pub fn actions(
                     .admitted()
                 {
                     lab.constructor.aim = Some(at);
-                    if let Some(source)=sources::active_mut(&mut lab) {source.target=at;}
+                    if let Some(source) = sources::active_mut(&mut lab) {
+                        source.target = at;
+                    }
                     lab.constructor.mode = constructor::Mode::Select;
                     lab.constructor.revision += 1;
                     lab.notice = "Точка воздействия выбрана".into();
@@ -1223,9 +1966,18 @@ pub fn actions(
                     + delta)
                     .rem_euclid(count as i32) as usize;
                 let w = lab.constructor.weapons[i].clone();
-                if lab.constructor.base.as_ref().is_some_and(|b|b.battle) {lab.notice="Выберите свободный источник в небойном сценарии".into();continue;}
+                if lab.constructor.base.as_ref().is_some_and(|b| b.battle) {
+                    lab.notice = "Выберите свободный источник в небойном сценарии".into();
+                    continue;
+                }
                 lab.constructor.weapon = Some((w.config, w.visual));
-                if let Some(source)=sources::active_mut(&mut lab) {source.config=w.config;source.power_milli=1000;source.visual=w.visual;source.effect=None;source.detonate=false;}
+                if let Some(source) = sources::active_mut(&mut lab) {
+                    source.config = w.config;
+                    source.power_milli = 1000;
+                    source.visual = w.visual;
+                    source.effect = None;
+                    source.detonate = false;
+                }
                 scenario::sync_sources(&mut lab);
                 lab.constructor.variant = Some(i);
                 lab.recipe.power = lab
@@ -1251,9 +2003,14 @@ pub fn actions(
                                 | LabAction::AddPart
                                 | LabAction::Tool(1)
                         ) {
-                            if !(matches!(other,LabAction::PickObject(_)) && l.ui.tab==1) {l.ui.tab=0;}
+                            if !(matches!(other, LabAction::PickObject(_)) && l.ui.tab == 1) {
+                                l.ui.tab = 0;
+                            }
                         }
-                        if matches!(other,LabAction::VoxelFinish(_)) {orbit::leave(l);l.ui.tab=0;}
+                        if matches!(other, LabAction::VoxelFinish(_)) {
+                            orbit::leave(l);
+                            l.ui.tab = 0;
+                        }
                         if other == LabAction::SaveElement {
                             l.ui.category = 6;
                             l.ui.page = 0;
@@ -1272,7 +2029,13 @@ pub fn actions(
         }
         if before != lab.recipe || rebuild {
             if lab.replay.recording {
-                match lab.replay.stop(&mut scene.sim) {Ok(())=>{lab.replay.leave();lab.notice="Запись остановлена перед пересозданием сцены".into();},Err(e)=>lab.notice=e}
+                match lab.replay.stop(&mut scene.sim) {
+                    Ok(()) => {
+                        lab.replay.leave();
+                        lab.notice = "Запись остановлена перед пересозданием сцены".into();
+                    }
+                    Err(e) => lab.notice = e,
+                }
             }
             if scene.generation >= u64::MAX - 1 {
                 lab.recipe = before;
@@ -1287,7 +2050,7 @@ pub fn actions(
                     workshop.pitch = edit.pitch;
                     *scene = fresh_scene(sim, &scene);
                     *edit = workshop;
-                    if before != lab.recipe && action!=LabAction::ApplyMaterial {
+                    if before != lab.recipe && action != LabAction::ApplyMaterial {
                         lab.notice = "Сцена восстановлена с новыми параметрами".into();
                     }
                     transition = true;
@@ -1315,27 +2078,45 @@ pub fn actions(
             );
             scene.energy = visual != 0;
             scene.anni = visual == 2;
-            scene.power = sources::active(&lab).map_or(lab.definition.layout.power_milli[lab.recipe.power],|s|s.power_milli);
-            if let Some(source)=sources::active(&lab){scene.energy=source.visual!=0;scene.anni=source.visual==2;}
+            scene.power = sources::active(&lab)
+                .map_or(lab.definition.layout.power_milli[lab.recipe.power], |s| {
+                    s.power_milli
+                });
+            if let Some(source) = sources::active(&lab) {
+                scene.energy = source.visual != 0;
+                scene.anni = source.visual == 2;
+            }
         }
         profile.configure_workers(&mut scene.sim);
         moving::reset(&mut visual);
-        if !(scene.out.is_some() && lab.tools.live && lab.tools.flight.preview) {effects.clear();}
-        if let Some(restored)=replay_effects.take() {effects.restore_replay(restored);}
+        if !(scene.out.is_some() && lab.tools.live && lab.tools.flight.preview) {
+            effects.clear();
+        }
+        if let Some(restored) = replay_effects.take() {
+            effects.restore_replay(restored);
+        }
         gas.atmosphere.clear();
         gas.params.control.z = 0.0;
         configure_gas(&scene.sim, scene.energy, scene.anni, &mut gas);
-        if replay_restored && scene.sim.config.delivery!=Delivery::Kinetic {
-            if let (Some(at),Some((start,_)))=(scene.sim.impact,lab.replay.bounds()) {
-                if scene.sim.impact_tick>=start && scene.sim.impact_tick<=scene.sim.tick {
-                    let point=Vec3::from(at.map(|v|v as f32));
-                    let mut params=gas.params;
-                    params.control.z=1.0;
-                    params.source=gas.surface_source(point,Vec3::Y).extend(scene.sim.config.gas_source_radius as f32);
-                    let born=scene.sim.impact_tick.saturating_mul(2);
-                    let now=scene.sim.tick.saturating_mul(2);
-                    let g=&mut *gas;
-                    g.atmosphere.restore_replay_impact(params,born,now,&g.terrain_words,g.window);
+        if replay_restored && scene.sim.config.delivery != Delivery::Kinetic {
+            if let (Some(at), Some((start, _))) = (scene.sim.impact, lab.replay.bounds()) {
+                if scene.sim.impact_tick >= start && scene.sim.impact_tick <= scene.sim.tick {
+                    let point = Vec3::from(at.map(|v| v as f32));
+                    let mut params = gas.params;
+                    params.control.z = 1.0;
+                    params.source = gas
+                        .surface_source(point, Vec3::Y)
+                        .extend(scene.sim.config.gas_source_radius as f32);
+                    let born = scene.sim.impact_tick.saturating_mul(2);
+                    let now = scene.sim.tick.saturating_mul(2);
+                    let g = &mut *gas;
+                    g.atmosphere.restore_replay_impact(
+                        params,
+                        born,
+                        now,
+                        &g.terrain_words,
+                        g.window,
+                    );
                 }
             }
         }
@@ -1380,7 +2161,10 @@ pub fn measure(mut lab: ResMut<Laboratory>, mut scene: ResMut<Scene>) {
     if scene.paused && lab.sampled != Some(scene.sim.tick) {
         lab.sampled = None;
     }
-    if lab.observing && lab.launch.is_empty() && lab.deadline.is_some_and(|end| scene.sim.tick >= end) {
+    if lab.observing
+        && lab.launch.is_empty()
+        && lab.deadline.is_some_and(|end| scene.sim.tick >= end)
+    {
         scene.paused = true;
         lab.observing = false;
         lab.sampled = None;
@@ -1490,14 +2274,19 @@ fn save_scene(lab: &Laboratory, sim: &BlastRange) -> Result<(), String> {
             .get(material)
             .map(|m| (material, m.strength))
     });
-    let visual = sources::active(lab).map_or_else(|| lab.constructor.weapon.map_or(
-        match lab.recipe.effect {
-            2 => 1,
-            6 => 2,
-            _ => 0,
+    let visual = sources::active(lab).map_or_else(
+        || {
+            lab.constructor.weapon.map_or(
+                match lab.recipe.effect {
+                    2 => 1,
+                    6 => 2,
+                    _ => 0,
+                },
+                |(_, v)| v,
+            )
         },
-        |(_, v)| v,
-    ),|s|s.visual);
+        |s| s.visual,
+    );
     let mut base = lab.constructor.base_layout(&lab.definition, lab.recipe)?;
     if let Some(at) = lab.constructor.aim {
         base.target = at;
@@ -1529,14 +2318,19 @@ fn save_weapon(lab: &mut Laboratory) -> Result<String, String> {
                 .exists()
         })
         .ok_or("Библиотека заполнена")?;
-    let visual = sources::active(lab).map_or_else(|| lab.constructor.weapon.map_or(
-        match lab.recipe.effect {
-            2 => 1,
-            6 => 2,
-            _ => 0,
+    let visual = sources::active(lab).map_or_else(
+        || {
+            lab.constructor.weapon.map_or(
+                match lab.recipe.effect {
+                    2 => 1,
+                    6 => 2,
+                    _ => 0,
+                },
+                |(_, v)| v,
+            )
         },
-        |(_, v)| v,
-    ),|s|s.visual);
+        |s| s.visual,
+    );
     let w = WeaponAsset {
         version: 1,
         name: format!("Моё оружие {number:04}"),
@@ -1567,13 +2361,17 @@ fn load_scene(lab: &mut Laboratory) -> Result<(), String> {
         .validate(&layout)
         .map_err(|e| e.to_string())?;
     lab.constructor.base = Some(file.base);
-    lab.constructor.workspace=file.workspace;
-    if let Some(step)=lab.constructor.workspace.editor_step {lab.definition.editor_step=step;}
+    lab.constructor.workspace = file.workspace;
+    if let Some(step) = lab.constructor.workspace.editor_step {
+        lab.definition.editor_step = step;
+    }
     lab.constructor.experiment = file.experiment;
     lab.constructor.placed = file.elements;
     lab.constructor.stand = false;
     lab.constructor.selected = lab.constructor.placed.len().checked_sub(1);
-    if lab.constructor.workspace.selected_material.is_none() {lab.constructor.sync_material(&lab.definition);}
+    if lab.constructor.workspace.selected_material.is_none() {
+        lab.constructor.sync_material(&lab.definition);
+    }
     lab.constructor.aim = None;
     lab.constructor.weapon = Some((file.weapon, file.visual));
     lab.constructor.strength = file.strength;
@@ -1604,7 +2402,10 @@ pub fn refresh(
 ) {
     let active = lab.active();
     for (mut n, menu, help) in &mut roots {
-        let value = if active && !first_person::immersive(&lab) && (menu.is_none() || lab.browser) && (help.is_none() || lab.ui.help)
+        let value = if active
+            && !first_person::immersive(&lab)
+            && (menu.is_none() || lab.browser)
+            && (help.is_none() || lab.ui.help)
         {
             Display::Flex
         } else {
@@ -1641,11 +2442,13 @@ pub fn refresh(
             background.0 = value;
         }
     }
-    if active {tools::inspector::refresh(&mut lab,&scene);}
-    let material_name=lab.constructor.material_name(&lab.definition,lab.recipe);
+    if active {
+        tools::inspector::refresh(&mut lab, &scene);
+    }
+    let material_name = lab.constructor.material_name(&lab.definition, lab.recipe);
     for (Label(kind), mut text) in &mut labels {
         let value = match kind {
-            0 => format!("Выбрано: {}",material_name),
+            0 => format!("Выбрано: {}", material_name),
             1 => lab.definition.forms[lab.recipe.form].name.clone(),
             2 => format!(
                 "Толщина плиты: {} мм\nПрочность: {:.2}×",
@@ -1672,7 +2475,10 @@ pub fn refresh(
                             "Осадный снаряд",
                         ][lab.recipe.effect as usize]
                     },
-                    sources::active(&lab).map_or(lab.definition.layout.power_milli[lab.recipe.power],|s|s.power_milli) as f32 / 1000.0,
+                    sources::active(&lab)
+                        .map_or(lab.definition.layout.power_milli[lab.recipe.power], |s| s
+                            .power_milli) as f32
+                        / 1000.0,
                     lab.constructor
                         .experiment
                         .as_ref()
@@ -1695,12 +2501,28 @@ pub fn refresh(
                 },
                 lab.notice
             ),
-            23=>lab.constructor.material_context(&lab.definition,lab.recipe),
-            21=>lab.tools.probe.clone(),
-            24=>lab.constructor.voxel_text(&lab.definition,lab.recipe),
-            25=>live_tools::text(&lab,scene.paused),
-            26|27|28|29|30=>ui::text(&lab,*kind),
-            22=>format!("Кисть: {}³ · дистанция: {} ед.\nПоверхность: {} · пересечения: {}",lab.tools.edge,lab.tools.distance as u32,if lab.constructor.workspace.surface_snap.unwrap_or(true){"вкл"}else{"выкл"},if lab.constructor.workspace.allow_overlap{"вкл"}else{"выкл"}),
+            23 => lab
+                .constructor
+                .material_context(&lab.definition, lab.recipe),
+            21 => lab.tools.probe.clone(),
+            24 => lab.constructor.voxel_text(&lab.definition, lab.recipe),
+            25 => live_tools::text(&lab, scene.paused),
+            26 | 27 | 28 | 29 | 30 => ui::text(&lab, *kind),
+            22 => format!(
+                "Кисть: {}³ · дистанция: {} ед.\nПоверхность: {} · пересечения: {}",
+                lab.tools.edge,
+                lab.tools.distance as u32,
+                if lab.constructor.workspace.surface_snap.unwrap_or(true) {
+                    "вкл"
+                } else {
+                    "выкл"
+                },
+                if lab.constructor.workspace.allow_overlap {
+                    "вкл"
+                } else {
+                    "выкл"
+                }
+            ),
             14 => format!(
                 "{} · тик {}",
                 if scene.paused {
@@ -1724,16 +2546,29 @@ mod tests {
     use super::*;
     #[test]
     fn dune_experiment_roundtrips_through_the_constructor_and_shared_engine() {
-        let mut lab=Laboratory::new(false);
-        let index=lab.experiments.iter().position(|e|e.id=="dune-rockfall").unwrap();
-        let expected=lab.experiments[index].layout.clone();
-        experiments::select(&mut lab,index).unwrap();
-        let (mut sim,_)=lab.prepare().unwrap();
-        assert_eq!(sim.layout.as_ref().unwrap().blocks,expected.blocks);
+        let mut lab = Laboratory::new(false);
+        let index = lab
+            .experiments
+            .iter()
+            .position(|e| e.id == "dune-rockfall")
+            .unwrap();
+        let expected = lab.experiments[index].layout.clone();
+        experiments::select(&mut lab, index).unwrap();
+        let (mut sim, _) = lab.prepare().unwrap();
+        assert_eq!(sim.layout.as_ref().unwrap().blocks, expected.blocks);
         assert!(experiments::commands(lab.constructor.experiment.as_ref().unwrap()).is_empty());
-        sim.set_physics_workers(1);sim.set_navigation_workers(1);
-        for _ in 0..8 {sim.step();}
-        assert!(sim.bodies.list.iter().any(|b|b.voxels.iter().all(|v|v.mat==6)),"suspended constructor rocks must fall without a shot");
+        sim.set_physics_workers(1);
+        sim.set_navigation_workers(1);
+        for _ in 0..8 {
+            sim.step();
+        }
+        assert!(
+            sim.bodies
+                .list
+                .iter()
+                .any(|b| b.voxels.iter().all(|v| v.mat == 6)),
+            "suspended constructor rocks must fall without a shot"
+        );
     }
     #[test]
     fn stand_is_pristine_and_recipe_override_is_local() {

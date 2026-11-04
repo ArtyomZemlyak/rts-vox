@@ -287,7 +287,11 @@ impl BlastRange {
                 continue;
             };
             let face = match battle.actors.get(id).map(|a| a.order) {
-                Some(battle::Order::Dig(face) | battle::Order::Reclaim(face)) if units[id].status.alive => face,
+                Some(battle::Order::Dig(face) | battle::Order::Reclaim(face))
+                    if units[id].status.alive =>
+                {
+                    face
+                }
                 _ => {
                     h.legs[id] = Leg::Digging;
                     continue;

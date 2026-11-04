@@ -369,7 +369,9 @@ pub struct Panel {
 impl Panel {
     pub(super) fn rebind_generation(&mut self, before: u64, after: u64) {
         if let Some(mission) = &mut self.mission {
-            if mission.generation == Some(before) { mission.generation = Some(after); }
+            if mission.generation == Some(before) {
+                mission.generation = Some(after);
+            }
         }
     }
     pub fn new(drive: bool, demo: bool) -> Self {
@@ -403,7 +405,11 @@ impl Panel {
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CrawlerMode { Move, Reclaim, Drill }
+pub enum CrawlerMode {
+    Move,
+    Reclaim,
+    Drill,
+}
 
 #[derive(Component, Clone, Copy, PartialEq)]
 pub enum Action {
@@ -598,7 +604,10 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
         ));
         let mut rows: Vec<(bool, Vec<(&str, Action)>)> = vec![
             (false, vec![("Лаборатория материалов", Action::Laboratory)]),
-            (false, vec![("Полигон краулера · сбор и бурение", Action::CrawlerField)]),
+            (
+                false,
+                vec![("Полигон краулера · сбор и бурение", Action::CrawlerField)],
+            ),
             (
                 false,
                 vec![("Прорыв укреплений · 3 на 3", Action::Skirmish(0))],
@@ -617,9 +626,18 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             (false, vec![("Штурм турелей T1/T2", Action::Skirmish(3))]),
             (false, vec![("Артиллерия T2: картечь", Action::Skirmish(4))]),
             (false, vec![("Осадная артиллерия T3", Action::Skirmish(5))]),
-            (false, vec![("Walker 04: четыре лазера", Action::Skirmish(21))]),
-            (false, vec![("T3 Разлом: волновая турель", Action::Skirmish(22))]),
-            (false, vec![("Старатель: сбор и бурение", Action::Skirmish(23))]),
+            (
+                false,
+                vec![("Walker 04: четыре лазера", Action::Skirmish(21))],
+            ),
+            (
+                false,
+                vec![("T3 Разлом: волновая турель", Action::Skirmish(22))],
+            ),
+            (
+                false,
+                vec![("Старатель: сбор и бурение", Action::Skirmish(23))],
+            ),
             (false, vec![("Режим испытаний / сброс", Action::RangeMode)]),
             (false, vec![("Сценарии испытаний", Action::ScenarioMenu)]),
             (
@@ -892,7 +910,7 @@ pub fn actions(
     snapshot: Res<super::ui_snapshot::UiSnapshot>,
     interactions: Query<(&Action, &Interaction), Changed<Interaction>>,
     windows: Query<&Window>,
-    roots: Query<&bevy::ui::RelativeCursorPosition, Or<(With<PanelRoot>,With<laboratory::Root>)>>,
+    roots: Query<&bevy::ui::RelativeCursorPosition, Or<(With<PanelRoot>, With<laboratory::Root>)>>,
     mut scrolls: Query<&mut ScrollPosition, With<ScrollPanel>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut gas: ResMut<GasInput>,
@@ -901,7 +919,7 @@ pub fn actions(
     laboratory: Option<Res<laboratory::Laboratory>>,
 ) {
     if laboratory.as_ref().is_some_and(|l| l.active()) {
-        panel.blocked=roots.iter().any(|r|r.cursor_over());
+        panel.blocked = roots.iter().any(|r| r.cursor_over());
         return;
     }
     let stock = knobs::Overrides::default();
@@ -1003,7 +1021,7 @@ pub fn actions(
             panel.crawler_charges = None;
         }
         match action {
-            Action::Laboratory => {},
+            Action::Laboratory => {}
             Action::Drawer(id) => {
                 panel.drawer = if panel.drawer == id { 0 } else { id };
                 if panel.drawer != 0 {
@@ -1369,9 +1387,12 @@ pub fn actions(
                 panel.ground_fire = false;
                 scene.notice = match mode {
                     CrawlerMode::Move => "Движение краулера: укажите точку ПКМ",
-                    CrawlerMode::Reclaim => "Сбор краулером: укажите обломок ПКМ; затем сбор в радиусе 16 м",
+                    CrawlerMode::Reclaim => {
+                        "Сбор краулером: укажите обломок ПКМ; затем сбор в радиусе 16 м"
+                    }
                     CrawlerMode::Drill => "Бурение краулером: укажите точку ПКМ",
-                }.into();
+                }
+                .into();
             }
             Action::UpgradeKil => {
                 if let Some(id) = edit.controlled {
@@ -1387,7 +1408,9 @@ pub fn actions(
             Action::BuildSite(kind) => {
                 panel.construction_kind = Some(kind);
                 panel.ground_fire = false;
-                scene.notice = "Стройка: укажите свободную землю ПКМ. Дроны сами принесут материал со склада.".into();
+                scene.notice =
+                    "Стройка: укажите свободную землю ПКМ. Дроны сами принесут материал со склада."
+                        .into();
             }
             Action::SiteQuota(site, quota) => {
                 scene.notice = if scene.sim.set_construction_quota(site, quota) {
@@ -1406,8 +1429,11 @@ pub fn actions(
                 }
             }
             Action::ElectricSupport => {
-                if !edit.battle_selected_ids(&scene.sim).iter().any(|&id|
-                    scene.sim.units[id].kind == RangeUnitKind::LightningTank) {
+                if !edit
+                    .battle_selected_ids(&scene.sim)
+                    .iter()
+                    .any(|&id| scene.sim.units[id].kind == RangeUnitKind::LightningTank)
+                {
                     scene.notice = "Выберите союзные электротанки".into();
                     continue;
                 }
@@ -1449,7 +1475,13 @@ pub fn actions(
                         | RangeUnitKind::NuclearSilo => 0,
                         RangeUnitKind::TurretT1 => 5,
                         RangeUnitKind::TurretT2 => 1,
-                        RangeUnitKind::Base | RangeUnitKind::GrebenStorage | RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4 | RangeUnitKind::SkobaDrone => 0,
+                        RangeUnitKind::Base
+                        | RangeUnitKind::GrebenStorage
+                        | RangeUnitKind::KilFactoryT1
+                        | RangeUnitKind::KilFactoryT2
+                        | RangeUnitKind::KilFactoryT3
+                        | RangeUnitKind::KilFactoryT4
+                        | RangeUnitKind::SkobaDrone => 0,
                     };
                     let delivery = match w {
                         3 => Delivery::Flame,
@@ -1840,7 +1872,11 @@ pub fn scenario_progress(
         enter_free_control(&mut panel, &mut scene, &mut edit);
         panel.free_launch = false;
         if panel.crawler_charges.is_some() && scene.sim.patrols_running {
-            let _ = scene.sim.battle_order(0, sim_core::blast::battle::Order::Reclaim([314, 17, 282]), None);
+            let _ = scene.sim.battle_order(
+                0,
+                sim_core::blast::battle::Order::Reclaim([314, 17, 282]),
+                None,
+            );
         }
     }
     if !scene.paused && edit.pending.is_none() && scene.sim.patrols_running {
@@ -1877,12 +1913,22 @@ pub fn scenario_progress(
         panel.battle_auto = false;
     }
     if edit.pending.is_none() && scene.sim.battle_mode() {
-        while panel.script.first().is_some_and(|next| next.tick <= scene.sim.tick) {
+        while panel
+            .script
+            .first()
+            .is_some_and(|next| next.tick <= scene.sim.tick)
+        {
             let next = panel.script.remove(0);
             let order = match next.order {
-                modding::range_skirmish::ScriptedOrder::Attack(target) => sim_core::blast::battle::Order::Attack(target),
-                modding::range_skirmish::ScriptedOrder::Dig(face) => sim_core::blast::battle::Order::Dig(face),
-                modding::range_skirmish::ScriptedOrder::Reclaim(face) => sim_core::blast::battle::Order::Reclaim(face),
+                modding::range_skirmish::ScriptedOrder::Attack(target) => {
+                    sim_core::blast::battle::Order::Attack(target)
+                }
+                modding::range_skirmish::ScriptedOrder::Dig(face) => {
+                    sim_core::blast::battle::Order::Dig(face)
+                }
+                modding::range_skirmish::ScriptedOrder::Reclaim(face) => {
+                    sim_core::blast::battle::Order::Reclaim(face)
+                }
             };
             let _ = scene.sim.battle_order(next.actor, order, None);
         }
@@ -2302,7 +2348,9 @@ pub fn scroll(
             let max =
                 ((node.content_size().y - node.size().y) * node.inverse_scale_factor()).max(0.0);
             let value = (pos.y + delta).clamp(0.0, max);
-            if pos.y != value { pos.y = value; }
+            if pos.y != value {
+                pos.y = value;
+            }
         }
     }
 }

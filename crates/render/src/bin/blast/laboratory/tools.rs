@@ -7,7 +7,7 @@ pub struct State {
     pub metric: u8,
     pub metric_scale: u8,
     pub orbit: Option<orbit::View>,
-    pub device_preview: Option<([i32;3],bool)>,
+    pub device_preview: Option<([i32; 3], bool)>,
     pub flight: first_person::Flight,
     pub live: bool,
     pub live_tool: u8, // dig, material, water, flame, laser, MG, HE, kinetic
@@ -15,7 +15,7 @@ pub struct State {
     pub power_milli: u32,
     pub emitting: bool,
     pub live_tick: Option<u32>,
-    pub live_target: Option<([i32;3],[i32;3])>,
+    pub live_target: Option<([i32; 3], [i32; 3])>,
     pub flying: bool,
     pub camera: Option<Transform>,
     held: [bool; 6],
@@ -69,17 +69,34 @@ pub fn input(
     motion: Option<Res<bevy::input::mouse::AccumulatedMouseMotion>>,
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
 ) {
-    lab.tools.device_preview=None;
+    lab.tools.device_preview = None;
     if lab.active() && lab.constructor.voxel_editing() {
-        lab.tools.held=[false;6];lab.tools.cursor=None;events.clear();
-        if let Ok(window)=windows.single() {
-            orbit::input(&mut lab,window,roots.iter().any(|r|r.cursor_over()),&keys,&mouse,motion.as_ref().map(|m|m.delta),&mut wheel);
-        } else {wheel.clear();}
+        lab.tools.held = [false; 6];
+        lab.tools.cursor = None;
+        events.clear();
+        if let Ok(window) = windows.single() {
+            orbit::input(
+                &mut lab,
+                window,
+                roots.iter().any(|r| r.cursor_over()),
+                &keys,
+                &mouse,
+                motion.as_ref().map(|m| m.delta),
+                &mut wheel,
+            );
+        } else {
+            wheel.clear();
+        }
         return;
     }
     orbit::leave(&mut lab);
     wheel.clear();
-    if lab.tools.live {lab.tools.held=[false;6];lab.tools.cursor=None;events.clear();return;}
+    if lab.tools.live {
+        lab.tools.held = [false; 6];
+        lab.tools.cursor = None;
+        events.clear();
+        return;
+    }
     for e in events.read() {
         if let Some(i) = [
             KeyCode::KeyW,
@@ -113,7 +130,10 @@ pub fn input(
     if lab.ui.editing.is_some() || lab.ui.help || lab.browser {
         return;
     }
-    let inspecting = matches!(lab.constructor.mode, constructor::Mode::Inspect|constructor::Mode::Voxel);
+    let inspecting = matches!(
+        lab.constructor.mode,
+        constructor::Mode::Inspect | constructor::Mode::Voxel
+    );
     let t = &mut lab.tools;
     let Some(mut pose) = t.camera.or_else(|| cameras.single().ok().copied()) else {
         return;
@@ -137,7 +157,9 @@ pub fn input(
     let direction = pose.forward() * (i32::from(h[0]) - i32::from(h[1])) as f32
         + pose.right() * (i32::from(h[3]) - i32::from(h[2])) as f32
         + Vec3::Y * (i32::from(h[5]) - i32::from(h[4])) as f32;
-    pose.translation += direction.normalize_or_zero() * time.delta_secs().min(0.05) * if inspecting {10.0} else {60.0};
+    pose.translation += direction.normalize_or_zero()
+        * time.delta_secs().min(0.05)
+        * if inspecting { 10.0 } else { 60.0 };
     t.camera = Some(pose);
 }
 impl Laboratory {
@@ -148,7 +170,9 @@ impl Laboratory {
         self.browser || self.ui.help || self.ui.editing.is_some()
     }
     pub fn flying(&self) -> bool {
-        self.active() && (self.tools.flying || (self.constructor.voxel_editing() && self.tools.orbit.is_some()))
+        self.active()
+            && (self.tools.flying
+                || (self.constructor.voxel_editing() && self.tools.orbit.is_some()))
     }
     pub fn tool_camera(
         &self,
@@ -163,15 +187,30 @@ impl Laboratory {
             return false;
         };
         *transform = camera;
-        if self.tools.flight.preview && std::env::var("RTS_LAB_CAPTURE_CASE").is_ok_and(|s|s.starts_with("metric-") && s!="metric-live") {
-            *projection=Projection::Orthographic(OrthographicProjection {
-                scaling_mode:bevy::camera::ScalingMode::FixedVertical{viewport_height:if std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()==Ok("metric-fragment") {12.0}else{80.0}},
+        if self.tools.flight.preview
+            && std::env::var("RTS_LAB_CAPTURE_CASE")
+                .is_ok_and(|s| s.starts_with("metric-") && s != "metric-live")
+        {
+            *projection = Projection::Orthographic(OrthographicProjection {
+                scaling_mode: bevy::camera::ScalingMode::FixedVertical {
+                    viewport_height: if std::env::var("RTS_LAB_CAPTURE_CASE").as_deref()
+                        == Ok("metric-fragment")
+                    {
+                        12.0
+                    } else {
+                        80.0
+                    },
+                },
                 ..OrthographicProjection::default_3d()
             });
             return true;
         }
         *projection = Projection::Perspective(PerspectiveProjection {
-            fov: if self.constructor.voxel_editing() {orbit::FOV.to_radians()}else{self.tools.flight.fov.to_radians()},
+            fov: if self.constructor.voxel_editing() {
+                orbit::FOV.to_radians()
+            } else {
+                self.tools.flight.fov.to_radians()
+            },
             aspect_ratio: aspect,
             near: 0.1,
             far: 20000.0,
@@ -233,7 +272,11 @@ pub(super) fn liquid_pick(scene: &Scene, ray: Ray3d) -> Option<[i32; 3]> {
             .then_some(p)
     })
 }
-fn falling_probe(scene: &Scene, ray: Ray3d, limit: f32) -> Option<(f32, [i32; 3], u16, u64, [u16;3])> {
+fn falling_probe(
+    scene: &Scene,
+    ray: Ray3d,
+    limit: f32,
+) -> Option<(f32, [i32; 3], u16, u64, [u16; 3])> {
     let mut best = None;
     let mut end = limit;
     // Exact voxel query runs only on a click. There is no per-frame index
@@ -261,7 +304,7 @@ fn falling_probe(scene: &Scene, ray: Ray3d, limit: f32) -> Option<(f32, [i32; 3]
             if let Some((t, _)) = entry(ray, lo, lo + Vec3::ONE) {
                 if t < end {
                     end = t;
-                    best = Some((t, p, v.mat, b.id, [v.x,v.y,v.z]));
+                    best = Some((t, p, v.mat, b.id, [v.x, v.y, v.z]));
                 }
             }
         }
@@ -277,7 +320,9 @@ pub fn pointer(
 ) -> bool {
     use constructor::Mode;
     let mode = lab.constructor.mode;
-    if lab.tools.live {return live_tools::pointer(lab,scene,ray,mouse,gizmos);}
+    if lab.tools.live {
+        return live_tools::pointer(lab, scene, ray, mouse, gizmos);
+    }
     if !matches!(
         mode,
         Mode::Brush | Mode::Erase | Mode::Inspect | Mode::Drill | Mode::Crawler | Mode::Collector
@@ -308,23 +353,32 @@ pub fn pointer(
                 )
             })
             .map_or(f32::INFINITY, |v| v.0 + 0.01);
-        let falling=falling_probe(scene,ray,limit);
-        let fragment=fragments::picking::pick(scene,ray,falling.as_ref().map_or(limit,|h|h.0));
-        if let Some(hit)=fragment {
-            let f=scene.sim.matter.debris.fragments.iter().find(|f|f.id==hit.id).unwrap();
-            let p=hit.point(f).unwrap().floor().to_array().map(|v|v as i32);
-            lab.tools.probe_direction=Some(*ray.direction);
-            inspector::select(lab,scene,p);
-            lab.tools.fragment=Some(hit);lab.tools.probe_stamp=None;
-            inspector::refresh(lab,scene);
+        let falling = falling_probe(scene, ray, limit);
+        let fragment =
+            fragments::picking::pick(scene, ray, falling.as_ref().map_or(limit, |h| h.0));
+        if let Some(hit) = fragment {
+            let f = scene
+                .sim
+                .matter
+                .debris
+                .fragments
+                .iter()
+                .find(|f| f.id == hit.id)
+                .unwrap();
+            let p = hit.point(f).unwrap().floor().to_array().map(|v| v as i32);
+            lab.tools.probe_direction = Some(*ray.direction);
+            inspector::select(lab, scene, p);
+            lab.tools.fragment = Some(hit);
+            lab.tools.probe_stamp = None;
+            inspector::refresh(lab, scene);
             return true;
         }
         if let Some((_, p, _, id, local)) = falling {
-            lab.tools.probe_direction=Some(*ray.direction);
+            lab.tools.probe_direction = Some(*ray.direction);
             inspector::select(lab, scene, p);
-            lab.tools.falling = Some((id,local));
+            lab.tools.falling = Some((id, local));
             lab.tools.probe_stamp = None;
-            inspector::refresh(lab,scene);
+            inspector::refresh(lab, scene);
             return true;
         }
     }
@@ -333,7 +387,7 @@ pub fn pointer(
     };
     if mode == Mode::Inspect {
         if mouse.just_pressed(MouseButton::Left) {
-            lab.tools.probe_direction=Some(*ray.direction);
+            lab.tools.probe_direction = Some(*ray.direction);
             inspector::select(lab, scene, at);
         }
         return true;
@@ -360,14 +414,19 @@ pub fn pointer(
     } else {
         lab.tools.edge
     };
-    let valid = if mode==Mode::Collector {
-        let t=modding::lab_tools::Tuning::stock();
-        let valid=at[0]>t.collector_half && at[2]>t.collector_half && at[1]>0
-            && at[0]+t.collector_half<scene.sim.size()[0] as i32-1
-            && at[2]+t.collector_half<scene.sim.size()[2] as i32-1
-            && at[1]+t.collector_height<scene.sim.size()[1] as i32-1;
-        lab.tools.device_preview=Some((at,valid));valid
-    } else {(0..3).all(|a| at[a] > 0 && at[a] + (edge as i32) < scene.sim.size()[a] as i32)};
+    let valid = if mode == Mode::Collector {
+        let t = modding::lab_tools::Tuning::stock();
+        let valid = at[0] > t.collector_half
+            && at[2] > t.collector_half
+            && at[1] > 0
+            && at[0] + t.collector_half < scene.sim.size()[0] as i32 - 1
+            && at[2] + t.collector_half < scene.sim.size()[2] as i32 - 1
+            && at[1] + t.collector_height < scene.sim.size()[1] as i32 - 1;
+        lab.tools.device_preview = Some((at, valid));
+        valid
+    } else {
+        (0..3).all(|a| at[a] > 0 && at[a] + (edge as i32) < scene.sim.size()[a] as i32)
+    };
     let colour = if valid {
         if mode == Mode::Erase {
             Color::srgb(1.0, 0.35, 0.2)
@@ -380,11 +439,13 @@ pub fn pointer(
     gizmos.cube(
         Transform::from_translation(
             Vec3::from(at.map(|v| v as f32))
-                + Vec3::splat(if matches!(mode, Mode::Drill | Mode::Crawler | Mode::Collector) {
-                    0.5
-                } else {
-                    edge as f32 * 0.5
-                }),
+                + Vec3::splat(
+                    if matches!(mode, Mode::Drill | Mode::Crawler | Mode::Collector) {
+                        0.5
+                    } else {
+                        edge as f32 * 0.5
+                    },
+                ),
         )
         .with_scale(Vec3::splat(edge as f32)),
         colour,
@@ -403,7 +464,7 @@ pub fn pointer(
             lab.constructor.pending.push(LabAction::DeviceAt(
                 if mode == Mode::Drill {
                     DeviceKind::Drill
-                } else if mode==Mode::Collector {
+                } else if mode == Mode::Collector {
                     DeviceKind::Collector
                 } else {
                     DeviceKind::Crawler
@@ -425,11 +486,16 @@ pub fn draw(lab: &Laboratory, scene: &Scene, gizmos: &mut Gizmos) {
         .into_iter()
         .flat_map(|l| &l.lab_devices)
     {
-        if let Some(c)=d.collector.as_ref() {
-            if let Some(aim)=c.aim.filter(|_|c.spent>0&&!c.returning) {
-                let p=Vec3::from(d.at.map(|v|v as f32));
-                let rotation=Quat::from_rotation_y(-(d.turns as f32)*std::f32::consts::FRAC_PI_2);
-                gizmos.line(p+rotation*Vec3::new(8.5,2.8,0.0),Vec3::from(aim.map(|v|v as f32))+Vec3::splat(0.5),theme::ACCENT);
+        if let Some(c) = d.collector.as_ref() {
+            if let Some(aim) = c.aim.filter(|_| c.spent > 0 && !c.returning) {
+                let p = Vec3::from(d.at.map(|v| v as f32));
+                let rotation =
+                    Quat::from_rotation_y(-(d.turns as f32) * std::f32::consts::FRAC_PI_2);
+                gizmos.line(
+                    p + rotation * Vec3::new(8.5, 2.8, 0.0),
+                    Vec3::from(aim.map(|v| v as f32)) + Vec3::splat(0.5),
+                    theme::ACCENT,
+                );
             }
             continue;
         }

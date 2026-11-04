@@ -225,15 +225,21 @@ fn coarse_dirty(fine_indices: &[u32], dims: [u32; 3]) -> Vec<u32> {
         let parent = x / 4 + coarse[0] * (y / 4 + coarse[1] * (z / 4));
         marked[parent as usize / 64] |= 1u64 << (parent % 64);
     }
-    marked.iter().enumerate().flat_map(|(i, &bits)| {
-        let mut bits = bits;
-        std::iter::from_fn(move || {
-            if bits == 0 { return None; }
-            let bit = bits.trailing_zeros();
-            bits &= bits - 1;
-            Some(i as u32 * 64 + bit)
+    marked
+        .iter()
+        .enumerate()
+        .flat_map(|(i, &bits)| {
+            let mut bits = bits;
+            std::iter::from_fn(move || {
+                if bits == 0 {
+                    return None;
+                }
+                let bit = bits.trailing_zeros();
+                bits &= bits - 1;
+                Some(i as u32 * 64 + bit)
+            })
         })
-    }).collect()
+        .collect()
 }
 
 // A word is eight consecutive x voxels. Visit rows, not individual words;
@@ -265,7 +271,9 @@ mod tests {
             let fine = dims.map(|n| n / 8);
             let coarse = dims.map(|n| n / 32);
             let count = fine.iter().product::<u32>();
-            let changed: Vec<u32> = (0..count).filter(|i| i % 113 == 0 || i % 127 == 3).collect();
+            let changed: Vec<u32> = (0..count)
+                .filter(|i| i % 113 == 0 || i % 127 == 3)
+                .collect();
             let got = coarse_dirty(&changed, dims);
             let mut expected = std::collections::BTreeSet::new();
             for i in changed {

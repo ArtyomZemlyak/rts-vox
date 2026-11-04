@@ -192,33 +192,50 @@ fn canister_reserves_wave_capacity_for_the_entire_salvo() {
 
 #[test]
 fn autonomous_salvo_bypasses_saturated_round_and_wave_admission_and_restores() {
-    let mut r=arena_of([RangeUnitKind::ArtilleryT2,RangeUnitKind::Tank]);
-    r.set_physics_workers(1); r.set_navigation_workers(1);
-    assert!(r.set_ai_vs_ai(true)); r.start_battle().unwrap();
-    r.battle.actors[0].order=Order::Attack(1);
-    r.battle.actors[1].order=Order::Hold;
-    let tuning=std::sync::Arc::make_mut(&mut r.battle.tuning);
-    tuning.max_rounds=1; tuning.max_waves=1;
+    let mut r = arena_of([RangeUnitKind::ArtilleryT2, RangeUnitKind::Tank]);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    assert!(r.set_ai_vs_ai(true));
+    r.start_battle().unwrap();
+    r.battle.actors[0].order = Order::Attack(1);
+    r.battle.actors[1].order = Order::Hold;
+    let tuning = std::sync::Arc::make_mut(&mut r.battle.tuning);
+    tuning.max_rounds = 1;
+    tuning.max_waves = 1;
     for _ in 0..100 {
-        r.battle.ai.next_tick=r.tick+r.battle.ai.tuning.decision_ticks;
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
-        if r.battle.actors[0].fired>0 {break;}
+        if r.battle.actors[0].fired > 0 {
+            break;
+        }
     }
-    assert_eq!(r.battle.actors[0].fired,1,"AI salvo stopped at a full admission budget");
-    assert_eq!(r.battle.rounds.len(),6);
+    assert_eq!(
+        r.battle.actors[0].fired, 1,
+        "AI salvo stopped at a full admission budget"
+    );
+    assert_eq!(r.battle.rounds.len(), 6);
     // Exercise a queue beyond the stock 64 rounds and 16 wave slots, without
     // needing a long-running full-map battle in this regression test.
-    while r.battle.rounds.len()<66 {
-        let round=&r.battle.rounds[0];
-        let copy=Round{owner:round.owner,weapon:round.weapon,pos:round.pos,previous:round.previous,velocity:round.velocity,distance:round.distance};
+    while r.battle.rounds.len() < 66 {
+        let round = &r.battle.rounds[0];
+        let copy = Round {
+            owner: round.owner,
+            weapon: round.weapon,
+            pos: round.pos,
+            previous: round.previous,
+            velocity: round.velocity,
+            distance: round.distance,
+        };
         r.battle.rounds.push(copy);
     }
-    let restored=BlastRange::restore(r.config,&r.snapshot()).expect("restore over-cap AI rounds");
-    assert_eq!(restored.battle.rounds.len(),66);
-    assert!(r.battle_order(0,Order::Hold,None));
+    let restored =
+        BlastRange::restore(r.config, &r.snapshot()).expect("restore over-cap AI rounds");
+    assert_eq!(restored.battle.rounds.len(), 66);
+    assert!(r.battle_order(0, Order::Hold, None));
     assert!(!r.battle.autonomous);
-    let restored=BlastRange::restore(r.config,&r.snapshot()).expect("restore accepted rounds after manual takeover");
-    assert_eq!(restored.battle.rounds.len(),66);
+    let restored = BlastRange::restore(r.config, &r.snapshot())
+        .expect("restore accepted rounds after manual takeover");
+    assert_eq!(restored.battle.rounds.len(), 66);
 }
 
 fn arena(kind: RangeUnitKind) -> BlastRange {
@@ -353,7 +370,13 @@ fn arena_of(kinds: [RangeUnitKind; 2]) -> BlastRange {
         l.units[0].at = [500, 16, 800];
         l.units[1].at = [1500, 16, 800];
     }
-    if matches!(kinds[0], RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4) {
+    if matches!(
+        kinds[0],
+        RangeUnitKind::KilFactoryT1
+            | RangeUnitKind::KilFactoryT2
+            | RangeUnitKind::KilFactoryT3
+            | RangeUnitKind::KilFactoryT4
+    ) {
         l.size = [1600, 512, 1600];
         l.clear_min = [64, 64];
         l.clear_max = [1536, 1536];
@@ -373,9 +396,24 @@ fn walker_arena(order: Order) -> BlastRange {
         .unwrap();
     layout.units[1].at = [1500, 16, 600];
     layout.units.extend([
-        RangeUnitDef { kind: RangeUnitKind::Tank, at: [1500, 16, 733], allied: false, weapon: None },
-        RangeUnitDef { kind: RangeUnitKind::Tank, at: [1500, 16, 866], allied: false, weapon: None },
-        RangeUnitDef { kind: RangeUnitKind::Tank, at: [1500, 16, 1000], allied: false, weapon: None },
+        RangeUnitDef {
+            kind: RangeUnitKind::Tank,
+            at: [1500, 16, 733],
+            allied: false,
+            weapon: None,
+        },
+        RangeUnitDef {
+            kind: RangeUnitKind::Tank,
+            at: [1500, 16, 866],
+            allied: false,
+            weapon: None,
+        },
+        RangeUnitDef {
+            kind: RangeUnitKind::Tank,
+            at: [1500, 16, 1000],
+            allied: false,
+            weapon: None,
+        },
     ]);
     let mut r = BlastRange::with_layout(
         ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
@@ -442,11 +480,21 @@ fn walker04_focus_tilts_ninety_degrees_and_uses_the_spider_power_on_all_four_arm
     let target = aim_point(&r.units[1]);
     assert_eq!(r.units[0].arm_targets, Some([target; 4]));
     assert_eq!(r.battle_weapon(0), Some(Weapon::Laser));
-    assert_eq!(r.battle_attack_range(0), Some(motion::spider_tuning().laser.range));
-    assert!(r.units[1].revision > 0, "focused beams did no physical work");
+    assert_eq!(
+        r.battle_attack_range(0),
+        Some(motion::spider_tuning().laser.range)
+    );
+    assert!(
+        r.units[1].revision > 0,
+        "focused beams did no physical work"
+    );
     let before = r.battle_muzzles(0);
     r.units[0].set_arm_targets([target; 4], r.battle.actors[0].turret.angle);
-    assert_eq!(r.battle_muzzles(0), before, "repeated aiming moved the mounts");
+    assert_eq!(
+        r.battle_muzzles(0),
+        before,
+        "repeated aiming moved the mounts"
+    );
 }
 
 #[test]
@@ -468,17 +516,23 @@ fn razlom_fires_seven_parallel_rays_and_does_not_replace_the_old_t3_artillery() 
     assert!(r.battle.lasers.is_empty());
     let direction = |trace: &weapons::Trace| {
         let delta = std::array::from_fn::<_, 3, _>(|axis| trace.to[axis].sub(trace.from[axis]));
-        let length = delta.iter().fold(0.0f64, |sum, v| {
-            let v = v.to_f64_lossy();
-            sum + v * v
-        }).sqrt();
+        let length = delta
+            .iter()
+            .fold(0.0f64, |sum, v| {
+                let v = v.to_f64_lossy();
+                sum + v * v
+            })
+            .sqrt();
         delta.map(|v| v.to_f64_lossy() / length)
     };
     let central = direction(&r.battle.razlom_lasers[3]);
     for trace in &r.battle.razlom_lasers {
         let other = direction(trace);
         let dot: f64 = (0..3).map(|axis| central[axis] * other[axis]).sum();
-        assert!(dot > 0.999, "rays converged instead of forming a front: {dot}");
+        assert!(
+            dot > 0.999,
+            "rays converged instead of forming a front: {dot}"
+        );
     }
     let old = arena_of([RangeUnitKind::ArtilleryTurretT3, RangeUnitKind::Tank]);
     assert_eq!(old.battle_weapon(0), Some(Weapon::Siege));
@@ -502,20 +556,50 @@ fn razlom_wave_kills_t1_keeps_travelling_and_restores_exactly() {
         if restored.is_none() && !r.battle.rounds.is_empty() {
             let mut replay = BlastRange::restore(r.config, &r.snapshot()).expect("wave snapshot");
             for point in [[224, 56, 333], [224, 55, 333], [254, 51, 333]] {
-                assert_eq!(r.units[1].solid(point), replay.units[1].solid(point), "contact changed at {point:?}");
+                assert_eq!(
+                    r.units[1].solid(point),
+                    replay.units[1].solid(point),
+                    "contact changed at {point:?}"
+                );
             }
-            assert_eq!(r.state_hash(), replay.state_hash(), "state changed by wave snapshot");
+            assert_eq!(
+                r.state_hash(),
+                replay.state_hash(),
+                "state changed by wave snapshot"
+            );
             let snapshot = r.snapshot();
             let from = r.battle.rounds[0].pos;
             let target = std::array::from_fn(|axis| {
-                from[axis].add(r.battle.rounds[0].velocity[axis].mul(Fx::from_ratio(1, crate::TICKS_PER_SECOND))).to_int_trunc()
+                from[axis]
+                    .add(
+                        r.battle.rounds[0].velocity[axis]
+                            .mul(Fx::from_ratio(1, crate::TICKS_PER_SECOND)),
+                    )
+                    .to_int_trunc()
             });
             let mut tuning = motion::spider_tuning().laser.clone();
             tuning.range = 31;
             let config = r.battle.laser_config;
-            let actual = r.laser_ray(from, target, Some(0), &tuning, &config, (&mut |_| {}, &|_, _| {}));
-            let expected = replay.laser_ray(from, target, Some(0), &tuning, &config, (&mut |_| {}, &|_, _| {}));
-            assert_eq!(actual.to, expected.to, "same saved ray produced different contacts");
+            let actual = r.laser_ray(
+                from,
+                target,
+                Some(0),
+                &tuning,
+                &config,
+                (&mut |_| {}, &|_, _| {}),
+            );
+            let expected = replay.laser_ray(
+                from,
+                target,
+                Some(0),
+                &tuning,
+                &config,
+                (&mut |_| {}, &|_, _| {}),
+            );
+            assert_eq!(
+                actual.to, expected.to,
+                "same saved ray produced different contacts"
+            );
             r = BlastRange::restore(r.config, &snapshot).unwrap();
             r.set_physics_workers(1);
             r.set_navigation_workers(1);
@@ -539,31 +623,71 @@ fn razlom_wave_kills_t1_keeps_travelling_and_restores_exactly() {
             assert_eq!(r.units[1].turret_delta, replay.units[1].turret_delta);
             assert_eq!(r.units[1].seg_frames, replay.units[1].seg_frames);
             assert_eq!(r.battle.rounds.len(), replay.battle.rounds.len());
-            let differences: Vec<_> = r.battle.rounds.iter().zip(&replay.battle.rounds).map(|(a, b)| {
-                (a.pos.map(|v| v.raw()), b.pos.map(|v| v.raw()), a.distance.raw(), b.distance.raw())
-            }).collect();
-            assert!(r.battle.rounds.iter().zip(&replay.battle.rounds).all(|(a, b)| {
-                a.owner == b.owner && a.weapon == b.weapon && a.pos == b.pos
-                    && a.velocity == b.velocity && a.distance == b.distance
-            }), "{differences:?}");
+            let differences: Vec<_> = r
+                .battle
+                .rounds
+                .iter()
+                .zip(&replay.battle.rounds)
+                .map(|(a, b)| {
+                    (
+                        a.pos.map(|v| v.raw()),
+                        b.pos.map(|v| v.raw()),
+                        a.distance.raw(),
+                        b.distance.raw(),
+                    )
+                })
+                .collect();
+            assert!(
+                r.battle
+                    .rounds
+                    .iter()
+                    .zip(&replay.battle.rounds)
+                    .all(|(a, b)| {
+                        a.owner == b.owner
+                            && a.weapon == b.weapon
+                            && a.pos == b.pos
+                            && a.velocity == b.velocity
+                            && a.distance == b.distance
+                    }),
+                "{differences:?}"
+            );
             assert_eq!(r.state_hash(), replay.state_hash());
         }
-        beyond |= r.battle.razlom_lasers.iter().any(|trace| trace.to[0] > Fx::from_int(460));
+        beyond |= r
+            .battle
+            .razlom_lasers
+            .iter()
+            .any(|trace| trace.to[0] > Fx::from_int(460));
         if !r.units[1].status.alive && beyond {
             break;
         }
     }
     if let Some(trace) = r.battle.razlom_lasers.get(3) {
         let at = trace.to.map(Fx::to_int_trunc);
-        eprintln!("wave end={at:?} material={} from={:?} to={:?}", material(&r.world, at), trace.from, trace.to);
+        eprintln!(
+            "wave end={at:?} material={} from={:?} to={:?}",
+            material(&r.world, at),
+            trace.from,
+            trace.to
+        );
     }
     if let Some(trace) = r.battle.razlom_lasers.get(3) {
         eprintln!("last trace hit={} serial={}", trace.hit, trace.serial);
     }
     for round in &r.battle.rounds {
-        eprintln!("active wave owner={} pos={:?} velocity={:?} distance={:?}", round.owner, round.pos, round.velocity, round.distance);
+        eprintln!(
+            "active wave owner={} pos={:?} velocity={:?} distance={:?}",
+            round.owner, round.pos, round.velocity, round.distance
+        );
     }
-    eprintln!("target alive={} core={:?} removed={} wave rounds={} phase={:?}", r.units[1].status.alive, r.units[1].integrity.core, r.units[1].removed.len(), r.battle.rounds.len(), r.battle.phase);
+    eprintln!(
+        "target alive={} core={:?} removed={} wave rounds={} phase={:?}",
+        r.units[1].status.alive,
+        r.units[1].integrity.core,
+        r.units[1].removed.len(),
+        r.battle.rounds.len(),
+        r.battle.phase
+    );
     assert!(!r.units[1].status.alive, "T1 survived the wave");
     assert!(beyond, "wave died with its first target");
     assert!(restored.is_some(), "no persistent wave was produced");
@@ -571,7 +695,9 @@ fn razlom_wave_kills_t1_keeps_travelling_and_restores_exactly() {
 
 #[test]
 fn kil_produces_a_tank_and_upgrades_to_t4_without_losing_its_queue() {
-    let mut layout = arena_of([RangeUnitKind::KilFactoryT1, RangeUnitKind::Tank]).layout.unwrap();
+    let mut layout = arena_of([RangeUnitKind::KilFactoryT1, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
     layout.size[1] = 512;
     let mut economy = modding::range_economy::RangeEconomy::stock();
     economy.bank.as_mut().unwrap().base_store = 1 << 40;
@@ -585,12 +711,18 @@ fn kil_produces_a_tank_and_upgrades_to_t4_without_losing_its_queue() {
     let seeded = 1 << 30;
     let economy = &mut r.matter.economy;
     assert_eq!(economy.ledger.reveal(economy.ground, seeded), seeded);
-    assert_eq!(economy.ledger.transfer(economy.ground, store, seeded), seeded);
+    assert_eq!(
+        economy.ledger.transfer(economy.ground, store, seeded),
+        seeded
+    );
     r.start_battle().unwrap();
-    assert_eq!(r.execute_battle_command(battle::commands::Command::Produce {
-        actor: 0,
-        kind: RangeUnitKind::Tank,
-    }), battle::commands::Outcome::Applied);
+    assert_eq!(
+        r.execute_battle_command(battle::commands::Command::Produce {
+            actor: 0,
+            kind: RangeUnitKind::Tank,
+        }),
+        battle::commands::Outcome::Applied
+    );
     let queue = r.production_queue(0);
     for tier in 2..=4 {
         for _ in 0..20 {
@@ -612,10 +744,13 @@ fn kil_produces_a_tank_and_upgrades_to_t4_without_losing_its_queue() {
     }
     assert_eq!(r.units.len(), 3);
     assert_eq!(r.units[2].kind, RangeUnitKind::Tank);
-    assert_eq!(r.execute_battle_command(battle::commands::Command::Produce {
-        actor: 0,
-        kind: RangeUnitKind::Tank,
-    }), battle::commands::Outcome::Applied);
+    assert_eq!(
+        r.execute_battle_command(battle::commands::Command::Produce {
+            actor: 0,
+            kind: RangeUnitKind::Tank,
+        }),
+        battle::commands::Outcome::Applied
+    );
     for _ in 0..300 {
         r.step();
     }
@@ -642,8 +777,8 @@ fn staratel_drill_is_not_processed_as_a_ballistic_weapon() {
 #[test]
 fn staratel_scenario_collects_mines_and_unloads_at_its_base() {
     let preset = modding::range_skirmish::stock(23).unwrap();
-    let layout = modding::range::RangeLayout::from_ron(include_str!("../../../data/range-km.ron"))
-        .unwrap();
+    let layout =
+        modding::range::RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
     let layout = preset.apply_to(layout).unwrap();
     for unit in &layout.units {
         let mut isolated = layout.clone();
@@ -653,7 +788,12 @@ fn staratel_scenario_collects_mines_and_unloads_at_its_base() {
             ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
             isolated,
         );
-        assert!(result.is_ok(), "placement of {:?} failed: {:?}", unit.kind, result.err());
+        assert!(
+            result.is_ok(),
+            "placement of {:?} failed: {:?}",
+            unit.kind,
+            result.err()
+        );
     }
     let mut r = BlastRange::with_layout(
         ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
@@ -673,9 +813,16 @@ fn staratel_scenario_collects_mines_and_unloads_at_its_base() {
                 modding::range_skirmish::ScriptedOrder::Reclaim(face) => Order::Reclaim(face),
             };
             let accepted = r.battle_order(next.actor, order, None);
-            assert!(accepted, "script tick={} order={order:?} phase={:?} actor={} alive={} at={:?} digs={:?}",
-                next.tick, r.battle.phase, next.actor, r.units[next.actor].status.alive,
-                r.units[next.actor].at, r.mining().map(|m| m.digs(r.units[next.actor].kind)));
+            assert!(
+                accepted,
+                "script tick={} order={order:?} phase={:?} actor={} alive={} at={:?} digs={:?}",
+                next.tick,
+                r.battle.phase,
+                next.actor,
+                r.units[next.actor].status.alive,
+                r.units[next.actor].at,
+                r.mining().map(|m| m.digs(r.units[next.actor].kind))
+            );
         }
         r.step();
         collected |= r.tank_held(0).is_some_and(|held| held > 0);
@@ -684,7 +831,14 @@ fn staratel_scenario_collects_mines_and_unloads_at_its_base() {
             break;
         }
     }
-    eprintln!("crawler at={:?} destination={:?} tank={:?} store={:?} leg={:?}", r.units[0].at, r.units[0].motion.destination, r.tank_held(0), r.side_store(true), r.hauling(0));
+    eprintln!(
+        "crawler at={:?} destination={:?} tank={:?} store={:?} leg={:?}",
+        r.units[0].at,
+        r.units[0].motion.destination,
+        r.tank_held(0),
+        r.side_store(true),
+        r.hauling(0)
+    );
     assert!(collected, "Staratel collected no debris or rock");
     assert!(unloaded, "Staratel never unloaded at the base");
     assert!(r.matter.economy.ledger.balanced());
@@ -692,9 +846,12 @@ fn staratel_scenario_collects_mines_and_unloads_at_its_base() {
 
 #[test]
 fn lightning_tank_fires_on_enemy_and_survives_snapshot_restore() {
-    let mut layout = arena_of([RangeUnitKind::LightningTank, RangeUnitKind::Tank]).layout.unwrap();
+    let mut layout = arena_of([RangeUnitKind::LightningTank, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
     layout.units[1].at = [300, 16, 336];
-    let config = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     let mut r = BlastRange::with_layout(config, layout).unwrap();
     r.set_physics_workers(1);
     r.set_navigation_workers(1);
@@ -707,15 +864,23 @@ fn lightning_tank_fires_on_enemy_and_survives_snapshot_restore() {
     for _ in 0..100 {
         r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
-        if r.battle.lightning.iter().any(|trace| trace.hit) { hit = true; break; }
+        if r.battle.lightning.iter().any(|trace| trace.hit) {
+            hit = true;
+            break;
+        }
     }
     assert!(hit, "electric vehicle never hit its target");
-    assert!(r.thermals.hot() > 0 || !r.units[1].removed.is_empty() || !r.units[1].seg_removed.is_empty(),
-        "electric contact did not heat or damage the target");
+    assert!(
+        r.thermals.hot() > 0
+            || !r.units[1].removed.is_empty()
+            || !r.units[1].seg_removed.is_empty(),
+        "electric contact did not heat or damage the target"
+    );
     assert!(r.units[0].status.alive);
     let mut last = "";
-    let mut restored = BlastRange::restore_observed(r.config, &r.snapshot(), |stage, _, _| last = stage)
-        .unwrap_or_else(|| panic!("restore electric unit failed at {last}"));
+    let mut restored =
+        BlastRange::restore_observed(r.config, &r.snapshot(), |stage, _, _| last = stage)
+            .unwrap_or_else(|| panic!("restore electric unit failed at {last}"));
     for _ in 0..4 {
         r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         restored.battle.ai.next_tick = restored.tick + restored.battle.ai.tuning.decision_ticks;
@@ -730,15 +895,36 @@ fn electric_support_amplifies_and_stops_when_the_helper_leaves() {
     let base = lightning_tuning();
     assert_eq!((base.work, base.heat, base.fracture_j), (5000, 30000, 10));
     let boosted = supported_lightning(1);
-    assert_eq!((boosted.range, boosted.work, boosted.heat, boosted.reload_ticks),
-        (base.range * 2, base.work * 2, base.heat * 2, base.reload_ticks / 2));
+    assert_eq!(
+        (
+            boosted.range,
+            boosted.work,
+            boosted.heat,
+            boosted.reload_ticks
+        ),
+        (
+            base.range * 2,
+            base.work * 2,
+            base.heat * 2,
+            base.reload_ticks / 2
+        )
+    );
     assert_eq!(supported_lightning(99).work, base.work * 5);
-    let mut layout = arena_of([RangeUnitKind::LightningTank, RangeUnitKind::Tank]).layout.unwrap();
+    let mut layout = arena_of([RangeUnitKind::LightningTank, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
     layout.units[1].at = [400, 16, 336];
-    layout.units.push(RangeUnitDef { kind: RangeUnitKind::LightningTank, at: [170, 16, 220], allied: true, weapon: None });
-    let config = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    layout.units.push(RangeUnitDef {
+        kind: RangeUnitKind::LightningTank,
+        at: [170, 16, 220],
+        allied: true,
+        weapon: None,
+    });
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     let mut r = BlastRange::with_layout(config, layout).unwrap();
-    r.set_physics_workers(1); r.set_navigation_workers(1);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
     assert!(r.battle_order(2, Order::Support(0), None));
@@ -746,10 +932,20 @@ fn electric_support_amplifies_and_stops_when_the_helper_leaves() {
     assert_eq!(r.battle_attack_range(0), Some(base.range * 2));
     let original = r.units[2].motion.pos;
     r.units[2].motion.pos[0] = Fx::from_int(500);
-    assert_eq!(r.electric_support_count(0), 0, "out-of-range helper still grants a bonus");
+    assert_eq!(
+        r.electric_support_count(0),
+        0,
+        "out-of-range helper still grants a bonus"
+    );
     r.units[2].motion.pos = original;
-    assert!(!r.battle_order(0, Order::Support(2), None), "support cycle accepted");
-    assert!(!r.battle_order(2, Order::Support(1), None), "enemy accepted as supported tank");
+    assert!(
+        !r.battle_order(0, Order::Support(2), None),
+        "support cycle accepted"
+    );
+    assert!(
+        !r.battle_order(2, Order::Support(1), None),
+        "enemy accepted as supported tank"
+    );
     assert!(r.battle_order(0, Order::Attack(1), None));
     let helper_volume = r.units[2].body.volume_mm3();
     let snapshot = r.snapshot();
@@ -761,13 +957,29 @@ fn electric_support_amplifies_and_stops_when_the_helper_leaves() {
         r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
         let muzzles = r.battle_muzzles(2);
-        link_from_muzzle |= r.battle.lightning.iter().any(|trace| muzzles.contains(&trace.from));
-        if r.battle.actors[0].fired >= base.burst_ticks && r.battle.actors[0].burst == 0 { break; }
+        link_from_muzzle |= r
+            .battle
+            .lightning
+            .iter()
+            .any(|trace| muzzles.contains(&trace.from));
+        if r.battle.actors[0].fired >= base.burst_ticks && r.battle.actors[0].burst == 0 {
+            break;
+        }
     }
-    assert!(r.battle.actors[0].fired >= base.burst_ticks, "supported tank did not fire");
+    assert!(
+        r.battle.actors[0].fired >= base.burst_ticks,
+        "supported tank did not fire"
+    );
     assert_eq!(r.battle.actors[2].fired, 0, "supporter fired at the enemy");
-    assert_eq!(r.units[2].body.volume_mm3(), helper_volume, "support link damaged its emitter");
-    assert!(link_from_muzzle, "support link did not originate at the helper's muzzle");
+    assert_eq!(
+        r.units[2].body.volume_mm3(),
+        helper_volume,
+        "support link damaged its emitter"
+    );
+    assert!(
+        link_from_muzzle,
+        "support link did not originate at the helper's muzzle"
+    );
     assert!(r.battle.actors[0].next.saturating_sub(r.tick) <= boosted.reload_ticks);
     assert!(r.matter.economy.ledger.balanced());
     assert!(r.battle_order(2, Order::Hold, None));
@@ -778,16 +990,29 @@ fn electric_support_amplifies_and_stops_when_the_helper_leaves() {
 
 #[test]
 fn electric_support_approaches_the_target_and_cancels_on_loss() {
-    let mut layout = arena_of([RangeUnitKind::LightningTank, RangeUnitKind::Tank]).layout.unwrap();
-    layout.units.push(RangeUnitDef { kind: RangeUnitKind::LightningTank, at: [170,16,100], allied: true, weapon: None });
-    let config = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut layout = arena_of([RangeUnitKind::LightningTank, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
+    layout.units.push(RangeUnitDef {
+        kind: RangeUnitKind::LightningTank,
+        at: [170, 16, 100],
+        allied: true,
+        weapon: None,
+    });
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     let mut r = BlastRange::with_layout(config, layout).unwrap();
-    r.set_physics_workers(1); r.set_navigation_workers(1); r.start_battle().unwrap();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    r.start_battle().unwrap();
     assert!(r.battle_order(2, Order::Support(0), None));
     r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
     r.step();
     assert_eq!(r.electric_support_count(0), 0);
-    assert!(r.units[2].motion.destination.is_some(), "distant helper never started approaching");
+    assert!(
+        r.units[2].motion.destination.is_some(),
+        "distant helper never started approaching"
+    );
     assert_eq!(r.battle.actors[2].fired, 0);
     r.units[0].status.alive = false;
     r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
@@ -798,10 +1023,16 @@ fn electric_support_approaches_the_target_and_cancels_on_loss() {
 
 #[test]
 fn lightning_pulse_stops_at_a_shield() {
-    let mut layout = arena_of([RangeUnitKind::LightningTank, RangeUnitKind::Tank]).layout.unwrap();
+    let mut layout = arena_of([RangeUnitKind::LightningTank, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
     layout.units[1].at = [360, 16, 336];
-    layout.shields.push(modding::range::RangeShieldDef { at: [360, 32, 336], radius: 80 });
-    let config = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    layout.shields.push(modding::range::RangeShieldDef {
+        at: [360, 32, 336],
+        radius: 80,
+    });
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     let mut r = BlastRange::with_layout(config, layout).unwrap();
     r.set_physics_workers(1);
     r.set_navigation_workers(1);
@@ -812,22 +1043,41 @@ fn lightning_pulse_stops_at_a_shield() {
     for _ in 0..100 {
         r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
-        if r.shields[0].hits > 0 { break; }
+        if r.shields[0].hits > 0 {
+            break;
+        }
     }
-    assert!(r.shields[0].hits > 0, "shield did not intercept electric pulse");
+    assert!(
+        r.shields[0].hits > 0,
+        "shield did not intercept electric pulse"
+    );
     assert!(r.shields[0].charge < r.shield_tuning.capacity);
     assert_eq!(r.thermals.hot(), 0, "pulse heated the shielded unit");
 }
 
 #[test]
 fn lightning_chains_to_nearby_hostile_units() {
-    let mut layout = arena_of([RangeUnitKind::LightningTank, RangeUnitKind::Tank]).layout.unwrap();
+    let mut layout = arena_of([RangeUnitKind::LightningTank, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
     layout.units[1].at = [300, 16, 336];
-    layout.units.push(RangeUnitDef { kind: RangeUnitKind::Tank, at: [300, 16, 405], allied: false, weapon: None });
-    layout.units.push(RangeUnitDef { kind: RangeUnitKind::Tank, at: [300, 16, 474], allied: false, weapon: None });
-    let config = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    layout.units.push(RangeUnitDef {
+        kind: RangeUnitKind::Tank,
+        at: [300, 16, 405],
+        allied: false,
+        weapon: None,
+    });
+    layout.units.push(RangeUnitDef {
+        kind: RangeUnitKind::Tank,
+        at: [300, 16, 474],
+        allied: false,
+        weapon: None,
+    });
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     let mut r = BlastRange::with_layout(config, layout).unwrap();
-    r.set_physics_workers(1); r.set_navigation_workers(1);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
     r.battle.actors[2].order = Order::Hold;
@@ -839,25 +1089,40 @@ fn lightning_chains_to_nearby_hostile_units() {
         r.step();
         if r.battle.lightning.len() >= 2 {
             reached = r.thermals.cells().any(|(cell, _)| cell.unit == 2)
-                || !r.units[2].removed.is_empty() || !r.units[2].seg_removed.is_empty();
-            if reached { break; }
+                || !r.units[2].removed.is_empty()
+                || !r.units[2].seg_removed.is_empty();
+            if reached {
+                break;
+            }
         }
     }
     assert!(reached, "secondary arc did not heat the neighbouring enemy");
     assert!(r.battle.lightning.len() <= 4, "unbounded chain");
-    assert!(!r.thermals.cells().any(|(cell, _)| cell.unit == 0), "emitter hit itself");
+    assert!(
+        !r.thermals.cells().any(|(cell, _)| cell.unit == 0),
+        "emitter hit itself"
+    );
 }
 
 #[test]
 fn lightning_secondary_reaches_the_extended_range_but_not_beyond_it() {
     for (distance, expected) in [(280, true), (360, false)] {
-        let mut layout = arena_of([RangeUnitKind::LightningTank, RangeUnitKind::Tank]).layout.unwrap();
+        let mut layout = arena_of([RangeUnitKind::LightningTank, RangeUnitKind::Tank])
+            .layout
+            .unwrap();
         layout.units[0].at = [170, 16, 160];
         layout.units[1].at = [300, 16, 160];
-        layout.units.push(RangeUnitDef { kind: RangeUnitKind::Tank, at: [300, 16, 160 + distance], allied: false, weapon: None });
-        let config = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        layout.units.push(RangeUnitDef {
+            kind: RangeUnitKind::Tank,
+            at: [300, 16, 160 + distance],
+            allied: false,
+            weapon: None,
+        });
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
         let mut r = BlastRange::with_layout(config, layout).unwrap();
-        r.set_physics_workers(1); r.set_navigation_workers(1);
+        r.set_physics_workers(1);
+        r.set_navigation_workers(1);
         r.start_battle().unwrap();
         r.battle.actors[1].order = Order::Hold;
         r.battle.actors[2].order = Order::Hold;
@@ -869,9 +1134,12 @@ fn lightning_secondary_reaches_the_extended_range_but_not_beyond_it() {
             if r.battle.lightning.first().is_some_and(|arc| arc.hit) {
                 observed = Some(r.battle.lightning.len() > 1);
                 if expected && observed == Some(true) {
-                    assert!(r.thermals.cells().any(|(cell, _)| cell.unit == 2)
-                        || !r.units[2].removed.is_empty() || !r.units[2].seg_removed.is_empty(),
-                        "extended arc did not affect its target");
+                    assert!(
+                        r.thermals.cells().any(|(cell, _)| cell.unit == 2)
+                            || !r.units[2].removed.is_empty()
+                            || !r.units[2].seg_removed.is_empty(),
+                        "extended arc did not affect its target"
+                    );
                 }
                 break;
             }
@@ -884,16 +1152,25 @@ fn lightning_secondary_reaches_the_extended_range_but_not_beyond_it() {
 #[test]
 fn lightning_burst_lasts_sixteen_ticks_and_respects_cooldown() {
     let mut r = arena_of([RangeUnitKind::LightningTank, RangeUnitKind::Tank]);
-    for y in 16..90 { for z in 310..362 { r.world.queue_edit(voxel::Edit::put(300, y, z, 3)); } }
-    while r.world.queued() > 0 { r.world.flush(); }
-    r.set_physics_workers(1); r.set_navigation_workers(1);
+    for y in 16..90 {
+        for z in 310..362 {
+            r.world.queue_edit(voxel::Edit::put(300, y, z, 3));
+        }
+    }
+    while r.world.queued() > 0 {
+        r.world.flush();
+    }
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
     assert!(r.battle_order(0, Order::Ground([300, 35, 336]), None));
     for _ in 0..100 {
         r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
-        if r.battle.actors[0].fired > 0 { break; }
+        if r.battle.actors[0].fired > 0 {
+            break;
+        }
     }
     assert_eq!(r.battle.actors[0].fired, 1);
     for _ in 1..16 {
@@ -907,13 +1184,26 @@ fn lightning_burst_lasts_sixteen_ticks_and_respects_cooldown() {
 
 #[test]
 fn lightning_secondary_arc_is_blocked_by_cover() {
-    let mut layout = arena_of([RangeUnitKind::LightningTank, RangeUnitKind::Tank]).layout.unwrap();
+    let mut layout = arena_of([RangeUnitKind::LightningTank, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
     layout.units[1].at = [300, 16, 336];
-    layout.units.push(RangeUnitDef { kind: RangeUnitKind::Tank, at: [300, 16, 405], allied: false, weapon: None });
-    layout.blocks.push(modding::range::RangeBlock { min: [250, 16, 365], max: [350, 100, 375], material: 3 });
-    let config = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    layout.units.push(RangeUnitDef {
+        kind: RangeUnitKind::Tank,
+        at: [300, 16, 405],
+        allied: false,
+        weapon: None,
+    });
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [250, 16, 365],
+        max: [350, 100, 375],
+        material: 3,
+    });
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     let mut r = BlastRange::with_layout(config, layout).unwrap();
-    r.set_physics_workers(1); r.set_navigation_workers(1);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
     r.battle.actors[2].order = Order::Hold;
@@ -930,13 +1220,17 @@ fn lightning_secondary_arc_is_blocked_by_cover() {
         }
     }
     assert!(blocked, "cover did not intercept the secondary arc");
-    assert!(!r.thermals.cells().any(|(cell, _)| cell.unit == 2), "arc passed through the wall");
+    assert!(
+        !r.thermals.cells().any(|(cell, _)| cell.unit == 2),
+        "arc passed through the wall"
+    );
 }
 
 #[test]
 fn lightning_hold_interrupts_the_burst_and_starts_reload() {
     let mut r = arena_of([RangeUnitKind::LightningTank, RangeUnitKind::Tank]);
-    r.set_physics_workers(1); r.set_navigation_workers(1);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
     let target = aim_point(&r.units[1]);
@@ -944,7 +1238,9 @@ fn lightning_hold_interrupts_the_burst_and_starts_reload() {
     for _ in 0..100 {
         r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
-        if r.battle.actors[0].fired > 0 { break; }
+        if r.battle.actors[0].fired > 0 {
+            break;
+        }
     }
     assert!(r.battle.actors[0].burst > 0);
     let fired = r.battle.actors[0].fired;
@@ -965,18 +1261,28 @@ fn lightning_mission_places_the_electric_vehicle() {
     let preset = modding::range_skirmish::stock(19).unwrap();
     let layout = preset.apply_to(base).unwrap();
     assert_eq!(layout.units[0].kind, RangeUnitKind::LightningTank);
-    super::super::placement::Validator::default().validate(&layout).unwrap();
+    super::super::placement::Validator::default()
+        .validate(&layout)
+        .unwrap();
 }
 
 #[test]
 fn eidolon_tank_has_working_systems_and_fires_a_real_armour_piercing_round() {
-    let mut layout = arena_of([RangeUnitKind::EidolonTank, RangeUnitKind::Tank]).layout.unwrap();
+    let mut layout = arena_of([RangeUnitKind::EidolonTank, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
     layout.units[1].at = [330, 16, 336];
-    let config = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     let mut r = BlastRange::with_layout(config, layout).unwrap();
     r.set_physics_workers(1);
     r.set_navigation_workers(1);
-    assert!(r.units[0].status.alive && r.units[0].status.engine && r.units[0].status.weapon && r.units[0].status.sensor);
+    assert!(
+        r.units[0].status.alive
+            && r.units[0].status.engine
+            && r.units[0].status.weapon
+            && r.units[0].status.sensor
+    );
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
     assert_eq!(r.battle_weapon(0), Some(Weapon::Kinetic));
@@ -986,16 +1292,30 @@ fn eidolon_tank_has_working_systems_and_fires_a_real_armour_piercing_round() {
     for _ in 0..180 {
         r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
-        shot |= r.battle.rounds.iter().any(|round| round.owner == 0 && round.weapon == Weapon::Kinetic);
-        contact |= r.battle.impacts.iter().any(|impact| impact.weapon == Weapon::Kinetic);
-        if shot && contact { break; }
+        shot |= r
+            .battle
+            .rounds
+            .iter()
+            .any(|round| round.owner == 0 && round.weapon == Weapon::Kinetic);
+        contact |= r
+            .battle
+            .impacts
+            .iter()
+            .any(|impact| impact.weapon == Weapon::Kinetic);
+        if shot && contact {
+            break;
+        }
     }
-    assert!(shot && contact, "eidolon gun must emit and resolve a kinetic round");
+    assert!(
+        shot && contact,
+        "eidolon gun must emit and resolve a kinetic round"
+    );
     let mut replay = BlastRange::restore(r.config, &r.snapshot()).expect("restore eidolon vehicle");
     for _ in 0..4 {
         r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         replay.battle.ai.next_tick = replay.tick + replay.battle.ai.tuning.decision_ticks;
-        r.step(); replay.step();
+        r.step();
+        replay.step();
         assert_eq!(r.state_hash(), replay.state_hash());
     }
     assert!(r.matter.economy.ledger.balanced());
@@ -1004,19 +1324,27 @@ fn eidolon_tank_has_working_systems_and_fires_a_real_armour_piercing_round() {
 #[test]
 fn eidolon_tank_mission_uses_valid_placement() {
     let base = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
-    let layout = modding::range_skirmish::stock(20).unwrap().apply_to(base).unwrap();
+    let layout = modding::range_skirmish::stock(20)
+        .unwrap()
+        .apply_to(base)
+        .unwrap();
     assert_eq!(layout.units[0].kind, RangeUnitKind::EidolonTank);
-    super::super::placement::Validator::default().validate(&layout).unwrap();
+    super::super::placement::Validator::default()
+        .validate(&layout)
+        .unwrap();
 }
 
 #[test]
 fn eidolon_tank_fires_two_weaker_shells_from_distinct_muzzles() {
     let mut r = arena_of([RangeUnitKind::EidolonTank, RangeUnitKind::Tank]);
-    r.set_physics_workers(1); r.set_navigation_workers(1);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
     let normal = r.battle.shot_config(Weapon::Kinetic, RangeUnitKind::Tank);
-    let twin = r.battle.shot_config(Weapon::Kinetic, RangeUnitKind::EidolonTank);
+    let twin = r
+        .battle
+        .shot_config(Weapon::Kinetic, RangeUnitKind::EidolonTank);
     assert_eq!(twin.energy * 2, normal.energy);
     assert_eq!(twin.material_energy_j * 2, normal.material_energy_j);
     assert_eq!(twin.shell_speed, normal.shell_speed);
@@ -1025,27 +1353,61 @@ fn eidolon_tank_fires_two_weaker_shells_from_distinct_muzzles() {
     for _ in 0..100 {
         r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
-        if r.battle.actors[0].fired > 0 { break; }
+        if r.battle.actors[0].fired > 0 {
+            break;
+        }
     }
     let muzzles = r.battle_muzzles(0);
-    let rounds: Vec<_> = r.battle.rounds.iter().filter(|round| round.owner == 0).collect();
+    let rounds: Vec<_> = r
+        .battle
+        .rounds
+        .iter()
+        .filter(|round| round.owner == 0)
+        .collect();
     assert_eq!(rounds.len(), 2, "both barrels must fire in the same salvo");
     assert_ne!(rounds[0].previous, rounds[1].previous);
-    assert!(muzzles.iter().all(|p| rounds.iter().any(|round| round.previous == *p)), "rounds did not originate at the physical muzzles");
+    assert!(
+        muzzles
+            .iter()
+            .all(|p| rounds.iter().any(|round| round.previous == *p)),
+        "rounds did not originate at the physical muzzles"
+    );
     let restored = BlastRange::restore(r.config, &r.snapshot()).expect("restore two flying rounds");
-    assert_eq!(restored.battle.rounds.iter().filter(|round| round.owner == 0).count(), 2);
-    assert_eq!(restored.battle.shot_config(Weapon::Kinetic, RangeUnitKind::EidolonTank).energy, twin.energy);
+    assert_eq!(
+        restored
+            .battle
+            .rounds
+            .iter()
+            .filter(|round| round.owner == 0)
+            .count(),
+        2
+    );
+    assert_eq!(
+        restored
+            .battle
+            .shot_config(Weapon::Kinetic, RangeUnitKind::EidolonTank)
+            .energy,
+        twin.energy
+    );
 }
 
 #[test]
 fn eidolon_tank_retains_the_surviving_barrel() {
     let mut r = arena_of([RangeUnitKind::EidolonTank, RangeUnitKind::Tank]);
     assert_eq!(r.battle_muzzles(0).len(), 2);
-    for y in 14..20 { for z in 17..21 { r.units[0].body.remove(50, y, z); } }
+    for y in 14..20 {
+        for z in 17..21 {
+            r.units[0].body.remove(50, y, z);
+        }
+    }
     r.units[0].refresh_damage(0);
     assert!(r.units[0].status.weapon);
     assert_eq!(r.battle_muzzles(0).len(), 1);
-    for y in 14..20 { for z in 33..37 { r.units[0].body.remove(50, y, z); } }
+    for y in 14..20 {
+        for z in 33..37 {
+            r.units[0].body.remove(50, y, z);
+        }
+    }
     r.units[0].refresh_damage(0);
     assert!(!r.units[0].status.weapon);
     assert!(r.battle_muzzles(0).is_empty());
@@ -1062,60 +1424,103 @@ fn eidolon_tank_follows_a_move_order_with_tracked_speed() {
     assert!(r.battle_order(0, Order::Move, Some([270, 336])));
     for _ in 0..100 {
         r.step();
-        if r.units[0].motion.pos[0] > start.add(Fx::from_int(20)) { break; }
+        if r.units[0].motion.pos[0] > start.add(Fx::from_int(20)) {
+            break;
+        }
     }
-    assert!(r.units[0].motion.pos[0] > start.add(Fx::from_int(20)), "eidolon tank did not advance");
+    assert!(
+        r.units[0].motion.pos[0] > start.add(Fx::from_int(20)),
+        "eidolon tank did not advance"
+    );
 }
 
 #[test]
 fn eidolon_tank_and_t1_have_comparable_duel_survival() {
-    for kinds in [[RangeUnitKind::EidolonTank, RangeUnitKind::Tank], [RangeUnitKind::Tank, RangeUnitKind::EidolonTank]] {
+    for kinds in [
+        [RangeUnitKind::EidolonTank, RangeUnitKind::Tank],
+        [RangeUnitKind::Tank, RangeUnitKind::EidolonTank],
+    ] {
         let mut r = arena_of(kinds);
-        r.set_physics_workers(1); r.set_navigation_workers(1);
+        r.set_physics_workers(1);
+        r.set_navigation_workers(1);
         r.start_battle().unwrap();
         r.battle.actors[0].order = Order::Attack(1);
         r.battle.actors[1].order = Order::Attack(0);
-        r.units[0].motion.enabled = false; r.units[1].motion.enabled = false;
+        r.units[0].motion.enabled = false;
+        r.units[1].motion.enabled = false;
         for _ in 0..720 {
             r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
             r.step();
-            if r.units.iter().any(|u| !u.status.alive || !u.status.weapon) { break; }
+            if r.units.iter().any(|u| !u.status.alive || !u.status.weapon) {
+                break;
+            }
         }
-        eprintln!("duel {kinds:?} tick={} fired={:?} alive={:?} weapons={:?} cores={:?} revisions={:?}", r.tick,
-            r.battle.actors.iter().map(|a|a.fired).collect::<Vec<_>>(),
-            r.units.iter().map(|u|u.status.alive).collect::<Vec<_>>(),
-            r.units.iter().map(|u|u.status.weapon).collect::<Vec<_>>(),
-            r.units.iter().map(|u|u.integrity.core).collect::<Vec<_>>(),
-            r.units.iter().map(|u|u.revision).collect::<Vec<_>>());
+        eprintln!(
+            "duel {kinds:?} tick={} fired={:?} alive={:?} weapons={:?} cores={:?} revisions={:?}",
+            r.tick,
+            r.battle.actors.iter().map(|a| a.fired).collect::<Vec<_>>(),
+            r.units.iter().map(|u| u.status.alive).collect::<Vec<_>>(),
+            r.units.iter().map(|u| u.status.weapon).collect::<Vec<_>>(),
+            r.units.iter().map(|u| u.integrity.core).collect::<Vec<_>>(),
+            r.units.iter().map(|u| u.revision).collect::<Vec<_>>()
+        );
         let first = r.tick;
-        assert!(r.units.iter().any(|u| !u.status.alive), "neither unit was defeated");
+        assert!(
+            r.units.iter().any(|u| !u.status.alive),
+            "neither unit was defeated"
+        );
         for _ in 0..20 {
             r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
             r.step();
-            if r.units.iter().all(|u| !u.status.alive) { break; }
+            if r.units.iter().all(|u| !u.status.alive) {
+                break;
+            }
         }
-        assert!(r.units.iter().all(|u| !u.status.alive), "the already-fired salvo did not finish the other tank");
-        assert!(r.tick - first <= 20, "the two defeat times drifted too far apart");
+        assert!(
+            r.units.iter().all(|u| !u.status.alive),
+            "the already-fired salvo did not finish the other tank"
+        );
+        assert!(
+            r.tick - first <= 20,
+            "the two defeat times drifted too far apart"
+        );
         eprintln!("duel {kinds:?}: defeat ticks {first}, {}", r.tick);
     }
     let mut defeat_ticks = Vec::new();
-    for kinds in [[RangeUnitKind::Tank, RangeUnitKind::Tank], [RangeUnitKind::Tank, RangeUnitKind::EidolonTank], [RangeUnitKind::EidolonTank, RangeUnitKind::Tank]] {
+    for kinds in [
+        [RangeUnitKind::Tank, RangeUnitKind::Tank],
+        [RangeUnitKind::Tank, RangeUnitKind::EidolonTank],
+        [RangeUnitKind::EidolonTank, RangeUnitKind::Tank],
+    ] {
         let mut r = arena_of(kinds);
-        r.set_physics_workers(1); r.set_navigation_workers(1);
+        r.set_physics_workers(1);
+        r.set_navigation_workers(1);
         r.start_battle().unwrap();
         r.battle.actors[0].order = Order::Attack(1);
         r.battle.actors[1].order = Order::Hold;
-        r.units[0].motion.enabled = false; r.units[1].motion.enabled = false;
+        r.units[0].motion.enabled = false;
+        r.units[1].motion.enabled = false;
         for _ in 0..720 {
             r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
             r.step();
-            if !r.units[1].status.alive { break; }
+            if !r.units[1].status.alive {
+                break;
+            }
         }
-        eprintln!("damage {kinds:?} tick={} fired={} target_alive={} core={:?}", r.tick, r.battle.actors[0].fired, r.units[1].status.alive, r.units[1].integrity.core);
-        assert!(!r.units[1].status.alive, "target survived the comparison budget");
+        eprintln!(
+            "damage {kinds:?} tick={} fired={} target_alive={} core={:?}",
+            r.tick, r.battle.actors[0].fired, r.units[1].status.alive, r.units[1].integrity.core
+        );
+        assert!(
+            !r.units[1].status.alive,
+            "target survived the comparison budget"
+        );
         defeat_ticks.push(r.tick);
     }
-    assert!(defeat_ticks[1].abs_diff(defeat_ticks[2]) <= 20, "one-sided defeat times differ: {defeat_ticks:?}");
+    assert!(
+        defeat_ticks[1].abs_diff(defeat_ticks[2]) <= 20,
+        "one-sided defeat times differ: {defeat_ticks:?}"
+    );
 }
 
 #[test]
@@ -4621,7 +5026,10 @@ fn t2_energy_round_preserves_class_power_after_owner_loss_and_save() {
         .battle
         .shot_config(Weapon::Energy, RangeUnitKind::TurretT2)
         .energy;
-    assert_eq!(heavy, ordinary * r.battle.tuning.turret_t2_power_milli / 1000);
+    assert_eq!(
+        heavy,
+        ordinary * r.battle.tuning.turret_t2_power_milli / 1000
+    );
     assert!(heavy > ordinary && heavy < ordinary * 2);
     // An already emitted bolt will hit empty ground after its gun loses power.
     let p = [300, 20, 100].map(Fx::from_int);
@@ -4685,23 +5093,40 @@ fn t2_energy_round_preserves_class_power_after_owner_loss_and_save() {
 
 #[test]
 fn t2_energy_spider_survives_three_actual_hits_with_its_weapon() {
-    let mut r=arena_of([RangeUnitKind::TurretT2,RangeUnitKind::Spider]);
-    r.set_physics_workers(1);r.set_navigation_workers(1);
-    r.start_battle().unwrap();r.battle.actors[1].order=Order::Hold;
-    r.units[1].motion.enabled=false;
-    assert!(r.battle_order(0,Order::Attack(1),None));
-    let mut hits=0;
+    let mut r = arena_of([RangeUnitKind::TurretT2, RangeUnitKind::Spider]);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    r.start_battle().unwrap();
+    r.battle.actors[1].order = Order::Hold;
+    r.units[1].motion.enabled = false;
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    let mut hits = 0;
     for _ in 0..400 {
-        r.battle.ai.next_tick=r.tick+r.battle.ai.tuning.decision_ticks;
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
-        hits+=r.battle.impacts.iter().filter(|i|i.weapon==Weapon::Energy).count();
-        if !r.units[1].status.alive || !r.units[1].status.weapon
-            || hits>=3 && r.battle.waves.is_empty() && r.world.queued()==0 {break;}
+        hits += r
+            .battle
+            .impacts
+            .iter()
+            .filter(|i| i.weapon == Weapon::Energy)
+            .count();
+        if !r.units[1].status.alive
+            || !r.units[1].status.weapon
+            || hits >= 3 && r.battle.waves.is_empty() && r.world.queued() == 0
+        {
+            break;
+        }
     }
-    assert!(hits>=3,"the T2 fixture fired only {hits} impacts");
-    assert!(r.units[1].status.alive && r.units[1].status.weapon,
-        "spider lost its core or weapon after {hits} hits; core={:?}",r.units[1].integrity.core);
-    assert!(r.units[1].revision>0, "the impacts never reached the spider");
+    assert!(hits >= 3, "the T2 fixture fired only {hits} impacts");
+    assert!(
+        r.units[1].status.alive && r.units[1].status.weapon,
+        "spider lost its core or weapon after {hits} hits; core={:?}",
+        r.units[1].integrity.core
+    );
+    assert!(
+        r.units[1].revision > 0,
+        "the impacts never reached the spider"
+    );
     assert!(r.matter.economy.ledger.balanced());
 }
 
@@ -5018,7 +5443,8 @@ fn spider_laser_opening_heats_the_visible_ground_then_armour_and_replays() {
             "mid-sweep restore diverged"
         );
         target_heated |= r.thermals.cells().any(|(cell, _)| cell.unit == 1)
-            || !r.units[1].removed.is_empty() || !r.units[1].seg_removed.is_empty();
+            || !r.units[1].removed.is_empty()
+            || !r.units[1].seg_removed.is_empty();
         assert!(
             !r.thermals.cells().any(|(cell, _)| cell.unit == 0),
             "emitter heated itself"
@@ -5054,8 +5480,11 @@ fn spider_laser_explicit_point_uses_the_servo_without_an_automatic_ground_openin
         r.battle.lasers[0].to[1].to_int_trunc() > 16,
         "point order acquired automatic ground opening"
     );
-    assert!(r.thermals.cells().any(|(cell, _)| cell.unit == 1)
-        || !r.units[1].removed.is_empty() || !r.units[1].seg_removed.is_empty());
+    assert!(
+        r.thermals.cells().any(|(cell, _)| cell.unit == 1)
+            || !r.units[1].removed.is_empty()
+            || !r.units[1].seg_removed.is_empty()
+    );
     assert!(r.matter.economy.ledger.balanced());
 }
 

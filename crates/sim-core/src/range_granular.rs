@@ -1,8 +1,11 @@
 //! Event-driven, conservative cellular flow; no particle per grain or map scan.
 //! Repose/cohesion and impact yield are approximations, not continuum mechanics.
-use fx::{blob::{Blob, Scan}, Fx};
-use modding::{granular::Tuning, Registry};
 use super::membership::Positions;
+use fx::{
+    blob::{Blob, Scan},
+    Fx,
+};
+use modding::{granular::Tuning, Registry};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use voxel::{bodies::Bodies, Edit, World};
 
@@ -39,7 +42,8 @@ pub(super) struct Flow {
 }
 impl Flow {
     pub fn new() -> Self {
-        let physics = crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("stock physics");
+        let physics =
+            crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("stock physics");
         Self {
             tuning: Tuning::stock(),
             queue: VecDeque::new(),
@@ -118,9 +122,14 @@ impl Flow {
     }
     #[cfg(test)]
     pub fn step(&mut self, w: &mut World, blocked: impl Fn(Pos) -> bool) {
-        self.step_moist(w,blocked,|_|0);
+        self.step_moist(w, blocked, |_| 0);
     }
-    pub fn step_moist(&mut self,w:&mut World,blocked:impl Fn(Pos)->bool,repose_bonus:impl Fn(Pos)->i32) {
+    pub fn step_moist(
+        &mut self,
+        w: &mut World,
+        blocked: impl Fn(Pos) -> bool,
+        repose_bonus: impl Fn(Pos) -> i32,
+    ) {
         self.advance_grains(w, &blocked, &repose_bonus);
     }
     /// A falling cohesive body's pressure displaces neighbouring loose cells.
@@ -136,14 +145,19 @@ impl Flow {
         let size = [w.nx, w.ny, w.nz];
         let mut changes = BTreeMap::new();
         let mut contacts = self.tuning.contacts_per_tick;
-        let mut remaining = self.tuning.contact_moves_per_tick.min(self.tuning.moves_per_tick);
+        let mut remaining = self
+            .tuning
+            .contact_moves_per_tick
+            .min(self.tuning.moves_per_tick);
         for b in &bodies.list {
             if b.fresh || b.resting || b.fallen == 0 || b.vy < Fx::ZERO || b.awaiting_removal(w) {
                 continue;
             }
             let area = usize::from(b.sx) * usize::from(b.sz);
             let reach = b.fy.add(b.vy).add(self.gravity).to_int_trunc().max(1) as u32;
-            if self.glancing_landing(b,w,reach.min(self.tuning.push_reach),&mut contacts) {continue;}
+            if self.glancing_landing(b, w, reach.min(self.tuning.push_reach), &mut contacts) {
+                continue;
+            }
             let density = b
                 .voxels
                 .first()
@@ -167,13 +181,18 @@ impl Flow {
                 // whenever it starts this tick more than one cell above it.
                 let mut contact = None;
                 for depth in 1..=reach.min(self.tuning.push_reach).min(q[1] as u32) {
-                    if contacts == 0 { break; }
+                    if contacts == 0 {
+                        break;
+                    }
                     contacts -= 1;
                     let p = [q[0] as u32, q[1] as u32 - depth, q[2] as u32];
                     if !inside(p, size) || blocked(p) || w.has_pending_dig(p[0], p[1], p[2]) {
                         break;
                     }
-                    if read(w, &changes, p) != 0 { contact = Some(p); break; }
+                    if read(w, &changes, p) != 0 {
+                        contact = Some(p);
+                        break;
+                    }
                 }
                 let Some(p) = contact else { continue };
                 if !inside(p, size) || blocked(p) || w.has_pending_dig(p[0], p[1], p[2]) {

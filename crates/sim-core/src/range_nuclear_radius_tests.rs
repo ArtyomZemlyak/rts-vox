@@ -21,7 +21,10 @@ fn pressure_trial(
 }
 
 fn pressure_trial_grade(
-    c: &ExplosionConfig, kind: RangeUnitKind, offset: [i32; 2], legacy_spider: bool,
+    c: &ExplosionConfig,
+    kind: RangeUnitKind,
+    offset: [i32; 2],
+    legacy_spider: bool,
 ) -> (bool, u32, u32, bool, bool, u64) {
     let at = [256 + (-offset[0]).max(0), 64, 256 + (-offset[1]).max(0)];
     let mut units = vec![RangeUnit::of_kind(
@@ -29,9 +32,11 @@ fn pressure_trial_grade(
         [at[0] + offset[0], at[1], at[2] + offset[1]],
     )];
     if legacy_spider {
-        let grade=[2000,1500,1500,2000,1500];
-        units[0].body.ablation_milli=grade;
-        for segment in &mut units[0].body.segments {segment.body.ablation_milli=grade;}
+        let grade = [2000, 1500, 1500, 2000, 1500];
+        units[0].body.ablation_milli = grade;
+        for segment in &mut units[0].body.segments {
+            segment.body.ablation_milli = grade;
+        }
     }
     let before = units[0].body.solid_count()
         + units[0]
@@ -114,7 +119,8 @@ fn stronger_nuclear_wave_destroys_spider_at_extended_range() {
 
 #[test]
 fn nuclear_spider_is_destroyed_at_twice_the_old_survival_distance() {
-    let current = ExplosionConfig::from_ron(include_str!("../../../data/nuclear-warhead.ron")).unwrap();
+    let current =
+        ExplosionConfig::from_ron(include_str!("../../../data/nuclear-warhead.ron")).unwrap();
     let mut previous = current;
     previous.energy = 2400;
     let old = pressure_trial(&previous, RangeUnitKind::Spider, [600, 0]);
@@ -125,7 +131,9 @@ fn nuclear_spider_is_destroyed_at_twice_the_old_survival_distance() {
 #[test]
 fn nuclear_spider_damage_uses_finite_strategic_payload() {
     let c = ExplosionConfig::from_ron(include_str!("../../../data/nuclear-warhead.ron")).unwrap();
-    let tuning = modding::range_battle::Tuning::from_ron(include_str!("../../../data/range-battle.ron")).unwrap();
+    let tuning =
+        modding::range_battle::Tuning::from_ron(include_str!("../../../data/range-battle.ron"))
+            .unwrap();
     let at = [256, 64, 256];
     let mut units = vec![RangeUnit::of_kind(RangeUnitKind::Spider, [1036, 64, 256])];
     let mut world = World::new(1600, 128, 512, 100, Box::new(Air));
@@ -137,14 +145,27 @@ fn nuclear_spider_damage_uses_finite_strategic_payload() {
     e.material_budget(energy, tuning.nuclear.body_energy_pct);
     e.capture(&world, &c, &units, &dents, usize::MAX);
     for _ in 0..128 {
-        e.step(&mut world, c.wave_work_per_tick, &mut units, &mut dents,
-            &mut Vec::new(), &c, Some(&mut matter));
+        e.step(
+            &mut world,
+            c.wave_work_per_tick,
+            &mut units,
+            &mut dents,
+            &mut Vec::new(),
+            &c,
+            Some(&mut matter),
+        );
         let u = &mut units[0];
-        if !u.body.status(&mut u.connectivity).alive { break; }
+        if !u.body.status(&mut u.connectivity).alive {
+            break;
+        }
     }
     let u = &mut units[0];
-    assert!(!u.body.status(&mut u.connectivity).alive,
-        "spider survived real finite-energy blast; removed={} admission={:?}", u.removed.len(), matter.admission.body);
+    assert!(
+        !u.body.status(&mut u.connectivity).alive,
+        "spider survived real finite-energy blast; removed={} admission={:?}",
+        u.removed.len(),
+        matter.admission.body
+    );
     assert!(matter.remaining_mj < energy);
     assert!(matter.economy.ledger.balanced());
 }
@@ -166,11 +187,7 @@ fn nuclear_open_air_has_a_lethal_inner_zone_and_surviving_outer_receivers() {
     ] {
         // Axis, reverse axis and 3:4 diagonals have equal Euclidean radii.
         for direction in [[5, 0], [-5, 0], [0, 5], [3, 4]] {
-            for (distance, alive) in [
-                (400, false),
-                (800, false),
-                (2600, true),
-            ] {
+            for (distance, alive) in [(400, false), (800, false), (2600, true)] {
                 let offset = direction.map(|v| v * distance / 5);
                 let (actual, removed, _, _, _, revision) = pressure_trial(&c, kind, offset);
                 assert_eq!(
@@ -190,8 +207,11 @@ fn nuclear_open_air_has_a_lethal_inner_zone_and_surviving_outer_receivers() {
 
 #[test]
 fn spider_reinforcement_does_not_reduce_nuclear_pressure_damage() {
-    let c=ExplosionConfig::from_ron(include_str!("../../../data/nuclear-warhead.ron")).unwrap();
-    let current=pressure_trial(&c,RangeUnitKind::Spider,[400,0]);
-    let previous=pressure_trial_grade(&c,RangeUnitKind::Spider,[400,0],true);
-    assert_eq!(current,previous,"nuclear pressure changed with the reinforced grade");
+    let c = ExplosionConfig::from_ron(include_str!("../../../data/nuclear-warhead.ron")).unwrap();
+    let current = pressure_trial(&c, RangeUnitKind::Spider, [400, 0]);
+    let previous = pressure_trial_grade(&c, RangeUnitKind::Spider, [400, 0], true);
+    assert_eq!(
+        current, previous,
+        "nuclear pressure changed with the reinforced grade"
+    );
 }

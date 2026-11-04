@@ -288,14 +288,14 @@ fn density_terrain_claims_use_confirmation_density_and_mixed_piles_keep_matter_o
     );
     // Put the real extracted pieces face-to-face on the same supported site.
     // Mere membership of a coarse pile cell must not teleport/reshape shards.
-    for (i,f) in r.matter.debris.fragments.iter_mut().enumerate() {
+    for (i, f) in r.matter.debris.fragments.iter_mut().enumerate() {
         f.position = V3::new(
             Fx::from_ratio(501, 2).add(Fx::from_int(i as i32)),
             Fx::from_ratio(33, 2),
             Fx::from_ratio(501, 2),
         );
         f.velocity = V3::ZERO;
-        f.basis=crate::burst::IDENTITY;
+        f.basis = crate::burst::IDENTITY;
         f.resting = true;
     }
     r.matter.debris.step_fragments(

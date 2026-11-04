@@ -2,173 +2,421 @@ use super::*;
 
 #[test]
 fn live_he_debris_settles_after_a_ground_shot() {
-    let (mut lab,mut scene)=setup();
-    action(&mut lab,&mut scene,LabAction::LiveTools);
-    action(&mut lab,&mut scene,LabAction::LiveTool(6));
-    action(&mut lab,&mut scene,LabAction::LiveApply([64,16,64],[40,24,64]));
-    for _ in 0..40 {tick(&mut lab,&mut scene);scene.sim.step();if scene.sim.shell.is_some() || scene.sim.impact.is_some(){break;}}
-    action(&mut lab,&mut scene,LabAction::LiveRelease);
-    for _ in 0..150 {scene.sim.step();}
-    let pieces=&scene.sim.matter.debris.fragments;
-    let flying=pieces.iter().filter(|f|!f.resting).count();
-    let max_y=pieces.iter().map(|f|f.position.y.to_int_trunc()).max().unwrap_or(0);
-    println!("live HE: tick={} impact={:?} pieces={} flying={} resting={} max_y={}",scene.sim.tick,scene.sim.impact,pieces.len(),flying,pieces.len()-flying,max_y);
-    println!("full={} sparse={} rotated={} above_25={}",pieces.iter().filter(|f|f.shape==u64::MAX&&f.side==4).count(),pieces.iter().filter(|f|f.shape!=u64::MAX).count(),pieces.iter().filter(|f|f.basis!=sim_core::burst::IDENTITY).count(),pieces.iter().filter(|f|f.resting&&f.position.y.to_int_trunc()>25).count());
-    println!("shape 1={} 2-8={} 9-32={} 33+={}",pieces.iter().filter(|f|f.shape.count_ones()==1).count(),pieces.iter().filter(|f|(2..=8).contains(&f.shape.count_ones())).count(),pieces.iter().filter(|f|(9..=32).contains(&f.shape.count_ones())).count(),pieces.iter().filter(|f|f.shape.count_ones()>32).count());
-    let mut false_support=0;
-    let cells=|q:&sim_core::burst::Fragment| {
-        let qp=[q.position.x,q.position.y,q.position.z].map(|v|v.to_f64_lossy());
-        let basis=q.basis.map(|v|[v.x,v.y,v.z].map(|x|x.to_f64_lossy()));
-        let centre=sim_core::burst::shape_centre(q.shape,q.side);let centre=[centre.x,centre.y,centre.z].map(|v|v.to_f64_lossy());
-        let scale=q.mm as f64/100.0;let radius=std::array::from_fn::<_,3,_>(|k|basis.iter().map(|v|v[k].abs()).sum::<f64>()*0.49*scale);
-        (0..u32::from(q.side).pow(3)).filter(|&bit|q.shape&(1u64<<bit)!=0).map(|bit|{
-            let s=q.side as u32;let cell=[bit%s,(bit/s)%s,bit/(s*s)];
-            let p=std::array::from_fn::<_,3,_>(|k|qp[k]+(0..3).map(|axis|basis[axis][k]*(cell[axis] as f64-centre[axis])*scale).sum::<f64>());
-            (std::array::from_fn::<_,3,_>(|k|p[k]-radius[k]),std::array::from_fn::<_,3,_>(|k|p[k]+radius[k]))
-        }).collect::<Vec<_>>()
+    let (mut lab, mut scene) = setup();
+    action(&mut lab, &mut scene, LabAction::LiveTools);
+    action(&mut lab, &mut scene, LabAction::LiveTool(6));
+    action(
+        &mut lab,
+        &mut scene,
+        LabAction::LiveApply([64, 16, 64], [40, 24, 64]),
+    );
+    for _ in 0..40 {
+        tick(&mut lab, &mut scene);
+        scene.sim.step();
+        if scene.sim.shell.is_some() || scene.sim.impact.is_some() {
+            break;
+        }
+    }
+    action(&mut lab, &mut scene, LabAction::LiveRelease);
+    for _ in 0..150 {
+        scene.sim.step();
+    }
+    let pieces = &scene.sim.matter.debris.fragments;
+    let flying = pieces.iter().filter(|f| !f.resting).count();
+    let max_y = pieces
+        .iter()
+        .map(|f| f.position.y.to_int_trunc())
+        .max()
+        .unwrap_or(0);
+    println!(
+        "live HE: tick={} impact={:?} pieces={} flying={} resting={} max_y={}",
+        scene.sim.tick,
+        scene.sim.impact,
+        pieces.len(),
+        flying,
+        pieces.len() - flying,
+        max_y
+    );
+    println!(
+        "full={} sparse={} rotated={} above_25={}",
+        pieces
+            .iter()
+            .filter(|f| f.shape == u64::MAX && f.side == 4)
+            .count(),
+        pieces.iter().filter(|f| f.shape != u64::MAX).count(),
+        pieces
+            .iter()
+            .filter(|f| f.basis != sim_core::burst::IDENTITY)
+            .count(),
+        pieces
+            .iter()
+            .filter(|f| f.resting && f.position.y.to_int_trunc() > 25)
+            .count()
+    );
+    println!(
+        "shape 1={} 2-8={} 9-32={} 33+={}",
+        pieces.iter().filter(|f| f.shape.count_ones() == 1).count(),
+        pieces
+            .iter()
+            .filter(|f| (2..=8).contains(&f.shape.count_ones()))
+            .count(),
+        pieces
+            .iter()
+            .filter(|f| (9..=32).contains(&f.shape.count_ones()))
+            .count(),
+        pieces.iter().filter(|f| f.shape.count_ones() > 32).count()
+    );
+    let mut false_support = 0;
+    let cells = |q: &sim_core::burst::Fragment| {
+        let qp = [q.position.x, q.position.y, q.position.z].map(|v| v.to_f64_lossy());
+        let basis = q.basis.map(|v| [v.x, v.y, v.z].map(|x| x.to_f64_lossy()));
+        let centre = sim_core::burst::shape_centre(q.shape, q.side);
+        let centre = [centre.x, centre.y, centre.z].map(|v| v.to_f64_lossy());
+        let scale = q.mm as f64 / 100.0;
+        let radius = std::array::from_fn::<_, 3, _>(|k| {
+            basis.iter().map(|v| v[k].abs()).sum::<f64>() * 0.49 * scale
+        });
+        (0..u32::from(q.side).pow(3))
+            .filter(|&bit| q.shape & (1u64 << bit) != 0)
+            .map(|bit| {
+                let s = q.side as u32;
+                let cell = [bit % s, (bit / s) % s, bit / (s * s)];
+                let p = std::array::from_fn::<_, 3, _>(|k| {
+                    qp[k]
+                        + (0..3)
+                            .map(|axis| basis[axis][k] * (cell[axis] as f64 - centre[axis]) * scale)
+                            .sum::<f64>()
+                });
+                (
+                    std::array::from_fn::<_, 3, _>(|k| p[k] - radius[k]),
+                    std::array::from_fn::<_, 3, _>(|k| p[k] + radius[k]),
+                )
+            })
+            .collect::<Vec<_>>()
     };
-    let mut false_moving_support=0;
-    for (index,f) in pieces.iter().enumerate().filter(|(_,f)|f.resting) {
-        let p=[f.position.x,f.position.y,f.position.z].map(|v|v.to_f64_lossy());
-        let (a,b)=f.bounds();let lo=std::array::from_fn::<_,3,_>(|k|p[k]+a[k].to_f64_lossy());let hi=std::array::from_fn::<_,3,_>(|k|p[k]+b[k].to_f64_lossy());
-        if lo[1]<0.5 {continue;}
-        let low=[lo[0],lo[1]-0.5,lo[2]].map(|v|v.floor().clamp(0.0,127.0) as u32);
-        let high=hi.map(|v|v.floor().clamp(0.0,127.0) as u32);
-        if scene.sim.world.any_solid_box(low,high){continue;}
-        let mut broad=false;let mut actual=false;let mut actual_pair=false;let moving_cells=cells(f);
-        for (other,q) in pieces.iter().enumerate().filter(|(i,q)|*i!=index&&q.resting) {
-            let _=other;let qp=[q.position.x,q.position.y,q.position.z].map(|v|v.to_f64_lossy());let (qa,qb)=q.bounds();
-            let qlo=std::array::from_fn::<_,3,_>(|k|qp[k]+qa[k].to_f64_lossy());let qhi=std::array::from_fn::<_,3,_>(|k|qp[k]+qb[k].to_f64_lossy());
-            let testlo=[lo[0],lo[1]-0.5,lo[2]];
-            if qhi[1]>lo[1]||!(0..3).all(|k|testlo[k]<qhi[k]&&qlo[k]<hi[k]){continue;}
-            broad=true;
-            let basis=q.basis.map(|v|[v.x,v.y,v.z].map(|x|x.to_f64_lossy()));
-            let centre=sim_core::burst::shape_centre(q.shape,q.side);let centre=[centre.x,centre.y,centre.z].map(|v|v.to_f64_lossy());
-            let scale=q.mm as f64/100.0;let radius=std::array::from_fn::<_,3,_>(|k|basis.iter().map(|v|v[k].abs()).sum::<f64>()*0.49*scale);
-            for bit in 0..u32::from(q.side).pow(3) {if q.shape&(1u64<<bit)==0{continue;}
-                let s=q.side as u32;let cell=[bit%s,(bit/s)%s,bit/(s*s)];
-                let centre_world=std::array::from_fn::<_,3,_>(|k|qp[k]+(0..3).map(|axis|basis[axis][k]*(cell[axis] as f64-centre[axis])*scale).sum::<f64>());
-                let cell_lo=std::array::from_fn::<_,3,_>(|k|centre_world[k]-radius[k]);
-                let cell_hi=std::array::from_fn::<_,3,_>(|k|centre_world[k]+radius[k]);
-                if (0..3).all(|k|testlo[k]<cell_hi[k]&&cell_lo[k]<hi[k]) {
-                    actual=true;
-                    if moving_cells.iter().any(|(a,b)|(0..3).all(|k|a[k]-if k==1 {0.5}else{0.0}<cell_hi[k]&&cell_lo[k]<b[k])) {actual_pair=true;break;}
+    let mut false_moving_support = 0;
+    for (index, f) in pieces.iter().enumerate().filter(|(_, f)| f.resting) {
+        let p = [f.position.x, f.position.y, f.position.z].map(|v| v.to_f64_lossy());
+        let (a, b) = f.bounds();
+        let lo = std::array::from_fn::<_, 3, _>(|k| p[k] + a[k].to_f64_lossy());
+        let hi = std::array::from_fn::<_, 3, _>(|k| p[k] + b[k].to_f64_lossy());
+        if lo[1] < 0.5 {
+            continue;
+        }
+        let low = [lo[0], lo[1] - 0.5, lo[2]].map(|v| v.floor().clamp(0.0, 127.0) as u32);
+        let high = hi.map(|v| v.floor().clamp(0.0, 127.0) as u32);
+        if scene.sim.world.any_solid_box(low, high) {
+            continue;
+        }
+        let mut broad = false;
+        let mut actual = false;
+        let mut actual_pair = false;
+        let moving_cells = cells(f);
+        for (other, q) in pieces
+            .iter()
+            .enumerate()
+            .filter(|(i, q)| *i != index && q.resting)
+        {
+            let _ = other;
+            let qp = [q.position.x, q.position.y, q.position.z].map(|v| v.to_f64_lossy());
+            let (qa, qb) = q.bounds();
+            let qlo = std::array::from_fn::<_, 3, _>(|k| qp[k] + qa[k].to_f64_lossy());
+            let qhi = std::array::from_fn::<_, 3, _>(|k| qp[k] + qb[k].to_f64_lossy());
+            let testlo = [lo[0], lo[1] - 0.5, lo[2]];
+            if qhi[1] > lo[1] || !(0..3).all(|k| testlo[k] < qhi[k] && qlo[k] < hi[k]) {
+                continue;
+            }
+            broad = true;
+            let basis = q.basis.map(|v| [v.x, v.y, v.z].map(|x| x.to_f64_lossy()));
+            let centre = sim_core::burst::shape_centre(q.shape, q.side);
+            let centre = [centre.x, centre.y, centre.z].map(|v| v.to_f64_lossy());
+            let scale = q.mm as f64 / 100.0;
+            let radius = std::array::from_fn::<_, 3, _>(|k| {
+                basis.iter().map(|v| v[k].abs()).sum::<f64>() * 0.49 * scale
+            });
+            for bit in 0..u32::from(q.side).pow(3) {
+                if q.shape & (1u64 << bit) == 0 {
+                    continue;
+                }
+                let s = q.side as u32;
+                let cell = [bit % s, (bit / s) % s, bit / (s * s)];
+                let centre_world = std::array::from_fn::<_, 3, _>(|k| {
+                    qp[k]
+                        + (0..3)
+                            .map(|axis| basis[axis][k] * (cell[axis] as f64 - centre[axis]) * scale)
+                            .sum::<f64>()
+                });
+                let cell_lo = std::array::from_fn::<_, 3, _>(|k| centre_world[k] - radius[k]);
+                let cell_hi = std::array::from_fn::<_, 3, _>(|k| centre_world[k] + radius[k]);
+                if (0..3).all(|k| testlo[k] < cell_hi[k] && cell_lo[k] < hi[k]) {
+                    actual = true;
+                    if moving_cells.iter().any(|(a, b)| {
+                        (0..3).all(|k| {
+                            a[k] - if k == 1 { 0.5 } else { 0.0 } < cell_hi[k] && cell_lo[k] < b[k]
+                        })
+                    }) {
+                        actual_pair = true;
+                        break;
+                    }
                 }
             }
-            if actual_pair {break;}
+            if actual_pair {
+                break;
+            }
         }
-        if broad&&!actual {false_support+=1;}
-        if actual&&!actual_pair {false_moving_support+=1;}
+        if broad && !actual {
+            false_support += 1;
+        }
+        if actual && !actual_pair {
+            false_moving_support += 1;
+        }
     }
-    assert_eq!(false_support,0,"a resting piece is supported only by empty parts of other fragment boxes");
-    assert_eq!(false_moving_support,0,"a resting piece is supported only under its own empty bounding corner");
-    assert!(scene.sim.impact.is_some(),"live gun must actually fire");
-    assert!(!pieces.is_empty(),"ground shot must produce fragments");
+    assert_eq!(
+        false_support, 0,
+        "a resting piece is supported only by empty parts of other fragment boxes"
+    );
+    assert_eq!(
+        false_moving_support, 0,
+        "a resting piece is supported only under its own empty bounding corner"
+    );
+    assert!(scene.sim.impact.is_some(), "live gun must actually fire");
+    assert!(!pieces.is_empty(), "ground shot must produce fragments");
 }
 
 #[test]
 fn scenario_edits_actor_commands_and_device_parameters_atomically() {
-    use modding::laboratory::experiments::{Input,Plan};
-    use modding::lab_tools::{Device,DeviceKind,Collector};
-    let (mut lab,scene)=setup();
-    let mut layout=scene.sim.layout.clone().unwrap();
-    layout.battle=true;
-    let mut unit=lab.experiments.iter().find(|e|e.id=="navigation").or_else(||lab.experiments.iter().find(|e|e.plan.inputs.iter().any(|i|matches!(i,Input::Move{..})))).unwrap().layout.units[0].clone();
-    unit.at=[64,16,64];layout.units.push(unit);
-    lab.constructor.base=Some(layout);
-    lab.constructor.experiment=Some(Plan{name:"Проверка".into(),description:String::new(),duration_ticks:100,inputs:vec![Input::FreeControl,Input::Move{actor:0,to:[80,64]}]});
-    lab.ui.scenario_input=1;
-    scenario::set_number(&mut lab,61,85,&scene).unwrap();
-    scenario::set_number(&mut lab,63,75,&scene).unwrap();
-    assert!(matches!(lab.constructor.experiment.as_ref().unwrap().inputs[1],Input::Move{actor:0,to:[85,75]}));
-    let previous=lab.constructor.experiment.clone();
-    assert!(scenario::set_number(&mut lab,60,2,&scene).is_err());
-    assert_eq!(lab.constructor.experiment,previous);
-    let at=[60,16,60];
-    lab.constructor.workspace.devices.push(Device{kind:DeviceKind::Collector,at,turns:0,work:0,dug:0,container:None,collector:Some(Collector::at(at))});
-    scenario::set_number(&mut lab,70,65,&scene).unwrap();
-    scenario::set_number(&mut lab,74,1234,&scene).unwrap();
-    assert_eq!(lab.constructor.workspace.devices[0].at[0],65);
-    assert_eq!(lab.constructor.workspace.devices[0].collector.as_ref().unwrap().capacity,1234);
-    let before=lab.constructor.workspace.clone();
-    assert!(scenario::set_number(&mut lab,75,-1,&scene).is_err());
-    assert_eq!(lab.constructor.workspace,before);
+    use modding::lab_tools::{Collector, Device, DeviceKind};
+    use modding::laboratory::experiments::{Input, Plan};
+    let (mut lab, scene) = setup();
+    let mut layout = scene.sim.layout.clone().unwrap();
+    layout.battle = true;
+    let mut unit = lab
+        .experiments
+        .iter()
+        .find(|e| e.id == "navigation")
+        .or_else(|| {
+            lab.experiments.iter().find(|e| {
+                e.plan
+                    .inputs
+                    .iter()
+                    .any(|i| matches!(i, Input::Move { .. }))
+            })
+        })
+        .unwrap()
+        .layout
+        .units[0]
+        .clone();
+    unit.at = [64, 16, 64];
+    layout.units.push(unit);
+    lab.constructor.base = Some(layout);
+    lab.constructor.experiment = Some(Plan {
+        name: "Проверка".into(),
+        description: String::new(),
+        duration_ticks: 100,
+        inputs: vec![
+            Input::FreeControl,
+            Input::Move {
+                actor: 0,
+                to: [80, 64],
+            },
+        ],
+    });
+    lab.ui.scenario_input = 1;
+    scenario::set_number(&mut lab, 61, 85, &scene).unwrap();
+    scenario::set_number(&mut lab, 63, 75, &scene).unwrap();
+    assert!(matches!(
+        lab.constructor.experiment.as_ref().unwrap().inputs[1],
+        Input::Move {
+            actor: 0,
+            to: [85, 75]
+        }
+    ));
+    let previous = lab.constructor.experiment.clone();
+    assert!(scenario::set_number(&mut lab, 60, 2, &scene).is_err());
+    assert_eq!(lab.constructor.experiment, previous);
+    let at = [60, 16, 60];
+    lab.constructor.workspace.devices.push(Device {
+        kind: DeviceKind::Collector,
+        at,
+        turns: 0,
+        work: 0,
+        dug: 0,
+        container: None,
+        collector: Some(Collector::at(at)),
+    });
+    scenario::set_number(&mut lab, 70, 65, &scene).unwrap();
+    scenario::set_number(&mut lab, 74, 1234, &scene).unwrap();
+    assert_eq!(lab.constructor.workspace.devices[0].at[0], 65);
+    assert_eq!(
+        lab.constructor.workspace.devices[0]
+            .collector
+            .as_ref()
+            .unwrap()
+            .capacity,
+        1234
+    );
+    let before = lab.constructor.workspace.clone();
+    assert!(scenario::set_number(&mut lab, 75, -1, &scene).is_err());
+    assert_eq!(lab.constructor.workspace, before);
 }
 
 #[test]
 fn scenario_multiple_sources_wait_for_completion_and_keep_separate_settings() {
-    use modding::laboratory::experiments::{Input,Plan};
-    let (mut lab,mut scene)=setup();
-    lab.constructor.base=scene.sim.layout.clone();
-    lab.constructor.experiment=Some(Plan{name:"Два заряда".into(),description:String::new(),duration_ticks:100,inputs:vec![Input::Detonate{at:[60,20,64]},Input::Detonate{at:[74,20,64]}]});
+    use modding::laboratory::experiments::{Input, Plan};
+    let (mut lab, mut scene) = setup();
+    lab.constructor.base = scene.sim.layout.clone();
+    lab.constructor.experiment = Some(Plan {
+        name: "Два заряда".into(),
+        description: String::new(),
+        duration_ticks: 100,
+        inputs: vec![
+            Input::Detonate { at: [60, 20, 64] },
+            Input::Detonate { at: [74, 20, 64] },
+        ],
+    });
     scenario::materialize(&mut lab).unwrap();
-    for s in &mut lab.constructor.workspace.sources {s.config.half_cells=3;s.power_milli=100;}
-    lab.constructor.workspace.sources[1].power_milli=200;
+    for s in &mut lab.constructor.workspace.sources {
+        s.config.half_cells = 3;
+        s.power_milli = 100;
+    }
+    lab.constructor.workspace.sources[1].power_milli = 200;
     lab.fire(&mut scene);
-    scenario::advance(&mut lab,&mut scene);
-    assert_eq!(scene.sim.impact,Some([60,20,64]));
-    assert_eq!(lab.launch.len(),1);
+    scenario::advance(&mut lab, &mut scene);
+    assert_eq!(scene.sim.impact, Some([60, 20, 64]));
+    assert_eq!(lab.launch.len(), 1);
     for _ in 0..150 {
-        scenario::advance(&mut lab,&mut scene);
-        if lab.launch.is_empty(){break;}
+        scenario::advance(&mut lab, &mut scene);
+        if lab.launch.is_empty() {
+            break;
+        }
         scene.sim.step();
     }
-    assert!(lab.launch.is_empty(),"the second charge must not be dropped while the first is busy");
-    assert_eq!(scene.sim.impact,Some([74,20,64]));
-    assert_eq!(scene.sim.config.energy,lab.constructor.workspace.sources[1].resolved().energy);
+    assert!(
+        lab.launch.is_empty(),
+        "the second charge must not be dropped while the first is busy"
+    );
+    assert_eq!(scene.sim.impact, Some([74, 20, 64]));
+    assert_eq!(
+        scene.sim.config.energy,
+        lab.constructor.workspace.sources[1].resolved().energy
+    );
 }
 
 #[test]
 fn scenario_reorder_and_remove_follow_the_correct_source() {
-    use modding::laboratory::experiments::{Input,Plan};
-    let (mut lab,scene)=setup();
-    lab.constructor.base=scene.sim.layout.clone();
-    lab.constructor.experiment=Some(Plan{name:"Порядок".into(),description:String::new(),duration_ticks:100,inputs:vec![Input::Detonate{at:[60,20,64]},Input::Detonate{at:[74,20,64]}]});
+    use modding::laboratory::experiments::{Input, Plan};
+    let (mut lab, scene) = setup();
+    lab.constructor.base = scene.sim.layout.clone();
+    lab.constructor.experiment = Some(Plan {
+        name: "Порядок".into(),
+        description: String::new(),
+        duration_ticks: 100,
+        inputs: vec![
+            Input::Detonate { at: [60, 20, 64] },
+            Input::Detonate { at: [74, 20, 64] },
+        ],
+    });
     scenario::materialize(&mut lab).unwrap();
-    scenario::action(&mut lab,LabAction::ScenarioMove(1),&scene).unwrap();
-    assert_eq!(lab.constructor.workspace.sources[0].input,Some(1));
-    assert_eq!(lab.constructor.workspace.sources[1].input,Some(0));
-    assert_eq!(lab.constructor.experiment.as_ref().unwrap().inputs[0],Input::Detonate{at:[74,20,64]});
-    scenario::action(&mut lab,LabAction::ScenarioRemove,&scene).unwrap();
-    assert_eq!(lab.constructor.workspace.sources.len(),1);
-    assert_eq!(lab.constructor.workspace.sources[0].at,[74,20,64]);
-    assert_eq!(lab.constructor.workspace.sources[0].input,Some(0));
-    assert_eq!(lab.constructor.experiment.as_ref().unwrap().inputs.len(),1);
+    scenario::action(&mut lab, LabAction::ScenarioMove(1), &scene).unwrap();
+    assert_eq!(lab.constructor.workspace.sources[0].input, Some(1));
+    assert_eq!(lab.constructor.workspace.sources[1].input, Some(0));
+    assert_eq!(
+        lab.constructor.experiment.as_ref().unwrap().inputs[0],
+        Input::Detonate { at: [74, 20, 64] }
+    );
+    scenario::action(&mut lab, LabAction::ScenarioRemove, &scene).unwrap();
+    assert_eq!(lab.constructor.workspace.sources.len(), 1);
+    assert_eq!(lab.constructor.workspace.sources[0].at, [74, 20, 64]);
+    assert_eq!(lab.constructor.workspace.sources[0].input, Some(0));
+    assert_eq!(lab.constructor.experiment.as_ref().unwrap().inputs.len(), 1);
 }
 
 #[test]
 fn scenario_deleting_a_unit_removes_its_orders_and_remaps_the_remaining_unit() {
-    use modding::laboratory::{catalog,experiments::{Input,Plan}};
-    let (mut lab,scene)=setup();
-    let mut layout=scene.sim.layout.clone().unwrap();layout.battle=true;
-    let mut first=lab.experiments.iter().find(|e|e.plan.inputs.iter().any(|i|matches!(i,Input::Move{..}))).unwrap().layout.units[0].clone();
-    first.at=[48,16,48];let mut second=first.clone();second.at=[80,16,80];
-    layout.units=vec![first,second];
-    lab.constructor.placed=catalog::parts_of_layout(layout.clone()).unwrap();
-    layout.units.clear();layout.unit_yaws.clear();
-    lab.constructor.base=Some(layout);
-    lab.constructor.experiment=Some(Plan{name:"Участники".into(),description:String::new(),duration_ticks:100,inputs:vec![Input::FreeControl,Input::Move{actor:0,to:[50,50]},Input::Move{actor:1,to:[75,75]}]});
-    lab.constructor.selected=Some(0);
-    lab.constructor.action(LabAction::Delete,&lab.definition,&mut lab.recipe).unwrap();
-    let inputs=&lab.constructor.experiment.as_ref().unwrap().inputs;
-    assert_eq!(inputs.len(),2);
-    assert!(matches!(inputs[1],Input::Move{actor:0,to:[75,75]}));
-    scenario::validate(&lab,&lab.constructor.layout(&lab.definition,lab.recipe).unwrap()).unwrap();
+    use modding::laboratory::{
+        catalog,
+        experiments::{Input, Plan},
+    };
+    let (mut lab, scene) = setup();
+    let mut layout = scene.sim.layout.clone().unwrap();
+    layout.battle = true;
+    let mut first = lab
+        .experiments
+        .iter()
+        .find(|e| {
+            e.plan
+                .inputs
+                .iter()
+                .any(|i| matches!(i, Input::Move { .. }))
+        })
+        .unwrap()
+        .layout
+        .units[0]
+        .clone();
+    first.at = [48, 16, 48];
+    let mut second = first.clone();
+    second.at = [80, 16, 80];
+    layout.units = vec![first, second];
+    lab.constructor.placed = catalog::parts_of_layout(layout.clone()).unwrap();
+    layout.units.clear();
+    layout.unit_yaws.clear();
+    lab.constructor.base = Some(layout);
+    lab.constructor.experiment = Some(Plan {
+        name: "Участники".into(),
+        description: String::new(),
+        duration_ticks: 100,
+        inputs: vec![
+            Input::FreeControl,
+            Input::Move {
+                actor: 0,
+                to: [50, 50],
+            },
+            Input::Move {
+                actor: 1,
+                to: [75, 75],
+            },
+        ],
+    });
+    lab.constructor.selected = Some(0);
+    lab.constructor
+        .action(LabAction::Delete, &lab.definition, &mut lab.recipe)
+        .unwrap();
+    let inputs = &lab.constructor.experiment.as_ref().unwrap().inputs;
+    assert_eq!(inputs.len(), 2);
+    assert!(matches!(
+        inputs[1],
+        Input::Move {
+            actor: 0,
+            to: [75, 75]
+        }
+    ));
+    scenario::validate(
+        &lab,
+        &lab.constructor.layout(&lab.definition, lab.recipe).unwrap(),
+    )
+    .unwrap();
 }
 
 #[test]
 fn scenario_rejects_stale_or_duplicate_source_links() {
-    use modding::laboratory::experiments::{Input,Plan};
-    let (mut lab,scene)=setup();lab.constructor.base=scene.sim.layout.clone();
-    lab.constructor.experiment=Some(Plan{name:"Связи".into(),description:String::new(),duration_ticks:100,inputs:vec![Input::Detonate{at:[60,20,64]}]});
+    use modding::laboratory::experiments::{Input, Plan};
+    let (mut lab, scene) = setup();
+    lab.constructor.base = scene.sim.layout.clone();
+    lab.constructor.experiment = Some(Plan {
+        name: "Связи".into(),
+        description: String::new(),
+        duration_ticks: 100,
+        inputs: vec![Input::Detonate { at: [60, 20, 64] }],
+    });
     scenario::materialize(&mut lab).unwrap();
-    let layout=lab.constructor.layout(&lab.definition,lab.recipe).unwrap();
-    assert!(scenario::validate(&lab,&layout).is_ok());
-    lab.constructor.workspace.sources[0].at[0]+=1;
-    assert!(scenario::validate(&lab,&layout).is_err());
+    let layout = lab.constructor.layout(&lab.definition, lab.recipe).unwrap();
+    assert!(scenario::validate(&lab, &layout).is_ok());
+    lab.constructor.workspace.sources[0].at[0] += 1;
+    assert!(scenario::validate(&lab, &layout).is_err());
     scenario::sync_sources(&mut lab);
-    let copy=lab.constructor.workspace.sources[0].clone();lab.constructor.workspace.sources.push(copy);
-    assert!(scenario::validate(&lab,&layout).is_err());
+    let copy = lab.constructor.workspace.sources[0].clone();
+    lab.constructor.workspace.sources.push(copy);
+    assert!(scenario::validate(&lab, &layout).is_err());
 }
 
 #[test]

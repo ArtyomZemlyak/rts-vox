@@ -20,10 +20,12 @@ impl Water {
     }
     pub(in crate::blast) fn exchange_grain(&mut self, source: Pos, target: Pos, size: Pos) {
         let amount = self.amount(target);
-        let thermal=self.take_moving_heat(target,amount);
+        let thermal = self.take_moving_heat(target, amount);
         self.set(target, 0);
         self.set(source, amount);
-        if thermal>0 {self.absorb_heat(source,thermal,size);}
+        if thermal > 0 {
+            self.absorb_heat(source, thermal, size);
+        }
         self.wake_near(source, size);
         self.wake_near(target, size);
         // Initial/free totals stay exact; displacement is not a new flux event.

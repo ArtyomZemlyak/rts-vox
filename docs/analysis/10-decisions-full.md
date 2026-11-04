@@ -32308,3 +32308,341 @@ T2 получает умеренное усиление, T3 — большую �
 либо8распределённых попаданий также сохраняют работоспособность. Движение
 цели, повышенная мощность и ответный огонь не входят в обещание. Методика, ограничения,
 тесты и поставленная сборка — analysis/400-tiered-unit-armour.md.
+
+## ADR-819 — Компактная запись приземлившихся обломков
+
+Дата: 2026-11-01. Статус: принято.
+
+Поздний ИИ-бой сохраняет сотни тысяч записей фрагментов. Фаза перевода тел
+создавала промежуточный `Vec<Option<Wreck>>` на каждую запись, хотя почти все
+элементы оставались пустыми. Полная индексация `Settled` плотным списком
+кандидатов была отдельно испытана и отклонена: локальный выигрыш клеток не
+покрывал цену сборки кандидатов и полного тика.
+
+Принятый путь сохраняет прежний обход и `advance_fragment`, но сразу собирает
+только фактические приземления. `filter_map` используется в последовательной
+и параллельной ветвях; соединение параллельных результатов сохраняет исходный
+порядок. Последующие слияние, Ledger и снимки читают тот же список в том же
+порядке. Игровые квоты, сроки, контакты и материя не затрагиваются.
+
+Это узкая оптимизация представления, не active/dirty IDs и не persistent
+membership. Полный обход истории и остальные дорогие фазы остаются. Годные
+A/B окна и ускорение `debris_translate` зафиксированы вместе с аномальными
+сериями; общий FPS и every-tick budget не объявляются закрытыми. Проверки —
+[410](410-compact-landed-wrecks.md).
+
+## ADR-820 — Общая шкала точного слияния обломков
+
+Дата: 2026-11-01. Статус: принято.
+
+Каждая попытка `Geometry::join` вычисляла одинаковое отношение
+`mm/WORLD_MM` для общей шкалы и ещё дважды внутри `origin`. Поскольку слияние
+допускается только при равном `mm`, обе геометрии используют одну шкалу.
+Теперь она вычисляется один раз и передаётся в `origin_at`; независимый
+тестовый `origin` сохраняет прежний расчёт для проверки эквивалентности.
+
+Отдельный вариант со ссылками на геометрию `join_memo` не прошёл повторный
+полный A/B и не принят. Здесь не меняются ключи, порядок доноров, выбор голов,
+геометрия, материя, Ledger или формат снимков. Две пары подтвердили удешевление
+`merge_groups` и позднего тика, но полный mean остался на уровне шума; общий
+FPS не объявляется. Методика и проверки — [420](420-join-scale.md).
+
+## ADR-821 — Индексация изменившихся куч слияния
+
+Дата: 2026-11-01. Статус: принято.
+
+Прежний `join_memo` переиспользовал отрицательный результат только при равенстве
+всей истории фрагментов. Теперь стабильные ID, ключ и точная геометрия проверяются
+независимо для каждой кучи. Если прошлый полный поиск не нашёл переносов и входы
+кучи совпали, её повторная группировка не нужна. Изменённые кучи проходят прежний
+алгоритм целиком; после любого переноса следующий тик снова полный.
+
+Query-only хеш-индекс используется для поиска ID, но не итерируется. Удалённые
+фрагменты выявляются массивом `matched` в исходном порядке. Изменение позиции после
+compaction без смены ID, ключа и геометрии не вызывает лишней инвалидации.
+Физика, порядок доноров, материя, Ledger и формат снимков не меняются.
+
+Тёплый memo сверен с холодным полным оракулом после изменений геометрии и опоры.
+Три пары показали небольшое удешевление последнего окна при сохранении всех36
+игровых полей и replay. Полные обходы `Settled`, wake и построение `current`
+остаются. Методика и измерения — [422](422-changed-join-groups.md).
+
+## ADR-822 — Точная ёмкость списков соседей движения
+
+Дата: 2026-11-01. Статус: принято.
+
+Три пути `motion` собирали `others` через `filter` и `chain`, поэтому Vec
+мог повторно расти. Теперь буфер выделяется один раз с ёмкостью
+`positions.len()+1` и заполняется через `extend`. Содержимое и порядок
+не меняются, gun obstacle и contact IDs прежние.
+
+Две пары подтвердили небольшой выигрыш полного тика и motion, все36 полей
+каждого тика совпали. Snapshot/replay сохранил хеш. Это локальная P2-оптимизация,
+а не решение retained history. Методика — [426](426-motion-others-capacity.md).
+
+## ADR-823 — Изменившиеся кучи через merge join по ID
+
+Дата: 2026-11-01. Статус: принято.
+
+`Memo::changed` больше не строит hash-индекс для нормального порядка стабильных
+FragmentId. Две отсортированные последовательности сравниваются одним merge join
+без `previous_by_id` и `matched`. Несортированный импорт сохраняет прежний hash
+fallback. Изменённые кучи, полный merge и valid/no-transfers не меняются.
+
+Холодный oracle и отдельный sorted/hash/unsorted тест подтвердили одинаковый
+набор изменений. Две пары показали уменьшение `merge_keys` и небольшое снижение
+полного тика. Все36 полей и replay совпали. Это ускорение инвалидации, а не
+решение всей retained-history нагрузки. Методика — [430](430-sorted-changed-keys.md).
+
+## ADR-824 — Moving-only запросы корпусов в wake
+
+Дата: 2026-11-01. Статус: принято.
+
+Push от корпуса возможен только при ненулевой скорости, но общий
+`HullQueries::hit` проверял и неподвижные тела. Новый `hit_moving` фильтрует
+их и в BVH-узлах, и в scalar fallback. Первый точный контакт, canonical source
+order, skip masks и общий `hit` не меняются.
+
+Смешанные scalar/BVH проверки совпали, все36 игровых полей и replay прежние.
+Обе пары уменьшили полный тик, но wake в одной серии был дороже, поэтому
+отдельный стабильный процент wake не заявляется. Методика и ограничения —
+[431](431-moving-hull-queries.md).
+
+## ADR-825 — Merge-aware memo после переносов обломков
+
+Дата: 2026-11-01. Статус: принято.
+
+`Memo::finish` больше не сбрасывает valid после фактического merge. Предыдущий
+точный вход остаётся базой следующего diff: удалённый donor инвалидирует прежний
+key, изменённый head — текущий, смена кучи — оба. Неизменённые группы пропускаются;
+полный merge changed keys, donor order, transfers и ledger прежние. Это уточняет
+no-transfers ограничение ADR-821 при сохранении merge join ADR-823.
+
+Warm/cold-тест после merge, все36 полей двух ABBA серий и replay на physics1/4/8
+совпали. Полный mean уменьшился на7,67%, позднее окно на9,60%, debris на16,99%.
+Полное построение current и другие retained-history обходы остаются. Методика и
+границы — [437](437-merge-aware-join-memo.md).
+
+## ADR-826 — Pool snapshot в существующем обходе фрагментов
+
+Дата: 2026-11-02. Статус: принято.
+
+`step_fragments_kernel` вычисляет flying/parked/parked_end в том же обходе
+`keep_on_map`, а не повторным `fragment_pool_snapshot` после `Settled`. Clamp не
+меняет `parkable`, поэтому классификация, квоты, wake и snapshot прежние.
+
+Две1600-пары дали полный mean−0,27%, позднее окно−0,84%, debris−0,84%. Все36
+полей каждого тика и replay на physics1/4/8 совпали. Это удаление одного линейного
+прохода, не решение retained-history нагрузки. Методика — [446](446-fused-fragment-pool-snapshot.md).
+
+## ADR-827 — Переиспользование subcell offsets
+
+Дата: 2026-11-03. Статус: принято.
+
+Read/contact/ground-only пути волны создавали массив `subcell_offsets(edge)` заново.
+`Explosion` теперь владеет им как derived buffer: создаёт в `begin`, временно передаёт
+вызову через `take` и возвращает на каждом выходе. При restore массив заново строится
+из сохранённого `cell`; в snapshot он не входит.
+
+Это не lazy arithmetic и не изменение material layout: массив и порядок доступа прежние.
+Contact order, материалы, энергия, квоты, IDs, ledger и hash не меняются. Две ordinary
+ABBA серии дали mean−0,80/−0,77%, все35 полей каждого тика совпали. Replay1/4/8 и все
+181 nuclear hash совпали. Nuclear дополнительно сократил `read_ground` примерно вдвое.
+Полная FPS-приёмка и остальная OPT316-02b остаются открытыми. Методика —
+[453](453-reused-subcell-offsets.md).
+
+## ADR-828 — Параллельная очистка Settled stripes
+
+Дата: 2026-11-03. Статус: принято.
+
+`SettledCells` и `SettledQueries` очищают свои восемь независимых stripe buffers через
+Rayon при `fragments.len() >= 1024`; малые входы сохраняют scalar clear. Это та же
+полная очистка перед прежним builder, без persistent state или изменения контактов.
+
+Две ordinary1600-пары дали mean−0,76%, позднее окно−0,64%, debris−0,92%. Все36 полей
+каждого тика совпали; replay1/4/8 дал `695327e0588d053c`. Первая пара не показала
+выигрыш позднего окна, поэтому результат относится к сумме серий, а не к обещанному
+масштабированию каждой очистки. Методика — [467](467-parallel-settled-clear.md).
+
+## ADR-829 — Восемь physics workers по умолчанию
+
+Дата: 2026-11-03. Статус: принято.
+
+`DEFAULT_PHYSICS_WORKERS` увеличен с4 до8, чтобы существующие независимые Settled
+stripes и другие physics tasks использовали весь пул. Это фиксированная конфигурация,
+не чтение числа ядер и не изменение работы/квот. Явные `set_physics_workers(1..=8)`
+и CLI overrides сохраняются.
+
+Две World1600-пары дали mean−14,94%, позднее окно−16,74%, debris−26,38%; Canister1200
+дал mean−14,77%. Все36 полей совпали. Две native AB/BA пары дали +5,76% FPS и−6,85%
+p99; 20 Гц не достигнуто. Replay300→600 на physics8 и после смены default дал
+`695327e0588d053c`. Методика — [474](474-default-physics-workers.md).
+
+## ADR-830 — Overlap Settled shapes и cell construction
+
+Дата: 2026-11-03. Статус: принято.
+
+При `fragments.len() >= 1024` shape assignment и `SettledCells::build` выполняются
+через `rayon::join` с раздельными mutable fields. Малые входы сохраняют последовательный
+путь. Новых buffers, collect и persistent state нет; shape indices и cell lists строятся
+в прежнем порядке.
+
+Две ordinary1600-пары дали mean−4,01%, позднее окно−5,05%, debris−9,63%; SettledCells
+в последнем окне сократился примерно на39%. Все36 полей совпали; replay1/4/8 дал
+`695327e0588d053c`. Методика — [478](478-overlap-shapes-cells.md).
+
+## ADR-831 — Overlap merge keys и wake wreck prune
+
+Дата: 2026-11-03. Статус: принято.
+
+При большой истории wake-stale wrecks удаляются через `rayon::join` с построением
+merge keys. Merged donors удаляются отдельным retain после transfers. Два retain
+сохраняют итоговый набор и порядок wrecks; landed, moved heads, ledger и compaction
+не меняются.
+
+Две ordinary1600-пары дали mean−0,59%, позднее окно−0,65%, при смешанных результатах
+пар и debris+0,34%. Принят ограниченный результат полного тика, а не ускорение каждой
+подфазы. Все36 полей и replay1/4/8 совпали. Методика — [482](482-merge-prune-overlap.md).
+
+## ADR-832 — Hash-таблица changed keys
+
+Дата: 2026-11-03. Статус: принято.
+
+Changed keys join хранятся в `FxLookup<Key, ()>`: нужны только emptiness и membership,
+поэтому BTree заменён deterministic Fx hash table. Sorted/hash diff, merge groups,
+donor order, transfers, ledger и hash не меняются. Sorted Vec из433 не повторяется.
+
+Две ordinary1600-пары дали mean−0,87%, позднее окно−1,41%, debris−3,14%; merge keys
+примерно−14%. Все36 полей и replay1/4/8 совпали. Методика — [483](483-hash-changed-keys.md).
+
+## ADR-833 — Восемь render compute workers по умолчанию
+
+Дата: 2026-11-03. Статус: принято.
+
+`blast::compute::plugin(None)` теперь фиксирует `compute.min_threads = max_threads = 8`.
+Явные `--compute-workers 1..=16` сохраняются; IO/async pools, SIM и глобальный Rayon4
+не меняются. Это не повтор отклонённого увеличения всего Rayon pool.
+
+Две native AB/BA пары дали +2,84% FPS и около−11% `simulation_core` p50; все capture
+валидны, 20 Гц не достигнуто. Unit-тест фиксирует default8 и независимость остальных
+pools. Методика — [484](484-default-compute-workers.md).
+
+## ADR-834 — Переиспользование merge shard buffers
+
+Дата: 2026-11-03. Статус: принято.
+
+`Bursts` владеет восемью merge shard vectors как scratch: builder берёт их через `take`,
+очищает логические записи и возвращает после merge groups. Scratch не входит в snapshot
+или hash; source indices, groups, transfers и ledger прежние.
+
+Две ordinary1600-пары дали mean−0,22%, позднее окно−0,43%, debris−0,05%. Обе серии
+по mean отрицательные, но эффект небольшой и не отменяет полный merge current. Все36
+полей и replay1/4/8 совпали. Методика — [486](486-reused-merge-shards.md).
+
+## ADR-835 — Overlap fragment publication и slot alignment
+
+Дата: 2026-11-03. Статус: принято.
+
+При `fragments.len() >= 2048` `Batches::update` и `slots.align` выполняются через
+существующий ComputeTaskPool. `slots.prepare` начинается только после обоих и получает
+прежние flags. Asset/entity commands и authoritative SIM не меняются; source order,
+progressive publication и lifetime meshes сохранены.
+
+Lifecycle-тест прошёл. Две native AB/BA пары дали +6,1% FPS, около−13% `fragments`
+p50 и−5,4% p99 кадра. Все capture валидны, 20 Гц не достигнуто. Методика —
+[490](490-overlap-fragment-publication.md).
+
+## ADR-836 — Fat LTO для release
+
+Дата: 2026-11-03. Статус: принято.
+
+`[profile.release] lto = "fat"` вместо `thin`. Прежние opt-level3, codegen-units1 и
+overflow-checks сохранены; bench profile и исходная логика не меняются. Увеличение
+времени сборки не входит в runtime метрики.
+
+Две ordinary1600-пары дали mean−0,63%, позднее окно−1,08%, debris−1,84%. Одна серия
+почти нейтральна, поэтому эффект ограничен. Все36 полей и replay1/4/8 совпали.
+Методика — [492](492-fat-lto.md).
+
+## ADR-837 — Tracked sortedness в join memo
+
+Дата: 2026-11-03. Статус: принято.
+
+`Memo` хранит `previous_sorted` и `current_sorted`, обновляемые при
+push/update/start/finish. Два полных `windows(2).all` прохода на каждом тике удалены.
+Строгое `<` по-прежнему отправляет duplicate/unsorted IDs в hash fallback; changed
+keys, geometry, membership и gameplay не меняются.
+
+Две ordinary1600-пары дали mean−2,11%, позднее окно−2,70%, debris−3,73%,
+rubble−3,11%. Все36 полей и replay1/4/8 совпали. Две native пары дали +0,35% FPS,
+p99 кадра−1,01%, `simulation_core`−0,38%, realtime ratio+0,21%. Методика —
+[498](498-tracked-sorted-memo.md).
+
+## ADR-838 — x86-64-v3 для целевой AVX2-машины
+
+Дата: 2026-11-03. Статус: принято.
+
+`.cargo/config.toml` задаёт `-Ctarget-cpu=x86-64-v3` только для
+`x86_64-pc-windows-msvc`. Это разрешает AVX2/BMI2 в пределах ADR-093, но не AVX-512.
+`target-cpu=native` не используется: машина замеров поддерживает AVX-512, а целевая
+машина нет. Исходная логика и gameplay не меняются.
+
+Две ordinary1600-пары дали mean−0,37%, позднее окно−0,90%, debris−2,16%. Все36
+полей и replay1/4/8 совпали. Две native пары дали +2,85% FPS, p99 кадра−3,03%,
+`fragments`−6,45%, `simulation_core`−1,57%, realtime ratio+1,52%. Методика —
+[501](501-x86-64-v3.md).
+
+## ADR-839 — In-place reconciliation render batches
+
+Дата: 2026-11-03. Статус: принято.
+
+`Batches::update` больше не извлекает весь `groups` в новый map. Существующие группы
+обновляются через `entry`; `seen` и `retain` сохраняют текущие ключи, а изменённые
+картинки и исчезнувшие группы проходят прежний retire. Source order, progressive
+publication, source indices и GPU meshes сохранены.
+
+Lifecycle-тест прошёл, включая wakeup, compaction, reclaim и scene replacement.
+Две native пары дали +0,56% FPS и p99 кадра−0,60%; `fragments` p50 не изменился.
+Методика — [504](504-in-place-render-batches.md).
+
+## ADR-840 — Dirty-tile reconciliation render batches
+
+Дата: 2026-11-04. Статус: принято.
+
+`Batches::update` отмечает dirty tiles по старому и новому положению для изменённых,
+перемещённых и исчезнувших фрагментов. Unaffected groups не пересобираются. Scene
+generation, disabled batching и пустой scratch вызывают полный rebuild; source order,
+progressive publication и publication lifecycle прежние.
+
+Lifecycle-тест прошёл после явной обработки disabled/empty границ. Две native пары
+дали +3,87% FPS, p99 кадра−3,95%, `fragments`−1,64%, realtime ratio+3,15%.
+Методика — [506](506-dirty-tile-batches.md).
+
+## ADR-841 — Overlap terrain publication и occupancy preparation
+
+Дата: 2026-11-04. Статус: принято.
+
+Построение occupancy union и per-actor caches не читает изменяемые `GasInput` words,
+поэтому выполняется параллельно с `apply_terrain`. `finish_occupancy` затем делает
+прежний ordered old/new merge, material resolve и dirty-word publication. SIM,
+материалы, порядок patches и последовательный fallback не меняются.
+
+Split-vs-sequential oracle, occupancy suite и fragment lifecycle прошли. Две native
+пары дали +1,12% pooled FPS и occupancy−63,53%; p99 +0,23% при разных знаках пар,
+поэтому улучшение хвоста не заявляется. State hash на1150 тиках совпал.
+Методика — [511](511-overlap-terrain-occupancy.md).
+
+## ADR-842 — Fused motion routes и ground preparation
+
+Дата: 2026-11-04. Статус: принято.
+
+Routes и ground каждого актора разделяют per-unit caches, поэтому не выполняются друг
+против друга. Один `par_chunks_mut(1)` сохраняет прежнюю последовательность routes →
+ground внутри актора и устраняет второй pool barrier. Search budgets, snapshot
+blockers и spatially ordered commit прежние; профильный маркер объединённой стадии
+`motion_routes_ground` не выдаёт её за нулевую ground-фазу.
+
+Все35 CSV-полей и hashes обеих1600-серий совпали; replay1/4/8 прошёл. Полный mean
+−1,48%, позднее окно−1,70%, motion−3,23%. Native pooled FPS+3,37% при p99+0,87%
+в обеих парах: цена хвоста зафиксирована и не считается улучшением.
+Методика — [512](512-fused-motion-routes-ground.md).

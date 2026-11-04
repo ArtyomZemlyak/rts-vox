@@ -2,9 +2,9 @@
 use super::*;
 use modding::laboratory::catalog::{self, Category, Element, Placed, WeaponAsset};
 
-#[path="constructor_material.rs"]
+#[path = "constructor_material.rs"]
 mod material;
-#[path="constructor_voxels.rs"]
+#[path = "constructor_voxels.rs"]
 pub(super) mod voxels;
 pub const LIBRARY: &str = "mods/laboratory/elements";
 pub const PROJECT: &str = "mods/laboratory/scenes/latest.ron";
@@ -12,7 +12,12 @@ pub const WEAPONS: &str = "mods/laboratory/weapons";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Select,
-    Brush,Erase,Inspect,Drill,Crawler,Collector,
+    Brush,
+    Erase,
+    Inspect,
+    Drill,
+    Crawler,
+    Collector,
     Source,
     Event,
     Place,
@@ -66,7 +71,10 @@ pub struct Constructor {
         Option<usize>,
         u8,
     )>,
-    snap_shape:Option<((u64,usize,u8,[i32;3],Recipe,Option<usize>,Mode),(Vec3,Vec3))>,
+    snap_shape: Option<(
+        (u64, usize, u8, [i32; 3], Recipe, Option<usize>, Mode),
+        (Vec3, Vec3),
+    )>,
     draft: Option<Draft>,
     scenario_return: Option<Draft>,
     pub weapons: Vec<WeaponAsset>,
@@ -135,7 +143,7 @@ impl Constructor {
             #[cfg(test)]
             preview_builds: 0,
             preview_key: None,
-            snap_shape:None,
+            snap_shape: None,
             draft: None,
             scenario_return: None,
             weapons,
@@ -160,19 +168,36 @@ impl Constructor {
             layout.gun = source.at;
             layout.target = source.target;
         }
-        layout.laboratory=true;
-        layout.allow_overlap=self.workspace.allow_overlap;
-        layout.lab_devices=self.workspace.devices.clone();
+        layout.laboratory = true;
+        layout.allow_overlap = self.workspace.allow_overlap;
+        layout.lab_devices = self.workspace.devices.clone();
         Ok(layout)
     }
-    pub fn remember_scene(&mut self, recipe:Recipe) {
-        if self.scenario_return.is_some() {return;}
-        self.scenario_return=Some(Draft {experiment:self.experiment.clone(),workspace:self.workspace.clone(),placed:self.placed.clone(),stand:self.stand,base:self.base.clone(),selected:self.selected,aim:self.aim,recipe,weapon:self.weapon,strength:self.strength});
+    pub fn remember_scene(&mut self, recipe: Recipe) {
+        if self.scenario_return.is_some() {
+            return;
+        }
+        self.scenario_return = Some(Draft {
+            experiment: self.experiment.clone(),
+            workspace: self.workspace.clone(),
+            placed: self.placed.clone(),
+            stand: self.stand,
+            base: self.base.clone(),
+            selected: self.selected,
+            aim: self.aim,
+            recipe,
+            weapon: self.weapon,
+            strength: self.strength,
+        });
     }
-    pub fn can_return(&self)->bool {self.scenario_return.is_some()&&!self.creating()}
-    pub fn return_scene(&mut self, recipe:&mut Recipe)->Result<(),String> {
-        if !self.can_return(){return Err("Сначала завершите создание элемента".into());}
-        self.draft=self.scenario_return.take();
+    pub fn can_return(&self) -> bool {
+        self.scenario_return.is_some() && !self.creating()
+    }
+    pub fn return_scene(&mut self, recipe: &mut Recipe) -> Result<(), String> {
+        if !self.can_return() {
+            return Err("Сначала завершите создание элемента".into());
+        }
+        self.draft = self.scenario_return.take();
         self.restore_draft(recipe);
         Ok(())
     }
@@ -206,7 +231,7 @@ impl Constructor {
             blocks: vec![RangeBlock {
                 min: [-x / 2, 0, -z / 2],
                 max: [x - x / 2, y, z - z / 2],
-                material: self.material(d,r),
+                material: self.material(d, r),
             }],
             units: Vec::new(),
             unit_yaws: Vec::new(),
@@ -241,23 +266,34 @@ impl Constructor {
         d: &Definition,
         r: &mut Recipe,
     ) -> Result<(bool, String), String> {
-        if !self.voxel_allowed(a) {return Err("Завершите редактирование кубиков кнопкой «Готово» или «Отмена»".into());}
+        if !self.voxel_allowed(a) {
+            return Err("Завершите редактирование кубиков кнопкой «Готово» или «Отмена»".into());
+        }
         match a {
-            LabAction::BeginVoxelEdit|LabAction::VoxelTool(_)|LabAction::VoxelStroke
-                |LabAction::VoxelFinish(_)|LabAction::VoxelUndo|LabAction::VoxelRedo|LabAction::SavePart => return self.voxel_action(a,d,*r),
-            LabAction::PickMaterial(id) => return self.pick_material(id,d),
+            LabAction::BeginVoxelEdit
+            | LabAction::VoxelTool(_)
+            | LabAction::VoxelStroke
+            | LabAction::VoxelFinish(_)
+            | LabAction::VoxelUndo
+            | LabAction::VoxelRedo
+            | LabAction::SavePart => return self.voxel_action(a, d, *r),
+            LabAction::PickMaterial(id) => return self.pick_material(id, d),
             LabAction::Material(delta) => {
-                let current=d.materials.iter().position(|m|m.id==self.material(d,*r)).unwrap_or(r.material);
-                let index=(current as i32+delta).rem_euclid(d.materials.len() as i32) as usize;
-                return self.pick_material(d.materials[index].id,d);
+                let current = d
+                    .materials
+                    .iter()
+                    .position(|m| m.id == self.material(d, *r))
+                    .unwrap_or(r.material);
+                let index = (current as i32 + delta).rem_euclid(d.materials.len() as i32) as usize;
+                return self.pick_material(d.materials[index].id, d);
             }
-            LabAction::ApplyMaterial => return self.apply_material(d,r),
+            LabAction::ApplyMaterial => return self.apply_material(d, r),
             LabAction::PickCatalog(i) => {
                 if i >= self.catalog.len() {
                     return Err("Объект отсутствует в каталоге".into());
                 }
                 self.choice = i;
-                self.selected=None;
+                self.selected = None;
                 self.mode = Mode::Place;
                 self.turns = 0;
                 self.elevation = 0;
@@ -268,11 +304,29 @@ impl Constructor {
                 self.sync_material(d);
             }
             LabAction::Tool(i) => {
-                self.mode = match i {1=>Mode::Move,2=>Mode::Brush,3=>Mode::Erase,4=>Mode::Inspect,5=>Mode::Drill,6=>Mode::Crawler,7=>Mode::Collector,_=>Mode::Select};
+                self.mode = match i {
+                    1 => Mode::Move,
+                    2 => Mode::Brush,
+                    3 => Mode::Erase,
+                    4 => Mode::Inspect,
+                    5 => Mode::Drill,
+                    6 => Mode::Crawler,
+                    7 => Mode::Collector,
+                    _ => Mode::Select,
+                };
                 self.hover = None;
             }
             LabAction::Turn(delta) => {
-                if matches!(self.mode, Mode::Place | Mode::Part | Mode::Source | Mode::Event | Mode::Drill | Mode::Crawler | Mode::Collector) {
+                if matches!(
+                    self.mode,
+                    Mode::Place
+                        | Mode::Part
+                        | Mode::Source
+                        | Mode::Event
+                        | Mode::Drill
+                        | Mode::Crawler
+                        | Mode::Collector
+                ) {
                     self.turns = (i32::from(self.turns) + delta).rem_euclid(4) as u8;
                 } else {
                     let i = self
@@ -285,8 +339,18 @@ impl Constructor {
                 }
             }
             LabAction::Elevation(delta) => {
-                if matches!(self.mode, Mode::Place | Mode::Part | Mode::Source | Mode::Event | Mode::Drill | Mode::Crawler | Mode::Collector) {
-                    self.elevation = (self.elevation + delta * d.editor_step).clamp(if self.mode==Mode::Source {-1024}else{0}, 1024);
+                if matches!(
+                    self.mode,
+                    Mode::Place
+                        | Mode::Part
+                        | Mode::Source
+                        | Mode::Event
+                        | Mode::Drill
+                        | Mode::Crawler
+                        | Mode::Collector
+                ) {
+                    self.elevation = (self.elevation + delta * d.editor_step)
+                        .clamp(if self.mode == Mode::Source { -1024 } else { 0 }, 1024);
                 } else {
                     return self.action(LabAction::Move(1, delta), d, r);
                 }
@@ -310,7 +374,7 @@ impl Constructor {
                     self.catalog.len() - 1
                 };
                 self.turns = item.turns;
-                self.selected=None;
+                self.selected = None;
                 self.elevation = (item.at[1] - self.base_layout(d, *r)?.ground_level).max(0);
                 self.mode = Mode::Place;
             }
@@ -319,7 +383,10 @@ impl Constructor {
                     (self.choice as i32 + delta).rem_euclid(self.catalog.len() as i32) as usize;
                 self.mode = Mode::Select;
             }
-            LabAction::Place => {self.selected=None;self.mode=Mode::Place;},
+            LabAction::Place => {
+                self.selected = None;
+                self.mode = Mode::Place;
+            }
             LabAction::AddPart => {
                 self.mode = Mode::Part;
                 self.turns = 0;
@@ -397,9 +464,11 @@ impl Constructor {
                 }
                 let b = &mut e.blocks[0];
                 for axis in 0..3 {
-                    let center=b.min[axis]+(b.max[axis]-b.min[axis])/2;
-                    if axis!=1 {b.min[axis]=center-self.part_size[axis]/2;}
-                    b.max[axis]=b.min[axis]+self.part_size[axis];
+                    let center = b.min[axis] + (b.max[axis] - b.min[axis]) / 2;
+                    if axis != 1 {
+                        b.min[axis] = center - self.part_size[axis] / 2;
+                    }
+                    b.max[axis] = b.min[axis] + self.part_size[axis];
                 }
                 self.commit(next, d, *r)?;
                 return Ok((
@@ -409,13 +478,29 @@ impl Constructor {
             }
             LabAction::Delete => {
                 let i = self.selected.ok_or("Выберите добавленный элемент")?;
-                let old_plan=self.experiment.clone();let old_workspace=self.workspace.clone();
-                let first=self.base.as_ref().map_or(0,|l|l.units.len())+self.placed[..i].iter().map(|p|p.element.units.len()).sum::<usize>();
-                let count=self.placed[i].element.units.len();
-                if count>0 {scenario::remove_actors(&mut self.experiment,&mut self.workspace,first,count);}
+                let old_plan = self.experiment.clone();
+                let old_workspace = self.workspace.clone();
+                let first = self.base.as_ref().map_or(0, |l| l.units.len())
+                    + self.placed[..i]
+                        .iter()
+                        .map(|p| p.element.units.len())
+                        .sum::<usize>();
+                let count = self.placed[i].element.units.len();
+                if count > 0 {
+                    scenario::remove_actors(
+                        &mut self.experiment,
+                        &mut self.workspace,
+                        first,
+                        count,
+                    );
+                }
                 let mut next = self.placed.clone();
                 next.remove(i);
-                if let Err(e)=self.commit(next, d, *r) {self.experiment=old_plan;self.workspace=old_workspace;return Err(e);}
+                if let Err(e) = self.commit(next, d, *r) {
+                    self.experiment = old_plan;
+                    self.workspace = old_workspace;
+                    return Err(e);
+                }
                 for s in &mut self.workspace.sources {
                     if let Some(b) = s.binding {
                         if b == i {
@@ -437,7 +522,7 @@ impl Constructor {
                 self.placed.clear();
                 for s in &mut self.workspace.sources {
                     s.binding = None;
-                    s.input=None;
+                    s.input = None;
                 }
                 self.selected = None;
                 self.mode = Mode::Select;
@@ -451,7 +536,9 @@ impl Constructor {
             }
             LabAction::Stand => {
                 self.experiment = None;
-                for s in &mut self.workspace.sources {s.input=None;}
+                for s in &mut self.workspace.sources {
+                    s.input = None;
+                }
                 self.stand = !self.stand;
                 self.base = None;
                 if !self.stand && r.effect == 5 {
@@ -530,7 +617,7 @@ impl Constructor {
                 self.catalog.push(element);
                 self.choice = self.catalog.len() - 1;
                 self.restore_draft(r);
-                self.selected=None;
+                self.selected = None;
                 self.mode = Mode::Place;
                 return Ok((
                     true,
@@ -668,15 +755,33 @@ impl Constructor {
         let base = self.base_layout(d, r)?;
         let layout = catalog::compose(&base, items)?;
         if !self.workspace.allow_overlap {
-            let mut boxes:Vec<(usize,RangeBlock)>=base.blocks.iter().filter(|b|b.material!=0 && b.material!=11).cloned().map(|b|(usize::MAX,b)).collect();
-            for (i,item) in items.iter().enumerate() {
-                let mut shape=base.clone();shape.blocks.clear();shape.units.clear();shape.shields.clear();shape.unit_yaws.clear();
+            let mut boxes: Vec<(usize, RangeBlock)> = base
+                .blocks
+                .iter()
+                .filter(|b| b.material != 0 && b.material != 11)
+                .cloned()
+                .map(|b| (usize::MAX, b))
+                .collect();
+            for (i, item) in items.iter().enumerate() {
+                let mut shape = base.clone();
+                shape.blocks.clear();
+                shape.units.clear();
+                shape.shields.clear();
+                shape.unit_yaws.clear();
                 item.append(&mut shape)?;
-                for b in shape.blocks.into_iter().filter(|b|b.material!=0 && b.material!=11) {
-                    if boxes.iter().any(|(j,a)|*j!=i && (0..3).all(|axis|b.min[axis]<a.max[axis] && a.min[axis]<b.max[axis])) {
+                for b in shape
+                    .blocks
+                    .into_iter()
+                    .filter(|b| b.material != 0 && b.material != 11)
+                {
+                    if boxes.iter().any(|(j, a)| {
+                        *j != i
+                            && (0..3)
+                                .all(|axis| b.min[axis] < a.max[axis] && a.min[axis] < b.max[axis])
+                    }) {
                         return Err("Пересечение элементов запрещено. Включите «Пересечения» во вкладке инструментов".into());
                     }
-                    boxes.push((i,b));
+                    boxes.push((i, b));
                 }
             }
         }
@@ -685,14 +790,50 @@ impl Constructor {
         }
         self.validator.validate(&layout).map_err(placement_error)
     }
-    fn local_bounds(&mut self,d:&Definition,r:Recipe,templates:&workbench::ghost::Templates)->Option<(Vec3,Vec3)> {
-        let key=(self.revision,self.choice,self.turns,self.part_size,r,self.selected,self.mode);
-        if let Some((saved,bounds))=&self.snap_shape {if *saved==key {return Some(*bounds);}}
-        let item=if self.mode==Mode::Move {let mut item=self.selected.and_then(|i|self.placed.get(i))?.clone();item.at=[0;3];item}
-            else{Placed{element:if self.mode==Mode::Part {self.part(d,r)}else{self.catalog[self.choice].clone()},at:[0;3],turns:self.turns}};
-        let mut shape=d.layout.clone();shape.blocks.clear();shape.units.clear();shape.shields.clear();shape.unit_yaws.clear();
-        item.append(&mut shape).ok()?;let bounds=visuals::bounds(&shape,templates);
-        self.snap_shape=Some((key,bounds));Some(bounds)
+    fn local_bounds(
+        &mut self,
+        d: &Definition,
+        r: Recipe,
+        templates: &workbench::ghost::Templates,
+    ) -> Option<(Vec3, Vec3)> {
+        let key = (
+            self.revision,
+            self.choice,
+            self.turns,
+            self.part_size,
+            r,
+            self.selected,
+            self.mode,
+        );
+        if let Some((saved, bounds)) = &self.snap_shape {
+            if *saved == key {
+                return Some(*bounds);
+            }
+        }
+        let item = if self.mode == Mode::Move {
+            let mut item = self.selected.and_then(|i| self.placed.get(i))?.clone();
+            item.at = [0; 3];
+            item
+        } else {
+            Placed {
+                element: if self.mode == Mode::Part {
+                    self.part(d, r)
+                } else {
+                    self.catalog[self.choice].clone()
+                },
+                at: [0; 3],
+                turns: self.turns,
+            }
+        };
+        let mut shape = d.layout.clone();
+        shape.blocks.clear();
+        shape.units.clear();
+        shape.shields.clear();
+        shape.unit_yaws.clear();
+        item.append(&mut shape).ok()?;
+        let bounds = visuals::bounds(&shape, templates);
+        self.snap_shape = Some((key, bounds));
+        Some(bounds)
     }
     pub fn preview_at(&mut self, at: [i32; 3], d: &Definition, r: Recipe) {
         let moving = self.mode == Mode::Move;
@@ -774,15 +915,17 @@ pub fn pointer(
     };
     if streaming.loading() {
         if !(lab.tools.flight.preview && scene.out.is_some()) {
-            live_tools::release(&mut lab,&mouse,true);
+            live_tools::release(&mut lab, &mouse, true);
         }
         lab.ui.viewport_ready = 0;
         lab.constructor.hover = None;
         return;
     }
     lab.ui.viewport_ready = lab.ui.viewport_ready.saturating_add(1);
-    if lab.tools.flight.preview && scene.out.is_some() {return;}
-    voxels::release(&mut lab,&mouse);
+    if lab.tools.flight.preview && scene.out.is_some() {
+        return;
+    }
+    voxels::release(&mut lab, &mouse);
     let c = &lab.constructor;
     if lab.ui.grid {
         let y = scene.sim.ground_level() as f32 + 0.15;
@@ -803,7 +946,7 @@ pub fn pointer(
         }
     }
     sources::draw(&lab, &scene, &mut gizmos);
-    tools::draw(&lab,&scene,&mut gizmos);
+    tools::draw(&lab, &scene, &mut gizmos);
     if let Some(item) = c.selected.and_then(|i| c.placed.get(i)) {
         let mut shape = lab.definition.layout.clone();
         shape.blocks.clear();
@@ -814,15 +957,19 @@ pub fn pointer(
             visuals::outline(&shape, &templates, &mut gizmos, theme::ACCENT);
         }
         if !c.voxel_editing() && !lab.tools.live {
-        let p = Vec3::from(item.at.map(|v| v as f32)) + Vec3::Y * 0.5;
-        gizmos.arrow(p, p + Vec3::X * 20.0, Color::srgb(1.0, 0.3, 0.25));
-        gizmos.arrow(p, p + Vec3::Y * 20.0, Color::srgb(0.35, 0.95, 0.4));
-        gizmos.arrow(p, p + Vec3::Z * 20.0, Color::srgb(0.3, 0.6, 1.0));
+            let p = Vec3::from(item.at.map(|v| v as f32)) + Vec3::Y * 0.5;
+            gizmos.arrow(p, p + Vec3::X * 20.0, Color::srgb(1.0, 0.3, 0.25));
+            gizmos.arrow(p, p + Vec3::Y * 20.0, Color::srgb(0.35, 0.95, 0.4));
+            gizmos.arrow(p, p + Vec3::Z * 20.0, Color::srgb(0.3, 0.6, 1.0));
         }
     }
     if let Some(at) = lab.ui.capture_at.filter(|_| scene.out.is_some()) {
-        if lab.constructor.mode==Mode::Event {
-            gizmos.cross(Vec3::from(at.map(|v|v as f32)),6.0,Color::srgb(0.25,1.0,0.5));
+        if lab.constructor.mode == Mode::Event {
+            gizmos.cross(
+                Vec3::from(at.map(|v| v as f32)),
+                6.0,
+                Color::srgb(0.25, 1.0, 0.5),
+            );
             return;
         }
         let l = &mut *lab;
@@ -847,19 +994,27 @@ pub fn pointer(
         || lab.browser
         || lab.ui.help
         || lab.ui.editing.is_some();
-    live_tools::release(&mut lab,&mouse,blocked);
+    live_tools::release(&mut lab, &mouse, blocked);
     if blocked {
         lab.constructor.hover = None;
         return;
     }
-    if mouse.just_pressed(MouseButton::Right) && !lab.tools.flying && !lab.constructor.voxel_editing() && !lab.tools.live {
+    if mouse.just_pressed(MouseButton::Right)
+        && !lab.tools.flying
+        && !lab.constructor.voxel_editing()
+        && !lab.tools.live
+    {
         lab.constructor.mode = Mode::Select;
         lab.constructor.hover = None;
         return;
     }
-    let cursor = if first_person::immersive(&lab) {Some(Vec2::new(window.width(),window.height())*0.5)} else {window.cursor_position()};
+    let cursor = if first_person::immersive(&lab) {
+        Some(Vec2::new(window.width(), window.height()) * 0.5)
+    } else {
+        window.cursor_position()
+    };
     let Some(cursor) = cursor else {
-        live_tools::release(&mut lab,&mouse,true);
+        live_tools::release(&mut lab, &mouse, true);
         lab.constructor.hover = None;
         return;
     };
@@ -867,39 +1022,70 @@ pub fn pointer(
         return;
     };
     let ray = if first_person::immersive(&lab) {
-        let pose=lab.tools.camera.unwrap();
-        Ok(Ray3d::new(pose.translation,pose.forward()))
-    } else {camera.viewport_to_world(transform, cursor)};
+        let pose = lab.tools.camera.unwrap();
+        Ok(Ray3d::new(pose.translation, pose.forward()))
+    } else {
+        camera.viewport_to_world(transform, cursor)
+    };
     let Ok(ray) = ray else {
         return;
     };
     let mode = lab.constructor.mode;
-    if tools::pointer(&mut lab,&scene,ray,&mouse,&mut gizmos) {return;}
+    if tools::pointer(&mut lab, &scene, ray, &mouse, &mut gizmos) {
+        return;
+    }
     match mode {
-        Mode::Voxel => voxels::pointer(&mut lab,&scene,ray,&mouse,&mut gizmos),
-        Mode::Brush|Mode::Erase|Mode::Inspect|Mode::Drill|Mode::Crawler|Mode::Collector|Mode::Live=>unreachable!(),
+        Mode::Voxel => voxels::pointer(&mut lab, &scene, ray, &mouse, &mut gizmos),
+        Mode::Brush
+        | Mode::Erase
+        | Mode::Inspect
+        | Mode::Drill
+        | Mode::Crawler
+        | Mode::Collector
+        | Mode::Live => unreachable!(),
         Mode::Event => {
-            let Some(index)=lab.ui.event else {return;};
-            if let Some((mut at,_))=workbench::pick(&scene.sim,ray) {
-                at[1]+=lab.constructor.elevation;
-                let size=scene.sim.size();
-                let valid=(0..3).all(|a|at[a]>=0&&at[a]<size[a] as i32)
-                    &&at[0]>=32&&at[0]<size[0] as i32-32&&at[2]>=32&&at[2]<size[2] as i32-32;
-                lab.constructor.hover=Some(at);
-                let colour=if valid {Color::srgb(0.25,1.0,0.5)}else{Color::srgb(1.0,0.24,0.18)};
-                gizmos.cross(Vec3::from(at.map(|v|v as f32)),6.0,colour);
-                gizmos.cube(Transform::from_translation(Vec3::from(at.map(|v|v as f32))).with_scale(Vec3::splat(5.0)),colour);
+            let Some(index) = lab.ui.event else {
+                return;
+            };
+            if let Some((mut at, _)) = workbench::pick(&scene.sim, ray) {
+                at[1] += lab.constructor.elevation;
+                let size = scene.sim.size();
+                let valid = (0..3).all(|a| at[a] >= 0 && at[a] < size[a] as i32)
+                    && at[0] >= 32
+                    && at[0] < size[0] as i32 - 32
+                    && at[2] >= 32
+                    && at[2] < size[2] as i32 - 32;
+                lab.constructor.hover = Some(at);
+                let colour = if valid {
+                    Color::srgb(0.25, 1.0, 0.5)
+                } else {
+                    Color::srgb(1.0, 0.24, 0.18)
+                };
+                gizmos.cross(Vec3::from(at.map(|v| v as f32)), 6.0, colour);
+                gizmos.cube(
+                    Transform::from_translation(Vec3::from(at.map(|v| v as f32)))
+                        .with_scale(Vec3::splat(5.0)),
+                    colour,
+                );
                 if mouse.just_pressed(MouseButton::Left) {
-                    if valid {lab.constructor.pending.push(LabAction::PlaceEvent(index,at));}
-                    else {lab.notice="Воздействие выходит за границы карты".into();}
+                    if valid {
+                        lab.constructor
+                            .pending
+                            .push(LabAction::PlaceEvent(index, at));
+                    } else {
+                        lab.notice = "Воздействие выходит за границы карты".into();
+                    }
                 }
-            }else{lab.constructor.hover=None;}
+            } else {
+                lab.constructor.hover = None;
+            }
         }
         Mode::Source => {
             let Ok(ray) = camera.viewport_to_world(transform, cursor) else {
                 return;
             };
-            let y = sources::active(&lab).map_or(scene.sim.ground_level()+32,|s|s.at[1]) + lab.constructor.elevation;
+            let y = sources::active(&lab).map_or(scene.sim.ground_level() + 32, |s| s.at[1])
+                + lab.constructor.elevation;
             if ray.direction.y.abs() < 0.0001 {
                 return;
             }
@@ -951,11 +1137,20 @@ pub fn pointer(
             } else {
                 ground + lab.constructor.elevation
             };
-            let surface_hit=if lab.constructor.workspace.surface_snap.unwrap_or(true) {workbench::pick(&scene.sim,ray)}else{None};
+            let surface_hit = if lab.constructor.workspace.surface_snap.unwrap_or(true) {
+                workbench::pick(&scene.sim, ray)
+            } else {
+                None
+            };
             let t = (y as f32 - ray.origin.y) / ray.direction.y;
-            let p=if ray.direction.y.abs()<1e-6 || !t.is_finite() || t<0.0 {
-                let Some((hit,_))=surface_hit else {return;};Vec3::from(hit.map(|v|v as f32))
-            }else{ray.origin+ray.direction*t};
+            let p = if ray.direction.y.abs() < 1e-6 || !t.is_finite() || t < 0.0 {
+                let Some((hit, _)) = surface_hit else {
+                    return;
+                };
+                Vec3::from(hit.map(|v| v as f32))
+            } else {
+                ray.origin + ray.direction * t
+            };
             let step = lab.definition.editor_step;
             let mut at = [
                 (p.x / step as f32).round() as i32 * step,
@@ -963,10 +1158,22 @@ pub fn pointer(
                 (p.z / step as f32).round() as i32 * step,
             ];
             if lab.constructor.workspace.surface_snap.unwrap_or(true) {
-                if let Some((hit,_))=surface_hit {
-                    let l=&mut *lab;
-                    if let Some((lo,hi))=l.constructor.local_bounds(&l.definition,l.recipe,&templates) {
-                        if lo.is_finite()&&hi.is_finite() {at=tools::surface_anchor(ray,hit,lo,hi,step,l.constructor.elevation);}
+                if let Some((hit, _)) = surface_hit {
+                    let l = &mut *lab;
+                    if let Some((lo, hi)) =
+                        l.constructor
+                            .local_bounds(&l.definition, l.recipe, &templates)
+                    {
+                        if lo.is_finite() && hi.is_finite() {
+                            at = tools::surface_anchor(
+                                ray,
+                                hit,
+                                lo,
+                                hi,
+                                step,
+                                l.constructor.elevation,
+                            );
+                        }
                     }
                 }
             }
@@ -1002,7 +1209,7 @@ pub fn pointer(
                         lab.ui.tab = 10;
                         return;
                     }
-                    if let Some(i)=scenario::pick_device(&lab,camera,transform,cursor) {
+                    if let Some(i) = scenario::pick_device(&lab, camera, transform, cursor) {
                         lab.constructor.pending.push(LabAction::Device(i));
                         return;
                     }
@@ -1010,14 +1217,23 @@ pub fn pointer(
                 let hit = workbench::pick(&scene.sim, ray);
                 if mode == Mode::Aim {
                     if let Some((p, _)) = hit {
-                        if lab.ui.tab==24 {lab.constructor.pending.push(LabAction::ScenarioAt(p));}
-                        else {lab.constructor.pending.push(LabAction::AimAt(p));}
+                        if lab.ui.tab == 24 {
+                            lab.constructor.pending.push(LabAction::ScenarioAt(p));
+                        } else {
+                            lab.constructor.pending.push(LabAction::AimAt(p));
+                        }
                     }
                 } else {
-                    let selected=lab.constructor.selection_at(&lab.definition,lab.recipe,hit.and_then(|(_,s)|s));
-                    if let Some(i)=selected {lab.constructor.pending.push(LabAction::PickObject(i));}
-                    else {lab.constructor.selected=None;}
-
+                    let selected = lab.constructor.selection_at(
+                        &lab.definition,
+                        lab.recipe,
+                        hit.and_then(|(_, s)| s),
+                    );
+                    if let Some(i) = selected {
+                        lab.constructor.pending.push(LabAction::PickObject(i));
+                    } else {
+                        lab.constructor.selected = None;
+                    }
                 }
             }
         }

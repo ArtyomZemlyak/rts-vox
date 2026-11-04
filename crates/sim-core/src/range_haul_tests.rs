@@ -145,25 +145,42 @@ fn destroyed_dock_cancels_the_old_route_without_losing_cargo() {
     let held = r.tank_held(0);
     r.units[DOCK].status.alive = false;
     r.haul_phase();
-    assert_eq!(r.units[0].motion.destination, None, "still driving to destroyed dock");
+    assert_eq!(
+        r.units[0].motion.destination, None,
+        "still driving to destroyed dock"
+    );
     assert_eq!(r.tank_held(0), held);
     assert!(r.hauling(0));
-    assert!(matches!(r.mining().unwrap().haul().unwrap().legs[0], Leg::Hauling(None)));
+    assert!(matches!(
+        r.mining().unwrap().haul().unwrap().legs[0],
+        Leg::Hauling(None)
+    ));
     assert_books(&r);
 }
 
 #[test]
 fn destroyed_dock_redirects_the_cargo_to_another_live_base() {
     let mut l = layout(20 * ROCK, 50_000, 1_000_000);
-    l.units.push(RangeUnitDef { kind: RangeUnitKind::Base, allied: true, at: [520, 16, 450], weapon: None });
+    l.units.push(RangeUnitDef {
+        kind: RangeUnitKind::Base,
+        allied: true,
+        at: [520, 16, 450],
+        weapon: None,
+    });
     let mut r = range(l);
     assert!(r.battle_order(0, Order::Dig(FACE), None));
     assert!(run(&mut r, 40, |r| r.hauling(0)));
-    assert!(matches!(r.mining().unwrap().haul().unwrap().legs[0], Leg::Hauling(Some(3))));
+    assert!(matches!(
+        r.mining().unwrap().haul().unwrap().legs[0],
+        Leg::Hauling(Some(3))
+    ));
     let held = r.tank_held(0);
     r.units[DOCK].status.alive = false;
     r.haul_phase();
-    assert!(matches!(r.mining().unwrap().haul().unwrap().legs[0], Leg::Hauling(Some(4))));
+    assert!(matches!(
+        r.mining().unwrap().haul().unwrap().legs[0],
+        Leg::Hauling(Some(4))
+    ));
     assert_eq!(r.units[0].motion.destination, Some([520, 450]));
     assert_eq!(r.tank_held(0), held);
     assert_books(&r);

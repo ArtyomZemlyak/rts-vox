@@ -32,8 +32,12 @@ fn main() {
             total.push(start.elapsed().as_nanos());
             flow.push(*flow_time.lock().unwrap());
             scans = scans.max(sim.material_flow().3);
-            if [20, 60, 120].contains(&tick) { checkpoints.push((tick, sim.material_flow().0)); }
-            if quiet.is_none() && sim.material_flow().2 == 0 && tick > 1 { quiet = Some(tick); }
+            if [20, 60, 120].contains(&tick) {
+                checkpoints.push((tick, sim.material_flow().0));
+            }
+            if quiet.is_none() && sim.material_flow().2 == 0 && tick > 1 {
+                quiet = Some(tick);
+            }
         }
         let (moved, pushed, pending, _) = sim.material_flow();
         total.sort_unstable();

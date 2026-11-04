@@ -19,114 +19,228 @@ fn range() -> BlastRange {
 
 #[test]
 fn gun_command_local_charge_detaches_an_authored_tower_with_sufficient_power() {
-    let definition=modding::laboratory::Definition::stock();
-    let element=modding::laboratory::catalog::stock().into_iter().find(|e|e.id=="collapse-tower").unwrap();
-    let item=modding::laboratory::catalog::Placed {element,at:[384,16,336],turns:0};
-    let mut layout=modding::laboratory::catalog::compose(&definition.layout,&[item]).unwrap();
-    layout.gun_point=true;
-    let base=ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
-    let mut detached=false;
-    let default_power=modding::laboratory::events::stock().into_iter().find(|e|e.icon=="hammer").unwrap().power_milli;
-    for power in [250,500,1000,2000] {
-        let mut sim=BlastRange::with_layout(base.at_power(power),layout.clone()).unwrap();
-        sim.set_physics_workers(1);sim.set_navigation_workers(1);
+    let definition = modding::laboratory::Definition::stock();
+    let element = modding::laboratory::catalog::stock()
+        .into_iter()
+        .find(|e| e.id == "collapse-tower")
+        .unwrap();
+    let item = modding::laboratory::catalog::Placed {
+        element,
+        at: [384, 16, 336],
+        turns: 0,
+    };
+    let mut layout = modding::laboratory::catalog::compose(&definition.layout, &[item]).unwrap();
+    layout.gun_point = true;
+    let base = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut detached = false;
+    let default_power = modding::laboratory::events::stock()
+        .into_iter()
+        .find(|e| e.icon == "hammer")
+        .unwrap()
+        .power_milli;
+    for power in [250, 500, 1000, 2000] {
+        let mut sim = BlastRange::with_layout(base.at_power(power), layout.clone()).unwrap();
+        sim.set_physics_workers(1);
+        sim.set_navigation_workers(1);
         sim.execute_command(Command::Gun(G::Control));
-        assert!(sim.execute_command(Command::Gun(G::Detonate {at:[384,28,336]})).accepted());
-        let mut fallen=false;
-        for _ in 0..140 {sim.step();fallen|=sim.bodies.list.iter().any(|b|b.fallen>0);}
-        println!("charge power={power} removed={} collapsed={} fallen={fallen} pillar={:?} roof={:?}",sim.removed,sim.collapsed_cells,crate::blast::material(&sim.world,[384,28,336]),crate::blast::material(&sim.world,[384,48,336]));
-        detached|=fallen||sim.collapsed_cells>0;
-        if power==default_power {assert!(fallen,"the default support charge must topple its sample tower");}
+        assert!(sim
+            .execute_command(Command::Gun(G::Detonate { at: [384, 28, 336] }))
+            .accepted());
+        let mut fallen = false;
+        for _ in 0..140 {
+            sim.step();
+            fallen |= sim.bodies.list.iter().any(|b| b.fallen > 0);
+        }
+        println!(
+            "charge power={power} removed={} collapsed={} fallen={fallen} pillar={:?} roof={:?}",
+            sim.removed,
+            sim.collapsed_cells,
+            crate::blast::material(&sim.world, [384, 28, 336]),
+            crate::blast::material(&sim.world, [384, 48, 336])
+        );
+        detached |= fallen || sim.collapsed_cells > 0;
+        if power == default_power {
+            assert!(
+                fallen,
+                "the default support charge must topple its sample tower"
+            );
+        }
         assert!(sim.matter.economy.ledger.balanced());
     }
-    assert!(detached,"a sufficient local charge must detach the unsupported tower");
-    let example=modding::laboratory::experiments::stock().into_iter().find(|e|e.id=="collapse").unwrap();
-    let config=ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
-    let at=match example.plan.inputs[0] {modding::laboratory::experiments::Input::Detonate {at}=>at,_=>panic!("local collapse trigger")};
-    let mut sim=BlastRange::with_layout(config,example.layout).unwrap();
-    sim.set_physics_workers(1);sim.set_navigation_workers(1);
+    assert!(
+        detached,
+        "a sufficient local charge must detach the unsupported tower"
+    );
+    let example = modding::laboratory::experiments::stock()
+        .into_iter()
+        .find(|e| e.id == "collapse")
+        .unwrap();
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let at = match example.plan.inputs[0] {
+        modding::laboratory::experiments::Input::Detonate { at } => at,
+        _ => panic!("local collapse trigger"),
+    };
+    let mut sim = BlastRange::with_layout(config, example.layout).unwrap();
+    sim.set_physics_workers(1);
+    sim.set_navigation_workers(1);
     sim.execute_command(Command::Gun(G::Control));
-    assert!(sim.execute_command(Command::Gun(G::Detonate{at})).accepted());
-    let mut fallen=false;
-    for _ in 0..200 {sim.step();fallen|=sim.bodies.list.iter().any(|b|b.fallen>0);}
-    println!("ready collapse removed={} collapsed={} fallen={fallen}",sim.removed,sim.collapsed_cells);
-    assert!(fallen||sim.collapsed_cells>0,"ready collapse scenario must actually detach its roof");
+    assert!(sim
+        .execute_command(Command::Gun(G::Detonate { at }))
+        .accepted());
+    let mut fallen = false;
+    for _ in 0..200 {
+        sim.step();
+        fallen |= sim.bodies.list.iter().any(|b| b.fallen > 0);
+    }
+    println!(
+        "ready collapse removed={} collapsed={} fallen={fallen}",
+        sim.removed, sim.collapsed_cells
+    );
+    assert!(
+        fallen || sim.collapsed_cells > 0,
+        "ready collapse scenario must actually detach its roof"
+    );
 }
 
 #[test]
 fn gun_command_local_charge_uses_shared_destruction_and_replays_without_a_shell() {
-    let old=range();
-    let mut layout=old.layout.clone().unwrap();
-    layout.gun_point=true;
-    layout.units.clear();layout.unit_yaws.clear();layout.blocks.clear();
-    layout.blocks.push(modding::range::RangeBlock {min:[420,16,320],max:[428,40,328],material:5});
-    let mut sim=BlastRange::with_layout(old.config,layout).unwrap();
-    sim.set_physics_workers(1);sim.set_navigation_workers(1);
+    let old = range();
+    let mut layout = old.layout.clone().unwrap();
+    layout.gun_point = true;
+    layout.units.clear();
+    layout.unit_yaws.clear();
+    layout.blocks.clear();
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [420, 16, 320],
+        max: [428, 40, 328],
+        material: 5,
+    });
+    let mut sim = BlastRange::with_layout(old.config, layout).unwrap();
+    sim.set_physics_workers(1);
+    sim.set_navigation_workers(1);
     sim.execute_command(Command::Gun(G::Control));
-    let before=sim.snapshot();
-    assert_eq!(sim.execute_command(Command::Gun(G::Detonate{at:[-1,24,324]})),Outcome::Rejected);
-    assert_eq!(sim.snapshot(),before);
-    let mut replay=BlastRange::restore(sim.config,&before).unwrap();
-    replay.set_physics_workers(1);replay.set_navigation_workers(1);
-    for r in [&mut sim,&mut replay] {
-        assert_eq!(r.execute_command(Command::Gun(G::Detonate{at:[424,24,324]})),Outcome::Applied);
-        assert_eq!(r.impact,Some([424,24,324]));
+    let before = sim.snapshot();
+    assert_eq!(
+        sim.execute_command(Command::Gun(G::Detonate { at: [-1, 24, 324] })),
+        Outcome::Rejected
+    );
+    assert_eq!(sim.snapshot(), before);
+    let mut replay = BlastRange::restore(sim.config, &before).unwrap();
+    replay.set_physics_workers(1);
+    replay.set_navigation_workers(1);
+    for r in [&mut sim, &mut replay] {
+        assert_eq!(
+            r.execute_command(Command::Gun(G::Detonate { at: [424, 24, 324] })),
+            Outcome::Applied
+        );
+        assert_eq!(r.impact, Some([424, 24, 324]));
         assert!(r.shell.is_none());
-        assert_eq!(r.execute_command(Command::Gun(G::Detonate{at:[424,24,324]})),Outcome::Busy);
+        assert_eq!(
+            r.execute_command(Command::Gun(G::Detonate { at: [424, 24, 324] })),
+            Outcome::Busy
+        );
     }
-    for _ in 0..16 {sim.step();replay.step();}
-    assert!(sim.removed>0,"placed charge must destroy actual material");
-    assert!(sim.shell.is_none(),"local trigger must not accidentally charge a projectile");
-    assert_eq!(sim.snapshot(),replay.snapshot());
+    for _ in 0..16 {
+        sim.step();
+        replay.step();
+    }
+    assert!(
+        sim.removed > 0,
+        "placed charge must destroy actual material"
+    );
+    assert!(
+        sim.shell.is_none(),
+        "local trigger must not accidentally charge a projectile"
+    );
+    assert_eq!(sim.snapshot(), replay.snapshot());
     assert!(sim.matter.economy.ledger.balanced());
-    let mut physical=range();
-    let before=physical.snapshot();
-    assert_eq!(physical.execute_command(Command::Gun(G::Detonate{at:[424,24,324]})),Outcome::Rejected);
-    assert_eq!(physical.snapshot(),before);
+    let mut physical = range();
+    let before = physical.snapshot();
+    assert_eq!(
+        physical.execute_command(Command::Gun(G::Detonate { at: [424, 24, 324] })),
+        Outcome::Rejected
+    );
+    assert_eq!(physical.snapshot(), before);
 }
 
 #[test]
 fn gun_command_point_emitter_has_no_chassis_and_replays_its_origin() {
-    let old=range();
-    let mut layout=old.layout.clone().unwrap();
-    layout.gun_point=true;
-    let mut sim=BlastRange::with_layout(old.config,layout).unwrap();
+    let old = range();
+    let mut layout = old.layout.clone().unwrap();
+    layout.gun_point = true;
+    let mut sim = BlastRange::with_layout(old.config, layout).unwrap();
     sim.execute_command(Command::Gun(G::Control));
     assert!(!sim.physical_gun());
-    let chassis=sim.gun.motion.pos;
-    let at=[192,48,336];
-    assert!(sim.execute_command(Command::Gun(G::Origin{at})).accepted());
-    assert_eq!(sim.muzzle().map(fx::Fx::to_int_trunc),at);
-    assert_eq!(sim.gun.motion.pos,chassis,"emitter repositioning does not move a hidden vehicle");
-    let before=sim.snapshot();
-    assert_eq!(sim.execute_command(Command::Gun(G::Origin{at:[-1,48,336]})),Outcome::Rejected);
-    assert_eq!(sim.snapshot(),before);
-    let mut phase=("",0,None);
-    let restored=BlastRange::restore_observed(sim.config,&before,|p,n,id|phase=(p,n,id));
-    let mut replay=restored.unwrap_or_else(||panic!("point emitter restore stopped at {phase:?}"));
-    assert_eq!(replay.snapshot(),before);
-    assert!(sim.refire());assert!(replay.refire());
-    assert_eq!(sim.execute_command(Command::Gun(G::Origin{at:[224,48,336]})),Outcome::Rejected,"busy origin is immutable");
-    for _ in 0..8 {sim.step();replay.step();}
-    assert!(sim.shell.is_some()||sim.impact.is_some(),"point must launch real shared projectile");
-    assert_eq!(sim.snapshot(),replay.snapshot());
-    let mut physical=range();
-    let before=physical.snapshot();
-    assert_eq!(physical.execute_command(Command::Gun(G::Origin{at})),Outcome::Rejected);
-    assert_eq!(physical.snapshot(),before);
+    let chassis = sim.gun.motion.pos;
+    let at = [192, 48, 336];
+    assert!(sim
+        .execute_command(Command::Gun(G::Origin { at }))
+        .accepted());
+    assert_eq!(sim.muzzle().map(fx::Fx::to_int_trunc), at);
+    assert_eq!(
+        sim.gun.motion.pos, chassis,
+        "emitter repositioning does not move a hidden vehicle"
+    );
+    let before = sim.snapshot();
+    assert_eq!(
+        sim.execute_command(Command::Gun(G::Origin { at: [-1, 48, 336] })),
+        Outcome::Rejected
+    );
+    assert_eq!(sim.snapshot(), before);
+    let mut phase = ("", 0, None);
+    let restored = BlastRange::restore_observed(sim.config, &before, |p, n, id| phase = (p, n, id));
+    let mut replay =
+        restored.unwrap_or_else(|| panic!("point emitter restore stopped at {phase:?}"));
+    assert_eq!(replay.snapshot(), before);
+    assert!(sim.refire());
+    assert!(replay.refire());
+    assert_eq!(
+        sim.execute_command(Command::Gun(G::Origin { at: [224, 48, 336] })),
+        Outcome::Rejected,
+        "busy origin is immutable"
+    );
+    for _ in 0..8 {
+        sim.step();
+        replay.step();
+    }
+    assert!(
+        sim.shell.is_some() || sim.impact.is_some(),
+        "point must launch real shared projectile"
+    );
+    assert_eq!(sim.snapshot(), replay.snapshot());
+    let mut physical = range();
+    let before = physical.snapshot();
+    assert_eq!(
+        physical.execute_command(Command::Gun(G::Origin { at })),
+        Outcome::Rejected
+    );
+    assert_eq!(physical.snapshot(), before);
 }
 
 #[test]
 fn gun_command_point_streams_ignore_dummy_chassis_damage() {
-    let d=modding::laboratory::Definition::stock();
-    let mut layout=d.layout.clone();layout.gun_point=true;layout.gun=[192,48,336];
-    let cfg=ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap();
-    let mut sim=BlastRange::with_layout(cfg,layout).unwrap();
-    sim.control();sim.gun.status.alive=false;sim.gun.status.weapon=false;
-    assert!(sim.ready());assert!(sim.refire());
-    for _ in 0..8 {sim.step();}
-    assert!(!sim.streams.traces.is_empty()||sim.streams.left>0,"point laser uses the existing stream path");
-    assert_eq!(sim.stream_muzzles()[0].map(fx::Fx::to_int_trunc),[192,48,336]);
+    let d = modding::laboratory::Definition::stock();
+    let mut layout = d.layout.clone();
+    layout.gun_point = true;
+    layout.gun = [192, 48, 336];
+    let cfg = ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap();
+    let mut sim = BlastRange::with_layout(cfg, layout).unwrap();
+    sim.control();
+    sim.gun.status.alive = false;
+    sim.gun.status.weapon = false;
+    assert!(sim.ready());
+    assert!(sim.refire());
+    for _ in 0..8 {
+        sim.step();
+    }
+    assert!(
+        !sim.streams.traces.is_empty() || sim.streams.left > 0,
+        "point laser uses the existing stream path"
+    );
+    assert_eq!(
+        sim.stream_muzzles()[0].map(fx::Fx::to_int_trunc),
+        [192, 48, 336]
+    );
 }
 
 #[cfg(test)]

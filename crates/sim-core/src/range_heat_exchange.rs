@@ -291,7 +291,10 @@ impl BlastRange {
         bounds: &[Bounds],
     ) -> Option<(Fx, Option<Site>)> {
         let solid = self.first_contact(source, from, to, bounds);
-        if !self.water.has_water_in_x_span(from[0].min(to[0]).to_int_trunc(),from[0].max(to[0]).to_int_trunc()) {
+        if !self.water.has_water_in_x_span(
+            from[0].min(to[0]).to_int_trunc(),
+            from[0].max(to[0]).to_int_trunc(),
+        ) {
             return solid;
         }
         let origin = std::array::from_fn::<_, 3, _>(|a| from[a].min(to[a]).to_int_trunc());

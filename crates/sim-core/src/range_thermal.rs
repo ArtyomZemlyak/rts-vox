@@ -2,6 +2,7 @@
 //! Conduction reads the old field; gains are committed together. Removed
 //! material takes its heat with it. Cross-volume contact is a separate phase.
 use super::{matter::Matter, BlastRange, RangeUnit};
+use crate::heat::HEAT_CAP;
 use fx::{
     blob::{Blob, Scan},
     Fx,
@@ -11,7 +12,6 @@ use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 use voxel::unit::{UnitBody, WORLD_MM};
-use crate::heat::HEAT_CAP;
 
 /// Geometry and neighbour energy are immutable until the melting pass.
 /// Capacity admission and total outflow still follow the source cursor order.
@@ -109,7 +109,8 @@ impl Thermals {
     /// fraction of an ever-growing field once every many seconds.
     fn work_limit(&self, t: &Tuning) -> usize {
         if self.cells.len() > t.max_cells {
-            t.cells_per_tick.max(self.cells.len().div_ceil(crate::TICKS_PER_SECOND as usize))
+            t.cells_per_tick
+                .max(self.cells.len().div_ceil(crate::TICKS_PER_SECOND as usize))
         } else {
             t.cells_per_tick
         }
@@ -179,7 +180,9 @@ impl Thermals {
     /// Accepted weapon energy owns its cell even beyond the passive diffusion
     /// budget. No earlier hot cell is evicted to make room for a new impact.
     pub(super) fn deposit_direct(&mut self, p: Cell, heat: u32, _t: &Tuning) {
-        if heat == 0 { return; }
+        if heat == 0 {
+            return;
+        }
         let h = self.cells.entry(p).or_default();
         let used = heat.min(HEAT_CAP - *h);
         *h += used;
@@ -188,7 +191,13 @@ impl Thermals {
     pub fn step(&mut self, units: &mut [RangeUnit], matter: &mut Matter, t: &Tuning) {
         self.step_observed(units, matter, t, |_| {}, &|_, _| {});
     }
-    fn conduction_read(&self, p: Cell, units: &[RangeUnit], t: &Tuning, protect_melting: bool) -> Option<ConductionRead> {
+    fn conduction_read(
+        &self,
+        p: Cell,
+        units: &[RangeUnit],
+        t: &Tuning,
+        protect_melting: bool,
+    ) -> Option<ConductionRead> {
         let body = p.body(units)?;
         let heat = self.heat(p);
         let mut neighbours = [None; 6];
@@ -197,17 +206,28 @@ impl Thermals {
             && temperature(heat, body.mm) >= t.softening[body.part_at(x, y, z) as usize]
             && !units[usize::from(p.unit)].section_holds(usize::from(p.part), p.at);
         if pending_melt {
-            return Some(ConductionRead { heat, neighbours, pending_melt });
+            return Some(ConductionRead {
+                heat,
+                neighbours,
+                pending_melt,
+            });
         }
         for (slot, q) in neighbours.iter_mut().zip(p.neighbours()) {
             if q.body(units).is_some() {
                 let other = self.heat(q);
                 if heat > other {
-                    *slot = Some((q, (u64::from(heat - other) * u64::from(t.conduction_milli) / 1000) as u32));
+                    *slot = Some((
+                        q,
+                        (u64::from(heat - other) * u64::from(t.conduction_milli) / 1000) as u32,
+                    ));
                 }
             }
         }
-        Some(ConductionRead { heat, neighbours, pending_melt })
+        Some(ConductionRead {
+            heat,
+            neighbours,
+            pending_melt,
+        })
     }
     fn conduction_delta(
         &mut self,
@@ -386,8 +406,15 @@ impl Thermals {
         // Direct weapon deposits can exceed the passive diffusion budget.
         // Encoded bytes and finite body dimensions bound untrusted saves.
         let geometry_limit = units.iter().fold(0usize, |total, u| {
-            let volume = |b: &UnitBody| usize::from(b.vol.nx) * usize::from(b.vol.ny) * usize::from(b.vol.nz);
-            u.body.segments.iter().fold(total.saturating_add(volume(&u.body)), |sum, part| sum.saturating_add(volume(&part.body)))
+            let volume = |b: &UnitBody| {
+                usize::from(b.vol.nx) * usize::from(b.vol.ny) * usize::from(b.vol.nz)
+            };
+            u.body
+                .segments
+                .iter()
+                .fold(total.saturating_add(volume(&u.body)), |sum, part| {
+                    sum.saturating_add(volume(&part.body))
+                })
         });
         if n > geometry_limit || n > s.left() / 12 {
             return None;
@@ -436,10 +463,13 @@ impl BlastRange {
             &self.matter.economy.mats,
             self.heat_tuning.cells_per_tick,
             self.thermal_tuning.cells_per_tick.saturating_sub(slots),
-            |p| self.matter.debris.claimed(p) || self.heat_tuning.melt_flow.iter().flatten().any(|f| {
-                let mat = self.world.material(p[0],p[1],p[2]);
-                f.solid == mat || f.liquid == mat
-            }),
+            |p| {
+                self.matter.debris.claimed(p)
+                    || self.heat_tuning.melt_flow.iter().flatten().any(|f| {
+                        let mat = self.world.material(p[0], p[1], p[2]);
+                        f.solid == mat || f.liquid == mat
+                    })
+            },
         );
         self.matter.reserve_heat(slots, ground);
     }
@@ -492,8 +522,10 @@ mod tests {
                 if q.body(units).is_none() {
                     continue;
                 }
-                let share =
-                    ((u64::from(heat.saturating_sub(field.heat(q))) * u64::from(t.conduction_milli) / 1000) as u32).min(available);
+                let share = ((u64::from(heat.saturating_sub(field.heat(q)))
+                    * u64::from(t.conduction_milli)
+                    / 1000) as u32)
+                    .min(available);
                 if share == 0 {
                     continue;
                 }
@@ -726,7 +758,8 @@ mod tests {
         assert_eq!(heat, 320_000_000);
         assert_eq!(r.thermals.heat(p), heat);
         assert_eq!(r.thermals.rejected_heat, 0);
-        let restored = BlastRange::restore(r.config, &r.snapshot()).expect("high body heat restore");
+        let restored =
+            BlastRange::restore(r.config, &r.snapshot()).expect("high body heat restore");
         assert_eq!(restored.thermals.heat(p), heat);
         assert_eq!(restored.state_hash(), r.state_hash());
     }
@@ -753,42 +786,73 @@ mod tests {
     }
     #[test]
     fn saturated_fragment_pool_cannot_cool_away_an_admitted_melt() {
-        let mut r=range();
-        let p=cell(&r,Part::Engine);
-        r.thermal_tuning.cooling_milli=100;
-        r.thermal_tuning.conduction_milli=100;
-        r.thermals.deposit_direct(p,500,&r.thermal_tuning);
-        let cap=r.matter.tuning.max_fragments;
-        r.matter.tuning.max_fragments=0;
-        for _ in 0..20 { r.step_unit_heat(); }
+        let mut r = range();
+        let p = cell(&r, Part::Engine);
+        r.thermal_tuning.cooling_milli = 100;
+        r.thermal_tuning.conduction_milli = 100;
+        r.thermals.deposit_direct(p, 500, &r.thermal_tuning);
+        let cap = r.matter.tuning.max_fragments;
+        r.matter.tuning.max_fragments = 0;
+        for _ in 0..20 {
+            r.step_unit_heat();
+        }
         assert!(p.body(&r.units).is_some());
-        assert_eq!(r.thermals.heat(p),500,"accepted melting cooled away during the blockage");
-        r.matter.tuning.max_fragments=cap;
+        assert_eq!(
+            r.thermals.heat(p),
+            500,
+            "accepted melting cooled away during the blockage"
+        );
+        r.matter.tuning.max_fragments = cap;
         r.step_unit_heat();
-        assert!(p.body(&r.units).is_none(),"deferred melt did not resume");
+        assert!(p.body(&r.units).is_none(), "deferred melt did not resume");
         assert!(r.matter.economy.ledger.balanced());
     }
     #[test]
     fn saturated_hot_batch_retains_every_damage_cell() {
-        let mut r=range();
-        r.thermal_tuning.softening=[1;5];
-        let b=&r.units[0].body;
-        let mut cells=Vec::new();
-        'outer: for x in 0..b.vol.nx { for y in 0..b.vol.ny { for z in 0..b.vol.nz {
-            if b.vol.get(x as usize,y as usize,z as usize) {
-                cells.push(Cell{unit:0,part:0,at:[x,y,z]});
-                if cells.len()==4096 {break 'outer;}
+        let mut r = range();
+        r.thermal_tuning.softening = [1; 5];
+        let b = &r.units[0].body;
+        let mut cells = Vec::new();
+        'outer: for x in 0..b.vol.nx {
+            for y in 0..b.vol.ny {
+                for z in 0..b.vol.nz {
+                    if b.vol.get(x as usize, y as usize, z as usize) {
+                        cells.push(Cell {
+                            unit: 0,
+                            part: 0,
+                            at: [x, y, z],
+                        });
+                        if cells.len() == 4096 {
+                            break 'outer;
+                        }
+                    }
+                }
             }
-        }}}
-        assert_eq!(cells.len(),4096);
-        for &p in &cells {r.thermals.deposit_direct(p,1000,&r.thermal_tuning);}
-        let start=std::time::Instant::now();
-        for _ in 0..8 {
-            let delta=r.thermals.conduction_delta(&cells,&r.units,&r.thermal_tuning,false,true,&|_,_|{});
-            assert!(delta.is_empty(),"waiting melt must not lose heat to cooling or conduction");
         }
-        eprintln!("4096 waiting hot cells, eight passes: {} us",start.elapsed().as_micros());
-        assert_eq!(r.thermals.hot(),4096);
+        assert_eq!(cells.len(), 4096);
+        for &p in &cells {
+            r.thermals.deposit_direct(p, 1000, &r.thermal_tuning);
+        }
+        let start = std::time::Instant::now();
+        for _ in 0..8 {
+            let delta = r.thermals.conduction_delta(
+                &cells,
+                &r.units,
+                &r.thermal_tuning,
+                false,
+                true,
+                &|_, _| {},
+            );
+            assert!(
+                delta.is_empty(),
+                "waiting melt must not lose heat to cooling or conduction"
+            );
+        }
+        eprintln!(
+            "4096 waiting hot cells, eight passes: {} us",
+            start.elapsed().as_micros()
+        );
+        assert_eq!(r.thermals.hot(), 4096);
     }
     #[test]
     fn melting_consumes_last_slot_and_retains_the_next_hot_cell() {
@@ -929,7 +993,9 @@ mod tests {
             let mut bytes = Blob::new();
             sim.thermals.save(&mut bytes);
             let mut restored = Thermals::default();
-            restored.load(&mut Scan::new(&bytes.v), &sim.units, &sim.thermal_tuning).unwrap();
+            restored
+                .load(&mut Scan::new(&bytes.v), &sim.units, &sim.thermal_tuning)
+                .unwrap();
             assert_eq!(restored.heat(p), 501);
             assert_eq!(restored.heat(q), 500);
         }

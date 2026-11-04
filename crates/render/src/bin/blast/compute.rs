@@ -3,11 +3,10 @@ use bevy::app::{TaskPoolOptions, TaskPoolPlugin};
 
 pub fn plugin(workers: Option<usize>) -> TaskPoolPlugin {
     let mut options = TaskPoolOptions::default();
-    if let Some(workers) = workers {
-        assert!((1..=16).contains(&workers), "--compute-workers 1..=16");
-        options.compute.min_threads = workers;
-        options.compute.max_threads = workers;
-    }
+    let workers = workers.unwrap_or(8);
+    assert!((1..=16).contains(&workers), "--compute-workers 1..=16");
+    options.compute.min_threads = workers;
+    options.compute.max_threads = workers;
     TaskPoolPlugin {
         task_pool_options: options,
     }
@@ -19,6 +18,8 @@ mod tests {
     #[test]
     fn override_is_fixed_and_does_not_reassign_other_pools() {
         let default = plugin(None).task_pool_options;
+        assert_eq!(default.compute.min_threads, 8);
+        assert_eq!(default.compute.max_threads, 8);
         for workers in [1, 4, 8, 16] {
             let options = plugin(Some(workers)).task_pool_options;
             assert_eq!(options.compute.min_threads, workers);

@@ -16,47 +16,47 @@ mod debris_tuning;
 pub mod economy;
 #[path = "range_formation.rs"]
 mod formation;
+#[path = "range_granular.rs"]
+mod granular;
+#[cfg(test)]
+#[path = "range_granular_tests.rs"]
+mod granular_tests;
 #[path = "range_gun_commands.rs"]
 mod gun_commands;
 #[path = "range_inspection.rs"]
 pub mod inspection;
-#[path = "range_membership.rs"]
-mod membership;
-#[path = "range_granular.rs"]
-mod granular;
-#[path = "range_water.rs"]
-pub mod water;
-#[path="range_lab_tools.rs"]
-mod lab_tools;
-#[path="range_lab_collectors.rs"]
+#[path = "range_lab_collectors.rs"]
 mod lab_collectors;
-#[path="range_upheaval.rs"]
-mod upheaval;
-#[path="range_obstacles.rs"]
-mod obstacles;
 #[cfg(test)]
-#[path = "range_water_tests.rs"]
-mod water_tests;
-#[cfg(test)]
-#[path="range_lab_physics_tests.rs"]
+#[path = "range_lab_physics_tests.rs"]
 mod lab_physics_tests;
-#[cfg(test)]
-#[path = "range_granular_tests.rs"]
-mod granular_tests;
+#[path = "range_lab_tools.rs"]
+mod lab_tools;
 #[path = "range_material_tuning.rs"]
 mod material_tuning;
 #[path = "range_matter.rs"]
 pub mod matter;
+#[path = "range_membership.rs"]
+mod membership;
 #[path = "range_motion.rs"]
 pub mod motion;
 #[path = "range_motion_tuning.rs"]
 mod motion_tuning;
+#[path = "range_obstacles.rs"]
+mod obstacles;
 #[path = "range_placement.rs"]
 pub mod placement;
 #[path = "range_plate.rs"]
 mod plate;
 #[path = "range_read_model.rs"]
 pub mod read_model;
+#[path = "range_upheaval.rs"]
+mod upheaval;
+#[path = "range_water.rs"]
+pub mod water;
+#[cfg(test)]
+#[path = "range_water_tests.rs"]
+mod water_tests;
 #[path = "range_wave_cells.rs"]
 mod wave_cells;
 #[path = "range_wave_queue.rs"]
@@ -512,7 +512,12 @@ impl RangeUnit {
     pub(crate) fn apply_course(&mut self, c: &modding::range::RangeCourse) {
         let tracked = matches!(
             self.kind,
-            RangeUnitKind::Tank | RangeUnitKind::LightningTank | RangeUnitKind::EidolonTank | RangeUnitKind::Crawler | RangeUnitKind::Artillery | RangeUnitKind::ArtilleryT2
+            RangeUnitKind::Tank
+                | RangeUnitKind::LightningTank
+                | RangeUnitKind::EidolonTank
+                | RangeUnitKind::Crawler
+                | RangeUnitKind::Artillery
+                | RangeUnitKind::ArtilleryT2
         );
         self.motion.speed = if self.kind.emplacement() {
             0
@@ -565,8 +570,12 @@ impl RangeUnit {
         static SKOBA: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         let mut body = match kind {
             RangeUnitKind::Tank => TANK.get_or_init(voxel::unit::tank).clone(),
-            RangeUnitKind::LightningTank => LIGHTNING_TANK.get_or_init(voxel::unit::lightning_tank).clone(),
-            RangeUnitKind::EidolonTank => EIDOLON_TANK.get_or_init(voxel::unit::eidolon_tank).clone(),
+            RangeUnitKind::LightningTank => LIGHTNING_TANK
+                .get_or_init(voxel::unit::lightning_tank)
+                .clone(),
+            RangeUnitKind::EidolonTank => {
+                EIDOLON_TANK.get_or_init(voxel::unit::eidolon_tank).clone()
+            }
             RangeUnitKind::Crawler => CRAWLER.get_or_init(voxel::unit::crawler).clone(),
             RangeUnitKind::Artillery => ARTILLERY.get_or_init(voxel::unit::artillery).clone(),
             RangeUnitKind::ArtilleryT2 => {
@@ -587,10 +596,18 @@ impl RangeUnit {
             RangeUnitKind::Walker04 => WALKER04.get_or_init(voxel::unit::walker04).clone(),
             RangeUnitKind::RazlomT3 => RAZLOM.get_or_init(voxel::unit::razlom_t3).clone(),
             RangeUnitKind::GrebenStorage => GREBEN.get_or_init(voxel::unit::greben_storage).clone(),
-            RangeUnitKind::KilFactoryT1 => KIL_T1.get_or_init(|| voxel::unit::kil_factory(1)).clone(),
-            RangeUnitKind::KilFactoryT2 => KIL_T2.get_or_init(|| voxel::unit::kil_factory(2)).clone(),
-            RangeUnitKind::KilFactoryT3 => KIL_T3.get_or_init(|| voxel::unit::kil_factory(3)).clone(),
-            RangeUnitKind::KilFactoryT4 => KIL_T4.get_or_init(|| voxel::unit::kil_factory(4)).clone(),
+            RangeUnitKind::KilFactoryT1 => {
+                KIL_T1.get_or_init(|| voxel::unit::kil_factory(1)).clone()
+            }
+            RangeUnitKind::KilFactoryT2 => {
+                KIL_T2.get_or_init(|| voxel::unit::kil_factory(2)).clone()
+            }
+            RangeUnitKind::KilFactoryT3 => {
+                KIL_T3.get_or_init(|| voxel::unit::kil_factory(3)).clone()
+            }
+            RangeUnitKind::KilFactoryT4 => {
+                KIL_T4.get_or_init(|| voxel::unit::kil_factory(4)).clone()
+            }
             RangeUnitKind::SkobaDrone => SKOBA.get_or_init(voxel::unit::skoba).clone(),
         };
         static ARMOUR: OnceLock<modding::unit_armour::Armour> = OnceLock::new();
@@ -785,7 +802,11 @@ impl RangeUnit {
         if let Some(targets) = self.arm_targets {
             for (arm, target) in targets.into_iter().enumerate() {
                 let muzzle = 13 + arm * 4;
-                let from = self.seg_frames[muzzle].world([Fx::from_int(6), Fx::from_int(3), Fx::from_int(3)]);
+                let from = self.seg_frames[muzzle].world([
+                    Fx::from_int(6),
+                    Fx::from_int(3),
+                    Fx::from_int(3),
+                ]);
                 let delta = [
                     Fx::from_int(target[0]).sub(from.x),
                     Fx::from_int(target[1]).sub(from.y),
@@ -796,8 +817,8 @@ impl RangeUnit {
                 let pitch = fx::angle::atan2(delta[1].raw(), flat.raw());
                 for index in 10 + arm * 4..=muzzle {
                     let attach = self.body.segments[index].attach;
-                    let pivot = [attach.at.0, attach.at.1, attach.at.2]
-                        .map(|v| Fx::from_int(i32::from(v)));
+                    let pivot =
+                        [attach.at.0, attach.at.1, attach.at.2].map(|v| Fx::from_int(i32::from(v)));
                     self.seg_frames[index] = crate::damage::aimed_about(
                         &self.seg_frames[index],
                         pivot,
@@ -1094,7 +1115,9 @@ fn role_work(body: &UnitBody, role: usize, c: &ExplosionConfig) -> u32 {
     // remains unchanged, including the spider's reactor and weapon.
     let ablation = if c.soil_crater.is_some() {
         body.ablation_milli[role].min([2000, 1500, 1500, 2000, 1500][role])
-    } else { body.ablation_milli[role] };
+    } else {
+        body.ablation_milli[role]
+    };
     (u64::from(c.unit_ablation_resistance)
         * u64::from(c.unit_role_resistance_milli[role])
         * u64::from(ablation)
@@ -2144,7 +2167,10 @@ impl Generator for RangeTerrain {
                 .iter()
                 .rev()
                 .map(|&i| &r.blocks[i])
-                .find(|b| b.material != modding::water::MATERIAL && b.contains([x as i32, y as i32, z as i32]))
+                .find(|b| {
+                    b.material != modding::water::MATERIAL
+                        && b.contains([x as i32, y as i32, z as i32])
+                })
             {
                 return b.material;
             }
@@ -2329,6 +2355,7 @@ pub struct Explosion {
     pub at: [i32; 3],
     origin: [i32; 3],
     cell: i32,
+    offsets: Vec<[i32; 3]>,
     pub wave: Wave,
     pub queued: usize,
     // None preserves legacy/shared energy; Some reserves remaining body work.
@@ -2409,7 +2436,6 @@ impl Explosion {
     fn crater(&self) -> Option<[i32; 3]> {
         self.nuclear_ground.then_some(self.at)
     }
-
     /// Each unit's box at the burst's frozen poses: as
     /// `bounds_aimed` measures it, measured once per body size.
     fn unit_boxes(&mut self, units: &[RangeUnit]) -> Vec<([i32; 3], [i32; 3])> {
@@ -2491,6 +2517,7 @@ impl Explosion {
             boxes: Default::default(),
             origin,
             cell,
+            offsets: subcell_offsets(cell),
             wave: Wave::new(n, c.energy, vec![0; n * n * n]).expect("validated explosion"),
             queued: 0,
             body_energy_mj: None,
@@ -2688,347 +2715,354 @@ impl Explosion {
             self.prepare_soil_plane(w, c);
         }
         observe("physics_wave_read_ground_begin");
-        let offsets = subcell_offsets(self.cell);
-        // A step visits at most this many cells, in about this order: the
-        // billable prefix of the queue, except that a step with contacts
-        // to resume visits those still owing body work first
-        // (`prefer_body_contacts`), which only a hull near the field can.
-        // Read in another order, the cells are found all the same, by the
-        // index below; a cell not read is read when visited.
-        let visits = self.pending.len().min(budget);
-        let roster = &units[..self.roster(units.len())];
-        let boxes = self.unit_boxes(roster);
-        let near_boxes = self.near_boxes(&boxes);
-        let order: Vec<phys::blast::Hit> =
-            if self.contact_resumes.is_empty() || near_boxes.is_empty() {
-                self.pending.range(..visits).copied().collect()
+        let offsets = std::mem::take(&mut self.offsets);
+        let result = (|| {
+            // A step visits at most this many cells, in about this order: the
+            // billable prefix of the queue, except that a step with contacts
+            // to resume visits those still owing body work first
+            // (`prefer_body_contacts`), which only a hull near the field can.
+            // Read in another order, the cells are found all the same, by the
+            // index below; a cell not read is read when visited.
+            let visits = self.pending.len().min(budget);
+            let roster = &units[..self.roster(units.len())];
+            let boxes = self.unit_boxes(roster);
+            let near_boxes = self.near_boxes(&boxes);
+            let order: Vec<phys::blast::Hit> =
+                if self.contact_resumes.is_empty() || near_boxes.is_empty() {
+                    self.pending.range(..visits).copied().collect()
+                } else {
+                    let count = roster.len();
+                    let mut first: Vec<phys::blast::Hit> = Vec::new();
+                    let mut rest: Vec<phys::blast::Hit> = Vec::new();
+                    for (k, hit) in self.pending.iter().enumerate() {
+                        if self.owes_body_work(hit, k == 0, &near_boxes, count) {
+                            first.push(*hit);
+                        } else if rest.len() < visits {
+                            rest.push(*hit);
+                        }
+                    }
+                    first.extend(rest);
+                    first.truncate(visits);
+                    first
+                };
+            let mut left_mj = spent.map(|(_, _, energy)| self.ground_share(energy));
+            let mut prices = Prices::default();
+            let (origin, edge) = (self.origin, self.cell);
+            let crater = self.crater();
+            let soil_y = self.soil_y();
+            let scale = (edge as usize).pow(3).max(8);
+            // Inline masks (up to 4^3 voxels) retain the previous packing. Large
+            // cells price material preparation by physical volume, not grid cells.
+            let coarse = scale > u64::BITS as usize;
+            observe(if coarse {
+                "physics_wave_read_coarse_begin"
             } else {
-                let count = roster.len();
-                let mut first: Vec<phys::blast::Hit> = Vec::new();
-                let mut rest: Vec<phys::blast::Hit> = Vec::new();
-                for (k, hit) in self.pending.iter().enumerate() {
-                    if self.owes_body_work(hit, k == 0, &near_boxes, count) {
-                        first.push(*hit);
-                    } else if rest.len() < visits {
-                        rest.push(*hit);
-                    }
-                }
-                first.extend(rest);
-                first.truncate(visits);
-                first
-            };
-        let mut left_mj = spent.map(|(_, _, energy)| self.ground_share(energy));
-        let mut prices = Prices::default();
-        let (origin, edge) = (self.origin, self.cell);
-        let crater = self.crater();
-        let soil_y = self.soil_y();
-        let scale = (edge as usize).pow(3).max(8);
-        // Inline masks (up to 4^3 voxels) retain the previous packing. Large
-        // cells price material preparation by physical volume, not grid cells.
-        let coarse = scale > u64::BITS as usize;
-        observe(if coarse {
-            "physics_wave_read_coarse_begin"
-        } else {
-            "physics_wave_read_fine_begin"
-        });
-        let chunk = if POLICY == 0 || (POLICY == 1 && !coarse) {
-            READ_CHUNK
-        } else {
-            (READ_CHUNK * 8).div_ceil(scale).clamp(1, READ_CHUNK)
-        };
-        let batch_limit = if POLICY == 1 && coarse {
-            (READ_BATCH * 8 / scale).clamp(4, READ_BATCH)
-        } else {
-            READ_BATCH
-        };
-        // Keep a small physical batch parallel even when one coarse cell
-        // exceeds the logical budget. Four cells cap the read-ahead at 2 MiB
-        // of material for 64^3 cells, instead of serializing every spent cell.
-        let batch_min = if POLICY == 1 && coarse { 4 } else { chunk };
-        let mut estimated = if POLICY == 0 || (POLICY == 1 && !coarse) {
-            8
-        } else {
-            scale
-        };
-        // If every registered solid material is unaffordable at the read's
-        // conservative energy estimate, sufficiently strong contacts cost only
-        // their visit. Larger batches then contain no discarded material work.
-        let spent_bounds = if POLICY == 1 && crater.is_none() {
-            spent.and_then(|(m, c, _)| unpaid_bounds(m, c, w, self.domain()))
-        } else {
-            None
-        };
-        // The same pace as the visits: a cell and each voxel of matter in
-        // it, unless the cell is spent.
-        let mut left = budget;
-        let mut next = 0;
-        'read: while left > 0 && next < visits {
-            observe("physics_wave_read_proofs_begin");
-            if POLICY == 1 {
-                // Proven air or completely confined soil costs only its
-                // ordered visit. No material payload is needed for either.
-                while left > 0 && next < visits {
-                    let hit = order[next];
-                    let p = std::array::from_fn(|a| origin[a] + hit.cell[a] * edge);
-                    let confined = spent.is_some_and(|(_, c, _)| {
-                        confined_soil_box(w, p, edge, hit.pressure, soil_y, crater, c)
-                    });
-                    if !confined && !cell_is_air(w, p, edge) {
-                        break;
-                    }
-                    self.solid.push((
-                        hit.cell,
-                        contact_mask::Mask::default(),
-                        if confined {
-                            CONFINED_SOIL
-                        } else {
-                            self.solid_mats.len() as u32
-                        },
-                    ));
-                    next += 1;
-                    left -= 1;
-                    #[cfg(test)]
-                    {
-                        self.read_work.prepared_cells += 1;
-                        self.read_work.air_cells += usize::from(!confined);
-                        self.read_work.confined_cells += usize::from(confined);
-                    }
-                }
-                if left == 0 || next == visits {
-                    observe("physics_wave_read_proofs_end");
-                    break;
-                }
-            }
-            // Every cell costs at least its visit: no batch reaches past
-            // what is left to bill, and a batch read past the last billed
-            // cell is not kept (review 252: only the billable prefix).
-            let packed = (visits - next)
-                .min(left)
-                .min((left / 8).clamp(READ_CHUNK, READ_BATCH));
-            let mut unpriced_run = 0;
-            if let (Some((m, c, live)), Some(global)) = (spent, spent_bounds) {
-                for hit in &order[next..next + packed] {
-                    let p = std::array::from_fn(|a| origin[a] + hit.cell[a] * edge);
-                    let (price, work) =
-                        if self.ground_share(live) < global.0 && hit.pressure >= global.1 {
-                            global
-                        } else {
-                            unpaid_bounds(m, c, w, (p, p.map(|v| v + edge))).unwrap_or(global)
-                        };
-                    if self.ground_share(live) >= price
-                        || hit.pressure < work.max(terrain_work(1, p[1].max(0), self.soil_y(), c))
-                    {
-                        break;
-                    }
-                    unpriced_run += 1;
-                }
-            }
-            // An estimated budget can run out early on deferred claims.
-            // Only an already-unaffordable live share can omit materials;
-            // otherwise retain parallel material reads instead of falling
-            // back to thousands of serial reads during application.
-            let unpriced = unpriced_run > 0;
-            // An exhausted estimate may still have live money when earlier
-            // claims deferred. Only occupancy-only batches are cheap enough
-            // to grow to a proven run; material reads keep their physical bound.
-            let batch = if unpriced {
-                unpriced_run
-            } else {
-                (visits - next)
-                    .min(left)
-                    .min((left / estimated).clamp(batch_min, batch_limit))
-            };
-            let task_chunk = if unpriced { READ_CHUNK } else { chunk };
-            let hits = &order[next..next + batch];
-            next += batch;
-            observe("physics_wave_read_proofs_end");
-            observe("physics_wave_read_payload_begin");
-            observe(if unpriced {
-                "physics_wave_read_bits_begin"
-            } else {
-                "physics_wave_read_materials_begin"
+                "physics_wave_read_fine_begin"
             });
-            let parts: Vec<ContactReadPart> = hits
-                .par_chunks(task_chunk)
-                .map(|chunk| {
-                    let mut masks = Vec::with_capacity(chunk.len());
-                    let mut mats = Vec::new();
-                    let mut kinds = Vec::new();
-                    for hit in chunk {
-                        let start = mats.len();
-                        let terraced = if !unpriced {
-                            spent.and_then(|(_, c, _)| {
-                                crater.filter(|_| c.soil_depth_cost != 0).and_then(|at| {
-                                    let p = std::array::from_fn(|a| origin[a] + hit.cell[a] * edge);
-                                    read_terraced_soil(
-                                        w,
-                                        p,
-                                        edge,
-                                        hit.pressure,
-                                        soil_y,
-                                        at,
-                                        c,
-                                        &mut mats,
-                                    )
-                                })
-                            })
-                        } else {
-                            None
-                        };
-                        let direct_soil = terraced.is_some();
-                        let mut mask = if let Some(mask) = terraced {
-                            mask
-                        } else if unpriced {
-                            read_occupancy(w, origin, edge, hit.cell)
-                        } else {
-                            read_cell_into(w, origin, edge, hit.cell, &offsets, &mut mats)
-                        };
-                        if let Some((_, c, _)) =
-                            spent.filter(|_| crater.is_some() && !unpriced && !direct_soil)
+            let chunk = if POLICY == 0 || (POLICY == 1 && !coarse) {
+                READ_CHUNK
+            } else {
+                (READ_CHUNK * 8).div_ceil(scale).clamp(1, READ_CHUNK)
+            };
+            let batch_limit = if POLICY == 1 && coarse {
+                (READ_BATCH * 8 / scale).clamp(4, READ_BATCH)
+            } else {
+                READ_BATCH
+            };
+            // Keep a small physical batch parallel even when one coarse cell
+            // exceeds the logical budget. Four cells cap the read-ahead at 2 MiB
+            // of material for 64^3 cells, instead of serializing every spent cell.
+            let batch_min = if POLICY == 1 && coarse { 4 } else { chunk };
+            let mut estimated = if POLICY == 0 || (POLICY == 1 && !coarse) {
+                8
+            } else {
+                scale
+            };
+            // If every registered solid material is unaffordable at the read's
+            // conservative energy estimate, sufficiently strong contacts cost only
+            // their visit. Larger batches then contain no discarded material work.
+            let spent_bounds = if POLICY == 1 && crater.is_none() {
+                spent.and_then(|(m, c, _)| unpaid_bounds(m, c, w, self.domain()))
+            } else {
+                None
+            };
+            // The same pace as the visits: a cell and each voxel of matter in
+            // it, unless the cell is spent.
+            let mut left = budget;
+            let mut next = 0;
+            'read: while left > 0 && next < visits {
+                observe("physics_wave_read_proofs_begin");
+                if POLICY == 1 {
+                    // Proven air or completely confined soil costs only its
+                    // ordered visit. No material payload is needed for either.
+                    while left > 0 && next < visits {
+                        let hit = order[next];
+                        let p = std::array::from_fn(|a| origin[a] + hit.cell[a] * edge);
+                        let confined = spent.is_some_and(|(_, c, _)| {
+                            confined_soil_box(w, p, edge, hit.pressure, soil_y, crater, c)
+                        });
+                        if !confined && !cell_is_air(w, p, edge) {
+                            break;
+                        }
+                        self.solid.push((
+                            hit.cell,
+                            contact_mask::Mask::default(),
+                            if confined {
+                                CONFINED_SOIL
+                            } else {
+                                self.solid_mats.len() as u32
+                            },
+                        ));
+                        next += 1;
+                        left -= 1;
+                        #[cfg(test)]
                         {
-                            let p: [i32; 3] =
-                                std::array::from_fn(|a| origin[a] + hit.cell[a] * edge);
-                            // Horizontal work is invariant down a column.
-                            // Compute it edge^2 times instead of edge^3, then
-                            // perform only a multiply/add per soil voxel.
-                            let columns: Vec<_> = (0..edge)
-                                .flat_map(|z| (0..edge).map(move |x| [p[0] + x, 0, p[2] + z]))
-                                .map(|q| nuclear_soil_column(q, crater.unwrap(), c))
-                                .collect();
-                            let mut kept = contact_mask::Mask::for_voxels(scale);
-                            let mut write = start;
-                            for (rank, subcell) in mask.ranked_from(0) {
-                                let mat = mats[start + rank];
-                                let q: [i32; 3] =
-                                    std::array::from_fn(|a| p[a] + offsets[subcell][a]);
-                                let silent = matches!(mat, 1 | 7 | 8)
-                                    && soil_contact_pressure(
-                                        hit.pressure,
-                                        if c.soil_depth_cost == 0 {
-                                            0
-                                        } else if c.soil_crater.is_none() {
-                                            let o = offsets[subcell];
-                                            soil_confinement(q[1], soil_y, c).saturating_add(
-                                                columns[(o[2] * edge + o[0]) as usize].0,
-                                            )
-                                        } else {
-                                            let o = offsets[subcell];
-                                            nuclear_column_load(
-                                                columns[(o[2] * edge + o[0]) as usize],
-                                                q[1],
-                                                soil_y,
-                                            )
-                                        },
-                                        mat,
-                                        true,
-                                        c,
-                                    ) == 0;
-                                if !silent {
-                                    kept.insert(subcell);
-                                    mats[write] = mat;
-                                    write += 1;
+                            self.read_work.prepared_cells += 1;
+                            self.read_work.air_cells += usize::from(!confined);
+                            self.read_work.confined_cells += usize::from(confined);
+                        }
+                    }
+                    if left == 0 || next == visits {
+                        observe("physics_wave_read_proofs_end");
+                        break;
+                    }
+                }
+                // Every cell costs at least its visit: no batch reaches past
+                // what is left to bill, and a batch read past the last billed
+                // cell is not kept (review 252: only the billable prefix).
+                let packed = (visits - next)
+                    .min(left)
+                    .min((left / 8).clamp(READ_CHUNK, READ_BATCH));
+                let mut unpriced_run = 0;
+                if let (Some((m, c, live)), Some(global)) = (spent, spent_bounds) {
+                    for hit in &order[next..next + packed] {
+                        let p = std::array::from_fn(|a| origin[a] + hit.cell[a] * edge);
+                        let (price, work) =
+                            if self.ground_share(live) < global.0 && hit.pressure >= global.1 {
+                                global
+                            } else {
+                                unpaid_bounds(m, c, w, (p, p.map(|v| v + edge))).unwrap_or(global)
+                            };
+                        if self.ground_share(live) >= price
+                            || hit.pressure
+                                < work.max(terrain_work(1, p[1].max(0), self.soil_y(), c))
+                        {
+                            break;
+                        }
+                        unpriced_run += 1;
+                    }
+                }
+                // An estimated budget can run out early on deferred claims.
+                // Only an already-unaffordable live share can omit materials;
+                // otherwise retain parallel material reads instead of falling
+                // back to thousands of serial reads during application.
+                let unpriced = unpriced_run > 0;
+                // An exhausted estimate may still have live money when earlier
+                // claims deferred. Only occupancy-only batches are cheap enough
+                // to grow to a proven run; material reads keep their physical bound.
+                let batch = if unpriced {
+                    unpriced_run
+                } else {
+                    (visits - next)
+                        .min(left)
+                        .min((left / estimated).clamp(batch_min, batch_limit))
+                };
+                let task_chunk = if unpriced { READ_CHUNK } else { chunk };
+                let hits = &order[next..next + batch];
+                next += batch;
+                observe("physics_wave_read_proofs_end");
+                observe("physics_wave_read_payload_begin");
+                observe(if unpriced {
+                    "physics_wave_read_bits_begin"
+                } else {
+                    "physics_wave_read_materials_begin"
+                });
+                let parts: Vec<ContactReadPart> = hits
+                    .par_chunks(task_chunk)
+                    .map(|chunk| {
+                        let mut masks = Vec::with_capacity(chunk.len());
+                        let mut mats = Vec::new();
+                        let mut kinds = Vec::new();
+                        for hit in chunk {
+                            let start = mats.len();
+                            let terraced = if !unpriced {
+                                spent.and_then(|(_, c, _)| {
+                                    crater.filter(|_| c.soil_depth_cost != 0).and_then(|at| {
+                                        let p =
+                                            std::array::from_fn(|a| origin[a] + hit.cell[a] * edge);
+                                        read_terraced_soil(
+                                            w,
+                                            p,
+                                            edge,
+                                            hit.pressure,
+                                            soil_y,
+                                            at,
+                                            c,
+                                            &mut mats,
+                                        )
+                                    })
+                                })
+                            } else {
+                                None
+                            };
+                            let direct_soil = terraced.is_some();
+                            let mut mask = if let Some(mask) = terraced {
+                                mask
+                            } else if unpriced {
+                                read_occupancy(w, origin, edge, hit.cell)
+                            } else {
+                                read_cell_into(w, origin, edge, hit.cell, &offsets, &mut mats)
+                            };
+                            if let Some((_, c, _)) =
+                                spent.filter(|_| crater.is_some() && !unpriced && !direct_soil)
+                            {
+                                let p: [i32; 3] =
+                                    std::array::from_fn(|a| origin[a] + hit.cell[a] * edge);
+                                // Horizontal work is invariant down a column.
+                                // Compute it edge^2 times instead of edge^3, then
+                                // perform only a multiply/add per soil voxel.
+                                let columns: Vec<_> = (0..edge)
+                                    .flat_map(|z| (0..edge).map(move |x| [p[0] + x, 0, p[2] + z]))
+                                    .map(|q| nuclear_soil_column(q, crater.unwrap(), c))
+                                    .collect();
+                                let mut kept = contact_mask::Mask::for_voxels(scale);
+                                let mut write = start;
+                                for (rank, subcell) in mask.ranked_from(0) {
+                                    let mat = mats[start + rank];
+                                    let q: [i32; 3] =
+                                        std::array::from_fn(|a| p[a] + offsets[subcell][a]);
+                                    let silent = matches!(mat, 1 | 7 | 8)
+                                        && soil_contact_pressure(
+                                            hit.pressure,
+                                            if c.soil_depth_cost == 0 {
+                                                0
+                                            } else if c.soil_crater.is_none() {
+                                                let o = offsets[subcell];
+                                                soil_confinement(q[1], soil_y, c).saturating_add(
+                                                    columns[(o[2] * edge + o[0]) as usize].0,
+                                                )
+                                            } else {
+                                                let o = offsets[subcell];
+                                                nuclear_column_load(
+                                                    columns[(o[2] * edge + o[0]) as usize],
+                                                    q[1],
+                                                    soil_y,
+                                                )
+                                            },
+                                            mat,
+                                            true,
+                                            c,
+                                        ) == 0;
+                                    if !silent {
+                                        kept.insert(subcell);
+                                        mats[write] = mat;
+                                        write += 1;
+                                    }
+                                }
+                                mats.truncate(write);
+                                mask = kept;
+                            }
+                            masks.push(mask);
+                            if coarse && !unpriced && spent.is_some() {
+                                kinds.push(material_kinds(&mats[start..]));
+                            }
+                        }
+                        ContactReadPart { masks, mats, kinds }
+                    })
+                    .collect();
+                observe("physics_wave_read_payload_end");
+                observe(if unpriced {
+                    "physics_wave_read_bits_end"
+                } else {
+                    "physics_wave_read_materials_end"
+                });
+                #[cfg(test)]
+                {
+                    self.read_work.batches += 1;
+                    self.read_work.prepared_cells += hits.len();
+                    self.read_work.prepared_solids +=
+                        parts.iter().map(|p| p.mats.len()).sum::<usize>();
+                    self.read_work.peak_batch = self.read_work.peak_batch.max(hits.len());
+                }
+                let before = left;
+                let mut k = 0;
+                observe("physics_wave_read_pack_begin");
+                for ContactReadPart { masks, mats, kinds } in parts {
+                    let mut start = self.solid_mats.len();
+                    self.solid_mats.extend_from_slice(&mats);
+                    for (local, mask) in masks.into_iter().enumerate() {
+                        if left == 0 {
+                            self.solid_mats.truncate(start);
+                            observe("physics_wave_read_pack_end");
+                            break 'read;
+                        }
+                        let hit = hits[k];
+                        k += 1;
+                        let count = mask.count_ones() as usize;
+                        if unpriced {
+                            // Store occupancy only, and recheck the live proof at use.
+                            self.solid.push((hit.cell, mask, UNPRICED));
+                            left -= 1;
+                            continue;
+                        }
+                        self.solid.push((hit.cell, mask, start as u32));
+                        let cell_mats = &self.solid_mats[start..start + count];
+                        start += count;
+                        let mut worked = count;
+                        if let (Some((m, c, _)), Some(left_mj)) = (spent, left_mj.as_mut()) {
+                            if crater.is_none()
+                                && spent_cell(
+                                    m,
+                                    c,
+                                    hit.pressure,
+                                    kinds.get(local).map_or(cell_mats, Vec::as_slice),
+                                    *left_mj,
+                                    [(origin[1] + hit.cell[1] * edge).max(0), self.soil_y()],
+                                    origin[1] + (hit.cell[1] + 1) * edge - 1,
+                                )
+                            {
+                                worked = 0;
+                            } else if c.material_energy_j > 0 {
+                                // Spend as the claims would, so that a wave whose
+                                // energy runs out within the step is read ahead
+                                // over the spent cells it walks after that. The
+                                // estimate pays for claims that will wait too,
+                                // so it runs out no later than the wave does.
+                                for &mat in cell_mats {
+                                    let price = prices.get(m, c, mat);
+                                    if hit.pressure >= material_work(mat, c) && price <= *left_mj {
+                                        *left_mj -= price;
+                                    }
                                 }
                             }
-                            mats.truncate(write);
-                            mask = kept;
                         }
-                        masks.push(mask);
-                        if coarse && !unpriced && spent.is_some() {
-                            kinds.push(material_kinds(&mats[start..]));
-                        }
+                        left -= left.min(1 + worked);
                     }
-                    ContactReadPart { masks, mats, kinds }
-                })
-                .collect();
-            observe("physics_wave_read_payload_end");
-            observe(if unpriced {
-                "physics_wave_read_bits_end"
-            } else {
-                "physics_wave_read_materials_end"
-            });
+                }
+                if POLICY == 2 {
+                    estimated = (before - left).div_ceil(k).max(8);
+                }
+                observe("physics_wave_read_pack_end");
+            }
             #[cfg(test)]
             {
-                self.read_work.batches += 1;
-                self.read_work.prepared_cells += hits.len();
-                self.read_work.prepared_solids += parts.iter().map(|p| p.mats.len()).sum::<usize>();
-                self.read_work.peak_batch = self.read_work.peak_batch.max(hits.len());
+                self.read_work.retained_cells = self.solid.len();
+                self.read_work.retained_solids = self.solid_mats.len();
             }
-            let before = left;
-            let mut k = 0;
-            observe("physics_wave_read_pack_begin");
-            for ContactReadPart { masks, mats, kinds } in parts {
-                let mut start = self.solid_mats.len();
-                self.solid_mats.extend_from_slice(&mats);
-                for (local, mask) in masks.into_iter().enumerate() {
-                    if left == 0 {
-                        self.solid_mats.truncate(start);
-                        observe("physics_wave_read_pack_end");
-                        break 'read;
-                    }
-                    let hit = hits[k];
-                    k += 1;
-                    let count = mask.count_ones() as usize;
-                    if unpriced {
-                        // Store occupancy only, and recheck the live proof at use.
-                        self.solid.push((hit.cell, mask, UNPRICED));
-                        left -= 1;
-                        continue;
-                    }
-                    self.solid.push((hit.cell, mask, start as u32));
-                    let cell_mats = &self.solid_mats[start..start + count];
-                    start += count;
-                    let mut worked = count;
-                    if let (Some((m, c, _)), Some(left_mj)) = (spent, left_mj.as_mut()) {
-                        if crater.is_none()
-                            && spent_cell(
-                                m,
-                                c,
-                                hit.pressure,
-                                kinds.get(local).map_or(cell_mats, Vec::as_slice),
-                                *left_mj,
-                                [(origin[1] + hit.cell[1] * edge).max(0), self.soil_y()],
-                                origin[1] + (hit.cell[1] + 1) * edge - 1,
-                            )
-                        {
-                            worked = 0;
-                        } else if c.material_energy_j > 0 {
-                            // Spend as the claims would, so that a wave whose
-                            // energy runs out within the step is read ahead
-                            // over the spent cells it walks after that. The
-                            // estimate pays for claims that will wait too,
-                            // so it runs out no later than the wave does.
-                            for &mat in cell_mats {
-                                let price = prices.get(m, c, mat);
-                                if hit.pressure >= material_work(mat, c) && price <= *left_mj {
-                                    *left_mj -= price;
-                                }
-                            }
-                        }
-                    }
-                    left -= left.min(1 + worked);
-                }
+            observe(if coarse {
+                "physics_wave_read_coarse_end"
+            } else {
+                "physics_wave_read_fine_end"
+            });
+            observe("physics_wave_read_ground_end");
+            if !self.point_contacts {
+                observe("physics_wave_body_map_begin");
+                self.read_bodies(units);
+                observe("physics_wave_body_map_end");
             }
-            if POLICY == 2 {
-                estimated = (before - left).div_ceil(k).max(8);
-            }
-            observe("physics_wave_read_pack_end");
-        }
-        #[cfg(test)]
-        {
-            self.read_work.retained_cells = self.solid.len();
-            self.read_work.retained_solids = self.solid_mats.len();
-        }
-        observe(if coarse {
-            "physics_wave_read_coarse_end"
-        } else {
-            "physics_wave_read_fine_end"
-        });
-        observe("physics_wave_read_ground_end");
-        if !self.point_contacts {
-            observe("physics_wave_body_map_begin");
-            self.read_bodies(units);
-            observe("physics_wave_body_map_end");
-        }
+        })();
+        self.offsets = offsets;
+        result
     }
     /// The body cells each cell read ahead owns of every hull whose frozen
     /// box meets it, as the contact step asks for them: a function of the
@@ -3442,142 +3476,190 @@ impl Explosion {
             })
             .collect();
         let mut here: Vec<usize> = Vec::new();
-        let offsets = subcell_offsets(self.cell);
-        let mut contacts = Vec::new();
-        let unpaid_bounds = matter
-            .as_deref()
-            .and_then(|m| unpaid_bounds(m, c, w, self.domain()));
-        'contact: while visits > 0 && work > 0 {
-            let Some(hit) = self.pending.front().copied() else {
-                break;
-            };
-            visits -= 1;
-            work -= 1;
-            let p = std::array::from_fn::<_, 3, _>(|a| self.origin[a] + hit.cell[a] * self.cell);
-            here.clear();
-            here.extend(near.iter().copied().filter(|&i| {
-                let (lo, hi) = boxes[i];
-                (0..3).all(|a| p[a] <= hi[a] && p[a] + self.cell > lo[a])
-            }));
-            // The first actor at or after `k` whose box meets this cell;
-            // the ground, numbered after every body, when none does.
-            let ground = units.len();
-            let next_actor = |k: usize| here.iter().copied().find(|&i| i >= k).unwrap_or(ground);
-            while self.contact_cursor < edge.pow(3) * actors {
-                let subcell = self.contact_cursor / actors;
-                let actor = if self.body_cursor > 0 {
-                    // A segment may have detached during pool pressure. Finish
-                    // its stable cursor before using the live broad phase.
-                    self.contact_cursor % actors
-                } else {
-                    next_actor(self.contact_cursor % actors)
+        let offsets = std::mem::take(&mut self.offsets);
+        let result = (|| {
+            let mut contacts = Vec::new();
+            let unpaid_bounds = matter
+                .as_deref()
+                .and_then(|m| unpaid_bounds(m, c, w, self.domain()));
+            'contact: while visits > 0 && work > 0 {
+                let Some(hit) = self.pending.front().copied() else {
+                    break;
                 };
-                self.contact_cursor = subcell * actors + actor;
-                let o = offsets[subcell];
-                let q = [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
-                // Advance only after successful application or an unaffordable
-                // hit. Pool pressure retries this exact actor on the next tick.
-                if let Some(u) = units.get_mut(actor) {
-                    // New bursts visit local voxel centres once per coarse
-                    // contact, not world-grid samples once per subcell.
-                    if !self.point_contacts && subcell != 0 {
-                        self.contact_cursor += 1;
-                        continue;
-                    }
-                    let (lo, hi) = boxes[actor];
-                    if self.point_contacts && (0..3).any(|a| q[a] < lo[a] || q[a] > hi[a]) {
-                        self.contact_cursor += 1;
-                        continue;
-                    }
-                    contacts.clear();
-                    if queries[actor].is_none() {
-                        queries[actor] = Some(HitFrames::new(
-                            u,
-                            self.poses[actor],
-                            &self.seg_poses[actor],
-                            self.turret_deltas[actor],
-                            self.turret_pitches[actor],
-                        ));
-                        if let Some(m) = matter.as_deref_mut() {
-                            m.admission.wave_geometry[1] += 1;
-                        }
-                    }
-                    let query = queries[actor].as_ref().expect("prepared hit frames");
-                    // The cells read ahead, or else asked now.
-                    let read = (!self.point_contacts)
-                        .then(|| {
-                            let map = self.body_maps.get(actor)?.as_ref()?;
-                            same_sizes(u, &map.sizes).then(|| {
-                                let n = self.wave.size();
-                                let c = hit.cell.map(|v| v as usize);
-                                map.range(((c[2] * n + c[1]) * n + c[0]) as u32)
-                            })
-                        })
-                        .flatten();
-                    if self.point_contacts {
-                        contacts.extend(query.hit(u, q));
-                    } else if read.is_none() {
-                        query.wave_cells(
-                            u,
-                            &self.poses[actor],
-                            &self.seg_poses[actor],
-                            p,
-                            self.cell,
-                            &mut contacts,
-                        );
-                    }
-                    let listed = read.map_or(contacts.len(), |(_, len)| len);
-                    while self.body_cursor < listed {
-                        let (part, cell) = match read {
-                            Some((start, _)) => self.body_maps[actor]
-                                .as_ref()
-                                .expect("body map read")
-                                .contact(start + self.body_cursor),
-                            None => contacts[self.body_cursor],
-                        };
-                        let solid = if part == 0 {
-                            u.body.vol.get(cell[0], cell[1], cell[2])
-                        } else {
-                            !u.seg_gone[part - 1]
-                                && u.body.segments[part - 1]
-                                    .body
-                                    .vol
-                                    .get(cell[0], cell[1], cell[2])
-                        };
-                        if !solid {
-                            self.body_cursor += 1;
+                visits -= 1;
+                work -= 1;
+                let p =
+                    std::array::from_fn::<_, 3, _>(|a| self.origin[a] + hit.cell[a] * self.cell);
+                here.clear();
+                here.extend(near.iter().copied().filter(|&i| {
+                    let (lo, hi) = boxes[i];
+                    (0..3).all(|a| p[a] <= hi[a] && p[a] + self.cell > lo[a])
+                }));
+                // The first actor at or after `k` whose box meets this cell;
+                // the ground, numbered after every body, when none does.
+                let ground = units.len();
+                let next_actor =
+                    |k: usize| here.iter().copied().find(|&i| i >= k).unwrap_or(ground);
+                while self.contact_cursor < edge.pow(3) * actors {
+                    let subcell = self.contact_cursor / actors;
+                    let actor = if self.body_cursor > 0 {
+                        // A segment may have detached during pool pressure. Finish
+                        // its stable cursor before using the live broad phase.
+                        self.contact_cursor % actors
+                    } else {
+                        next_actor(self.contact_cursor % actors)
+                    };
+                    self.contact_cursor = subcell * actors + actor;
+                    let o = offsets[subcell];
+                    let q = [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
+                    // Advance only after successful application or an unaffordable
+                    // hit. Pool pressure retries this exact actor on the next tick.
+                    if let Some(u) = units.get_mut(actor) {
+                        // New bursts visit local voxel centres once per coarse
+                        // contact, not world-grid samples once per subcell.
+                        if !self.point_contacts && subcell != 0 {
+                            self.contact_cursor += 1;
                             continue;
                         }
-                        match part {
-                            0 => {
-                                // A cell already cut loose leaves with its whole
-                                // section; the wave neither ablates it nor waits
-                                // for it. Every other cell takes the impulse as
-                                // it arrives.
-                                let leaving = u
-                                    .section
+                        let (lo, hi) = boxes[actor];
+                        if self.point_contacts && (0..3).any(|a| q[a] < lo[a] || q[a] > hi[a]) {
+                            self.contact_cursor += 1;
+                            continue;
+                        }
+                        contacts.clear();
+                        if queries[actor].is_none() {
+                            queries[actor] = Some(HitFrames::new(
+                                u,
+                                self.poses[actor],
+                                &self.seg_poses[actor],
+                                self.turret_deltas[actor],
+                                self.turret_pitches[actor],
+                            ));
+                            if let Some(m) = matter.as_deref_mut() {
+                                m.admission.wave_geometry[1] += 1;
+                            }
+                        }
+                        let query = queries[actor].as_ref().expect("prepared hit frames");
+                        // The cells read ahead, or else asked now.
+                        let read = (!self.point_contacts)
+                            .then(|| {
+                                let map = self.body_maps.get(actor)?.as_ref()?;
+                                same_sizes(u, &map.sizes).then(|| {
+                                    let n = self.wave.size();
+                                    let c = hit.cell.map(|v| v as usize);
+                                    map.range(((c[2] * n + c[1]) * n + c[0]) as u32)
+                                })
+                            })
+                            .flatten();
+                        if self.point_contacts {
+                            contacts.extend(query.hit(u, q));
+                        } else if read.is_none() {
+                            query.wave_cells(
+                                u,
+                                &self.poses[actor],
+                                &self.seg_poses[actor],
+                                p,
+                                self.cell,
+                                &mut contacts,
+                            );
+                        }
+                        let listed = read.map_or(contacts.len(), |(_, len)| len);
+                        while self.body_cursor < listed {
+                            let (part, cell) = match read {
+                                Some((start, _)) => self.body_maps[actor]
                                     .as_ref()
-                                    .is_some_and(|j| j.holds(cell.map(|v| v as u8)));
-                                if !leaving {
-                                    let need = unit_work(&u.body, cell, c).saturating_sub(
-                                        u.dents.get(&cell.map(|v| v as u8)).copied().unwrap_or(0),
-                                    );
+                                    .expect("body map read")
+                                    .contact(start + self.body_cursor),
+                                None => contacts[self.body_cursor],
+                            };
+                            let solid = if part == 0 {
+                                u.body.vol.get(cell[0], cell[1], cell[2])
+                            } else {
+                                !u.seg_gone[part - 1]
+                                    && u.body.segments[part - 1]
+                                        .body
+                                        .vol
+                                        .get(cell[0], cell[1], cell[2])
+                            };
+                            if !solid {
+                                self.body_cursor += 1;
+                                continue;
+                            }
+                            match part {
+                                0 => {
+                                    // A cell already cut loose leaves with its whole
+                                    // section; the wave neither ablates it nor waits
+                                    // for it. Every other cell takes the impulse as
+                                    // it arrives.
+                                    let leaving = u
+                                        .section
+                                        .as_ref()
+                                        .is_some_and(|j| j.holds(cell.map(|v| v as u8)));
+                                    if !leaving {
+                                        let need = unit_work(&u.body, cell, c).saturating_sub(
+                                            u.dents
+                                                .get(&cell.map(|v| v as u8))
+                                                .copied()
+                                                .unwrap_or(0),
+                                        );
+                                        let mut apply = true;
+                                        if hit.pressure >= need && hit.pressure > 0 {
+                                            if let Some(m) = matter
+                                                .as_deref_mut()
+                                                .filter(|_| c.material_energy_j > 0)
+                                            {
+                                                let frame =
+                                                    if cell[1] >= usize::from(u.body.turret_y) {
+                                                        query.turret
+                                                    } else {
+                                                        self.poses[actor]
+                                                    };
+                                                let at = self.at;
+                                                match self.claim_energy(m, true, |m| {
+                                                    m.body(actor, u, cell, &frame, at)
+                                                }) {
+                                                    matter::ClaimResult::Applied => u.detached += 1,
+                                                    matter::ClaimResult::Unaffordable
+                                                    | matter::ClaimResult::Indestructible => {
+                                                        apply = false
+                                                    }
+                                                    matter::ClaimResult::Deferred => {
+                                                        if !FAIR {
+                                                            return;
+                                                        }
+                                                        self.yield_contact();
+                                                        continue 'contact;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if apply {
+                                            u.receive_cell(cell, hit.pressure, c);
+                                            u.absorbed = u.absorbed.saturating_add(hit.pressure);
+                                        }
+                                    }
+                                }
+                                part => {
+                                    if u.section_holds(part, cell.map(|v| v as u8)) {
+                                        self.body_cursor += 1;
+                                        continue;
+                                    }
+                                    // A segment takes the impulse in its own frame.
+                                    let seg = part - 1;
+                                    let need = unit_work(&u.body.segments[seg].body, cell, c)
+                                        .saturating_sub(u.seg_dent(seg, cell));
                                     let mut apply = true;
                                     if hit.pressure >= need && hit.pressure > 0 {
                                         if let Some(m) = matter
                                             .as_deref_mut()
                                             .filter(|_| c.material_energy_j > 0)
                                         {
-                                            let frame = if cell[1] >= usize::from(u.body.turret_y) {
-                                                query.turret
-                                            } else {
-                                                self.poses[actor]
-                                            };
                                             let at = self.at;
+                                            let frame = self.seg_poses[actor][seg];
                                             match self.claim_energy(m, true, |m| {
-                                                m.body(actor, u, cell, &frame, at)
+                                                m.body_segment(actor, u, seg, cell, &frame, at)
                                             }) {
-                                                matter::ClaimResult::Applied => u.detached += 1,
+                                                matter::ClaimResult::Applied => u.seg_detached += 1,
                                                 matter::ClaimResult::Unaffordable
                                                 | matter::ClaimResult::Indestructible => {
                                                     apply = false
@@ -3593,136 +3675,107 @@ impl Explosion {
                                         }
                                     }
                                     if apply {
-                                        u.receive_cell(cell, hit.pressure, c);
+                                        u.receive_seg_cell(seg, cell, hit.pressure, c);
                                         u.absorbed = u.absorbed.saturating_add(hit.pressure);
                                     }
                                 }
                             }
-                            part => {
-                                if u.section_holds(part, cell.map(|v| v as u8)) {
-                                    self.body_cursor += 1;
-                                    continue;
-                                }
-                                // A segment takes the impulse in its own frame.
-                                let seg = part - 1;
-                                let need = unit_work(&u.body.segments[seg].body, cell, c)
-                                    .saturating_sub(u.seg_dent(seg, cell));
-                                let mut apply = true;
-                                if hit.pressure >= need && hit.pressure > 0 {
-                                    if let Some(m) =
-                                        matter.as_deref_mut().filter(|_| c.material_energy_j > 0)
-                                    {
-                                        let at = self.at;
-                                        let frame = self.seg_poses[actor][seg];
-                                        match self.claim_energy(m, true, |m| {
-                                            m.body_segment(actor, u, seg, cell, &frame, at)
-                                        }) {
-                                            matter::ClaimResult::Applied => u.seg_detached += 1,
-                                            matter::ClaimResult::Unaffordable
-                                            | matter::ClaimResult::Indestructible => apply = false,
-                                            matter::ClaimResult::Deferred => {
-                                                if !FAIR {
-                                                    return;
-                                                }
-                                                self.yield_contact();
-                                                continue 'contact;
-                                            }
-                                        }
-                                    }
-                                }
-                                if apply {
-                                    u.receive_seg_cell(seg, cell, hit.pressure, c);
-                                    u.absorbed = u.absorbed.saturating_add(hit.pressure);
-                                }
-                            }
+                            self.body_cursor += 1;
                         }
-                        self.body_cursor += 1;
-                    }
-                    self.body_cursor = 0;
-                } else if !self.point_contacts {
-                    // Bodies meet a cell only in its first subcell: what is
-                    // left of it is ground alone, subcell by subcell in the
-                    // same order, without walking the bodies again; and an
-                    // empty cell has none (ADR-681).
-                    let (mask, start) = self.solid_cell(
-                        w,
-                        hit.cell,
-                        &offsets,
-                        matter.as_deref().is_some_and(|m| {
-                            self.unpaid_contact(w, c, m, p, hit.pressure, unpaid_bounds)
-                        }),
-                        c.soil_depth_cost != 0
-                            && hit.pressure
-                                <= soil_box_confinement(
-                                    p,
-                                    self.cell,
-                                    self.soil_y(),
-                                    self.crater(),
-                                    c,
-                                ),
-                    );
-                    if self.ground_silent(c, hit.pressure, &mask, start, p) {
-                        self.finish_contact();
-                        continue 'contact;
-                    }
-                    let spent =
-                        self.ground_spent(matter.as_deref(), c, hit.pressure, &mask, start, p[1]);
-                    if spent {
-                        if let Some(m) = matter.as_deref_mut() {
-                            m.count_unpaid_mask(w, p, self.cell, &mask, subcell);
-                        }
-                        self.finish_contact();
-                        continue 'contact;
-                    }
-                    for (rank, s) in mask.ranked_from(subcell) {
-                        if self.nuclear_ground && work == 0 {
-                            self.contact_cursor = s * actors + units.len();
-                            return;
-                        }
-                        let m = self.solid_mats[start + rank];
-                        self.contact_cursor = s * actors + units.len();
-                        let o = offsets[s];
-                        let q = [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
-                        if !self.ground_contact_known(
+                        self.body_cursor = 0;
+                    } else if !self.point_contacts {
+                        // Bodies meet a cell only in its first subcell: what is
+                        // left of it is ground alone, subcell by subcell in the
+                        // same order, without walking the bodies again; and an
+                        // empty cell has none (ADR-681).
+                        let (mask, start) = self.solid_cell(
                             w,
-                            q,
-                            m,
-                            hit.pressure,
-                            dents,
-                            changed,
-                            c,
-                            matter.as_deref_mut(),
-                        ) {
-                            if !FAIR {
-                                return;
-                            }
-                            self.yield_contact();
+                            hit.cell,
+                            &offsets,
+                            matter.as_deref().is_some_and(|m| {
+                                self.unpaid_contact(w, c, m, p, hit.pressure, unpaid_bounds)
+                            }),
+                            c.soil_depth_cost != 0
+                                && hit.pressure
+                                    <= soil_box_confinement(
+                                        p,
+                                        self.cell,
+                                        self.soil_y(),
+                                        self.crater(),
+                                        c,
+                                    ),
+                        );
+                        if self.ground_silent(c, hit.pressure, &mask, start, p) {
+                            self.finish_contact();
                             continue 'contact;
                         }
-                        // A voxel of matter worked pays the pace.
-                        work = work.saturating_sub(1);
+                        let spent = self.ground_spent(
+                            matter.as_deref(),
+                            c,
+                            hit.pressure,
+                            &mask,
+                            start,
+                            p[1],
+                        );
+                        if spent {
+                            if let Some(m) = matter.as_deref_mut() {
+                                m.count_unpaid_mask(w, p, self.cell, &mask, subcell);
+                            }
+                            self.finish_contact();
+                            continue 'contact;
+                        }
+                        for (rank, s) in mask.ranked_from(subcell) {
+                            if self.nuclear_ground && work == 0 {
+                                self.contact_cursor = s * actors + units.len();
+                                return;
+                            }
+                            let m = self.solid_mats[start + rank];
+                            self.contact_cursor = s * actors + units.len();
+                            let o = offsets[s];
+                            let q = [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
+                            if !self.ground_contact_known(
+                                w,
+                                q,
+                                m,
+                                hit.pressure,
+                                dents,
+                                changed,
+                                c,
+                                matter.as_deref_mut(),
+                            ) {
+                                if !FAIR {
+                                    return;
+                                }
+                                self.yield_contact();
+                                continue 'contact;
+                            }
+                            // A voxel of matter worked pays the pace.
+                            work = work.saturating_sub(1);
+                        }
+                        self.contact_cursor = edge.pow(3) * actors;
+                        break;
+                    } else if !self.ground_contact(
+                        w,
+                        q,
+                        hit.pressure,
+                        dents,
+                        changed,
+                        c,
+                        matter.as_deref_mut(),
+                    ) {
+                        if !FAIR {
+                            return;
+                        }
+                        self.yield_contact();
+                        continue 'contact;
                     }
-                    self.contact_cursor = edge.pow(3) * actors;
-                    break;
-                } else if !self.ground_contact(
-                    w,
-                    q,
-                    hit.pressure,
-                    dents,
-                    changed,
-                    c,
-                    matter.as_deref_mut(),
-                ) {
-                    if !FAIR {
-                        return;
-                    }
-                    self.yield_contact();
-                    continue 'contact;
+                    self.contact_cursor += 1;
                 }
-                self.contact_cursor += 1;
+                self.finish_contact();
             }
-            self.finish_contact();
-        }
+        })();
+        self.offsets = offsets;
+        result
     }
     /// Local-cell waves visit each body's voxels only in the first subcell.
     /// Legacy point-sampled waves may still reach a body in later subcells:
@@ -3765,79 +3818,84 @@ impl Explosion {
             m.admission.wave_ground_only[0] += 1;
         }
         let actors = count + 1;
-        let offsets = subcell_offsets(self.cell);
-        let unpaid_bounds = matter
-            .as_deref()
-            .and_then(|m| unpaid_bounds(m, c, w, self.domain()));
-        'contact: while visits > 0 && work > 0 {
-            let Some(hit) = self.pending.front().copied() else {
-                break;
-            };
-            visits -= 1;
-            work -= 1;
-            if let Some(m) = matter.as_deref_mut() {
-                m.admission.wave_ground_only[1] += 1;
-            }
-            let p: [i32; 3] = std::array::from_fn(|a| self.origin[a] + hit.cell[a] * self.cell);
-            let from = self.contact_cursor / actors;
-            // Only ground is left of this contact: its cells with matter,
-            // read ahead, or read now.
-            let (mask, start) = self.solid_cell(
-                w,
-                hit.cell,
-                &offsets,
-                matter
-                    .as_deref()
-                    .is_some_and(|m| self.unpaid_contact(w, c, m, p, hit.pressure, unpaid_bounds)),
-                c.soil_depth_cost != 0
-                    && hit.pressure
-                        <= soil_box_confinement(p, self.cell, self.soil_y(), self.crater(), c),
-            );
-            if self.ground_silent(c, hit.pressure, &mask, start, p) {
-                self.finish_contact();
-                continue 'contact;
-            }
-            let spent = self.ground_spent(matter.as_deref(), c, hit.pressure, &mask, start, p[1]);
-            if spent {
+        let offsets = std::mem::take(&mut self.offsets);
+        let result = (|| {
+            let unpaid_bounds = matter
+                .as_deref()
+                .and_then(|m| unpaid_bounds(m, c, w, self.domain()));
+            'contact: while visits > 0 && work > 0 {
+                let Some(hit) = self.pending.front().copied() else {
+                    break;
+                };
+                visits -= 1;
+                work -= 1;
                 if let Some(m) = matter.as_deref_mut() {
-                    m.count_unpaid_mask(w, p, self.cell, &mask, from);
+                    m.admission.wave_ground_only[1] += 1;
                 }
-                self.finish_contact();
-                continue 'contact;
-            }
-            for (rank, subcell) in mask.ranked_from(from) {
-                if self.nuclear_ground && work == 0 {
-                    self.contact_cursor = subcell * actors + count;
-                    return;
-                }
-                let m = self.solid_mats[start + rank];
-                // No body can remain in this subcell. Preserve the canonical
-                // ground cursor before attempting a possibly deferred claim.
-                self.contact_cursor = subcell * actors + count;
-                let o = offsets[subcell];
-                let q = [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
-                if !self.ground_contact_known(
+                let p: [i32; 3] = std::array::from_fn(|a| self.origin[a] + hit.cell[a] * self.cell);
+                let from = self.contact_cursor / actors;
+                // Only ground is left of this contact: its cells with matter,
+                // read ahead, or read now.
+                let (mask, start) = self.solid_cell(
                     w,
-                    q,
-                    m,
-                    hit.pressure,
-                    dents,
-                    changed,
-                    c,
-                    matter.as_deref_mut(),
-                ) {
-                    if !FAIR {
-                        return;
-                    }
-                    self.yield_contact();
+                    hit.cell,
+                    &offsets,
+                    matter.as_deref().is_some_and(|m| {
+                        self.unpaid_contact(w, c, m, p, hit.pressure, unpaid_bounds)
+                    }),
+                    c.soil_depth_cost != 0
+                        && hit.pressure
+                            <= soil_box_confinement(p, self.cell, self.soil_y(), self.crater(), c),
+                );
+                if self.ground_silent(c, hit.pressure, &mask, start, p) {
+                    self.finish_contact();
                     continue 'contact;
                 }
-                // A voxel of matter worked pays the pace.
-                work = work.saturating_sub(1);
-                self.contact_cursor += 1;
+                let spent =
+                    self.ground_spent(matter.as_deref(), c, hit.pressure, &mask, start, p[1]);
+                if spent {
+                    if let Some(m) = matter.as_deref_mut() {
+                        m.count_unpaid_mask(w, p, self.cell, &mask, from);
+                    }
+                    self.finish_contact();
+                    continue 'contact;
+                }
+                for (rank, subcell) in mask.ranked_from(from) {
+                    if self.nuclear_ground && work == 0 {
+                        self.contact_cursor = subcell * actors + count;
+                        return;
+                    }
+                    let m = self.solid_mats[start + rank];
+                    // No body can remain in this subcell. Preserve the canonical
+                    // ground cursor before attempting a possibly deferred claim.
+                    self.contact_cursor = subcell * actors + count;
+                    let o = offsets[subcell];
+                    let q = [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
+                    if !self.ground_contact_known(
+                        w,
+                        q,
+                        m,
+                        hit.pressure,
+                        dents,
+                        changed,
+                        c,
+                        matter.as_deref_mut(),
+                    ) {
+                        if !FAIR {
+                            return;
+                        }
+                        self.yield_contact();
+                        continue 'contact;
+                    }
+                    // A voxel of matter worked pays the pace.
+                    work = work.saturating_sub(1);
+                    self.contact_cursor += 1;
+                }
+                self.finish_contact();
             }
-            self.finish_contact();
-        }
+        })();
+        self.offsets = offsets;
+        result
     }
     /// A refused claim retains every unpaid cell and its frozen transform.
     /// Another contact can use admission without replaying the paid prefix.
@@ -4796,8 +4854,8 @@ pub struct BlastRange {
     collapse: CollapseLayer,
     granular: granular::Flow,
     pub water: water::Water,
-    lab_tools_tuning:modding::lab_tools::Tuning,
-    upheaval:upheaval::Upheaval,
+    lab_tools_tuning: modding::lab_tools::Tuning,
+    upheaval: upheaval::Upheaval,
     /// Cohesive terrain the layer tore loose, falling whole until it
     /// lands and bakes back into the world (ADR-300). In the snapshot.
     pub bodies: Bodies,
@@ -4858,7 +4916,7 @@ fn relative_contact_velocity(
 
 /// Physics workers of a scene until told otherwise: a constant, never the
 /// machine's core count (CLAUDE.md, ADR-080).
-const DEFAULT_PHYSICS_WORKERS: usize = 4;
+const DEFAULT_PHYSICS_WORKERS: usize = 8;
 
 // The crowded full-map battle uses a larger persistent pool; smaller
 // rosters retain the training battle's pool. This affects scheduling only.
@@ -4961,7 +5019,11 @@ impl BlastRange {
 
     pub fn aim_angle(&self) -> i32 {
         let target = self.target();
-        let origin = if self.point_gun() { self.layout.as_ref().unwrap().gun.map(Fx::from_int) } else { self.gun.motion.pos };
+        let origin = if self.point_gun() {
+            self.layout.as_ref().unwrap().gun.map(Fx::from_int)
+        } else {
+            self.gun.motion.pos
+        };
         let x = Fx::from_int(target[0]).sub(origin[0]);
         let z = Fx::from_int(target[2]).sub(origin[2]);
         fx::angle::atan2(z.raw(), x.raw())
@@ -4970,7 +5032,7 @@ impl BlastRange {
     pub fn heading(&self) -> [Fx; 3] {
         Self::heading_at(self.turret.angle)
     }
-    fn heading_at(angle:i32)->[Fx;3] {
+    fn heading_at(angle: i32) -> [Fx; 3] {
         let x = fx::angle::cos(angle);
         let z = fx::angle::sin(angle);
         let length = x.mul(x).add(z.mul(z)).sqrt();
@@ -4980,7 +5042,9 @@ impl BlastRange {
         [x.div(length), Fx::ZERO, z.div(length)]
     }
     pub fn muzzle(&self) -> [Fx; 3] {
-        if let Some(l) = self.layout.as_ref().filter(|l| l.gun_point) { return l.gun.map(Fx::from_int); }
+        if let Some(l) = self.layout.as_ref().filter(|l| l.gun_point) {
+            return l.gun.map(Fx::from_int);
+        }
         {
             let muzzles = self.stream_muzzles();
             if !muzzles.is_empty() {
@@ -4991,9 +5055,9 @@ impl BlastRange {
                 return muzzles[self.streams.serial.wrapping_sub(fired) as usize % muzzles.len()];
             }
         }
-        Self::tank_muzzle(&self.gun,self.heading())
+        Self::tank_muzzle(&self.gun, self.heading())
     }
-    fn tank_muzzle(gun:&RangeUnit,d:[Fx;3])->[Fx;3] {
+    fn tank_muzzle(gun: &RangeUnit, d: [Fx; 3]) -> [Fx; 3] {
         [
             gun.motion.pos[0].add(d[0].mul(Fx::from_int(30))),
             gun.motion.pos[1].add(Fx::from_int(23)),
@@ -5002,20 +5066,27 @@ impl BlastRange {
     }
     /// Author an editable point at the original gun's aimed barrel, without
     /// building another world or copying weapon dimensions into the editor.
-    pub fn authored_muzzle(layout:&RangeLayout)->[i32;3] {
-        if layout.gun_point {return layout.gun;}
-        let gun=RangeUnit::of_kind(layout.gun_kind,layout.gun);
-        let x=Fx::from_int(layout.target[0]).sub(gun.motion.pos[0]);
-        let z=Fx::from_int(layout.target[2]).sub(gun.motion.pos[2]);
-        let angle=fx::angle::atan2(z.raw(),x.raw());
-        let muzzle=weapons::muzzles(&gun,angle).first().copied()
-            .unwrap_or_else(||Self::tank_muzzle(&gun,Self::heading_at(angle)));
+    pub fn authored_muzzle(layout: &RangeLayout) -> [i32; 3] {
+        if layout.gun_point {
+            return layout.gun;
+        }
+        let gun = RangeUnit::of_kind(layout.gun_kind, layout.gun);
+        let x = Fx::from_int(layout.target[0]).sub(gun.motion.pos[0]);
+        let z = Fx::from_int(layout.target[2]).sub(gun.motion.pos[2]);
+        let angle = fx::angle::atan2(z.raw(), x.raw());
+        let muzzle = weapons::muzzles(&gun, angle)
+            .first()
+            .copied()
+            .unwrap_or_else(|| Self::tank_muzzle(&gun, Self::heading_at(angle)));
         muzzle.map(Fx::to_int_trunc)
     }
     pub fn new(config: ExplosionConfig) -> Self {
         Self::build(config, None)
     }
-    pub fn with_layout(mut config: ExplosionConfig, mut layout: RangeLayout) -> Result<Self, String> {
+    pub fn with_layout(
+        mut config: ExplosionConfig,
+        mut layout: RangeLayout,
+    ) -> Result<Self, String> {
         economy::produce::starting_crews(&mut layout);
         placement::Validator::default()
             .validate(&layout)
@@ -5278,15 +5349,15 @@ impl BlastRange {
             .chain(std::iter::once(&gun))
             .map(|u| motion_tuning::values(&u.motion))
             .collect();
-        let mut water=water::Water::new();
-        water.seed(&world,layout.as_ref());
+        let mut water = water::Water::new();
+        water.seed(&world, layout.as_ref());
         let mut granular = granular::Flow::new();
         granular.seed(layout.as_ref());
         let mut result = Self {
             granular,
             water,
-            lab_tools_tuning:modding::lab_tools::Tuning::stock(),
-            upheaval:upheaval::Upheaval::new(),
+            lab_tools_tuning: modding::lab_tools::Tuning::stock(),
+            upheaval: upheaval::Upheaval::new(),
             motion_defaults,
             debris_defaults: matter.tuning,
             material_defaults: material_tuning::defaults(&matter.economy.mats),
@@ -5367,7 +5438,11 @@ impl BlastRange {
         };
         result.turret = crate::turret::Traverse::new(result.aim_angle());
         result.gun.update_pose(result.turret.angle);
-        if let Some(layout) = result.layout.as_ref().filter(|l| !l.initial_debris.is_empty()) {
+        if let Some(layout) = result
+            .layout
+            .as_ref()
+            .filter(|l| !l.initial_debris.is_empty())
+        {
             let mut cells = Vec::new();
             for piece in &layout.initial_debris {
                 for z in piece.min[2]..piece.max[2] {
@@ -5380,23 +5455,45 @@ impl BlastRange {
             }
             let start = result.matter.debris.fragments.len();
             let (_, returned) = result.matter.debris.pieces_from_cells(
-                &mut result.world, &cells, &mut result.matter.economy, &result.matter.tuning, 4,
+                &mut result.world,
+                &cells,
+                &mut result.matter.economy,
+                &result.matter.tuning,
+                4,
             );
             if returned > 0 {
                 eprintln!("authored debris: {returned} cells retained as terrain because the fragment pool is full");
             }
-            for f in &mut result.matter.debris.fragments[start..] { f.resting = true; }
+            for f in &mut result.matter.debris.fragments[start..] {
+                f.resting = true;
+            }
         }
         // Generator-authored laboratory blocks have no initial edit event.
         // Wake their support checks too: a suspended solid must fall when the
         // experiment starts, even if the sand below it is already at rest.
-        if let Some(l)=result.layout.as_ref().filter(|l|l.laboratory) {
+        if let Some(l) = result.layout.as_ref().filter(|l| l.laboratory) {
             for b in &l.blocks {
-                if b.min[1]<=l.ground_level || b.material==0 || b.material==modding::water::MATERIAL
-                    || result.granular.tuning.material(b.material).is_some() {continue;}
+                if b.min[1] <= l.ground_level
+                    || b.material == 0
+                    || b.material == modding::water::MATERIAL
+                    || result.granular.tuning.material(b.material).is_some()
+                {
+                    continue;
+                }
                 for k in 0..8 {
-                    let p:[u32;3]=std::array::from_fn(|a|if k&(1<<a)==0 {b.min[a] as u32}else{b.max[a] as u32-1});
-                    result.collapse_backlog.insert(voxel::Edit::put(p[0],p[1],p[2],result.world.material(p[0],p[1],p[2])));
+                    let p: [u32; 3] = std::array::from_fn(|a| {
+                        if k & (1 << a) == 0 {
+                            b.min[a] as u32
+                        } else {
+                            b.max[a] as u32 - 1
+                        }
+                    });
+                    result.collapse_backlog.insert(voxel::Edit::put(
+                        p[0],
+                        p[1],
+                        p[2],
+                        result.world.material(p[0], p[1], p[2]),
+                    ));
                 }
             }
         }
@@ -5508,21 +5605,37 @@ impl BlastRange {
         // also identifies the clock used by velocities and deadlines.
         b.u32(67);
         b.u32(crate::TICKS_PER_SECOND as u32);
-        if self.upheaval.has_state() { b.u32(74); }
-        let water_thermal=self.water.has_thermal_remainder();
-        if water_thermal {b.u32(73);}
-        let water_motion=self.water.has_motion();
-        if water_motion {b.u32(72);}
+        if self.upheaval.has_state() {
+            b.u32(74);
+        }
+        let water_thermal = self.water.has_thermal_remainder();
+        if water_thermal {
+            b.u32(73);
+        }
+        let water_motion = self.water.has_motion();
+        if water_motion {
+            b.u32(72);
+        }
         let grain_motion = self.granular.has_motion();
-        if grain_motion { b.u32(71); }
-        let upheaval=self.upheaval.has_state();
-        if upheaval {b.u32(70);}
-        let water=self.water.has_state();
-        if water {b.u32(69);}
+        if grain_motion {
+            b.u32(71);
+        }
+        let upheaval = self.upheaval.has_state();
+        if upheaval {
+            b.u32(70);
+        }
+        let water = self.water.has_state();
+        if water {
+            b.u32(69);
+        }
         let flow = self.granular.has_state();
-        if flow { b.u32(68); }
+        if flow {
+            b.u32(68);
+        }
         let construction = self.has_construction();
-        if construction { b.u32(75); }
+        if construction {
+            b.u32(75);
+        }
         // Whole-map searches in flight wrap the format below in version 66
         // and follow everything else (ADR-680); without one the bytes are
         // those of the version the range otherwise needs.
@@ -5724,12 +5837,24 @@ impl BlastRange {
         if coarse {
             self.save_coarse_searches(&mut b);
         }
-        if flow { self.granular.save_legacy(&mut b); }
-        if water {self.water.save_legacy(&mut b);}
-        if upheaval {self.upheaval.save(&mut b);}
-        if grain_motion { self.granular.save_motion(&mut b); }
-        if water_motion {self.water.save_motion(&mut b);}
-        if water_thermal {self.water.save_thermal_remainder(&mut b);}
+        if flow {
+            self.granular.save_legacy(&mut b);
+        }
+        if water {
+            self.water.save_legacy(&mut b);
+        }
+        if upheaval {
+            self.upheaval.save(&mut b);
+        }
+        if grain_motion {
+            self.granular.save_motion(&mut b);
+        }
+        if water_motion {
+            self.water.save_motion(&mut b);
+        }
+        if water_thermal {
+            self.water.save_thermal_remainder(&mut b);
+        }
         b.v
     }
     /// The sections appended to the snapshot after `version`, in order:
@@ -5956,20 +6081,36 @@ impl BlastRange {
             return None;
         }
         let upheaval_scaled = version == 74;
-        if upheaval_scaled { version = s.u32(); }
-        let water_thermal=version==73;
-        if water_thermal {version=s.u32();}
-        let water_motion=version==72;
-        if water_motion {version=s.u32();}
+        if upheaval_scaled {
+            version = s.u32();
+        }
+        let water_thermal = version == 73;
+        if water_thermal {
+            version = s.u32();
+        }
+        let water_motion = version == 72;
+        if water_motion {
+            version = s.u32();
+        }
         let grain_motion = version == 71;
-        if grain_motion { version = s.u32(); }
-        let upheaval=version==70;
-        if upheaval {version=s.u32();}
-        let water=version==69;
-        if water {version=s.u32();}
+        if grain_motion {
+            version = s.u32();
+        }
+        let upheaval = version == 70;
+        if upheaval {
+            version = s.u32();
+        }
+        let water = version == 69;
+        if water {
+            version = s.u32();
+        }
         let flow = version == 68;
-        if flow { version = s.u32(); }
-        if version == 75 { version = s.u32(); }
+        if flow {
+            version = s.u32();
+        }
+        if version == 75 {
+            version = s.u32();
+        }
         // Version 66 wraps another with the whole-map searches in flight
         // (ADR-680).
         let coarse = version == 66;
@@ -6588,33 +6729,59 @@ impl BlastRange {
             observe("coarse", bytes.len() - s.left(), None);
             r.load_coarse_searches(&mut s)?;
         }
-        if flow { r.granular.load_legacy(&mut s, r.size)?; }
-        else { r.granular = granular::Flow::new(); }
-        if water {r.water.load_legacy(&mut s,r.size)?;} else {r.water=water::Water::new();}
-        if upheaval {r.upheaval.load(&mut s,r.size,upheaval_scaled)?;}
-        else if upheaval_scaled { return None; }
+        if flow {
+            r.granular.load_legacy(&mut s, r.size)?;
+        } else {
+            r.granular = granular::Flow::new();
+        }
+        if water {
+            r.water.load_legacy(&mut s, r.size)?;
+        } else {
+            r.water = water::Water::new();
+        }
+        if upheaval {
+            r.upheaval.load(&mut s, r.size, upheaval_scaled)?;
+        } else if upheaval_scaled {
+            return None;
+        }
         if grain_motion {
-            if !flow { return None; }
+            if !flow {
+                return None;
+            }
             r.granular.load_motion(&mut s, r.size)?;
         }
         if water_motion {
-            if !water {return None;}
-            r.water.load_motion(&mut s,r.size)?;
+            if !water {
+                return None;
+            }
+            r.water.load_motion(&mut s, r.size)?;
         }
         if water_thermal {
-            if !water {return None;}
-            r.water.load_thermal_remainder(&mut s,r.size)?;
-        }
-        let mut device_containers=std::collections::BTreeSet::new();
-        for d in r.layout.as_ref().into_iter().flat_map(|l|&l.lab_devices) {
-            if let Some(id)=d.container {
-                let c=r.matter.economy.ledger.try_get(id)?;
-                if c.kind!=crate::matter::Kind::Hauler || !c.alive || !device_containers.insert(id) {return None;}
-                if d.collector.as_ref().is_some_and(|s|s.capacity!=c.cap) {return None;}
+            if !water {
+                return None;
             }
-            if let Some(id)=d.collector.as_ref().and_then(|c|c.depot) {
-                let c=r.matter.economy.ledger.try_get(id)?;
-                if c.kind!=crate::matter::Kind::Depot || !c.alive || !device_containers.insert(id) {return None;}
+            r.water.load_thermal_remainder(&mut s, r.size)?;
+        }
+        let mut device_containers = std::collections::BTreeSet::new();
+        for d in r.layout.as_ref().into_iter().flat_map(|l| &l.lab_devices) {
+            if let Some(id) = d.container {
+                let c = r.matter.economy.ledger.try_get(id)?;
+                if c.kind != crate::matter::Kind::Hauler
+                    || !c.alive
+                    || !device_containers.insert(id)
+                {
+                    return None;
+                }
+                if d.collector.as_ref().is_some_and(|s| s.capacity != c.cap) {
+                    return None;
+                }
+            }
+            if let Some(id) = d.collector.as_ref().and_then(|c| c.depot) {
+                let c = r.matter.economy.ledger.try_get(id)?;
+                if c.kind != crate::matter::Kind::Depot || !c.alive || !device_containers.insert(id)
+                {
+                    return None;
+                }
             }
         }
         observe("tail", bytes.len() - s.left(), None);
@@ -6629,7 +6796,12 @@ impl BlastRange {
 
     /// Moved cells, contact displacements, queued patches, last scan count.
     pub fn material_flow(&self) -> (u64, u64, usize, u32) {
-        (self.granular.moved, self.granular.pushed, self.granular.pending(), self.granular.scanned)
+        (
+            self.granular.moved,
+            self.granular.pushed,
+            self.granular.pending(),
+            self.granular.scanned,
+        )
     }
     pub fn state_hash(&self) -> u64 {
         self.snapshot()
@@ -6644,9 +6816,7 @@ impl BlastRange {
         self.gun.kind != RangeUnitKind::Crawler && self.gun.status.alive && self.gun.status.weapon
     }
     pub fn ready(&self) -> bool {
-        !self.battle_mode()
-            && (self.point_gun() || self.gun_armed())
-            && self.shot_ready()
+        !self.battle_mode() && (self.point_gun() || self.gun_armed()) && self.shot_ready()
     }
     fn shot_ready(&self) -> bool {
         self.streams.ready(self.tick)
@@ -7134,14 +7304,26 @@ impl BlastRange {
         self.water.vapor_events.clear();
         self.step_upheaval();
         if !self.water.is_empty() {
-            let resistance=Fx::from_ratio((1000-self.water.tuning.drag_milli) as i32,1000);
+            let resistance = Fx::from_ratio((1000 - self.water.tuning.drag_milli) as i32, 1000);
             for u in self.units.iter_mut().chain(std::iter::once(&mut self.gun)) {
-                let (lo,hi)=u.bounds();
-                let middle=[(lo[0]+hi[0])/2,lo[1]+1,(lo[2]+hi[2])/2];
-                let wet=[[lo[0]-1,middle[1],middle[2]],[hi[0]+1,middle[1],middle[2]],
-                    [middle[0],middle[1],lo[2]-1],[middle[0],middle[1],hi[2]+1]].iter().any(|p|
-                    p.iter().all(|v|*v>=0) && self.water.amount(p.map(|v|v as u32))>self.water.tuning.units_per_voxel/4);
-                if wet {u.motion.drive.vel=u.motion.drive.vel.mul(resistance);u.motion.hull.vy=u.motion.hull.vy.mul(resistance);}
+                let (lo, hi) = u.bounds();
+                let middle = [(lo[0] + hi[0]) / 2, lo[1] + 1, (lo[2] + hi[2]) / 2];
+                let wet = [
+                    [lo[0] - 1, middle[1], middle[2]],
+                    [hi[0] + 1, middle[1], middle[2]],
+                    [middle[0], middle[1], lo[2] - 1],
+                    [middle[0], middle[1], hi[2] + 1],
+                ]
+                .iter()
+                .any(|p| {
+                    p.iter().all(|v| *v >= 0)
+                        && self.water.amount(p.map(|v| v as u32))
+                            > self.water.tuning.units_per_voxel / 4
+                });
+                if wet {
+                    u.motion.drive.vel = u.motion.drive.vel.mul(resistance);
+                    u.motion.hull.vy = u.motion.hull.vy.mul(resistance);
+                }
             }
         }
         // Retain fields that may retire during this tick, including their
@@ -7380,85 +7562,78 @@ impl BlastRange {
         });
         let mut local_hunts: Vec<Option<motion::PreparedLocalHunt>> =
             (0..self.units.len()).map(|_| None).collect();
-        if count >= 2 {
+        let mut prepared_ground: Vec<_> = (0..self.units.len()).map(|_| None).collect();
+        if count >= 2 || (driven && self.units.len() >= 4) {
             if let Some(pool) = &self.navigation_pool {
-                // Terrain-only searches commit directly. Local searches run
-                // speculatively against snapshot blockers and commit only if
-                // their queried clearances match the spatially ordered live state.
+                // Each actor keeps the former routes-then-ground order. Independent
+                // actors share one pool barrier and the ordered commit is unchanged.
                 let world = &self.world;
                 let rubble = &self.rubble;
                 let tick = self.tick;
                 let gun_obstacle =
                     physical_gun.then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body));
-                let driven =
-                    self.patrols_running && (!battle_mode || self.battle_movement_active());
-                local_hunts = pool.install(|| {
+                (local_hunts, prepared_ground) = pool.install(|| {
                     self.units
                         .par_chunks_mut(1)
                         .enumerate()
                         .map(|(id, chunk)| {
                             let u = &mut chunk[0];
-                            task_detail(id, "route_begin");
-                            u.motion.prepare_terrain_hunt(
-                                world,
-                                &u.body,
-                                rubble,
-                                tick,
-                                &changed,
-                                |stage| task_detail(id, stage),
-                            );
-                            if !driven || !u.motion.needs_local_hunt() {
-                                task_detail(id, "route_end");
-                                return None;
-                            }
-                            let mut others = Vec::with_capacity(positions.len() + 1);
-                            others.extend(
-                                positions
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(i, _)| *i != id)
-                                    .map(|(_, p)| *p)
-                                    .chain(gun_obstacle),
-                            );
-                            let prepared = u.motion.prepare_local_hunt_tasks(
-                                world,
-                                &u.body,
-                                &others,
-                                rubble,
-                                &changed,
-                                |stage| task_detail(id, stage),
-                                |batch, begin| task_detail(id, motion::sweep_event(batch, begin)),
-                            );
-                            task_detail(id, "route_end");
-                            prepared
+                            let local = if count >= 2 {
+                                task_detail(id, "route_begin");
+                                u.motion.prepare_terrain_hunt(
+                                    world,
+                                    &u.body,
+                                    rubble,
+                                    tick,
+                                    &changed,
+                                    |stage| task_detail(id, stage),
+                                );
+                                if !driven || !u.motion.needs_local_hunt() {
+                                    task_detail(id, "route_end");
+                                    None
+                                } else {
+                                    let mut others = Vec::with_capacity(positions.len() + 1);
+                                    others.extend(
+                                        positions
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(i, _)| *i != id)
+                                            .map(|(_, p)| *p)
+                                            .chain(gun_obstacle),
+                                    );
+                                    let prepared = u.motion.prepare_local_hunt_tasks(
+                                        world,
+                                        &u.body,
+                                        &others,
+                                        rubble,
+                                        &changed,
+                                        |stage| task_detail(id, stage),
+                                        |batch, begin| {
+                                            task_detail(id, motion::sweep_event(batch, begin))
+                                        },
+                                    );
+                                    task_detail(id, "route_end");
+                                    prepared
+                                }
+                            } else {
+                                None
+                            };
+                            let ground = if driven {
+                                task_detail(id, "ground_begin");
+                                let prepared =
+                                    u.motion.prepare_ground(world, &u.body, rubble, &changed);
+                                task_detail(id, "ground_end");
+                                prepared
+                            } else {
+                                None
+                            };
+                            (local, ground)
                         })
-                        .collect()
+                        .unzip()
                 });
             }
         }
-        detail("motion_routes");
-        let mut prepared_ground: Vec<_> = (0..self.units.len()).map(|_| None).collect();
-        if driven && self.units.len() >= 4 {
-            if let Some(pool) = &self.navigation_pool {
-                let world = &self.world;
-                let rubble = &self.rubble;
-                prepared_ground = pool.install(|| {
-                    self.units
-                        .par_chunks_mut(1)
-                        .enumerate()
-                        .map(|(id, chunk)| {
-                            let u = &mut chunk[0];
-                            task_detail(id, "ground_begin");
-                            let prepared =
-                                u.motion.prepare_ground(world, &u.body, rubble, &changed);
-                            task_detail(id, "ground_end");
-                            prepared
-                        })
-                        .collect()
-                });
-            }
-        }
-        detail("motion_ground");
+        detail("motion_routes_ground");
         // Accepted hull positions remain ordered. Feet and articulated poses
         // read only each actor and frozen terrain; later hulls use Obstacle,
         // which does not depend on foot state or segment frames.
@@ -7671,8 +7846,13 @@ impl BlastRange {
             .map(|u| (u.motion.cut.as_slice(), u.at));
         let mut felling = self.navigation.fell;
         if battle_mode && self.battle.autonomous {
-            let backlog = self.matter.felling_pending().div_ceil(crate::TICKS_PER_SECOND as usize);
-            felling.cells_per_tick = felling.cells_per_tick.max(backlog.min(u32::MAX as usize) as u32);
+            let backlog = self
+                .matter
+                .felling_pending()
+                .div_ceil(crate::TICKS_PER_SECOND as usize);
+            felling.cells_per_tick = felling
+                .cells_per_tick
+                .max(backlog.min(u32::MAX as usize) as u32);
         }
         self.matter.felling_phase(&mut self.world, cuts, &felling);
         detail("motion_felling");
@@ -7769,8 +7949,13 @@ impl BlastRange {
                         artillery::velocity(from, target, gun_weapon, &self.config, 1000),
                     )
                 } else if self.point_gun() && self.config.motion == ProjectileMotion::Direct {
-                    weapons::flight_velocity(std::array::from_fn(|a| Fx::from_int(target[a]).sub(from[a])), self.config.shell_speed)
-                } else if self.config.delivery == modding::explosion::Delivery::Kinetic || self.point_gun() {
+                    weapons::flight_velocity(
+                        std::array::from_fn(|a| Fx::from_int(target[a]).sub(from[a])),
+                        self.config.shell_speed,
+                    )
+                } else if self.config.delivery == modding::explosion::Delivery::Kinetic
+                    || self.point_gun()
+                {
                     weapons::kinetic_velocity(from, target, &self.config)
                 } else {
                     [
@@ -7950,7 +8135,8 @@ impl BlastRange {
         self.exchange_heat_observed(&|_, event| physics_detail(3, event));
         completed("heat_exchange");
         if !self.water.is_empty() {
-            self.water.cool(&self.world,&mut self.heat,&self.matter.economy.mats);
+            self.water
+                .cool(&self.world, &mut self.heat, &self.matter.economy.mats);
         }
         detail("heat_begin");
         {
@@ -7988,7 +8174,8 @@ impl BlastRange {
         if battle_mode && self.battle.autonomous {
             // Pending edits own matter and must not be trapped indefinitely
             // behind a fixed drain quota while an AI battle keeps firing.
-            self.world.max_edits_per_tick = normal_edit_budget.max(self.world.queued().div_ceil(10));
+            self.world.max_edits_per_tick =
+                normal_edit_budget.max(self.world.queued().div_ceil(10));
         }
         self.build_drain_chunks();
         self.world.flush();
@@ -8011,17 +8198,57 @@ impl BlastRange {
         completed("heat_flush");
         self.granular.observe(self.world.edits(), self.size);
         let flow_begin = self.world.edits().len();
-        let body_obstacles=obstacles::Index::new(self.bodies.list.iter().map(|b|obstacles::Obstacle{min:[b.ox,b.oy,b.oz],max:[b.ox+i64::from(b.sx),b.oy+i64::from(b.height()),b.oz+i64::from(b.sz)]}).collect());
+        let body_obstacles = obstacles::Index::new(
+            self.bodies
+                .list
+                .iter()
+                .map(|b| obstacles::Obstacle {
+                    min: [b.ox, b.oy, b.oz],
+                    max: [
+                        b.ox + i64::from(b.sx),
+                        b.oy + i64::from(b.height()),
+                        b.oz + i64::from(b.sz),
+                    ],
+                })
+                .collect(),
+        );
         if self.heat.has_molten() {
-            let mut bounds: Vec<_> = self.bodies.list.iter().map(|b|obstacles::Obstacle{min:[b.ox,b.oy,b.oz],max:[b.ox+i64::from(b.sx),b.oy+i64::from(b.height()),b.oz+i64::from(b.sz)]}).collect();
-            bounds.extend(self.units.iter().filter(|u|u.status.alive).map(|u| {let (lo,hi)=u.bounds();obstacles::Obstacle{min:lo.map(i64::from),max:hi.map(|v|i64::from(v)+1)}}));
+            let mut bounds: Vec<_> = self
+                .bodies
+                .list
+                .iter()
+                .map(|b| obstacles::Obstacle {
+                    min: [b.ox, b.oy, b.oz],
+                    max: [
+                        b.ox + i64::from(b.sx),
+                        b.oy + i64::from(b.height()),
+                        b.oz + i64::from(b.sz),
+                    ],
+                })
+                .collect();
+            bounds.extend(self.units.iter().filter(|u| u.status.alive).map(|u| {
+                let (lo, hi) = u.bounds();
+                obstacles::Obstacle {
+                    min: lo.map(i64::from),
+                    max: hi.map(|v| i64::from(v) + 1),
+                }
+            }));
             let fluid_obstacles = obstacles::Index::new(bounds);
-            self.heat.step_molten(&mut self.world, &self.heat_tuning, self.tick,
-                |p|self.matter.debris.claimed(p) || fluid_obstacles.contains(p) || self.water.amount(p)>0);
+            self.heat
+                .step_molten(&mut self.world, &self.heat_tuning, self.tick, |p| {
+                    self.matter.debris.claimed(p)
+                        || fluid_obstacles.contains(p)
+                        || self.water.amount(p) > 0
+                });
         }
-        self.granular.step_moist(&mut self.world, |p| self.matter.debris.claimed(p)||body_obstacles.contains(p), |p|self.water.repose_bonus(p));
+        self.granular.step_moist(
+            &mut self.world,
+            |p| self.matter.debris.claimed(p) || body_obstacles.contains(p),
+            |p| self.water.repose_bonus(p),
+        );
         let flow_edits = &self.world.edits()[flow_begin..];
-        self.world_changed.columns(flow_edits.iter().map(|e| [e.x as i32, e.z as i32]));
+        self.world_changed
+            .columns(flow_edits.iter().map(|e| [e.x as i32, e.z as i32]));
         completed("material_flow");
         // Everything without support falls (ADR-299): the batch's collapse
         // layer finds what the edits left hanging and digs it out as
@@ -8138,7 +8365,15 @@ impl BlastRange {
                 &mut self.bodies,
                 &mut completed,
                 &held,
-                &|mat| self.granular.tuning.material(mat).is_none() && !self.heat_tuning.melt_flow.iter().flatten().any(|f|f.liquid==mat),
+                &|mat| {
+                    self.granular.tuning.material(mat).is_none()
+                        && !self
+                            .heat_tuning
+                            .melt_flow
+                            .iter()
+                            .flatten()
+                            .any(|f| f.liquid == mat)
+                },
             );
             if collapse_stats.held > 0 {
                 self.collapse_work.blocked_by |=
@@ -8171,7 +8406,7 @@ impl BlastRange {
             let mats = &self.matter.economy.mats;
             let mut whole = Vec::new();
             for b in std::mem::take(&mut self.bodies.list) {
-                if !self.bodies.spawned.contains(&b.id) || b.vy<Fx::ZERO {
+                if !self.bodies.spawned.contains(&b.id) || b.vy < Fx::ZERO {
                     whole.push(b);
                     continue;
                 }
@@ -8296,57 +8531,123 @@ impl BlastRange {
         // Whole bodies fall a voxel at a time and bake back where they
         // land, through the edit queue like everything else.
         let contact_begin = self.world.edits().len();
-        self.granular.impact(&mut self.world, &self.bodies, &self.matter.economy.mats,
-            self.tick, |p| self.matter.debris.claimed(p));
-        self.world_changed.columns(self.world.edits()[contact_begin..].iter().map(|e| [e.x as i32, e.z as i32]));
-        self.collapse_backlog.extend(&self.world.edits()[contact_begin..]);
-        let water=&self.water;
-        let materials=&self.matter.economy.mats;
-        let mut slope_checks=self.granular.tuning.slope.checks_per_tick;
-        let slopes=self.bodies.list.iter().any(|b|self.granular.slope_candidate(b))
-            && self.bodies.list.len()+self.units.len()+self.matter.debris.fragments.len()+1
-                <= slope_checks as usize/(8*self.granular.tuning.slope.reach as usize);
-        let mut occupied:Vec<_>=if slopes {self.bodies.list.iter().map(|b|{let (lo,hi)=b.bounds();(b.id,lo,hi)}).collect()}else{Vec::new()};
+        self.granular.impact(
+            &mut self.world,
+            &self.bodies,
+            &self.matter.economy.mats,
+            self.tick,
+            |p| self.matter.debris.claimed(p),
+        );
+        self.world_changed.columns(
+            self.world.edits()[contact_begin..]
+                .iter()
+                .map(|e| [e.x as i32, e.z as i32]),
+        );
+        self.collapse_backlog
+            .extend(&self.world.edits()[contact_begin..]);
+        let water = &self.water;
+        let materials = &self.matter.economy.mats;
+        let mut slope_checks = self.granular.tuning.slope.checks_per_tick;
+        let slopes = self
+            .bodies
+            .list
+            .iter()
+            .any(|b| self.granular.slope_candidate(b))
+            && self.bodies.list.len() + self.units.len() + self.matter.debris.fragments.len() + 1
+                <= slope_checks as usize / (8 * self.granular.tuning.slope.reach as usize);
+        let mut occupied: Vec<_> = if slopes {
+            self.bodies
+                .list
+                .iter()
+                .map(|b| {
+                    let (lo, hi) = b.bounds();
+                    (b.id, lo, hi)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         if !occupied.is_empty() {
-            occupied.extend(self.units.iter().chain(physical_gun.then_some(&self.gun))
-                .filter(|u|u.status.alive).enumerate().map(|(i,u)| {
-                    let (lo,hi)=u.bounds();(u64::MAX-i as u64,lo.map(i64::from),hi.map(|v|i64::from(v)+1))
-                }));
-            occupied.extend(self.matter.debris.fragments.iter().enumerate().map(|(i,f)| {
-                let (lo,hi)=f.bounds();(u64::MAX-self.units.len() as u64-2-i as u64,
-                    lo.map(|v|v.raw()>>32),hi.map(|v|(v.raw()>>32)+1))
-            }));
+            occupied.extend(
+                self.units
+                    .iter()
+                    .chain(physical_gun.then_some(&self.gun))
+                    .filter(|u| u.status.alive)
+                    .enumerate()
+                    .map(|(i, u)| {
+                        let (lo, hi) = u.bounds();
+                        (
+                            u64::MAX - i as u64,
+                            lo.map(i64::from),
+                            hi.map(|v| i64::from(v) + 1),
+                        )
+                    }),
+            );
+            occupied.extend(
+                self.matter
+                    .debris
+                    .fragments
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let (lo, hi) = f.bounds();
+                        (
+                            u64::MAX - self.units.len() as u64 - 2 - i as u64,
+                            lo.map(|v| v.raw() >> 32),
+                            hi.map(|v| (v.raw() >> 32) + 1),
+                        )
+                    }),
+            );
         }
         // Reserve enough of the shared budget for one grounded candidate.
         // Otherwise small bodies processed first can indefinitely defer a
         // large one, leaving it suspended at first contact. Rotate priority
         // by simulation tick, without exceeding the existing phase limit.
         let candidates: Vec<_> = if slopes {
-            self.bodies.list.iter().filter(|b| self.granular.slope_candidate(b) && !b.can_fall(&self.world))
+            self.bodies
+                .list
+                .iter()
+                .filter(|b| self.granular.slope_candidate(b) && !b.can_fall(&self.world))
                 .filter_map(|b| {
                     let cost = self.granular.slope_query_budget(b, occupied.len());
                     (cost <= slope_checks).then_some((b.id, cost))
-                }).collect()
-        } else { Vec::new() };
-        let mut priority = if candidates.is_empty() { None }
-            else { Some(candidates[self.tick as usize % candidates.len()]) };
-        let granular=&mut self.granular;
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut priority = if candidates.is_empty() {
+            None
+        } else {
+            Some(candidates[self.tick as usize % candidates.len()])
+        };
+        let granular = &mut self.granular;
         let earlier = self.world.edits().len();
-        self.bodies.step_contact(&mut self.world,|b,w|water.support_body(b,w,materials),|b,w| {
-            if let Some((id, reserved)) = priority {
-                if id != b.id && granular.slope_candidate(b)
-                    && granular.slope_query_budget(b, occupied.len()).saturating_add(reserved) > slope_checks
-                {
-                    return true;
+        self.bodies.step_contact(
+            &mut self.world,
+            |b, w| water.support_body(b, w, materials),
+            |b, w| {
+                if let Some((id, reserved)) = priority {
+                    if id != b.id
+                        && granular.slope_candidate(b)
+                        && granular
+                            .slope_query_budget(b, occupied.len())
+                            .saturating_add(reserved)
+                            > slope_checks
+                    {
+                        return true;
+                    }
+                    if id == b.id {
+                        priority = None;
+                    }
                 }
-                if id == b.id { priority = None; }
-            }
-            let held=slopes && granular.slide_body(b,w,&mut slope_checks,&occupied);
-            if let Some((_,lo,hi))=occupied.iter_mut().find(|(id,_,_)|*id==b.id) {
-                (*lo,*hi)=b.bounds();
-            }
-            held
-        });
+                let held = slopes && granular.slide_body(b, w, &mut slope_checks, &occupied);
+                if let Some((_, lo, hi)) = occupied.iter_mut().find(|(id, _, _)| *id == b.id) {
+                    (*lo, *hi) = b.bounds();
+                }
+                held
+            },
+        );
         detail("debris_body_motion");
         // Collapse and landing produce transfers after the main drain.
         // Complete them this tick, preserving its deltas (ADR-684): a
@@ -8357,28 +8658,59 @@ impl BlastRange {
         self.world_changed
             .columns(transfers.iter().map(|e| [e.x as i32, e.z as i32]));
         self.collapse_backlog.extend(transfers);
-        self.granular.observe(&self.world.edits()[contact_begin..], self.size);
+        self.granular
+            .observe(&self.world.edits()[contact_begin..], self.size);
         detail("debris_bodies");
         if !self.water.is_empty() {
-            self.water.observe(self.world.edits(),self.size);
-            let mut obstacles:Vec<_>=self.bodies.list.iter().filter(|b|!b.fresh).map(|b|water::Obstacle {
-                min:[b.ox,b.oy,b.oz],max:[b.ox+i64::from(b.sx),b.oy+i64::from(b.height()),b.oz+i64::from(b.sz)]
-            }).collect();
-            obstacles.extend(self.units.iter().chain(physical_gun.then_some(&self.gun)).filter(|u|u.status.alive).map(|u| {
-                let (lo,hi)=u.bounds();water::Obstacle{min:lo.map(i64::from),max:hi.map(|v|i64::from(v)+1)}
-            }));
-            let obstacles_index=obstacles::Index::new(obstacles.clone());
-            self.water.step_indexed(&self.world,&obstacles,&obstacles_index);
-            let erosion_begin=self.world.edits().len();
-            self.granular.erode(&mut self.world,&mut self.water,self.tick,
-                |p|self.matter.debris.claimed(p)||obstacles_index.contains(p));
-            let erosion_edits=&self.world.edits()[erosion_begin..];
-            self.world_changed.columns(erosion_edits.iter().map(|e|[e.x as i32,e.z as i32]));
+            self.water.observe(self.world.edits(), self.size);
+            let mut obstacles: Vec<_> = self
+                .bodies
+                .list
+                .iter()
+                .filter(|b| !b.fresh)
+                .map(|b| water::Obstacle {
+                    min: [b.ox, b.oy, b.oz],
+                    max: [
+                        b.ox + i64::from(b.sx),
+                        b.oy + i64::from(b.height()),
+                        b.oz + i64::from(b.sz),
+                    ],
+                })
+                .collect();
+            obstacles.extend(
+                self.units
+                    .iter()
+                    .chain(physical_gun.then_some(&self.gun))
+                    .filter(|u| u.status.alive)
+                    .map(|u| {
+                        let (lo, hi) = u.bounds();
+                        water::Obstacle {
+                            min: lo.map(i64::from),
+                            max: hi.map(|v| i64::from(v) + 1),
+                        }
+                    }),
+            );
+            let obstacles_index = obstacles::Index::new(obstacles.clone());
+            self.water
+                .step_indexed(&self.world, &obstacles, &obstacles_index);
+            let erosion_begin = self.world.edits().len();
+            self.granular
+                .erode(&mut self.world, &mut self.water, self.tick, |p| {
+                    self.matter.debris.claimed(p) || obstacles_index.contains(p)
+                });
+            let erosion_edits = &self.world.edits()[erosion_begin..];
+            self.world_changed
+                .columns(erosion_edits.iter().map(|e| [e.x as i32, e.z as i32]));
             self.collapse_backlog.extend(erosion_edits);
-            self.water.observe(erosion_edits,self.size);
-            self.granular.observe(erosion_edits,self.size);
-            let wet_edits:Vec<_>=self.water.wet_changed.iter().map(|p|voxel::Edit::put(p[0],p[1],p[2],self.world.material(p[0],p[1],p[2]))).collect();
-            self.granular.observe(&wet_edits,self.size);
+            self.water.observe(erosion_edits, self.size);
+            self.granular.observe(erosion_edits, self.size);
+            let wet_edits: Vec<_> = self
+                .water
+                .wet_changed
+                .iter()
+                .map(|p| voxel::Edit::put(p[0], p[1], p[2], self.world.material(p[0], p[1], p[2])))
+                .collect();
+            self.granular.observe(&wet_edits, self.size);
         }
         completed("water_flow");
         self.matter.step_unit_sections(&mut self.units);
@@ -8727,6 +9059,7 @@ impl Explosion {
             at,
             origin,
             cell,
+            offsets: subcell_offsets(cell),
             queued,
             wave,
             captured,
@@ -13130,8 +13463,11 @@ mod tests {
     }
     #[test]
     fn player_tank_muzzle_uses_the_actual_tilted_and_turned_barrel() {
-        let mut r = BlastRange::new(ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap());
-        r.gun.motion.hull.up = crate::damage::V3::new(Fx::from_ratio(1, 10), Fx::ONE, Fx::from_ratio(-1, 5));
+        let mut r = BlastRange::new(
+            ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
+        );
+        r.gun.motion.hull.up =
+            crate::damage::V3::new(Fx::from_ratio(1, 10), Fx::ONE, Fx::from_ratio(-1, 5));
         r.turret.angle = fx::angle::FULL / 7;
         r.gun.update_pose(r.turret.angle);
         let actual = r.stream_muzzles();

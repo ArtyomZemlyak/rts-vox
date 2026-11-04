@@ -62,14 +62,18 @@ pub(super) fn pose(b: &voxel::bodies::Body) -> Transform {
         2 | 4 => Quat::from_rotation_z(angle),
         _ => Quat::IDENTITY,
     };
-    let mut translation=Vec3::new(
+    let mut translation = Vec3::new(
         b.ox as f32 + f32::from(b.pivot_x),
         b.oy as f32 - fy,
         b.oz as f32 + f32::from(b.pivot_z),
     );
-    if b.tilt_axis>=3 {
-        let centre=Vec3::new((b.sx/2) as f32,(b.height()/2) as f32,(b.sz/2) as f32);
-        translation+=centre-rotation*centre;
+    if b.tilt_axis >= 3 {
+        let centre = Vec3::new(
+            (b.sx / 2) as f32,
+            (b.height() / 2) as f32,
+            (b.sz / 2) as f32,
+        );
+        translation += centre - rotation * centre;
     }
     Transform::from_translation(translation).with_rotation(rotation)
 }
@@ -235,21 +239,33 @@ mod rolling_tests {
     use super::*;
     struct Rock;
     impl voxel::Generator for Rock {
-        fn material(&self, _:u32,_:u32,_:u32)->u16 {6}
+        fn material(&self, _: u32, _: u32, _: u32) -> u16 {
+            6
+        }
     }
     #[test]
     fn render_roll_matches_simulated_voxel_positions() {
-        let w=voxel::World::new(32,32,32,100,Box::new(Rock));
-        let cells:Vec<_>=(10..13).flat_map(|z|(10..14).flat_map(move |y|(10..15).map(move |x|(x,y,z)))).collect();
-        let mut body=voxel::bodies::Body::from_world_cells(&w,&cells).unwrap();
-        for axis in [3,4] {for angle in [0,3000,12000,35000,62000] {
-            body.tilt_axis=axis;body.tilt_angle=angle;
-            let transform=pose(&body);
-            for &v in &body.voxels {
-                let p=transform.transform_point(Vec3::new(v.x as f32,v.y as f32,v.z as f32));
-                let (x,y,z)=body.world_of(v);let q=Vec3::new(x as f32,y as f32,z as f32);
-                assert!((p-q).abs().max_element()<=0.51,"axis={axis} angle={angle} p={p:?} q={q:?}");
+        let w = voxel::World::new(32, 32, 32, 100, Box::new(Rock));
+        let cells: Vec<_> = (10..13)
+            .flat_map(|z| (10..14).flat_map(move |y| (10..15).map(move |x| (x, y, z))))
+            .collect();
+        let mut body = voxel::bodies::Body::from_world_cells(&w, &cells).unwrap();
+        for axis in [3, 4] {
+            for angle in [0, 3000, 12000, 35000, 62000] {
+                body.tilt_axis = axis;
+                body.tilt_angle = angle;
+                let transform = pose(&body);
+                for &v in &body.voxels {
+                    let p =
+                        transform.transform_point(Vec3::new(v.x as f32, v.y as f32, v.z as f32));
+                    let (x, y, z) = body.world_of(v);
+                    let q = Vec3::new(x as f32, y as f32, z as f32);
+                    assert!(
+                        (p - q).abs().max_element() <= 0.51,
+                        "axis={axis} angle={angle} p={p:?} q={q:?}"
+                    );
+                }
             }
-        }}
+        }
     }
 }

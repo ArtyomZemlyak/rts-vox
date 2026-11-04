@@ -48,7 +48,9 @@ impl Tuning {
             | crate::range::RangeUnitKind::Crawler
             | crate::range::RangeUnitKind::Artillery
             | crate::range::RangeUnitKind::ArtilleryT2 => &self.tank,
-            crate::range::RangeUnitKind::Strider | crate::range::RangeUnitKind::Walker04 | crate::range::RangeUnitKind::SkobaDrone => &self.walker,
+            crate::range::RangeUnitKind::Strider
+            | crate::range::RangeUnitKind::Walker04
+            | crate::range::RangeUnitKind::SkobaDrone => &self.walker,
             crate::range::RangeUnitKind::Spider => &self.spider,
             crate::range::RangeUnitKind::TurretT1
             | crate::range::RangeUnitKind::ArtilleryTurretT2

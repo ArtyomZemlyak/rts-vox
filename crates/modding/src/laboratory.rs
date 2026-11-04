@@ -3,12 +3,12 @@ use crate::range::{RangeBlock, RangeLayout};
 use serde::{Deserialize, Serialize};
 #[path = "laboratory_catalog.rs"]
 pub mod catalog;
+#[path = "laboratory_events.rs"]
+pub mod events;
 #[path = "laboratory_experiments.rs"]
 pub mod experiments;
 #[path = "laboratory_sources.rs"]
 pub mod sources;
-#[path = "laboratory_events.rs"]
-pub mod events;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Material {

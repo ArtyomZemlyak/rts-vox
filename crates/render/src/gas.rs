@@ -221,7 +221,7 @@ impl Default for GasInput {
             params: GasParams::default(),
             atmosphere: Atmosphere::default(),
             terrain_words: Arc::new(vec![]),
-            metric_words: Arc::new(vec![0; (8192+16)*4]),
+            metric_words: Arc::new(vec![0; (8192 + 16) * 4]),
             metric_revision: 0,
             terrain_column_top: Vec::new(),
             terrain_revision: 0,
@@ -1085,9 +1085,11 @@ fn init(
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let metric=device.create_buffer(&BufferDescriptor {
-        label:Some("laboratory metric cells"),size:((8192+16)*4*4) as u64,
-        usage:BufferUsages::STORAGE|BufferUsages::COPY_DST,mapped_at_creation:false,
+    let metric = device.create_buffer(&BufferDescriptor {
+        label: Some("laboratory metric cells"),
+        size: ((8192 + 16) * 4 * 4) as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
     });
     commands.insert_resource(Pipeline {
         mask_layout,
@@ -1110,8 +1112,8 @@ fn init(
         bounds: bounds::BoundsPipeline::new(&cache, shaders.bounds.clone()),
         terrain,
         metric,
-        metric_bytes:(8192+16)*4*4,
-        metric_revision:u64::MAX,
+        metric_bytes: (8192 + 16) * 4 * 4,
+        metric_revision: u64::MAX,
         terrain_revision: 0,
         distant_revision: 0,
         ready_frames: 0,
@@ -1141,17 +1143,19 @@ fn prepare(
     trace: Option<Res<crate::timeline::RenderTrace>>,
 ) -> Result<(), BevyError> {
     let (device, queue) = gpu;
-    if pipeline.metric_revision!=input.metric_revision {
-        let bytes=input.metric_words.len()*4;
-        if bytes!=pipeline.metric_bytes {
-            pipeline.metric=device.create_buffer(&BufferDescriptor {
-                label:Some("laboratory metric cells"),size:bytes as u64,
-                usage:BufferUsages::STORAGE|BufferUsages::COPY_DST,mapped_at_creation:false,
+    if pipeline.metric_revision != input.metric_revision {
+        let bytes = input.metric_words.len() * 4;
+        if bytes != pipeline.metric_bytes {
+            pipeline.metric = device.create_buffer(&BufferDescriptor {
+                label: Some("laboratory metric cells"),
+                size: bytes as u64,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             });
-            pipeline.metric_bytes=bytes;
+            pipeline.metric_bytes = bytes;
         }
-        queue.write_buffer(&pipeline.metric,0,le_bytes(&input.metric_words).as_ref());
-        pipeline.metric_revision=input.metric_revision;
+        queue.write_buffer(&pipeline.metric, 0, le_bytes(&input.metric_words).as_ref());
+        pipeline.metric_revision = input.metric_revision;
     }
     let trace = trace.as_ref().and_then(|t| t.0.as_ref());
     let scope = trace.map(|t| t.scope("gas_prepare"));
@@ -1640,7 +1644,7 @@ fn draw_gas(
         let wanted = input.atmosphere.clock.saturating_sub(source.born);
         // At most 16 substeps per region per frame, matching the scene's eight
         // 30 Hz ticks. Pending deposits stay ordered until the GPU catches up.
-        let budget=source.substep_budget(r.simulated);
+        let budget = source.substep_budget(r.simulated);
         let end = wanted.min(r.simulated.saturating_add(budget));
         loop {
             for d in &r.deposits {

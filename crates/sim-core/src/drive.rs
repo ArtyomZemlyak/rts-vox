@@ -414,27 +414,56 @@ mod tests {
 
     #[test]
     fn tuned_chassis_accelerate_and_turn_faster_without_raising_speed_limit() {
-        let spider = modding::spider::Tuning::from_ron(include_str!("../../../data/spider.ron")).unwrap().chassis;
+        let spider = modding::spider::Tuning::from_ron(include_str!("../../../data/spider.ron"))
+            .unwrap()
+            .chassis;
         for (name, chassis, old_thrust, old_brake, old_turn) in [
             ("tracked", tracked(), 180, 240, 90),
             ("walking", walking(), 48, 60, 60),
             ("spider", spider, 1200, 1800, 28),
         ] {
             let mut old = chassis;
-            old.thrust = old_thrust; old.brake = old_brake; old.turn = old_turn;
+            old.thrust = old_thrust;
+            old.brake = old_brake;
+            old.turn = old_turn;
             let new_limits = Limits::of(&chassis, TICKS_PER_SECOND);
             let old_limits = Limits::of(&old, TICKS_PER_SECOND);
-            assert!(new_limits.accel > old_limits.accel && new_limits.brake > old_limits.brake, "{name}");
-            assert!(new_limits.turn > old_limits.turn && new_limits.turn_acc > old_limits.turn_acc, "{name}");
+            assert!(
+                new_limits.accel > old_limits.accel && new_limits.brake > old_limits.brake,
+                "{name}"
+            );
+            assert!(
+                new_limits.turn > old_limits.turn && new_limits.turn_acc > old_limits.turn_acc,
+                "{name}"
+            );
             let max_speed = Fx::from_int(40);
             let mut fast = Drive::default();
             let mut slow = fast;
             for _ in 0..12 {
-                fast = advance(fast, angle::FULL / 4, max_speed, &new_limits, Fx::ONE, inv_tick()).0;
-                slow = advance(slow, angle::FULL / 4, max_speed, &old_limits, Fx::ONE, inv_tick()).0;
+                fast = advance(
+                    fast,
+                    angle::FULL / 4,
+                    max_speed,
+                    &new_limits,
+                    Fx::ONE,
+                    inv_tick(),
+                )
+                .0;
+                slow = advance(
+                    slow,
+                    angle::FULL / 4,
+                    max_speed,
+                    &old_limits,
+                    Fx::ONE,
+                    inv_tick(),
+                )
+                .0;
                 assert!(fast.vel.abs() <= max_speed, "{name} exceeded speed");
             }
-            assert!(angle::diff(fast.head, 0).abs() > angle::diff(slow.head, 0).abs(), "{name} did not turn faster");
+            assert!(
+                angle::diff(fast.head, 0).abs() > angle::diff(slow.head, 0).abs(),
+                "{name} did not turn faster"
+            );
         }
     }
     #[test]

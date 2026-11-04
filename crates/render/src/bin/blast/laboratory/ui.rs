@@ -17,8 +17,8 @@ pub struct State {
     pub capture_at: Option<[i32; 3]>,
     ready_frames: u8,
     pub viewport_ready: u8,
-    pub scenario_input:usize,
-    pub device:usize,
+    pub scenario_input: usize,
+    pub device: usize,
     per_page: usize,
 }
 impl Default for State {
@@ -37,8 +37,8 @@ impl Default for State {
             capture_at: None,
             ready_frames: 0,
             viewport_ready: 0,
-            scenario_input:0,
-            device:0,
+            scenario_input: 0,
+            device: 0,
             per_page: 8,
         }
     }
@@ -91,8 +91,12 @@ fn category(e: &Element) -> u8 {
     }
 }
 fn filtered(lab: &Laboratory) -> Vec<usize> {
-    if lab.ui.category==7 {return (0..lab.events.len()).collect();}
-    if lab.ui.category==8 {return (0..lab.experiments.len()).collect();}
+    if lab.ui.category == 7 {
+        return (0..lab.events.len()).collect();
+    }
+    if lab.ui.category == 8 {
+        return (0..lab.experiments.len()).collect();
+    }
     lab.constructor
         .catalog
         .iter()
@@ -209,9 +213,16 @@ fn section(p: &mut ChildSpawnerCommands, id: u8, children: impl FnOnce(&mut Chil
 
 fn editing(lab: &Laboratory) -> Option<&Element> {
     let c = &lab.constructor;
-    (!matches!(c.mode, constructor::Mode::Place | constructor::Mode::Part | constructor::Mode::Drill | constructor::Mode::Crawler | constructor::Mode::Collector))
-        .then(|| c.selected.and_then(|i| c.placed.get(i)).map(|p| &p.element))
-        .flatten()
+    (!matches!(
+        c.mode,
+        constructor::Mode::Place
+            | constructor::Mode::Part
+            | constructor::Mode::Drill
+            | constructor::Mode::Crawler
+            | constructor::Mode::Collector
+    ))
+    .then(|| c.selected.and_then(|i| c.placed.get(i)).map(|p| &p.element))
+    .flatten()
 }
 fn single_block(lab: &Laboratory) -> bool {
     editing(lab).is_some_and(|e| e.blocks.len() == 1 && e.units.is_empty() && e.shields.is_empty())
@@ -234,7 +245,12 @@ fn section_visible(lab: &Laboratory, id: u8) -> bool {
         26 => scenario::has_actor(lab),
         27 => scenario::has_target(lab),
         28 => scenario::has_pilot(lab),
-        29 => lab.constructor.workspace.devices.get(lab.ui.device).is_some_and(|d|d.collector.is_some()),
+        29 => lab
+            .constructor
+            .workspace
+            .devices
+            .get(lab.ui.device)
+            .is_some_and(|d| d.collector.is_some()),
         11 => lab.ui.parameter_details,
         12 => lab.ui.editing.is_some(),
         13 => lab.constructor.can_return(),
@@ -376,7 +392,15 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
             control(p, &f, "Отмена", "x", LabAction::CancelCreate);
         });
         controls(p, &f, &[("Очистить сцену", "trash-2", LabAction::Clear)]);
-        section(p,13,|p| {control(p,&f,"Вернуть мою сборку","undo-2",LabAction::ReturnConstruction);});
+        section(p, 13, |p| {
+            control(
+                p,
+                &f,
+                "Вернуть мою сборку",
+                "undo-2",
+                LabAction::ReturnConstruction,
+            );
+        });
     });
     let mut right = panel_node();
     right.right = px(12);
@@ -731,44 +755,54 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
 pub fn selected(lab: &Laboratory, a: LabAction) -> bool {
     let c = &lab.constructor;
     match a {
-        LabAction::ScenarioInput(i)=>lab.ui.scenario_input==i,
-        LabAction::Device(i)=>lab.ui.device==i,
-        LabAction::PickEvent(i)=>lab.ui.event==Some(i)&&c.mode==constructor::Mode::Event,
-        LabAction::Experiment(i)=>lab.experiments.get(i).is_some_and(|e|c.experiment.as_ref().is_some_and(|p|p.name==e.plan.name)),
-        LabAction::LocalCharge(local)=>sources::active(lab).is_some_and(|s|s.detonate==local),
+        LabAction::ScenarioInput(i) => lab.ui.scenario_input == i,
+        LabAction::Device(i) => lab.ui.device == i,
+        LabAction::PickEvent(i) => lab.ui.event == Some(i) && c.mode == constructor::Mode::Event,
+        LabAction::Experiment(i) => lab
+            .experiments
+            .get(i)
+            .is_some_and(|e| c.experiment.as_ref().is_some_and(|p| p.name == e.plan.name)),
+        LabAction::LocalCharge(local) => sources::active(lab).is_some_and(|s| s.detonate == local),
         LabAction::EditNumber(id) => lab.ui.editing.as_ref().is_some_and(|(i, _, _)| *i == id),
         LabAction::SourcePosition => c.mode == constructor::Mode::Source,
         LabAction::Source(i) => c.workspace.selected == i,
         LabAction::BindSource(bind) => {
             sources::active(lab).is_some_and(|s| s.binding.is_some() == bind)
         }
-        LabAction::VoxelTool(n) => c.voxel_edit.as_ref().is_some_and(|s|s.tool==match n {0=>modding::laboratory::catalog::voxels::Tool::Add,1=>modding::laboratory::catalog::voxels::Tool::Erase,_=>modding::laboratory::catalog::voxels::Tool::Paint}),
+        LabAction::VoxelTool(n) => c.voxel_edit.as_ref().is_some_and(|s| {
+            s.tool
+                == match n {
+                    0 => modding::laboratory::catalog::voxels::Tool::Add,
+                    1 => modding::laboratory::catalog::voxels::Tool::Erase,
+                    _ => modding::laboratory::catalog::voxels::Tool::Paint,
+                }
+        }),
         LabAction::Tool(0) => c.mode == constructor::Mode::Select,
         LabAction::Tool(1) => c.mode == constructor::Mode::Move,
-        LabAction::Tool(2)=>c.mode==constructor::Mode::Brush,
-        LabAction::Tool(3)=>c.mode==constructor::Mode::Erase,
-        LabAction::Tool(4)=>c.mode==constructor::Mode::Inspect,
-        LabAction::Tool(5)=>c.mode==constructor::Mode::Drill,
-        LabAction::Tool(6)=>c.mode==constructor::Mode::Crawler,
-        LabAction::Tool(7)=>c.mode==constructor::Mode::Collector,
-        LabAction::Flying=>lab.tools.flying,
-        LabAction::LiveTools=>lab.tools.live,
-        LabAction::LiveTool(n)=>lab.tools.live&&lab.tools.live_tool==n,
-        LabAction::LivePoint=>lab.tools.point,
-        LabAction::SurfaceSnap=>c.workspace.surface_snap.unwrap_or(true),
-        LabAction::AllowOverlap=>c.workspace.allow_overlap,
+        LabAction::Tool(2) => c.mode == constructor::Mode::Brush,
+        LabAction::Tool(3) => c.mode == constructor::Mode::Erase,
+        LabAction::Tool(4) => c.mode == constructor::Mode::Inspect,
+        LabAction::Tool(5) => c.mode == constructor::Mode::Drill,
+        LabAction::Tool(6) => c.mode == constructor::Mode::Crawler,
+        LabAction::Tool(7) => c.mode == constructor::Mode::Collector,
+        LabAction::Flying => lab.tools.flying,
+        LabAction::LiveTools => lab.tools.live,
+        LabAction::LiveTool(n) => lab.tools.live && lab.tools.live_tool == n,
+        LabAction::LivePoint => lab.tools.point,
+        LabAction::SurfaceSnap => c.workspace.surface_snap.unwrap_or(true),
+        LabAction::AllowOverlap => c.workspace.allow_overlap,
         LabAction::AddPart => c.mode == constructor::Mode::Part,
         LabAction::Aim => c.mode == constructor::Mode::Aim,
         LabAction::PickCatalog(i) => c.choice == i && c.mode == constructor::Mode::Place,
         LabAction::PickObject(i) => c.selected == Some(i),
-        LabAction::PickMaterial(id) => c.material(&lab.definition,lab.recipe)==id,
+        LabAction::PickMaterial(id) => c.material(&lab.definition, lab.recipe) == id,
         LabAction::Category(i) => lab.ui.category == i,
         LabAction::Tab(i) => lab.ui.tab == i,
         LabAction::Grid => lab.ui.grid,
         LabAction::SectionToggle => lab.tools.section.enabled,
-        LabAction::SectionAxis(axis) => lab.tools.section.axis==axis,
-        LabAction::ReplayStart=>lab.replay.recording,
-        LabAction::Metric(mode) => lab.tools.metric==mode,
+        LabAction::SectionAxis(axis) => lab.tools.section.axis == axis,
+        LabAction::ReplayStart => lab.replay.recording,
+        LabAction::Metric(mode) => lab.tools.metric == mode,
         LabAction::Help => lab.ui.help,
         LabAction::ParameterDetails => lab.ui.parameter_details,
         LabAction::Experiments => lab.browser,
@@ -849,12 +883,38 @@ fn icon_bytes(name: &str) -> &'static [u8] {
         "bomb"
     )
 }
-fn event_image(pictures:&mut Pictures,images:&mut Assets<Image>,name:&'static str)->Handle<Image> {
-    if let Some((_,h))=pictures.event_icons.iter().find(|(n,_)|*n==name) {return h.clone();}
+fn event_image(
+    pictures: &mut Pictures,
+    images: &mut Assets<Image>,
+    name: &'static str,
+) -> Handle<Image> {
+    if let Some((_, h)) = pictures.event_icons.iter().find(|(n, _)| *n == name) {
+        return h.clone();
+    }
     macro_rules! large {($($n:literal),*)=>{match name {$($n=>include_bytes!(concat!("../../../../../../data/ui/icons/large/",$n,".rgba")).as_slice(),)*_=>include_bytes!("../../../../../../data/ui/icons/large/bomb.rgba").as_slice()}};}
-    let bytes=large!("bomb","radiation","hammer","zap","flame","sparkles","crosshair","layers");
-    let h=images.add(Image::new(Extent3d {width:192,height:192,depth_or_array_layers:1},TextureDimension::D2,bytes.to_vec(),TextureFormat::Rgba8UnormSrgb,RenderAssetUsages::default()));
-    pictures.event_icons.push((name,h.clone()));h
+    let bytes = large!(
+        "bomb",
+        "radiation",
+        "hammer",
+        "zap",
+        "flame",
+        "sparkles",
+        "crosshair",
+        "layers"
+    );
+    let h = images.add(Image::new(
+        Extent3d {
+            width: 192,
+            height: 192,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        bytes.to_vec(),
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    ));
+    pictures.event_icons.push((name, h.clone()));
+    h
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -874,7 +934,16 @@ pub fn sync(
         (&Card, &mut Node, &mut LabAction, &mut BorderColor),
         (Without<Object>, Without<Inspector>, Without<Help>),
     >,
-    mut card_images: Query<(&CardImage, &mut ImageNode, &mut Node), (Without<Icon>, Without<Card>, Without<Object>, Without<Inspector>, Without<Help>)>,
+    mut card_images: Query<
+        (&CardImage, &mut ImageNode, &mut Node),
+        (
+            Without<Icon>,
+            Without<Card>,
+            Without<Object>,
+            Without<Inspector>,
+            Without<Help>,
+        ),
+    >,
     mut card_names: Query<(&CardName, &mut Text), Without<ObjectName>>,
     mut objects: Query<
         (&Object, &mut Node, &mut BorderColor),
@@ -891,7 +960,10 @@ pub fn sync(
             Without<Inspector>,
         ),
     >,
-    (mut buttons, hovers): (Query<(Entity, &LabAction, Has<bevy::ui::InteractionDisabled>), Without<Card>>, Query<(&Card,&Interaction)>),
+    (mut buttons, hovers): (
+        Query<(Entity, &LabAction, Has<bevy::ui::InteractionDisabled>), Without<Card>>,
+        Query<(&Card, &Interaction)>,
+    ),
 ) {
     if !lab.active() {
         if let Some(previous) = lab.ui.scale.take() {
@@ -965,13 +1037,25 @@ pub fn sync(
     let list = filtered(&lab);
     lab.ui.page = lab.ui.page.min(list.len().saturating_sub(1) / count);
     let page = &list[(lab.ui.page * count).min(list.len())..];
-    if let Some(i)=hovers.iter().find(|(_,interaction)|**interaction==Interaction::Hovered).and_then(|(Card(slot),_)|page.get(*slot)) {
-        let description=match lab.ui.category {7=>Some(lab.events[*i].description.clone()),8=>Some(lab.experiments[*i].plan.description.clone()),_=>None};
-        if let Some(text)=description {if lab.notice!=text {lab.notice=text;}}
+    if let Some(i) = hovers
+        .iter()
+        .find(|(_, interaction)| **interaction == Interaction::Hovered)
+        .and_then(|(Card(slot), _)| page.get(*slot))
+    {
+        let description = match lab.ui.category {
+            7 => Some(lab.events[*i].description.clone()),
+            8 => Some(lab.experiments[*i].plan.description.clone()),
+            _ => None,
+        };
+        if let Some(text) = description {
+            if lab.notice != text {
+                lab.notice = text;
+            }
+        }
     }
     // Only one missing asset thumbnail per frame; reuse exact cached template geometry.
     let mut missing = false;
-    if let Some(templates) = templates.as_ref().filter(|_|lab.ui.category<7) {
+    if let Some(templates) = templates.as_ref().filter(|_| lab.ui.category < 7) {
         if let Some(element) = page
             .iter()
             .take(count)
@@ -983,15 +1067,33 @@ pub fn sync(
             pictures.assets.push((element.clone(), h));
         }
     }
-    if lab.ui.category==8 {
-        if let Some(templates)=templates.as_ref() {
-            if let Some(i)=page.iter().take(count).find(|i|!pictures.scenarios.iter().any(|(cached,_)|cached==*i)) {
-                missing=true;
-                let e=&lab.experiments[*i];
-                let element=Element {id:e.id.clone(),name:e.plan.name.clone(),category:Category::Custom,
-                    blocks:e.layout.blocks.clone(),units:e.layout.units.clone(),unit_yaws:e.layout.unit_yaws.clone(),shields:e.layout.shields.clone()};
-                let h=if element.blocks.is_empty()&&element.units.is_empty()&&element.shields.is_empty() {event_image(&mut pictures,&mut images,"layers")}else{images.add(visuals::thumbnail(&element,templates))};
-                pictures.scenarios.push((*i,h));
+    if lab.ui.category == 8 {
+        if let Some(templates) = templates.as_ref() {
+            if let Some(i) = page
+                .iter()
+                .take(count)
+                .find(|i| !pictures.scenarios.iter().any(|(cached, _)| cached == *i))
+            {
+                missing = true;
+                let e = &lab.experiments[*i];
+                let element = Element {
+                    id: e.id.clone(),
+                    name: e.plan.name.clone(),
+                    category: Category::Custom,
+                    blocks: e.layout.blocks.clone(),
+                    units: e.layout.units.clone(),
+                    unit_yaws: e.layout.unit_yaws.clone(),
+                    shields: e.layout.shields.clone(),
+                };
+                let h = if element.blocks.is_empty()
+                    && element.units.is_empty()
+                    && element.shields.is_empty()
+                {
+                    event_image(&mut pictures, &mut images, "layers")
+                } else {
+                    images.add(visuals::thumbnail(&element, templates))
+                };
+                pictures.scenarios.push((*i, h));
             }
         }
     }
@@ -1011,7 +1113,11 @@ pub fn sync(
             },
         );
         if let Some(i) = i {
-            let value=match lab.ui.category {7=>LabAction::PickEvent(i),8=>LabAction::Experiment(i),_=>LabAction::PickCatalog(i)};
+            let value = match lab.ui.category {
+                7 => LabAction::PickEvent(i),
+                8 => LabAction::Experiment(i),
+                _ => LabAction::PickCatalog(i),
+            };
             if *action != value {
                 *action = value;
             }
@@ -1023,29 +1129,56 @@ pub fn sync(
         }
     }
     for (CardImage(slot), mut image, mut node) in &mut card_images {
-        let height=px(if lab.ui.category==8 {74}else{94});
-        if node.height!=height {node.height=height;}
-        let empty=lab.ui.category==8&&page.get(*slot).is_some_and(|i| {let e=&lab.experiments[*i];e.layout.blocks.is_empty()&&e.layout.units.is_empty()&&e.layout.shields.is_empty()});
-        let width=match lab.ui.category {7=>px(94),8=>px(if empty {74}else{106}),_=>percent(100)};
-        if node.width!=width {node.width=width;}
-        let alignment=if lab.ui.category>=7 {AlignSelf::Center}else{AlignSelf::Auto};
-        if node.align_self!=alignment {node.align_self=alignment;}
-        let handle = if lab.ui.category==7 {
+        let height = px(if lab.ui.category == 8 { 74 } else { 94 });
+        if node.height != height {
+            node.height = height;
+        }
+        let empty = lab.ui.category == 8
+            && page.get(*slot).is_some_and(|i| {
+                let e = &lab.experiments[*i];
+                e.layout.blocks.is_empty()
+                    && e.layout.units.is_empty()
+                    && e.layout.shields.is_empty()
+            });
+        let width = match lab.ui.category {
+            7 => px(94),
+            8 => px(if empty { 74 } else { 106 }),
+            _ => percent(100),
+        };
+        if node.width != width {
+            node.width = width;
+        }
+        let alignment = if lab.ui.category >= 7 {
+            AlignSelf::Center
+        } else {
+            AlignSelf::Auto
+        };
+        if node.align_self != alignment {
+            node.align_self = alignment;
+        }
+        let handle = if lab.ui.category == 7 {
             page.get(*slot).map(|i| {
-                let name=events::icon(&lab.events[*i].icon);
-                event_image(&mut pictures,&mut images,name)
+                let name = events::icon(&lab.events[*i].icon);
+                event_image(&mut pictures, &mut images, name)
             })
-        }else if lab.ui.category==8 {
-            page.get(*slot).and_then(|i|pictures.scenarios.iter().find(|(cached,_)|cached==i).map(|(_,h)|h.clone()))
-        }else{page
-            .get(*slot)
-            .and_then(|i| {
+        } else if lab.ui.category == 8 {
+            page.get(*slot).and_then(|i| {
                 pictures
-                    .assets
+                    .scenarios
                     .iter()
-                    .find(|(e, _)| e == &lab.constructor.catalog[*i])
+                    .find(|(cached, _)| cached == i)
+                    .map(|(_, h)| h.clone())
             })
-            .map(|(_, h)| h.clone())};
+        } else {
+            page.get(*slot)
+                .and_then(|i| {
+                    pictures
+                        .assets
+                        .iter()
+                        .find(|(e, _)| e == &lab.constructor.catalog[*i])
+                })
+                .map(|(_, h)| h.clone())
+        };
         if let Some(handle) = handle {
             if image.image != handle {
                 image.image = handle;
@@ -1058,9 +1191,11 @@ pub fn sync(
         }
     }
     for (CardName(slot), mut text) in &mut card_names {
-        let value = page
-            .get(*slot)
-            .map_or("", |i| match lab.ui.category {7=>lab.events[*i].name.as_str(),8=>lab.experiments[*i].plan.name.as_str(),_=>lab.constructor.catalog[*i].name.as_str()});
+        let value = page.get(*slot).map_or("", |i| match lab.ui.category {
+            7 => lab.events[*i].name.as_str(),
+            8 => lab.experiments[*i].plan.name.as_str(),
+            _ => lab.constructor.catalog[*i].name.as_str(),
+        });
         if text.0 != value {
             **text = value.to_string();
         }
@@ -1113,56 +1248,192 @@ pub fn sync(
 }
 
 pub fn capture_ready(lab: &Laboratory) -> bool {
-    if matches!(std::env::var("RTS_LAB_CAPTURE_CASE").as_deref(),Ok("replay-effects"|"section-unit-laser")) && lab.ui.ready_frames<24 {return false;}
-    !lab.active() || (!lab.tools.flight.profile && lab.replay.target.is_none() && lab.ui.ready_frames >= if lab.tools.metric>0 && !lab.tools.section.enabled {20}else{4} && lab.ui.viewport_ready >= 4)
+    if matches!(
+        std::env::var("RTS_LAB_CAPTURE_CASE").as_deref(),
+        Ok("replay-effects" | "section-unit-laser")
+    ) && lab.ui.ready_frames < 24
+    {
+        return false;
+    }
+    !lab.active()
+        || (!lab.tools.flight.profile
+            && lab.replay.target.is_none()
+            && lab.ui.ready_frames
+                >= if lab.tools.metric > 0 && !lab.tools.section.enabled {
+                    20
+                } else {
+                    4
+                }
+            && lab.ui.viewport_ready >= 4)
 }
 /// Explicit screenshot fixtures only; never used by a normal interactive session.
 pub fn capture_fixture(lab: &mut Laboratory) -> bool {
     let Ok(case) = std::env::var("RTS_LAB_CAPTURE_CASE") else {
         return false;
     };
-    if matches!(case.as_str(),"section-unit"|"section-unit-metric"|"unit-metric"|"section-unit-laser") {
-        let c=&mut lab.constructor;
-        let tank=c.catalog.iter().find(|e|e.id=="tank").expect("tank catalog").clone();
-        c.placed.clear();c.selected=None;c.base=None;c.stand=false;
-        c.placed.push(modding::laboratory::catalog::Placed{element:tank,at:[384,16,336],turns:0});
-        let centre=Vec3::new(384.0,24.0,336.0);
-        lab.tools.flying=true;
-        lab.tools.camera=Some(Transform::from_translation(centre+Vec3::new(-35.0,30.0,55.0)).looking_at(centre,Vec3::Y));
-        lab.ui.tab=30;
-        return true;
-    }
-    if case == "melt-steel" || case == "metric-section" || case == "metric-surface" || case == "metric-live" || case == "metric-fragment" || case == "replay-ui" || case == "replay-effects" {
-        let c=&mut lab.constructor;
-        c.placed.clear(); c.selected=None; c.base=None; c.stand=false;
+    if matches!(
+        case.as_str(),
+        "section-unit" | "section-unit-metric" | "unit-metric" | "section-unit-laser"
+    ) {
+        let c = &mut lab.constructor;
+        let tank = c
+            .catalog
+            .iter()
+            .find(|e| e.id == "tank")
+            .expect("tank catalog")
+            .clone();
+        c.placed.clear();
+        c.selected = None;
+        c.base = None;
+        c.stand = false;
         c.placed.push(modding::laboratory::catalog::Placed {
-            element:modding::laboratory::catalog::Element {
-                id:"melt-capture".into(), name:"Стальная плита".into(), category:Category::Custom,
-                blocks:vec![RangeBlock{min:[0;3],max:[4,30,30],material:3}],
-                units:vec![], unit_yaws:vec![], shields:vec![],
-            }, at:[384,16,330], turns:0,
+            element: tank,
+            at: [384, 16, 336],
+            turns: 0,
         });
-        let centre=Vec3::new(384.0,31.0,345.0);
-        lab.tools.flying=true;
-        lab.tools.camera=Some(Transform::from_translation(centre+Vec3::new(-52.0,38.0,62.0)).looking_at(centre,Vec3::Y));
-        lab.ui.tab=if case.starts_with("metric-") {30}else if case.starts_with("replay-") {31}else{3};
+        let centre = Vec3::new(384.0, 24.0, 336.0);
+        lab.tools.flying = true;
+        lab.tools.camera = Some(
+            Transform::from_translation(centre + Vec3::new(-35.0, 30.0, 55.0))
+                .looking_at(centre, Vec3::Y),
+        );
+        lab.ui.tab = 30;
         return true;
     }
-    if ["collector-before","collector-after","collector-profile"].contains(&case.as_str()) {
-        let index=lab.experiments.iter().position(|e|e.id=="crawler-salvage").unwrap();
-        experiments::select(lab,index).expect("collector capture fixture");lab.ui.tab=3;return true;
+    if case == "melt-steel"
+        || case == "metric-section"
+        || case == "metric-surface"
+        || case == "metric-live"
+        || case == "metric-fragment"
+        || case == "replay-ui"
+        || case == "replay-effects"
+    {
+        let c = &mut lab.constructor;
+        c.placed.clear();
+        c.selected = None;
+        c.base = None;
+        c.stand = false;
+        c.placed.push(modding::laboratory::catalog::Placed {
+            element: modding::laboratory::catalog::Element {
+                id: "melt-capture".into(),
+                name: "Стальная плита".into(),
+                category: Category::Custom,
+                blocks: vec![RangeBlock {
+                    min: [0; 3],
+                    max: [4, 30, 30],
+                    material: 3,
+                }],
+                units: vec![],
+                unit_yaws: vec![],
+                shields: vec![],
+            },
+            at: [384, 16, 330],
+            turns: 0,
+        });
+        let centre = Vec3::new(384.0, 31.0, 345.0);
+        lab.tools.flying = true;
+        lab.tools.camera = Some(
+            Transform::from_translation(centre + Vec3::new(-52.0, 38.0, 62.0))
+                .looking_at(centre, Vec3::Y),
+        );
+        lab.ui.tab = if case.starts_with("metric-") {
+            30
+        } else if case.starts_with("replay-") {
+            31
+        } else {
+            3
+        };
+        return true;
     }
-    if ["dune-before","dune-during","dune-after","dune-profile"].contains(&case.as_str()) {
-        let index=lab.experiments.iter().position(|e|e.id=="dune-rockfall").unwrap();
-        experiments::select(lab,index).expect("dune capture fixture");lab.ui.tab=3;return true;
+    if ["collector-before", "collector-after", "collector-profile"].contains(&case.as_str()) {
+        let index = lab
+            .experiments
+            .iter()
+            .position(|e| e.id == "crawler-salvage")
+            .unwrap();
+        experiments::select(lab, index).expect("collector capture fixture");
+        lab.ui.tab = 3;
+        return true;
     }
-    if ["water-gravity-before","water-gravity-during","water-gravity-after","water-gravity-profile"].contains(&case.as_str()) {
-        let index=lab.experiments.iter().position(|e|e.id=="water-fall").unwrap();
-        experiments::select(lab,index).expect("water gravity fixture");lab.ui.tab=3;return true;
+    if ["dune-before", "dune-during", "dune-after", "dune-profile"].contains(&case.as_str()) {
+        let index = lab
+            .experiments
+            .iter()
+            .position(|e| e.id == "dune-rockfall")
+            .unwrap();
+        experiments::select(lab, index).expect("dune capture fixture");
+        lab.ui.tab = 3;
+        return true;
+    }
+    if [
+        "water-gravity-before",
+        "water-gravity-during",
+        "water-gravity-after",
+        "water-gravity-profile",
+    ]
+    .contains(&case.as_str())
+    {
+        let index = lab
+            .experiments
+            .iter()
+            .position(|e| e.id == "water-fall")
+            .unwrap();
+        experiments::select(lab, index).expect("water gravity fixture");
+        lab.ui.tab = 3;
+        return true;
     }
     if ![
-        "overview", "valid", "invalid", "help", "results", "weapon", "draft", "block", "aim",
-        "sources", "settings", "number", "bound", "error", "events", "scenarios", "collapse-kit", "event-preview", "material-scene", "material-catalog", "material-result", "water-scene", "water-result", "water-float", "physics-tools", "physics-wetting", "physics-dome", "physics-devices", "physics-glass", "physics-erosion", "material-object", "material-stand", "voxel-inspector", "voxel-editor", "live-tools", "he-fragments-flight", "he-fragments-heat-flight", "he-fragments-landed", "fragment-inspector", "surround", "fps-laser", "fps-water", "fps-menu", "fps-overview", "fps-profile", "fps-water-profile", "fps-fire", "fps-fire-profile", "fps-mg-profile", "fps-he-profile", "fps-ap-profile",
+        "overview",
+        "valid",
+        "invalid",
+        "help",
+        "results",
+        "weapon",
+        "draft",
+        "block",
+        "aim",
+        "sources",
+        "settings",
+        "number",
+        "bound",
+        "error",
+        "events",
+        "scenarios",
+        "collapse-kit",
+        "event-preview",
+        "material-scene",
+        "material-catalog",
+        "material-result",
+        "water-scene",
+        "water-result",
+        "water-float",
+        "physics-tools",
+        "physics-wetting",
+        "physics-dome",
+        "physics-devices",
+        "physics-glass",
+        "physics-erosion",
+        "material-object",
+        "material-stand",
+        "voxel-inspector",
+        "voxel-editor",
+        "live-tools",
+        "he-fragments-flight",
+        "he-fragments-heat-flight",
+        "he-fragments-landed",
+        "fragment-inspector",
+        "surround",
+        "fps-laser",
+        "fps-water",
+        "fps-menu",
+        "fps-overview",
+        "fps-profile",
+        "fps-water-profile",
+        "fps-fire",
+        "fps-fire-profile",
+        "fps-mg-profile",
+        "fps-he-profile",
+        "fps-ap-profile",
     ]
     .contains(&case.as_str())
     {
@@ -1186,21 +1457,44 @@ pub fn capture_fixture(lab: &mut Laboratory) -> bool {
     }
     c.selected = Some(0);
     c.revision += 1;
-    if case=="fragment-inspector" {
-        c.placed.clear();c.selected=None;c.base=None;c.stand=false;c.mode=constructor::Mode::Inspect;
-        lab.ui.tab=14;return true;
+    if case == "fragment-inspector" {
+        c.placed.clear();
+        c.selected = None;
+        c.base = None;
+        c.stand = false;
+        c.mode = constructor::Mode::Inspect;
+        lab.ui.tab = 14;
+        return true;
     }
     if case.starts_with("he-fragments-") {
-        c.placed.clear();c.selected=None;c.base=None;c.stand=false;
+        c.placed.clear();
+        c.selected = None;
+        c.base = None;
+        c.stand = false;
         c.placed.push(modding::laboratory::catalog::Placed {
-            element:modding::laboratory::catalog::Element {
-                id:"he-fragments-check".into(),name:"Бетонная мишень".into(),category:Category::Custom,
-                blocks:vec![RangeBlock{min:[0;3],max:[16,12,16],material:2}],units:vec![],unit_yaws:vec![],shields:vec![],
-            },at:[384,16,336],turns:0,
+            element: modding::laboratory::catalog::Element {
+                id: "he-fragments-check".into(),
+                name: "Бетонная мишень".into(),
+                category: Category::Custom,
+                blocks: vec![RangeBlock {
+                    min: [0; 3],
+                    max: [16, 12, 16],
+                    material: 2,
+                }],
+                units: vec![],
+                unit_yaws: vec![],
+                shields: vec![],
+            },
+            at: [384, 16, 336],
+            turns: 0,
         });
-        let centre=Vec3::new(392.0,18.0,344.0);
-        lab.tools.flying=true;lab.tools.camera=Some(Transform::from_translation(centre+Vec3::new(48.0,38.0,50.0)).looking_at(centre,Vec3::Y));
-        lab.ui.tab=3;
+        let centre = Vec3::new(392.0, 18.0, 344.0);
+        lab.tools.flying = true;
+        lab.tools.camera = Some(
+            Transform::from_translation(centre + Vec3::new(48.0, 38.0, 50.0))
+                .looking_at(centre, Vec3::Y),
+        );
+        lab.ui.tab = 3;
         return true;
     }
     if case == "block" {
@@ -1230,32 +1524,80 @@ pub fn capture_fixture(lab: &mut Laboratory) -> bool {
             [272, 16, 320]
         });
     }
-    if case=="material-object" || case=="material-stand" {
-        if case=="material-object" {c.action(LabAction::PickObject(1),&lab.definition,&mut lab.recipe).unwrap();}
-        else {c.placed.clear();c.selected=None;c.stand=true;c.base=None;c.mode=constructor::Mode::Select;}
-        c.action(LabAction::PickMaterial(5),&lab.definition,&mut lab.recipe).unwrap();
-        if case=="material-object" {c.action(LabAction::ApplyMaterial,&lab.definition,&mut lab.recipe).unwrap();}
-        lab.ui.tab=1;
+    if case == "material-object" || case == "material-stand" {
+        if case == "material-object" {
+            c.action(LabAction::PickObject(1), &lab.definition, &mut lab.recipe)
+                .unwrap();
+        } else {
+            c.placed.clear();
+            c.selected = None;
+            c.stand = true;
+            c.base = None;
+            c.mode = constructor::Mode::Select;
+        }
+        c.action(LabAction::PickMaterial(5), &lab.definition, &mut lab.recipe)
+            .unwrap();
+        if case == "material-object" {
+            c.action(LabAction::ApplyMaterial, &lab.definition, &mut lab.recipe)
+                .unwrap();
+        }
+        lab.ui.tab = 1;
     }
     if case == "voxel-editor" {
-        c.selected=Some(1);c.action(LabAction::BeginVoxelEdit,&lab.definition,&mut lab.recipe).unwrap();
-        let item=&c.placed[1];let b=item.element.blocks.iter().find(|b|b.material!=0).unwrap();
-        let at=modding::laboratory::catalog::voxels::world_cell(item,b.min);
-        for (p,tool,mat) in [(at,modding::laboratory::catalog::voxels::Tool::Paint,3),([at[0],at[1]+1,at[2]],modding::laboratory::catalog::voxels::Tool::Erase,3),([at[0]-1,at[1],at[2]],modding::laboratory::catalog::voxels::Tool::Add,5)] {
-            c.stage_voxel_cells(std::collections::BTreeSet::from([p]),tool,mat).unwrap();
-            c.action(LabAction::VoxelStroke,&lab.definition,&mut lab.recipe).unwrap();
+        c.selected = Some(1);
+        c.action(LabAction::BeginVoxelEdit, &lab.definition, &mut lab.recipe)
+            .unwrap();
+        let item = &c.placed[1];
+        let b = item
+            .element
+            .blocks
+            .iter()
+            .find(|b| b.material != 0)
+            .unwrap();
+        let at = modding::laboratory::catalog::voxels::world_cell(item, b.min);
+        for (p, tool, mat) in [
+            (at, modding::laboratory::catalog::voxels::Tool::Paint, 3),
+            (
+                [at[0], at[1] + 1, at[2]],
+                modding::laboratory::catalog::voxels::Tool::Erase,
+                3,
+            ),
+            (
+                [at[0] - 1, at[1], at[2]],
+                modding::laboratory::catalog::voxels::Tool::Add,
+                5,
+            ),
+        ] {
+            c.stage_voxel_cells(std::collections::BTreeSet::from([p]), tool, mat)
+                .unwrap();
+            c.action(LabAction::VoxelStroke, &lab.definition, &mut lab.recipe)
+                .unwrap();
         }
-        lab.tools.selected=Some(at);lab.tools.probe_direction=Some(Vec3::new(6.0,-5.0,6.0).normalize());
-        let centre=Vec3::from(at.map(|v|v as f32))+Vec3::splat(0.5);
-        lab.tools.camera=Some(Transform::from_translation(centre+Vec3::new(-6.0,5.0,-6.0).normalize()*10.0).looking_at(centre,Vec3::Y));lab.tools.flying=true;lab.ui.tab=17;
+        lab.tools.selected = Some(at);
+        lab.tools.probe_direction = Some(Vec3::new(6.0, -5.0, 6.0).normalize());
+        let centre = Vec3::from(at.map(|v| v as f32)) + Vec3::splat(0.5);
+        lab.tools.camera = Some(
+            Transform::from_translation(centre + Vec3::new(-6.0, 5.0, -6.0).normalize() * 10.0)
+                .looking_at(centre, Vec3::Y),
+        );
+        lab.tools.flying = true;
+        lab.ui.tab = 17;
     }
     if case == "voxel-inspector" {
-        c.selected=None;c.mode=constructor::Mode::Inspect;lab.ui.tab=14;
-        let item=&c.placed[1];let block=item.element.blocks.iter().find(|b|b.material!=0).unwrap();
-        lab.tools.selected=Some(std::array::from_fn(|a|item.at[a]+block.min[a]));
-        lab.tools.probe_direction=Some(Vec3::new(6.0,-5.0,6.0).normalize());
+        c.selected = None;
+        c.mode = constructor::Mode::Inspect;
+        lab.ui.tab = 14;
+        let item = &c.placed[1];
+        let block = item
+            .element
+            .blocks
+            .iter()
+            .find(|b| b.material != 0)
+            .unwrap();
+        lab.tools.selected = Some(std::array::from_fn(|a| item.at[a] + block.min[a]));
+        lab.tools.probe_direction = Some(Vec3::new(6.0, -5.0, 6.0).normalize());
         tools::inspector::focus(lab);
-        lab.tools.probe_stamp=None;
+        lab.tools.probe_stamp = None;
     }
     lab.ui.help = case == "help";
     if case == "weapon" {
@@ -1286,7 +1628,12 @@ pub fn capture_fixture(lab: &mut Laboratory) -> bool {
             keys.press(KeyCode::ControlLeft);
             keys.press(KeyCode::KeyA);
             parameters::keyboard(lab, &mut keys);
-            for key in [KeyCode::Digit2, KeyCode::Period, KeyCode::Digit7, KeyCode::Digit5] {
+            for key in [
+                KeyCode::Digit2,
+                KeyCode::Period,
+                KeyCode::Digit7,
+                KeyCode::Digit5,
+            ] {
                 keys.press(key);
                 parameters::keyboard(lab, &mut keys);
             }
@@ -1299,68 +1646,141 @@ pub fn capture_fixture(lab: &mut Laboratory) -> bool {
             sources::active_mut(lab).unwrap().binding = Some(0);
         }
     }
-    if case=="events" || case=="event-preview" {lab.ui.category=7;}
-    if case=="scenarios" {lab.ui.category=8;}
-    if case=="material-scene" || case=="material-catalog" || case=="material-result" {
-        let index=lab.experiments.iter().position(|e|e.id=="rock-sand").unwrap();
-        experiments::select(lab,index).unwrap();
-        lab.ui.category=8; lab.ui.page=2; lab.ui.tab=3;
+    if case == "events" || case == "event-preview" {
+        lab.ui.category = 7;
     }
-    if case=="water-scene" || case=="water-result" || case=="water-float" {
-        let id=if case=="water-float" {"water-float"}else{"water-fall"};
-        let index=lab.experiments.iter().position(|e|e.id==id).unwrap();
-        experiments::select(lab,index).unwrap();
-        lab.ui.category=8; lab.ui.page=lab.experiments.len().saturating_sub(1)/8;lab.ui.tab=3;
+    if case == "scenarios" {
+        lab.ui.category = 8;
+    }
+    if case == "material-scene" || case == "material-catalog" || case == "material-result" {
+        let index = lab
+            .experiments
+            .iter()
+            .position(|e| e.id == "rock-sand")
+            .unwrap();
+        experiments::select(lab, index).unwrap();
+        lab.ui.category = 8;
+        lab.ui.page = 2;
+        lab.ui.tab = 3;
+    }
+    if case == "water-scene" || case == "water-result" || case == "water-float" {
+        let id = if case == "water-float" {
+            "water-float"
+        } else {
+            "water-fall"
+        };
+        let index = lab.experiments.iter().position(|e| e.id == id).unwrap();
+        experiments::select(lab, index).unwrap();
+        lab.ui.category = 8;
+        lab.ui.page = lab.experiments.len().saturating_sub(1) / 8;
+        lab.ui.tab = 3;
     }
     if case.starts_with("physics-") {
-        let id=match case.as_str(){"physics-dome"=>"buried-dome","physics-devices"=>"drill-crawler","physics-glass"=>"vitrification","physics-erosion"=>"water-erosion",_=>"wetting"};
-        let index=lab.experiments.iter().position(|e|e.id==id).unwrap();
-        experiments::select(lab,index).unwrap();lab.ui.category=8;lab.ui.page=lab.experiments.len().saturating_sub(1)/8;lab.ui.tab=if case=="physics-tools"{16}else{3};
+        let id = match case.as_str() {
+            "physics-dome" => "buried-dome",
+            "physics-devices" => "drill-crawler",
+            "physics-glass" => "vitrification",
+            "physics-erosion" => "water-erosion",
+            _ => "wetting",
+        };
+        let index = lab.experiments.iter().position(|e| e.id == id).unwrap();
+        experiments::select(lab, index).unwrap();
+        lab.ui.category = 8;
+        lab.ui.page = lab.experiments.len().saturating_sub(1) / 8;
+        lab.ui.tab = if case == "physics-tools" { 16 } else { 3 };
     }
-    if case=="collapse-kit" || case=="event-preview" {
+    if case == "collapse-kit" || case == "event-preview" {
         lab.constructor.placed.clear();
-        let element=lab.constructor.catalog.iter().find(|e|e.id=="collapse-tower").unwrap().clone();
-        lab.constructor.placed.push(modding::laboratory::catalog::Placed{element,at:[384,16,336],turns:0});
+        let element = lab
+            .constructor
+            .catalog
+            .iter()
+            .find(|e| e.id == "collapse-tower")
+            .unwrap()
+            .clone();
+        lab.constructor
+            .placed
+            .push(modding::laboratory::catalog::Placed {
+                element,
+                at: [384, 16, 336],
+                turns: 0,
+            });
         sources::ensure(lab).unwrap();
-        let source=sources::active_mut(lab).unwrap();
-        source.name="Подрыв опоры".into();source.detonate=true;source.at=[384,28,336];source.target=source.at;source.power_milli=500;
-        lab.ui.tab=2;
-        lab.ui.category=7;
-        if case=="event-preview" {lab.constructor.mode=constructor::Mode::Event;lab.ui.event=Some(4);lab.ui.capture_at=Some([384,28,336]);}
+        let source = sources::active_mut(lab).unwrap();
+        source.name = "Подрыв опоры".into();
+        source.detonate = true;
+        source.at = [384, 28, 336];
+        source.target = source.at;
+        source.power_milli = 500;
+        lab.ui.tab = 2;
+        lab.ui.category = 7;
+        if case == "event-preview" {
+            lab.constructor.mode = constructor::Mode::Event;
+            lab.ui.event = Some(4);
+            lab.ui.capture_at = Some([384, 28, 336]);
+        }
     }
     true
 }
 
 pub fn enabled(lab: &Laboratory, a: LabAction) -> bool {
-    if !lab.constructor.voxel_allowed(a) {return false;}
-    if !live_tools::allowed(lab,a) {return false;}
-    if a==LabAction::BeginVoxelEdit {return lab.constructor.can_voxel_edit();}
+    if !lab.constructor.voxel_allowed(a) {
+        return false;
+    }
+    if !live_tools::allowed(lab, a) {
+        return false;
+    }
+    if a == LabAction::BeginVoxelEdit {
+        return lab.constructor.can_voxel_edit();
+    }
     let c = &lab.constructor;
     match a {
-        LabAction::ReplayStart=>!lab.replay.recording,
-        LabAction::ReplayStop=>lab.replay.recording,
-        LabAction::ReplaySave=>lab.replay.bounds().is_some(),
-        LabAction::ReplayOpen=>!lab.replay.recording,
-        LabAction::ReplayBrowse(_)=>!lab.replay.recording,
-        LabAction::ReplayPlay=>lab.replay.bounds().is_some_and(|(_,end)|lab.replay.position.is_some_and(|at|at<end)) && lab.replay.target.is_none() && !lab.replay.playing,
-        LabAction::ReplayLeave=>lab.replay.position.is_some() || lab.replay.target.is_some(),
-        LabAction::ReplaySeek(_)|LabAction::ReplayJump(_)=>lab.replay.bounds().is_some(),
-        LabAction::LiveTool(_)|LabAction::LivePoint|LabAction::LivePower(_)|LabAction::LiveCapture|LabAction::LiveSpeed(_)|LabAction::LiveLook(_)|LabAction::LiveFov(_)|LabAction::Tab(21)=>lab.tools.live,
-        LabAction::VoxelUndo=>c.voxel_can_undo(false),
-        LabAction::VoxelRedo=>c.voxel_can_undo(true),
-        LabAction::VoxelTool(_)|LabAction::VoxelFinish(_)=>c.voxel_editing(),
-        LabAction::SavePart=>c.selected.is_some(),
-        LabAction::Tab(17)=>c.voxel_editing()||c.can_voxel_edit(),
-        LabAction::ReturnConstruction=>c.can_return(),
-        LabAction::PickEvent(i) | LabAction::PlaceEvent(i,_)=>i<lab.events.len()&&c.workspace.sources.len()<32,
-        LabAction::LocalCharge(local)=>sources::active(lab).is_some_and(|s|!local||s.config.delivery==Delivery::Blast),
+        LabAction::ReplayStart => !lab.replay.recording,
+        LabAction::ReplayStop => lab.replay.recording,
+        LabAction::ReplaySave => lab.replay.bounds().is_some(),
+        LabAction::ReplayOpen => !lab.replay.recording,
+        LabAction::ReplayBrowse(_) => !lab.replay.recording,
+        LabAction::ReplayPlay => {
+            lab.replay
+                .bounds()
+                .is_some_and(|(_, end)| lab.replay.position.is_some_and(|at| at < end))
+                && lab.replay.target.is_none()
+                && !lab.replay.playing
+        }
+        LabAction::ReplayLeave => lab.replay.position.is_some() || lab.replay.target.is_some(),
+        LabAction::ReplaySeek(_) | LabAction::ReplayJump(_) => lab.replay.bounds().is_some(),
+        LabAction::LiveTool(_)
+        | LabAction::LivePoint
+        | LabAction::LivePower(_)
+        | LabAction::LiveCapture
+        | LabAction::LiveSpeed(_)
+        | LabAction::LiveLook(_)
+        | LabAction::LiveFov(_)
+        | LabAction::Tab(21) => lab.tools.live,
+        LabAction::VoxelUndo => c.voxel_can_undo(false),
+        LabAction::VoxelRedo => c.voxel_can_undo(true),
+        LabAction::VoxelTool(_) | LabAction::VoxelFinish(_) => c.voxel_editing(),
+        LabAction::SavePart => c.selected.is_some(),
+        LabAction::Tab(17) => c.voxel_editing() || c.can_voxel_edit(),
+        LabAction::ReturnConstruction => c.can_return(),
+        LabAction::PickEvent(i) | LabAction::PlaceEvent(i, _) => {
+            i < lab.events.len() && c.workspace.sources.len() < 32
+        }
+        LabAction::LocalCharge(local) => {
+            sources::active(lab).is_some_and(|s| !local || s.config.delivery == Delivery::Blast)
+        }
         LabAction::ApplyNumber | LabAction::CancelNumber => lab.ui.editing.is_some(),
         LabAction::EditNumber(id) | LabAction::AdjustNumber(id, _) if matches!(id,0..=15|40..=54) => {
             sources::active(lab).is_some()
         }
-        LabAction::AddSource => c.workspace.sources.len() < 32 && !c.base.as_ref().is_some_and(|b|b.battle),
+        LabAction::AddSource => {
+            c.workspace.sources.len() < 32 && !c.base.as_ref().is_some_and(|b| b.battle)
+        }
         LabAction::Source(i) => i < c.workspace.sources.len(),
-        LabAction::RemoveSource => !c.workspace.sources.is_empty() && (c.experiment.is_some() || c.workspace.sources.len()>1),
+        LabAction::RemoveSource => {
+            !c.workspace.sources.is_empty()
+                && (c.experiment.is_some() || c.workspace.sources.len() > 1)
+        }
         LabAction::BindSource(true) => {
             c.selected
                 .is_some_and(|i| !c.placed[i].element.units.is_empty())
@@ -1369,7 +1789,9 @@ pub fn enabled(lab: &Laboratory, a: LabAction) -> bool {
         LabAction::SourcePosition | LabAction::BindSource(false) => sources::active(lab).is_some(),
         LabAction::Delete | LabAction::Duplicate | LabAction::MoveAt(_) => editing(lab).is_some(),
         LabAction::PickObject(i) => i < c.placed.len(),
-        LabAction::Form(_) | LabAction::Thickness | LabAction::Strength => c.stand && c.base.is_none(),
+        LabAction::Form(_) | LabAction::Thickness | LabAction::Strength => {
+            c.stand && c.base.is_none()
+        }
         LabAction::ApplyMaterial => c.can_apply_material(),
         LabAction::ApplySize => single_block(lab),
         LabAction::Split => {
@@ -1377,18 +1799,40 @@ pub fn enabled(lab: &Laboratory, a: LabAction) -> bool {
         }
         LabAction::Move(_, _) => {
             c.selected.is_some()
-                && !matches!(c.mode, constructor::Mode::Place | constructor::Mode::Part | constructor::Mode::Drill | constructor::Mode::Crawler | constructor::Mode::Collector)
+                && !matches!(
+                    c.mode,
+                    constructor::Mode::Place
+                        | constructor::Mode::Part
+                        | constructor::Mode::Drill
+                        | constructor::Mode::Crawler
+                        | constructor::Mode::Collector
+                )
         }
         LabAction::Tool(1) => c.selected.is_some(),
         LabAction::Turn(_) => {
             c.selected.is_some()
-                || matches!(c.mode, constructor::Mode::Place | constructor::Mode::Part | constructor::Mode::Drill | constructor::Mode::Crawler | constructor::Mode::Collector)
+                || matches!(
+                    c.mode,
+                    constructor::Mode::Place
+                        | constructor::Mode::Part
+                        | constructor::Mode::Drill
+                        | constructor::Mode::Crawler
+                        | constructor::Mode::Collector
+                )
         }
         LabAction::Elevation(_) => {
             c.selected.is_some()
                 || matches!(
                     c.mode,
-                    constructor::Mode::Place | constructor::Mode::Part | constructor::Mode::Source | constructor::Mode::Event | constructor::Mode::Brush | constructor::Mode::Erase | constructor::Mode::Drill | constructor::Mode::Crawler | constructor::Mode::Collector
+                    constructor::Mode::Place
+                        | constructor::Mode::Part
+                        | constructor::Mode::Source
+                        | constructor::Mode::Event
+                        | constructor::Mode::Brush
+                        | constructor::Mode::Erase
+                        | constructor::Mode::Drill
+                        | constructor::Mode::Crawler
+                        | constructor::Mode::Collector
                 )
         }
         LabAction::SaveElement => c.creating() && !c.placed.is_empty(),
@@ -1398,7 +1842,11 @@ pub fn enabled(lab: &Laboratory, a: LabAction) -> bool {
             if delta < 0 {
                 lab.ui.page > 0
             } else {
-                lab.ui.page.saturating_add(1).saturating_mul(lab.ui.per_page) < filtered(lab).len()
+                lab.ui
+                    .page
+                    .saturating_add(1)
+                    .saturating_mul(lab.ui.per_page)
+                    < filtered(lab).len()
             }
         }
         _ => true,
@@ -1416,26 +1864,52 @@ mod tests {
     use super::*;
     #[test]
     fn metric_legend_and_sampling_scale_are_described() {
-        let mut lab=Laboratory::new(false);
-        lab.tools.metric=6;lab.tools.metric_scale=4;
-        assert!(text(&lab,28).contains("5 м/с"));
-        assert!(text(&lab,29).contains("19.2"));
-        assert!(text(&lab,29).contains("40 см"));
+        let mut lab = Laboratory::new(false);
+        lab.tools.metric = 6;
+        lab.tools.metric_scale = 4;
+        assert!(text(&lab, 28).contains("5 м/с"));
+        assert!(text(&lab, 29).contains("19.2"));
+        assert!(text(&lab, 29).contains("40 см"));
     }
     #[test]
     fn scenario_and_device_panels_show_only_applicable_fields() {
-        use modding::laboratory::experiments::{Input,Plan};
-        let mut lab=Laboratory::new(false);
-        lab.constructor.experiment=Some(Plan{name:"Проверка".into(),description:String::new(),duration_ticks:10,
-            inputs:vec![Input::FreeControl,Input::Move{actor:0,to:[80,80]},Input::Pilot{actor:0,throttle:1,turn:0,aim:[80,16,80],fire:false}]});
-        lab.ui.tab=24;
-        assert!(section_visible(&lab,24));assert!(!section_visible(&lab,25));assert!(!section_visible(&lab,22));
-        assert!(!section_visible(&lab,26));assert!(!section_visible(&lab,27));
-        lab.ui.scenario_input=1;
-        assert!(section_visible(&lab,26));assert!(section_visible(&lab,27));assert!(!section_visible(&lab,28));
-        lab.ui.scenario_input=2;assert!(section_visible(&lab,28));
-        lab.ui.tab=25;assert!(section_visible(&lab,25));assert!(!section_visible(&lab,24));
-        assert!(!section_visible(&lab,29));
+        use modding::laboratory::experiments::{Input, Plan};
+        let mut lab = Laboratory::new(false);
+        lab.constructor.experiment = Some(Plan {
+            name: "Проверка".into(),
+            description: String::new(),
+            duration_ticks: 10,
+            inputs: vec![
+                Input::FreeControl,
+                Input::Move {
+                    actor: 0,
+                    to: [80, 80],
+                },
+                Input::Pilot {
+                    actor: 0,
+                    throttle: 1,
+                    turn: 0,
+                    aim: [80, 16, 80],
+                    fire: false,
+                },
+            ],
+        });
+        lab.ui.tab = 24;
+        assert!(section_visible(&lab, 24));
+        assert!(!section_visible(&lab, 25));
+        assert!(!section_visible(&lab, 22));
+        assert!(!section_visible(&lab, 26));
+        assert!(!section_visible(&lab, 27));
+        lab.ui.scenario_input = 1;
+        assert!(section_visible(&lab, 26));
+        assert!(section_visible(&lab, 27));
+        assert!(!section_visible(&lab, 28));
+        lab.ui.scenario_input = 2;
+        assert!(section_visible(&lab, 28));
+        lab.ui.tab = 25;
+        assert!(section_visible(&lab, 25));
+        assert!(!section_visible(&lab, 24));
+        assert!(!section_visible(&lab, 29));
     }
     #[test]
     fn laboratory_docks_filter_cards_and_switch_tabs_without_rebuilding_the_world() {
@@ -1484,13 +1958,21 @@ mod tests {
             .iter(world)
             .filter(|(i, _)| i.0 < 4)
             .all(|(i, n)| (n.display == Display::Flex) == (i.0 == 2)));
-        for category in [7,8] {
-            super::super::integration_tests::click(&mut app,LabAction::Category(category));
-            let world=app.world_mut();
-            let mut cards=world.query::<(&Card,&Node,&LabAction)>();
-            let actions:Vec<_>=cards.iter(world).filter(|(_,n,_)|n.display==Display::Flex).map(|(_,_,a)|*a).collect();
+        for category in [7, 8] {
+            super::super::integration_tests::click(&mut app, LabAction::Category(category));
+            let world = app.world_mut();
+            let mut cards = world.query::<(&Card, &Node, &LabAction)>();
+            let actions: Vec<_> = cards
+                .iter(world)
+                .filter(|(_, n, _)| n.display == Display::Flex)
+                .map(|(_, _, a)| *a)
+                .collect();
             assert!(!actions.is_empty());
-            assert!(actions.iter().all(|a|if category==7 {matches!(a,LabAction::PickEvent(_))}else{matches!(a,LabAction::Experiment(_))}));
+            assert!(actions.iter().all(|a| if category == 7 {
+                matches!(a, LabAction::PickEvent(_))
+            } else {
+                matches!(a, LabAction::Experiment(_))
+            }));
         }
         assert_eq!(
             app.world().resource::<Scene>().sim.snapshot(),
@@ -1578,13 +2060,36 @@ impl Laboratory {
 #[cfg(test)]
 #[test]
 fn voxel_editor_sections_and_history_controls_are_visible_for_a_single_block() {
-    let mut lab=Laboratory::new(false);lab.constructor.stand=false;
-    let element=lab.constructor.catalog.iter().find(|e|e.blocks.len()==1&&e.units.is_empty()&&e.shields.is_empty()).unwrap().clone();
-    lab.constructor.placed=vec![modding::laboratory::catalog::Placed{element,at:[384,16,336],turns:0}];lab.constructor.selected=Some(0);lab.ui.tab=0;
-    assert!(section_visible(&lab,18));assert!(enabled(&lab,LabAction::BeginVoxelEdit));
-    lab.constructor.action(LabAction::BeginVoxelEdit,&lab.definition,&mut lab.recipe).unwrap();lab.ui.tab=17;
-    assert!(section_visible(&lab,17));assert!(enabled(&lab,LabAction::VoxelFinish(true)));
-    assert!(!enabled(&lab,LabAction::VoxelUndo));assert!(!enabled(&lab,LabAction::Fire));
-    assert!(enabled(&lab,LabAction::Tab(1)));assert!(!enabled(&lab,LabAction::PickObject(0)));
-    assert!(lab.constructor.material_context(&lab.definition,lab.recipe).contains("кисти кубиков"));
+    let mut lab = Laboratory::new(false);
+    lab.constructor.stand = false;
+    let element = lab
+        .constructor
+        .catalog
+        .iter()
+        .find(|e| e.blocks.len() == 1 && e.units.is_empty() && e.shields.is_empty())
+        .unwrap()
+        .clone();
+    lab.constructor.placed = vec![modding::laboratory::catalog::Placed {
+        element,
+        at: [384, 16, 336],
+        turns: 0,
+    }];
+    lab.constructor.selected = Some(0);
+    lab.ui.tab = 0;
+    assert!(section_visible(&lab, 18));
+    assert!(enabled(&lab, LabAction::BeginVoxelEdit));
+    lab.constructor
+        .action(LabAction::BeginVoxelEdit, &lab.definition, &mut lab.recipe)
+        .unwrap();
+    lab.ui.tab = 17;
+    assert!(section_visible(&lab, 17));
+    assert!(enabled(&lab, LabAction::VoxelFinish(true)));
+    assert!(!enabled(&lab, LabAction::VoxelUndo));
+    assert!(!enabled(&lab, LabAction::Fire));
+    assert!(enabled(&lab, LabAction::Tab(1)));
+    assert!(!enabled(&lab, LabAction::PickObject(0)));
+    assert!(lab
+        .constructor
+        .material_context(&lab.definition, lab.recipe)
+        .contains("кисти кубиков"));
 }

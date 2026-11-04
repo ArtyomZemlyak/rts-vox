@@ -60,6 +60,10 @@ mod hull_queries;
 pub use hull_queries::HullQueries;
 #[path = "corpse.rs"]
 mod corpse;
+#[path = "fragment_join.rs"]
+mod fragment_join;
+#[path = "fragment_join_memo.rs"]
+mod fragment_join_memo;
 #[cfg(test)]
 #[path = "burst_ground_claim_tests.rs"]
 mod ground_claim_tests;
@@ -68,10 +72,6 @@ mod ground_claim_tests;
 mod hull_query_tests;
 #[path = "shape_geometry.rs"]
 mod shape_geometry;
-#[path = "fragment_join.rs"]
-mod fragment_join;
-#[path="fragment_join_memo.rs"]
-mod fragment_join_memo;
 #[path = "unit_debris.rs"]
 mod unit_debris;
 
@@ -108,64 +108,178 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn fragment_landing_does_not_absorb_remote_shards_but_exact_contacts_keep_matter_and_world_cells() {
-        for distance in [1,12] {
-            let (mut b,mut w,mut e)=(Bursts::default(),world(),economy());w.flush();
-            let mut t=tuning().blast;t.pile_cell=32;t.max_flying=0;t.push_pct=0;
-            for (id,x) in [(1,48),(2,48+distance)] {
-                let held=e.ledger.create(matter::Kind::Debris,0,u64::MAX);
-                let amount=e.per_voxel(2);e.ledger.reveal(e.ground,amount);e.ledger.transfer(e.ground,held,amount);
-                b.fragments.push(Fragment{id,position:centre([x,12,48]),velocity:V3::ZERO,material:2,paint:None,mm:100,
-                    basis:IDENTITY,mass_g:1200,count:1,shape:1,side:1,chunk:None,held,resting:true});
-                e.wrecks.push(Wreck{held,x:x as i32,y:12,z:48});
+    fn fragment_landing_does_not_absorb_remote_shards_but_exact_contacts_keep_matter_and_world_cells(
+    ) {
+        for distance in [1, 12] {
+            let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+            w.flush();
+            let mut t = tuning().blast;
+            t.pile_cell = 32;
+            t.max_flying = 0;
+            t.push_pct = 0;
+            for (id, x) in [(1, 48), (2, 48 + distance)] {
+                let held = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+                let amount = e.per_voxel(2);
+                e.ledger.reveal(e.ground, amount);
+                e.ledger.transfer(e.ground, held, amount);
+                b.fragments.push(Fragment {
+                    id,
+                    position: centre([x, 12, 48]),
+                    velocity: V3::ZERO,
+                    material: 2,
+                    paint: None,
+                    mm: 100,
+                    basis: IDENTITY,
+                    mass_g: 1200,
+                    count: 1,
+                    shape: 1,
+                    side: 1,
+                    chunk: None,
+                    held,
+                    resting: true,
+                });
+                e.wrecks.push(Wreck {
+                    held,
+                    x: x as i32,
+                    y: 12,
+                    z: 48,
+                });
             }
-            b.step_fragments(&w,&mut e,&t,Fx::ZERO,0,Surroundings::NONE);
+            b.step_fragments(&w, &mut e, &t, Fx::ZERO, 0, Surroundings::NONE);
             assert!(e.balanced());
-            if distance==12 {
-                assert_eq!(b.fragments.len(),2,"3.2 m broad-phase must not teleport distant debris");
-                assert_eq!(b.fragments[0].position,centre([48,12,48]));
-                assert_eq!(b.fragments[1].position,centre([60,12,48]));
-                assert!(b.fragments.iter().all(|f|f.shape==1&&f.side==1&&f.mm==100&&f.basis==IDENTITY));
+            if distance == 12 {
+                assert_eq!(
+                    b.fragments.len(),
+                    2,
+                    "3.2 m broad-phase must not teleport distant debris"
+                );
+                assert_eq!(b.fragments[0].position, centre([48, 12, 48]));
+                assert_eq!(b.fragments[1].position, centre([60, 12, 48]));
+                assert!(b
+                    .fragments
+                    .iter()
+                    .all(|f| f.shape == 1 && f.side == 1 && f.mm == 100 && f.basis == IDENTITY));
             } else {
-                assert_eq!(b.fragments.len(),1);
-                let f=&b.fragments[0];assert_eq!((f.shape,f.side,f.count),(3,2,2));
-                assert_eq!(f.position,V3::new(Fx::from_int(49),Fx::from_ratio(25,2),Fx::from_ratio(97,2)));
-                assert_eq!(e.ledger.held(f.held),2*e.per_voxel(2));
-                assert_eq!((e.wrecks[0].x,e.wrecks[0].y,e.wrecks[0].z),(49,12,48));
+                assert_eq!(b.fragments.len(), 1);
+                let f = &b.fragments[0];
+                assert_eq!((f.shape, f.side, f.count), (3, 2, 2));
+                assert_eq!(
+                    f.position,
+                    V3::new(
+                        Fx::from_int(49),
+                        Fx::from_ratio(25, 2),
+                        Fx::from_ratio(97, 2)
+                    )
+                );
+                assert_eq!(e.ledger.held(f.held), 2 * e.per_voxel(2));
+                assert_eq!((e.wrecks[0].x, e.wrecks[0].y, e.wrecks[0].z), (49, 12, 48));
             }
         }
     }
 
     #[test]
     fn resting_join_memo_matches_cold_recomputation_after_geometry_and_support_changes() {
-        let (mut warm,mut cold,mut ew,mut ec,mut w)=(Bursts::default(),Bursts::default(),economy(),economy(),world());
-        let mut t=tuning();t.blast.rest_check_ticks=1;t.blast.push_pct=0;
+        let (mut warm, mut cold, mut ew, mut ec, mut w) = (
+            Bursts::default(),
+            Bursts::default(),
+            economy(),
+            economy(),
+            world(),
+        );
+        let mut t = tuning();
+        t.blast.rest_check_ticks = 1;
+        t.blast.push_pct = 0;
         w.flush();
-        for (b,e) in [(&mut warm,&mut ew),(&mut cold,&mut ec)] {
-            for (id,x) in [(1,48),(2,60)] {
-                let held=e.ledger.create(matter::Kind::Debris,0,u64::MAX);
-                let amount=e.per_voxel(2);e.ledger.reveal(e.ground,amount);e.ledger.transfer(e.ground,held,amount);
-                b.fragments.push(Fragment{id,position:centre([x,12,48]),velocity:V3::ZERO,material:2,paint:None,mm:100,basis:IDENTITY,mass_g:1200,count:1,shape:1,side:1,chunk:None,held,resting:true});
-                e.wrecks.push(Wreck{held,x:x as i32,y:12,z:48});
+        for (b, e) in [(&mut warm, &mut ew), (&mut cold, &mut ec)] {
+            for (id, x) in [(1, 48), (2, 60)] {
+                let held = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+                let amount = e.per_voxel(2);
+                e.ledger.reveal(e.ground, amount);
+                e.ledger.transfer(e.ground, held, amount);
+                b.fragments.push(Fragment {
+                    id,
+                    position: centre([x, 12, 48]),
+                    velocity: V3::ZERO,
+                    material: 2,
+                    paint: None,
+                    mm: 100,
+                    basis: IDENTITY,
+                    mass_g: 1200,
+                    count: 1,
+                    shape: 1,
+                    side: 1,
+                    chunk: None,
+                    held,
+                    resting: true,
+                });
+                e.wrecks.push(Wreck {
+                    held,
+                    x: x as i32,
+                    y: 12,
+                    z: 48,
+                });
             }
         }
         // Pin both pieces over real terrain, then change an exact input and
         // finally remove support. No warm memo may suppress a join or wakeup.
-        w.queue_edit(Edit::put(48,11,48,2));w.queue_edit(Edit::put(60,11,48,2));w.flush();
+        w.queue_edit(Edit::put(48, 11, 48, 2));
+        w.queue_edit(Edit::put(60, 11, 48, 2));
+        w.flush();
         for tick in 0..16 {
-            if tick==4 { for b in [&mut warm,&mut cold] {b.fragments[1].paint=Some([1,2,3]);} }
-            if tick==6 { for b in [&mut warm,&mut cold] {b.fragments[1].paint=None;b.fragments[1].position=centre([49,12,48]);} w.queue_edit(Edit::put(49,11,48,2));w.flush(); }
-            if tick==10 {for x in 48..=60 {w.queue_edit(Edit::dig(x,11,48));}w.flush();}
-            cold.join_memo=Default::default();
-            warm.step_fragments(&w,&mut ew,&t.blast,crate::gravity_per_tick(&t),tick,Surroundings::NONE);
-            cold.step_fragments(&w,&mut ec,&t.blast,crate::gravity_per_tick(&t),tick,Surroundings::NONE);
-            let (mut a,mut b)=(Blob::new(),Blob::new());warm.save(&mut a);cold.save(&mut b);
-            assert_eq!(a.v,b.v,"warm memo diverged at tick {tick}");assert_eq!(warm.hash(),cold.hash());
-            assert!(ew.balanced()&&ec.balanced());
-            if tick==6 {assert_eq!(warm.fragments.len(),1,"new contact was missed");}
+            if tick == 4 {
+                for b in [&mut warm, &mut cold] {
+                    b.fragments[1].paint = Some([1, 2, 3]);
+                }
+            }
+            if tick == 6 {
+                for b in [&mut warm, &mut cold] {
+                    b.fragments[1].paint = None;
+                    b.fragments[1].position = centre([49, 12, 48]);
+                }
+                w.queue_edit(Edit::put(49, 11, 48, 2));
+                w.flush();
+            }
+            if tick == 10 {
+                for x in 48..=60 {
+                    w.queue_edit(Edit::dig(x, 11, 48));
+                }
+                w.flush();
+            }
+            cold.join_memo = Default::default();
+            warm.step_fragments(
+                &w,
+                &mut ew,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE,
+            );
+            cold.step_fragments(
+                &w,
+                &mut ec,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE,
+            );
+            let (mut a, mut b) = (Blob::new(), Blob::new());
+            warm.save(&mut a);
+            cold.save(&mut b);
+            assert_eq!(a.v, b.v, "warm memo diverged at tick {tick}");
+            assert_eq!(warm.hash(), cold.hash());
+            assert!(ew.balanced() && ec.balanced());
+            if tick == 6 {
+                assert_eq!(warm.fragments.len(), 1, "new contact was missed");
+            }
         }
-        assert!(warm.join_memo.hits>0,"the stationary negative pass was never reused");
-        assert!(warm.wakeups>0,"support changes must still wake memoized sleepers");
+        assert!(
+            warm.join_memo.hits > 0,
+            "the stationary negative pass was never reused"
+        );
+        assert!(
+            warm.wakeups > 0,
+            "support changes must still wake memoized sleepers"
+        );
     }
 
     #[test]
@@ -2942,15 +3056,18 @@ mod tests {
                 Surroundings::NONE,
             );
         }
-        assert_eq!(b.fragments.iter().map(|f|f.count).sum::<u32>(),2);
-        assert!(b.fragments.iter().all(|f|f.resting&&f.mm==100&&f.count==f.shape.count_ones()));
+        assert_eq!(b.fragments.iter().map(|f| f.count).sum::<u32>(), 2);
+        assert!(b
+            .fragments
+            .iter()
+            .all(|f| f.resting && f.mm == 100 && f.count == f.shape.count_ones()));
         let rubble = b.rubble(&w, &[], &[]);
-        assert!(rubble.get(&[48,48]).is_some_and(|h|(13..=14).contains(h)));
+        assert!(rubble.get(&[48, 48]).is_some_and(|h| (13..=14).contains(h)));
         assert!(
             b.rubble(&w, &[1], &[]).is_empty(),
             "a yielding heap is no floor"
         );
-        assert!(rubble.get(&[49,48]).is_some_and(|h|(13..=14).contains(h)));
+        assert!(rubble.get(&[49, 48]).is_some_and(|h| (13..=14).contains(h)));
         assert_eq!(rubble.get(&[51, 48]), None);
         assert!(e.balanced());
     }
@@ -3000,7 +3117,11 @@ mod tests {
             0,
             Surroundings::NONE,
         );
-        assert_eq!(b.fragments.len(), 3, "separated pieces must not teleport into a pile");
+        assert_eq!(
+            b.fragments.len(),
+            3,
+            "separated pieces must not teleport into a pile"
+        );
         let pile = &b.fragments[1];
         assert_eq!((pile.material, pile.count), (1, 1));
         assert!(pile.resting);
@@ -3433,27 +3554,102 @@ mod tests {
     }
     #[test]
     fn settled_irregular_piece_does_not_support_an_empty_corner() {
-        let piece=Fragment{id:1,position:V3::new(Fx::from_int(48),Fx::from_int(20),Fx::from_int(48)),
-            velocity:V3::ZERO,material:1,paint:None,mm:100,basis:IDENTITY,mass_g:1,count:3,
-            shape:0b1_0011,side:2,chunk:None,held:0,resting:true};
-        let index=Settled::around(&[piece],&[],|_,_|true);
-        let at=|x:i32,z:i32|[Fx::from_int(48).add(Fx::from_ratio(x,3)),Fx::from_int(20),Fx::from_int(48).add(Fx::from_ratio(z,3))];
-        let meets=|p:[Fx;3]|index.hit(p.map(|v|v.sub(Fx::from_ratio(1,10))),p.map(|v|v.add(Fx::from_ratio(1,10))),u32::MAX,None);
-        assert!(!meets(at(2,2)),"an empty corner is not a physical support");
-        assert!(meets(at(2,-1)),"occupied material must remain collidable");
+        let piece = Fragment {
+            id: 1,
+            position: V3::new(Fx::from_int(48), Fx::from_int(20), Fx::from_int(48)),
+            velocity: V3::ZERO,
+            material: 1,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 1,
+            count: 3,
+            shape: 0b1_0011,
+            side: 2,
+            chunk: None,
+            held: 0,
+            resting: true,
+        };
+        let index = Settled::around(&[piece], &[], |_, _| true);
+        let at = |x: i32, z: i32| {
+            [
+                Fx::from_int(48).add(Fx::from_ratio(x, 3)),
+                Fx::from_int(20),
+                Fx::from_int(48).add(Fx::from_ratio(z, 3)),
+            ]
+        };
+        let meets = |p: [Fx; 3]| {
+            index.hit(
+                p.map(|v| v.sub(Fx::from_ratio(1, 10))),
+                p.map(|v| v.add(Fx::from_ratio(1, 10))),
+                u32::MAX,
+                None,
+            )
+        };
+        assert!(
+            !meets(at(2, 2)),
+            "an empty corner is not a physical support"
+        );
+        assert!(meets(at(2, -1)), "occupied material must remain collidable");
     }
     #[test]
     fn support_under_only_the_riders_empty_corner_does_not_suspend_it() {
-        let rider=Fragment{id:1,position:V3::new(Fx::from_int(48),Fx::from_int(20),Fx::from_int(48)),
-            velocity:V3::ZERO,material:1,paint:None,mm:100,basis:IDENTITY,mass_g:1,count:3,
-            shape:0b1_0011,side:2,chunk:None,held:0,resting:false};
-        let make_support=|z:i32|Fragment{id:2,position:V3::new(Fx::from_int(48).add(Fx::from_ratio(2,3)),Fx::from_int(19),Fx::from_int(48).add(Fx::from_ratio(z,3))),
-            velocity:V3::ZERO,material:1,paint:None,mm:100,basis:IDENTITY,mass_g:1,count:1,
-            shape:1,side:1,chunk:None,held:0,resting:true};
-        let check=|support|{let pieces=[Fragment{chunk:None,..rider},support];let index=Settled::around(&pieces,&[],|_,_|true);
-            let (lo,hi)=pieces[0].bounds();index.supports(arr(pieces[0].position),lo,hi,0)};
-        assert!(!check(make_support(2)),"empty rider corner must not hold the piece");
-        assert!(check(make_support(-1)),"occupied rider corner must retain support");
+        let rider = Fragment {
+            id: 1,
+            position: V3::new(Fx::from_int(48), Fx::from_int(20), Fx::from_int(48)),
+            velocity: V3::ZERO,
+            material: 1,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 1,
+            count: 3,
+            shape: 0b1_0011,
+            side: 2,
+            chunk: None,
+            held: 0,
+            resting: false,
+        };
+        let make_support = |z: i32| Fragment {
+            id: 2,
+            position: V3::new(
+                Fx::from_int(48).add(Fx::from_ratio(2, 3)),
+                Fx::from_int(19),
+                Fx::from_int(48).add(Fx::from_ratio(z, 3)),
+            ),
+            velocity: V3::ZERO,
+            material: 1,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 1,
+            count: 1,
+            shape: 1,
+            side: 1,
+            chunk: None,
+            held: 0,
+            resting: true,
+        };
+        let check = |support| {
+            let pieces = [
+                Fragment {
+                    chunk: None,
+                    ..rider
+                },
+                support,
+            ];
+            let index = Settled::around(&pieces, &[], |_, _| true);
+            let (lo, hi) = pieces[0].bounds();
+            index.supports(arr(pieces[0].position), lo, hi, 0)
+        };
+        assert!(
+            !check(make_support(2)),
+            "empty rider corner must not hold the piece"
+        );
+        assert!(
+            check(make_support(-1)),
+            "occupied rider corner must retain support"
+        );
     }
     #[test]
     fn thin_stacked_fragments_sleep_until_their_support_is_removed() {
@@ -4355,16 +4551,23 @@ mod tests {
             let mut merged = BTreeSet::new();
             for i in 0..pieces.fragments.len() {
                 let f = &pieces.fragments[i];
-                let Some(geometry)=fragment_join::Geometry::of(f) else {continue;};
+                let Some(geometry) = fragment_join::Geometry::of(f) else {
+                    continue;
+                };
                 let key = (
                     arr(f.position).map(|v| v.to_int_trunc().div_euclid(t.pile_cell as i32)),
                     f.material,
                     f.paint,
                     f.mm,
                 );
-                let heads=piles.entry(key).or_default();
-                let joined=heads.iter().find_map(|&j|Some((j,fragment_join::Geometry::of(&pieces.fragments[j])?.join(geometry)?)));
-                if let Some((j,shape)) = joined {
+                let heads = piles.entry(key).or_default();
+                let joined = heads.iter().find_map(|&j| {
+                    Some((
+                        j,
+                        fragment_join::Geometry::of(&pieces.fragments[j])?.join(geometry)?,
+                    ))
+                });
+                if let Some((j, shape)) = joined {
                     let (a, b) = pieces.fragments.split_at_mut(i);
                     let to = &mut a[j];
                     let from = &b[0];
@@ -4373,13 +4576,20 @@ mod tests {
                     to.count += from.count;
                     shape.apply(to);
                     merged.insert(from.held);
-                } else if heads.len()<fragment_join::HEADS {
+                } else if heads.len() < fragment_join::HEADS {
                     heads.push(i);
                 }
             }
             pieces.fragments.retain(|f| !merged.contains(&f.held));
             economy.wrecks.retain(|w| !merged.contains(&w.held));
-            for w in &mut economy.wrecks {if let Some(f)=pieces.fragments.iter().find(|f|f.held==w.held) {let p=arr(f.position).map(Fx::to_int_trunc);w.x=p[0];w.y=p[1];w.z=p[2];}}
+            for w in &mut economy.wrecks {
+                if let Some(f) = pieces.fragments.iter().find(|f| f.held == w.held) {
+                    let p = arr(f.position).map(Fx::to_int_trunc);
+                    w.x = p[0];
+                    w.y = p[1];
+                    w.z = p[2];
+                }
+            }
             for held in merged {
                 assert!(economy.ledger.retire_empty_debris(held));
             }
@@ -4403,7 +4613,10 @@ mod tests {
                     economy.ledger.reveal(economy.ground, amount);
                     economy.ledger.transfer(economy.ground, held, amount);
                     let position = V3::new(
-                        Fx::from_int(4 + (group / 8 % 8) as i32 * 8).add(Fx::from_ratio(donor as i32,if group%8<4 {2}else{1})),
+                        Fx::from_int(4 + (group / 8 % 8) as i32 * 8).add(Fx::from_ratio(
+                            donor as i32,
+                            if group % 8 < 4 { 2 } else { 1 },
+                        )),
                         Fx::from_ratio(if group < 64 { 25 } else { 65 }, 2),
                         Fx::from_int(4 + (group / 64) as i32 * 8),
                     );
@@ -5885,9 +6098,11 @@ pub(crate) enum GroundClaimError {
     Frame,
 }
 
+type RestingPile = ([i32; 3], Mat, Option<[u8; 3]>, u16);
 #[derive(Default)]
 pub struct Bursts {
     join_memo: fragment_join_memo::Memo,
+    join_shards: [Vec<(RestingPile, usize)>; 8],
     jobs: VecDeque<Job>,
     claims: BTreeMap<[u32; 3], Claim>,
     /// Open claims of each group as a box mask. Each connected component
@@ -7126,10 +7341,23 @@ impl Bursts {
         // Tilted hulls on a crater floor can shed cells whose captured centre
         // is below the map. Apply the common boundary rule before freezing
         // support queries, including newly admitted sections and resting pieces.
-        for f in self.fragments.iter_mut().chain(self.corpses.values_mut()) {
+        let (mut flying, mut parked, mut parked_end) = (0, 0, 0);
+        for (i, f) in self.fragments.iter_mut().enumerate() {
+            flying += usize::from(!f.resting);
+            if parked < t.max_resting_fragments as usize && f.parkable() {
+                parked += 1;
+                parked_end = i + 1;
+            }
             f.keep_on_map([world.nx, world.nz]);
         }
-        type RestingPile = ([i32; 3], Mat, Option<[u8; 3]>, u16);
+        let pool = FragmentPools {
+            working: self.fragments.len() - parked,
+            parked,
+            flying,
+        };
+        for f in self.corpses.values_mut() {
+            f.keep_on_map([world.nx, world.nz]);
+        }
         let mut merged = BTreeSet::new();
         let mut stale_wrecks = BTreeSet::new();
         let mut settled = std::mem::take(&mut self.settled_scratch);
@@ -7153,7 +7381,6 @@ impl Bursts {
         // flying slot until its dig lands and it becomes a piece: a
         // waking piece does not take it (ADR-443). A group of claims holds
         // a slot per component, not per cell (ADR-659).
-        let (pool, parked_end) = self.fragment_pool_snapshot(t);
         let mut room = (t.max_flying as usize)
             .saturating_sub(pool.flying + self.reserved + thermal_reserve as usize);
         let mut working_room = (t.max_fragments as usize)
@@ -7183,7 +7410,7 @@ impl Bursts {
             let mut push = None;
             if f.chunk.is_none() && t.push_pct > 0 && (!f.resting || can_wake) {
                 let (low, high) = settled.fragment_bounds(i as u32, f);
-                if let Some(h) = hull_queries.hit(arr(f.position), low, high, 0) {
+                if let Some(h) = hull_queries.hit_moving(arr(f.position), low, high, 0) {
                     // What the hull climbs as floor it does not push: a
                     // piece of a yielding material, or one rising above
                     // the hull's step, is bulldozed; the rest is ridden.
@@ -7213,7 +7440,7 @@ impl Bursts {
                 && !supported(f, world, hulls, &settled, i as u32);
             (push, unsupported)
         };
-        let mut motion_pending=pool.flying>0;
+        let mut motion_pending = pool.flying > 0;
         let wakeups = fragment_wake_queries::<COMPACT_WAKE>(&self.fragments, query, task);
         for (i, (push, unsupported)) in wakeups {
             let f = &mut self.fragments[i];
@@ -7228,13 +7455,13 @@ impl Bursts {
                     stale_wrecks.insert(f.held);
                 }
                 f.velocity = velocity;
-                motion_pending=true;
+                motion_pending = true;
             }
             if can_wake && f.resting && unsupported {
                 // The ground under it was taken (ADR-291): it falls again,
                 // and its wreck entry goes until it settles anew.
                 f.resting = false;
-                motion_pending=true;
+                motion_pending = true;
                 self.wakeups += 1;
                 room -= 1;
                 working_room -= usize::from(parked);
@@ -7260,7 +7487,9 @@ impl Bursts {
                 }
             })
         };
-        let landed_slots: Vec<Option<Wreck>> = if !motion_pending {Vec::new()} else if self.fragments.len() >= 1024 {
+        let mut landed: Vec<Wreck> = if !motion_pending {
+            Vec::new()
+        } else if self.fragments.len() >= 1024 {
             self.fragments
                 .par_iter_mut()
                 .enumerate()
@@ -7268,67 +7497,107 @@ impl Bursts {
                     || PhysicsTask::new(task, "physics_translate_begin", "physics_translate_end"),
                     |_, item| translate(item),
                 )
+                .filter_map(|landed| landed)
                 .collect()
         } else {
             self.fragments
                 .iter_mut()
                 .enumerate()
-                .map(translate)
+                .filter_map(translate)
                 .collect()
         };
-        let mut landed: Vec<Wreck> = landed_slots.into_iter().flatten().collect();
         completed("debris_translate");
         // Equal keys always enter the same shard; source slots stay ordered
         // inside it. Each independent table therefore chooses the same first
         // pile owner as the original single table, without shared mutation.
-        let pile_grid = PileGrid::new(t.pile_cell);
-        let mut shards: [Vec<(RestingPile, usize)>; 8] = std::array::from_fn(|_| Vec::new());
         let parallel = self.fragments.len() >= 1024;
-        let mut memo=std::mem::take(&mut self.join_memo);
-        for (i,f) in self.fragments.iter().enumerate() {
-            if let Some(geometry)=fragment_join::Geometry::of(f) {
-                memo.push(i,(pile_grid.at(f.position),f.material,f.paint,f.mm),f,geometry);
+        let mut memo = std::mem::take(&mut self.join_memo);
+        let mut build_keys = || {
+            let pile_grid = PileGrid::new(t.pile_cell);
+            let mut shards = std::mem::take(&mut self.join_shards);
+            for shard in &mut shards {
+                shard.clear();
             }
-        }
-        let unchanged=memo.unchanged();
-        if !unchanged {for input in &memo.current {
-            let key=input.key;
-            let hash=(key.0[0] as u32).wrapping_mul(0x9e3779b9).rotate_left(13)
-                ^(key.0[1] as u32).wrapping_mul(0xc2b2ae35)^(key.0[2] as u32).wrapping_mul(0x85ebca6b);
-            let shard=if parallel {(hash>>29) as usize}else{0};
-            shards[shard].push((key,input.index));
-        }}
+            for (i, f) in self.fragments.iter().enumerate() {
+                if let Some(geometry) = fragment_join::Geometry::of(f) {
+                    memo.push(
+                        i,
+                        (pile_grid.at(f.position), f.material, f.paint, f.mm),
+                        f,
+                        geometry,
+                    );
+                }
+            }
+            let changed = memo.changed();
+            if changed.as_ref().is_none_or(|keys| !keys.is_empty()) {
+                for input in &memo.current {
+                    let key = input.key;
+                    if changed
+                        .as_ref()
+                        .is_some_and(|keys| !keys.contains_key(&key))
+                    {
+                        continue;
+                    }
+                    let hash = (key.0[0] as u32).wrapping_mul(0x9e3779b9).rotate_left(13)
+                        ^ (key.0[1] as u32).wrapping_mul(0xc2b2ae35)
+                        ^ (key.0[2] as u32).wrapping_mul(0x85ebca6b);
+                    let shard = if parallel { (hash >> 29) as usize } else { 0 };
+                    shards[shard].push((key, input.index));
+                }
+            }
+            (shards, changed)
+        };
+        let (shards, changed) = if parallel && !stale_wrecks.is_empty() {
+            let wake_stale = std::mem::take(&mut stale_wrecks);
+            rayon::join(build_keys, || {
+                retain_live(&mut e.wrecks, &wake_stale, |w| w.held, true);
+            })
+            .0
+        } else {
+            let result = build_keys();
+            if !stale_wrecks.is_empty() {
+                let wake_stale = std::mem::take(&mut stale_wrecks);
+                retain_live(&mut e.wrecks, &wake_stale, |w| w.held, true);
+            }
+            result
+        };
         completed("debris_merge_keys");
         let group = |entries: &Vec<(RestingPile, usize)>| {
             let _task = PhysicsTask::new(task, "physics_merge_begin", "physics_merge_end");
-            let mut piles: FxLookup<RestingPile, Vec<(usize,fragment_join::Geometry)>> = FxLookup::with_capacity(entries.len());
+            let mut piles: FxLookup<RestingPile, Vec<(usize, fragment_join::Geometry)>> =
+                FxLookup::with_capacity(entries.len());
             let mut pairs = Vec::new();
             for &(key, donor) in entries {
-                let geometry=fragment_join::Geometry::of(&self.fragments[donor]).unwrap();
-                let heads=piles.entry(key).or_default();
-                let joined=heads.iter_mut().find_map(|(head,shape)| {
-                    let next=shape.join(geometry)?;
-                    *shape=next;Some((*head,next))
+                let geometry = fragment_join::Geometry::of(&self.fragments[donor]).unwrap();
+                let heads = piles.entry(key).or_default();
+                let joined = heads.iter_mut().find_map(|(head, shape)| {
+                    let next = shape.join(geometry)?;
+                    *shape = next;
+                    Some((*head, next))
                 });
-                if let Some((head,shape))=joined {
-                    pairs.push((head,donor,shape));
-                } else if heads.len()<fragment_join::HEADS {
-                    heads.push((donor,geometry));
+                if let Some((head, shape)) = joined {
+                    pairs.push((head, donor, shape));
+                } else if heads.len() < fragment_join::HEADS {
+                    heads.push((donor, geometry));
                 }
             }
             pairs
         };
-        let groups: Vec<_> = if unchanged {Vec::new()} else if parallel {
+        let groups: Vec<_> = if changed.as_ref().is_some_and(|keys| keys.is_empty()) {
+            Vec::new()
+        } else if parallel {
             shards.par_iter().map(group).collect()
         } else {
             shards[..1].iter().map(group).collect()
         };
+        self.join_shards = shards;
         completed("debris_merge_groups");
         let mut transfers: Vec<_> = groups.into_iter().flatten().collect();
-        memo.finish(transfers.is_empty());self.join_memo=memo;
-        let mut moved_heads=BTreeMap::new();
-        transfers.sort_unstable_by_key(|&(_, donor,_)| donor);
-        for (head, donor,shape) in transfers {
+        memo.finish();
+        self.join_memo = memo;
+        let mut moved_heads = BTreeMap::new();
+        transfers.sort_unstable_by_key(|&(_, donor, _)| donor);
+        for (head, donor, shape) in transfers {
             let (a, b) = self.fragments.split_at_mut(donor);
             let to = &mut a[head];
             let from = &b[0];
@@ -7336,7 +7605,7 @@ impl Bursts {
             to.mass_g += from.mass_g;
             to.count += from.count;
             shape.apply(to);
-            moved_heads.insert(to.held,arr(to.position).map(Fx::to_int_trunc));
+            moved_heads.insert(to.held, arr(to.position).map(Fx::to_int_trunc));
             merged.insert(from.held);
         }
         completed("debris_advance");
@@ -7353,7 +7622,11 @@ impl Bursts {
         completed("debris_wreck_prune");
         if !moved_heads.is_empty() {
             for w in e.wrecks.iter_mut().chain(landed.iter_mut()) {
-                if let Some(p)=moved_heads.get(&w.held) {w.x=p[0];w.y=p[1];w.z=p[2];}
+                if let Some(p) = moved_heads.get(&w.held) {
+                    w.x = p[0];
+                    w.y = p[1];
+                    w.z = p[2];
+                }
             }
         }
         e.wrecks
@@ -8579,44 +8852,90 @@ pub(crate) struct Settled {
 #[derive(Clone, Copy)]
 struct SettledShape {
     pos: V3,
-    basis: [V3;3],
-    centre: [Fx;3],
-    radius: [Fx;3],
+    basis: [V3; 3],
+    centre: [Fx; 3],
+    radius: [Fx; 3],
     scale: Fx,
     shape: u64,
     side: u8,
 }
 impl SettledShape {
-    fn new(f:&Fragment)->Self {
-        let scale=Fx::from_ratio(f.mm as i32,voxel::unit::WORLD_MM as i32);
-        let half=Fx::from_ratio(49,100).mul(scale);
-        let radius=std::array::from_fn(|a|arr(f.basis[0])[a].abs().add(arr(f.basis[1])[a].abs()).add(arr(f.basis[2])[a].abs()).mul(half));
-        Self{pos:f.position,basis:f.basis,centre:arr(shape_centre(f.shape,f.side)),radius,scale,shape:f.shape,side:f.side}
+    fn new(f: &Fragment) -> Self {
+        let scale = Fx::from_ratio(f.mm as i32, voxel::unit::WORLD_MM as i32);
+        let half = Fx::from_ratio(49, 100).mul(scale);
+        let radius = std::array::from_fn(|a| {
+            arr(f.basis[0])[a]
+                .abs()
+                .add(arr(f.basis[1])[a].abs())
+                .add(arr(f.basis[2])[a].abs())
+                .mul(half)
+        });
+        Self {
+            pos: f.position,
+            basis: f.basis,
+            centre: arr(shape_centre(f.shape, f.side)),
+            radius,
+            scale,
+            shape: f.shape,
+            side: f.side,
+        }
     }
-    fn meets(&self,lo:[Fx;3],hi:[Fx;3])->bool {
-        let mut bits=self.shape;
-        while bits!=0 {
-            let i=bits.trailing_zeros();bits&=bits-1;
-            if i>=box_cells(self.side) {continue;}
-            let q=shape_cell(i,self.side);let mut offset=V3::ZERO;
-            for a in 0..3 {offset=offset.add(self.basis[a].scale(Fx::from_int(q[a]).sub(self.centre[a]).mul(self.scale)));}
-            let p=arr(self.pos.add(offset));
-            if (0..3).all(|a|lo[a]<p[a].add(self.radius[a])&&p[a].sub(self.radius[a])<hi[a]) {return true;}
+    fn meets(&self, lo: [Fx; 3], hi: [Fx; 3]) -> bool {
+        let mut bits = self.shape;
+        while bits != 0 {
+            let i = bits.trailing_zeros();
+            bits &= bits - 1;
+            if i >= box_cells(self.side) {
+                continue;
+            }
+            let q = shape_cell(i, self.side);
+            let mut offset = V3::ZERO;
+            for a in 0..3 {
+                offset = offset.add(
+                    self.basis[a].scale(Fx::from_int(q[a]).sub(self.centre[a]).mul(self.scale)),
+                );
+            }
+            let p = arr(self.pos.add(offset));
+            if (0..3).all(|a| lo[a] < p[a].add(self.radius[a]) && p[a].sub(self.radius[a]) < hi[a])
+            {
+                return true;
+            }
         }
         false
     }
-    fn meets_pair(&self,lo:[Fx;3],hi:[Fx;3],other:&SettledShape,shift_lo:[Fx;3],shift_hi:[Fx;3])->bool {
-        let mut bits=self.shape;
-        while bits!=0 {
-            let i=bits.trailing_zeros();bits&=bits-1;
-            if i>=box_cells(self.side) {continue;}
-            let q=shape_cell(i,self.side);let mut offset=V3::ZERO;
-            for a in 0..3 {offset=offset.add(self.basis[a].scale(Fx::from_int(q[a]).sub(self.centre[a]).mul(self.scale)));}
-            let p=arr(self.pos.add(offset));
-            let cell_lo=[0,1,2].map(|a|p[a].sub(self.radius[a]));
-            let cell_hi=[0,1,2].map(|a|p[a].add(self.radius[a]));
-            if (0..3).all(|a|lo[a]<cell_hi[a]&&cell_lo[a]<hi[a])
-                && other.meets([0,1,2].map(|a|cell_lo[a].sub(shift_hi[a])),[0,1,2].map(|a|cell_hi[a].sub(shift_lo[a]))){return true;}
+    fn meets_pair(
+        &self,
+        lo: [Fx; 3],
+        hi: [Fx; 3],
+        other: &SettledShape,
+        shift_lo: [Fx; 3],
+        shift_hi: [Fx; 3],
+    ) -> bool {
+        let mut bits = self.shape;
+        while bits != 0 {
+            let i = bits.trailing_zeros();
+            bits &= bits - 1;
+            if i >= box_cells(self.side) {
+                continue;
+            }
+            let q = shape_cell(i, self.side);
+            let mut offset = V3::ZERO;
+            for a in 0..3 {
+                offset = offset.add(
+                    self.basis[a].scale(Fx::from_int(q[a]).sub(self.centre[a]).mul(self.scale)),
+                );
+            }
+            let p = arr(self.pos.add(offset));
+            let cell_lo = [0, 1, 2].map(|a| p[a].sub(self.radius[a]));
+            let cell_hi = [0, 1, 2].map(|a| p[a].add(self.radius[a]));
+            if (0..3).all(|a| lo[a] < cell_hi[a] && cell_lo[a] < hi[a])
+                && other.meets(
+                    [0, 1, 2].map(|a| cell_lo[a].sub(shift_hi[a])),
+                    [0, 1, 2].map(|a| cell_hi[a].sub(shift_lo[a])),
+                )
+            {
+                return true;
+            }
         }
         false
     }
@@ -9049,10 +9368,18 @@ impl Iterator for SettledCellList<'_> {
 }
 impl SettledCells {
     fn clear(&mut self) {
-        for stripe in &mut self.stripes {
+        self.clear_parallel(false);
+    }
+    fn clear_parallel(&mut self, parallel: bool) {
+        let clear = |stripe: &mut SettledCellStripe| {
             stripe.cells.clear();
             stripe.nodes.clear();
             stripe.wide.clear();
+        };
+        if parallel {
+            self.stripes.par_iter_mut().for_each(clear);
+        } else {
+            self.stripes.iter_mut().for_each(clear);
         }
         self.len = 0;
     }
@@ -9378,8 +9705,13 @@ impl SettledQueries {
     const PAGED_MIN_RANGES: usize = 8192;
 
     fn clear(&mut self) {
-        for stripe in &mut self.0 {
-            stripe.clear();
+        self.clear_parallel(false);
+    }
+    fn clear_parallel(&mut self, parallel: bool) {
+        if parallel {
+            self.0.par_iter_mut().for_each(SettledQueryStripe::clear);
+        } else {
+            self.0.iter_mut().for_each(SettledQueryStripe::clear);
         }
     }
     fn is_empty(&self) -> bool {
@@ -9722,10 +10054,12 @@ impl Settled {
         completed: &mut impl FnMut(&'static str),
         task: &(impl Fn(usize, &'static str) + Sync),
     ) {
-        out.cells.clear();
-        out.shapes.clear();out.shape_index.clear();
+        let parallel = fragments.len() >= 1024;
+        out.cells.clear_parallel(parallel);
+        out.shapes.clear();
+        out.shape_index.clear();
         out.requests = 0;
-        want.clear();
+        want.clear_parallel(parallel);
         completed("settled_clear");
         if !fragments.iter().any(|f| f.resting) {
             out.boxes.clear();
@@ -9838,19 +10172,40 @@ impl Settled {
             fragments.iter().enumerate().map(candidate).collect()
         };
         completed("settled_candidates");
-        out.shape_index.resize(fragments.len(),u32::MAX);
-        for (i,entry) in selected.iter().enumerate() {
-            let f=&fragments[i];
-            let cells=box_cells(f.side);
-            let full=if cells==64 {u64::MAX}else{(1u64<<cells)-1};
-            // An axis-aligned full box has no empty corners to refine.
-            if (entry.is_some() || asks(i,f)) && f.chunk.is_none() && f.shape.count_ones()>1 && !(f.basis==IDENTITY && f.shape==full) {
-                out.shape_index[i]=out.shapes.len() as u32;
-                out.shapes.push(SettledShape::new(f));
+        let Settled {
+            cells,
+            shape_index,
+            shapes,
+            ..
+        } = out;
+        let mut build_shapes = || {
+            shape_index.resize(fragments.len(), u32::MAX);
+            for (i, entry) in selected.iter().enumerate() {
+                let f = &fragments[i];
+                let cells = box_cells(f.side);
+                let full = if cells == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << cells) - 1
+                };
+                // An axis-aligned full box has no empty corners to refine.
+                if (entry.is_some() || asks(i, f))
+                    && f.chunk.is_none()
+                    && f.shape.count_ones() > 1
+                    && !(f.basis == IDENTITY && f.shape == full)
+                {
+                    shape_index[i] = shapes.len() as u32;
+                    shapes.push(SettledShape::new(f));
+                }
             }
+        };
+        let mut build_cells = || cells.build(&selected, want, fragments.len() >= 1024, task);
+        if fragments.len() >= 1024 {
+            rayon::join(build_shapes, build_cells);
+        } else {
+            build_shapes();
+            build_cells();
         }
-        out.cells
-            .build(&selected, want, fragments.len() >= 1024, task);
         completed("settled_cells");
     }
     /// Sweep down to the support, rather than teleporting the whole box
@@ -9865,17 +10220,37 @@ impl Settled {
     /// Whether the box `lo..hi` shares space with a resting piece other
     /// than `skip`. The pieces are boxes here, as they are to the world.
     fn hit(&self, lo: [Fx; 3], hi: [Fx; 3], skip: u32, from_above: Option<Fx>) -> bool {
-        self.hit_impl(lo,hi,skip,from_above,false)
+        self.hit_impl(lo, hi, skip, from_above, false)
     }
     fn hit_refined(&self, lo: [Fx; 3], hi: [Fx; 3], skip: u32, from_above: Option<Fx>) -> bool {
-        self.hit_impl(lo,hi,skip,from_above,true)
+        self.hit_impl(lo, hi, skip, from_above, true)
     }
-    fn hit_impl(&self, lo: [Fx; 3], hi: [Fx; 3], skip: u32, from_above: Option<Fx>, refine_moving:bool) -> bool {
+    fn hit_impl(
+        &self,
+        lo: [Fx; 3],
+        hi: [Fx; 3],
+        skip: u32,
+        from_above: Option<Fx>,
+        refine_moving: bool,
+    ) -> bool {
         if self.cells.is_empty() {
             return false;
         }
-        let moving=refine_moving.then(||self.shape_index.get(skip as usize).and_then(|&n|self.shapes.get(n as usize))).flatten();
-        let shifts=moving.and_then(|_|self.boxes.get(skip as usize)).map(|(old_lo,old_hi)|([0,1,2].map(|a|lo[a].sub(old_lo[a])),[0,1,2].map(|a|hi[a].sub(old_hi[a]))));
+        let moving = refine_moving
+            .then(|| {
+                self.shape_index
+                    .get(skip as usize)
+                    .and_then(|&n| self.shapes.get(n as usize))
+            })
+            .flatten();
+        let shifts = moving
+            .and_then(|_| self.boxes.get(skip as usize))
+            .map(|(old_lo, old_hi)| {
+                (
+                    [0, 1, 2].map(|a| lo[a].sub(old_lo[a])),
+                    [0, 1, 2].map(|a| hi[a].sub(old_hi[a])),
+                )
+            });
         let (c0, c1) = settled_cells(lo, hi);
         for z in c0[2]..=c1[2] {
             for y in c0[1]..=c1[1] {
@@ -9894,13 +10269,21 @@ impl Settled {
                         if from_above.is_some_and(|bottom| qhi[1] > bottom) {
                             continue;
                         }
-                        if !(0..3).all(|a| lo[a] < qhi[a] && qlo[a] < hi[a]) {continue;}
-                        let shape=self.shape_index.get(i as usize).and_then(|&n|self.shapes.get(n as usize));
-                        let intersects=match (shape,moving,shifts) {
-                            (Some(q),Some(m),Some((sl,sh)))=>q.meets_pair(lo,hi,m,sl,sh),
-                            (Some(q),_,_)=>q.meets(lo,hi),
-                            (None,Some(m),Some((sl,sh)))=>m.meets([0,1,2].map(|a|qlo[a].sub(sh[a])),[0,1,2].map(|a|qhi[a].sub(sl[a]))),
-                            _=>true,
+                        if !(0..3).all(|a| lo[a] < qhi[a] && qlo[a] < hi[a]) {
+                            continue;
+                        }
+                        let shape = self
+                            .shape_index
+                            .get(i as usize)
+                            .and_then(|&n| self.shapes.get(n as usize));
+                        let intersects = match (shape, moving, shifts) {
+                            (Some(q), Some(m), Some((sl, sh))) => q.meets_pair(lo, hi, m, sl, sh),
+                            (Some(q), _, _) => q.meets(lo, hi),
+                            (None, Some(m), Some((sl, sh))) => m.meets(
+                                [0, 1, 2].map(|a| qlo[a].sub(sh[a])),
+                                [0, 1, 2].map(|a| qhi[a].sub(sl[a])),
+                            ),
+                            _ => true,
                         };
                         if intersects {
                             return true;
@@ -10232,7 +10615,11 @@ fn substeps(
             };
             let blocked = world_contact
                 || hull_hit(p, low, high, hulls, inside).is_some()
-                || (if axis == 1 && delta[axis] < Fx::ZERO {Settled::hit_refined} else {Settled::hit})(
+                || (if axis == 1 && delta[axis] < Fx::ZERO {
+                    Settled::hit_refined
+                } else {
+                    Settled::hit
+                })(
                     settled,
                     [0, 1, 2].map(|a| p[a].add(low[a])),
                     [0, 1, 2].map(|a| p[a].add(high[a])),

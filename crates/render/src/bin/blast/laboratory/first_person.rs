@@ -92,7 +92,9 @@ pub(super) fn release(lab: &mut Laboratory) {
     lab.tools.flight.request = false;
     lab.tools.flight.trigger_ready = false;
     lab.tools.flight.held = [false; 14];
-    if (lab.tools.emitting || lab.tools.live_target.is_some()) && !lab.constructor.pending.contains(&LabAction::LiveRelease) {
+    if (lab.tools.emitting || lab.tools.live_target.is_some())
+        && !lab.constructor.pending.contains(&LabAction::LiveRelease)
+    {
         lab.constructor.pending.push(LabAction::LiveRelease);
     }
 }
@@ -121,8 +123,15 @@ pub fn input(
         return;
     };
     if !lab.active() || !lab.tools.live || !lab.tools.flying {
-        if lab.active() && lab.tools.live && !lab.tools.flying && window.focused
-            && lab.ui.editing.is_none() && !lab.ui.help && !lab.browser && keys.just_pressed(KeyCode::Tab) {
+        if lab.active()
+            && lab.tools.live
+            && !lab.tools.flying
+            && window.focused
+            && lab.ui.editing.is_none()
+            && !lab.ui.help
+            && !lab.browser
+            && keys.just_pressed(KeyCode::Tab)
+        {
             lab.constructor.pending.push(LabAction::LiveCapture);
             keys.reset(KeyCode::Tab);
         }
@@ -336,11 +345,21 @@ pub fn draw(
         }
     }
     if show {
-        let phase=if scene.paused {"ПАУЗА"}
-            else if lab.tools.live_tool>=6 && lab.tools.live_target.is_some() && scene.sim.shell.is_none()
-                && scene.sim.fire_tick!=u32::MAX && scene.sim.fire_tick>=scene.sim.tick {"ЗАРЯДКА"}
-            else if lab.tools.live_tool>=6 && lab.tools.live_target.is_some() && !scene.sim.ready() {"ПЕРЕЗАРЯДКА"}
-            else {"СИМУЛЯЦИЯ"};
+        let phase = if scene.paused {
+            "ПАУЗА"
+        } else if lab.tools.live_tool >= 6
+            && lab.tools.live_target.is_some()
+            && scene.sim.shell.is_none()
+            && scene.sim.fire_tick != u32::MAX
+            && scene.sim.fire_tick >= scene.sim.tick
+        {
+            "ЗАРЯДКА"
+        } else if lab.tools.live_tool >= 6 && lab.tools.live_target.is_some() && !scene.sim.ready()
+        {
+            "ПЕРЕЗАРЯДКА"
+        } else {
+            "СИМУЛЯЦИЯ"
+        };
         let value=format!("ЛАБОРАТОРИЯ / {}  ·  {}\nКисть {} см · Дальность {:.1} м · Полёт {:.1} м/с\nМощность {:.2}× · Tab — настройки и курсор",live_tools::name(lab.tools.live_tool),
             phase,lab.tools.edge*10,lab.tools.distance*0.1,lab.tools.flight.speed*0.1,lab.tools.power_milli as f32/1000.0);
         for mut t in &mut texts {
@@ -387,11 +406,7 @@ pub fn draw(
                 [4.45, -2.85, -6.2],
                 [0.025, 0.05, 0.07, 1.0],
             ),
-            (
-                [3.2, -3.0, -7.4],
-                [4.0, -2.4, -7.2],
-                [0.05, 0.55, 0.7, 1.0],
-            ),
+            ([3.2, -3.0, -7.4], [4.0, -2.4, -7.2], [0.05, 0.55, 0.7, 1.0]),
             (
                 [3.68, -3.8, -5.9],
                 [3.72, -3.2, -4.7],

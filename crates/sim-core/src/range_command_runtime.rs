@@ -20,9 +20,13 @@ mod plan_delivery_tests;
 mod checkpoint;
 pub use checkpoint::DecodeLimits;
 /// Encode one command in the same versioned representation as checkpoints.
-pub fn save_recorded_command(b:&mut fx::blob::Blob,command:Command) {checkpoint::save_recorded_command(b,command)}
+pub fn save_recorded_command(b: &mut fx::blob::Blob, command: Command) {
+    checkpoint::save_recorded_command(b, command)
+}
 /// Decode one command and return the number of bytes consumed.
-pub fn read_recorded_command(bytes:&[u8])->Option<(Command,usize)> {checkpoint::read_recorded_command(bytes)}
+pub fn read_recorded_command(bytes: &[u8]) -> Option<(Command, usize)> {
+    checkpoint::read_recorded_command(bytes)
+}
 
 #[path = "range_ai_frame.rs"]
 mod ai_frame;

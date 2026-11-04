@@ -551,27 +551,42 @@ impl Motion {
                 if determinant.abs() >= Fx::from_ratio(1, 2) {
                     let own_distance = cross(delta, other.direction).div(determinant);
                     let other_distance = cross(delta, forward).div(determinant);
-                    let desired = Fx::from_int(self.speed).mul(response.engine).mul(response.traction);
+                    let desired = Fx::from_int(self.speed)
+                        .mul(response.engine)
+                        .mul(response.traction);
                     let horizon = Fx::from_int(3);
                     // Compare distances first: a nearly stationary neighbour
                     // would otherwise overflow fixed-point time division.
-                    if own_distance > Fx::ZERO && other_distance > Fx::ZERO && desired > Fx::ZERO
+                    if own_distance > Fx::ZERO
+                        && other_distance > Fx::ZERO
+                        && desired > Fx::ZERO
                         && own_distance <= desired.mul(horizon)
-                        && other_distance <= other.velocity.mul(horizon) {
+                        && other_distance <= other.velocity.mul(horizon)
+                    {
                         let own_time = own_distance.div(desired);
                         let other_time = other_distance.div(other.velocity);
-                        let clearance = own_radius.add(other.obstacle.half[0].max(other.obstacle.half[1])).add(margin);
+                        let clearance = own_radius
+                            .add(other.obstacle.half[0].max(other.obstacle.half[1]))
+                            .add(margin);
                         let slower = desired.min(other.velocity);
                         let two = Fx::from_int(2);
-                        let window = if clearance >= slower.mul(two) { two } else { clearance.div(slower) };
+                        let window = if clearance >= slower.mul(two) {
+                            two
+                        } else {
+                            clearance.div(slower)
+                        };
                         if own_time.sub(other_time).abs() <= window {
                             let gap = own_distance.sub(clearance);
-                            hint.speed = hint.speed.min(drive::stopping_speed(gap, brake, TICKS, hint.speed));
+                            hint.speed = hint
+                                .speed
+                                .min(drive::stopping_speed(gap, brake, TICKS, hint.speed));
                         }
                     }
                 }
             }
-            if other.velocity >= hint.speed { continue; }
+            if other.velocity >= hint.speed {
+                continue;
+            }
             let across = delta[1].mul(forward[0]).sub(delta[0].mul(forward[1])).abs();
             let facing = dot(forward, other.direction);
             let side = forward[0]
@@ -2889,7 +2904,12 @@ impl Motion {
                     // the conservative distance to the following waypoint.
                     // Real terrain and hull contact are still checked each tick.
                     let distance = steering::braking_distance(
-                        [self.pos[0], self.pos[2]], if steering.is_some_and(|s| s.rounded) { aim } else { [dx, dz] },
+                        [self.pos[0], self.pos[2]],
+                        if steering.is_some_and(|s| s.rounded) {
+                            aim
+                        } else {
+                            [dx, dz]
+                        },
                         self.path.get(self.cursor + 1).copied(),
                         steering.is_some_and(|s| s.rounded),
                     );
@@ -2898,8 +2918,8 @@ impl Motion {
                     // forward-facing correction even when the large rounded
                     // preview is unavailable. The live pose and hull checks still run
                     // on every step and refuse any unsafe move.
-                    let rolling_correction = steering.is_none()
-                        && alignment > Fx::from_ratio(25, 100);
+                    let rolling_correction =
+                        steering.is_none() && alignment > Fx::from_ratio(25, 100);
                     if steering.is_some() || rolling_correction {
                         speed = drive::corner_speed(
                             aim,
@@ -3077,9 +3097,9 @@ impl Motion {
         let mut candidate = Obstacle::of(self, b);
         candidate.pos[0] = nx;
         candidate.pos[2] = nz;
-        let collision = others.iter().position(|p| {
-            hull_contact_blocks(&previous, &candidate, p)
-        });
+        let collision = others
+            .iter()
+            .position(|p| hull_contact_blocks(&previous, &candidate, p));
         // A hull never enters a pose that leans it past its limit or
         // grounds more of its belly. The contact grade is a softer rule: a
         // rise the hull already stands in may be left through another such
@@ -3742,24 +3762,43 @@ mod tests {
         let mut b = Motion::new([300, 16, 240], RangeUnitKind::Tank, &body);
         b.drive.head = angle::QUARTER;
         for (m, goal) in [(&mut a, [500, 300]), (&mut b, [300, 500])] {
-            m.enabled = true; m.destination = Some(goal); m.path = vec![goal];
+            m.enabled = true;
+            m.destination = Some(goal);
+            m.path = vec![goal];
             m.drive.vel = Fx::from_int(40);
         }
         let response = crate::mobility::Mobility::intact(true);
         let hints = |a: &Motion, b: &Motion| {
             let traffic = [Traffic::of(a, &body, true), Traffic::of(b, &body, true)];
-            (a.traffic_hint(&body, 0, &traffic, response).unwrap().speed,
-             b.traffic_hint(&body, 1, &traffic, response).unwrap().speed)
+            (
+                a.traffic_hint(&body, 0, &traffic, response).unwrap().speed,
+                b.traffic_hint(&body, 1, &traffic, response).unwrap().speed,
+            )
         };
         let (priority, yielding) = hints(&a, &b);
         assert_eq!(priority, Fx::from_int(a.speed));
-        assert!(yielding < Fx::from_int(b.speed), "approaching intersection did not yield");
+        assert!(
+            yielding < Fx::from_int(b.speed),
+            "approaching intersection did not yield"
+        );
         a.drive.vel = Fx::from_int(8);
-        assert_eq!(hints(&a, &b).1, Fx::from_int(b.speed), "widely separated arrival times slowed traffic");
+        assert_eq!(
+            hints(&a, &b).1,
+            Fx::from_int(b.speed),
+            "widely separated arrival times slowed traffic"
+        );
         a.drive.vel = Fx::ZERO;
-        assert_eq!(hints(&a, &b).1, Fx::from_int(b.speed), "stationary obstruction caused a predictive deadlock");
+        assert_eq!(
+            hints(&a, &b).1,
+            Fx::from_int(b.speed),
+            "stationary obstruction caused a predictive deadlock"
+        );
         a.drive.vel = Fx(1);
-        assert_eq!(hints(&a, &b).1, Fx::from_int(b.speed), "near-zero velocity caused overflow or false yield");
+        assert_eq!(
+            hints(&a, &b).1,
+            Fx::from_int(b.speed),
+            "near-zero velocity caused overflow or false yield"
+        );
     }
 
     #[test]
@@ -3771,22 +3810,38 @@ mod tests {
         let mut b = Motion::new([300, 16, 220], RangeUnitKind::Tank, &body);
         b.drive.head = angle::QUARTER;
         for (m, goal) in [(&mut a, [500, 300]), (&mut b, [300, 500])] {
-            m.enabled = true; m.destination = Some(goal); m.path = vec![goal];
+            m.enabled = true;
+            m.destination = Some(goal);
+            m.path = vec![goal];
         }
         let advance = |a: &mut Motion, b: &mut Motion, tick| {
             let traffic = [Traffic::of(a, &body, true), Traffic::of(b, &body, true)];
-            a.set_traffic_hint(a.traffic_hint(&body, 0, &traffic, crate::mobility::Mobility::intact(true)));
-            b.set_traffic_hint(b.traffic_hint(&body, 1, &traffic, crate::mobility::Mobility::intact(true)));
+            a.set_traffic_hint(a.traffic_hint(
+                &body,
+                0,
+                &traffic,
+                crate::mobility::Mobility::intact(true),
+            ));
+            b.set_traffic_hint(b.traffic_hint(
+                &body,
+                1,
+                &traffic,
+                crate::mobility::Mobility::intact(true),
+            ));
             a.allow_start(false);
             step(a, &w, &body, &[Obstacle::of(b, &body)], tick);
             b.allow_start(false);
             step(b, &w, &body, &[Obstacle::of(a, &body)], tick);
         };
-        for tick in 0..25 { advance(&mut a, &mut b, tick); }
+        for tick in 0..25 {
+            advance(&mut a, &mut b, tick);
+        }
         let restore = |m: &Motion| {
-            let mut blob = Blob::new(); m.save(&mut blob);
+            let mut blob = Blob::new();
+            m.save(&mut blob);
             let mut copy = Motion::new([1, 16, 1], RangeUnitKind::Tank, &body);
-            assert!(copy.load(&mut Scan::new(&blob.v))); copy
+            assert!(copy.load(&mut Scan::new(&blob.v)));
+            copy
         };
         let mut a_copy = restore(&a);
         let mut b_copy = restore(&b);
@@ -3795,8 +3850,12 @@ mod tests {
             advance(&mut a_copy, &mut b_copy, tick);
             for (original, copy) in [(&a, &a_copy), (&b, &b_copy)] {
                 let (mut left, mut right) = (Blob::new(), Blob::new());
-                original.save(&mut left); copy.save(&mut right);
-                assert_eq!(left.v, right.v, "crossing diverged after restoring at tick {tick}");
+                original.save(&mut left);
+                copy.save(&mut right);
+                assert_eq!(
+                    left.v, right.v,
+                    "crossing diverged after restoring at tick {tick}"
+                );
             }
         }
     }
@@ -3819,15 +3878,28 @@ mod tests {
             for tick in 0..180 {
                 let traffic = [Traffic::of(&a, &body, true), Traffic::of(&b, &body, true)];
                 if with_hint {
-                    a.set_traffic_hint(a.traffic_hint(&body, 0, &traffic, crate::mobility::Mobility::intact(true)));
-                    b.set_traffic_hint(b.traffic_hint(&body, 1, &traffic, crate::mobility::Mobility::intact(true)));
+                    a.set_traffic_hint(a.traffic_hint(
+                        &body,
+                        0,
+                        &traffic,
+                        crate::mobility::Mobility::intact(true),
+                    ));
+                    b.set_traffic_hint(b.traffic_hint(
+                        &body,
+                        1,
+                        &traffic,
+                        crate::mobility::Mobility::intact(true),
+                    ));
                 }
                 a.allow_start(false);
                 step(&mut a, &w, &body, &[Obstacle::of(&b, &body)], tick);
                 b.allow_start(false);
                 step(&mut b, &w, &body, &[Obstacle::of(&a, &body)], tick);
                 blocked += u32::from(a.blocked) + u32::from(b.blocked);
-                assert!(Obstacle::of(&a, &body).penetration(&Obstacle::of(&b, &body)) <= HULL_CONTACT_SLOP);
+                assert!(
+                    Obstacle::of(&a, &body).penetration(&Obstacle::of(&b, &body))
+                        <= HULL_CONTACT_SLOP
+                );
                 assert!(a.drive.vel.abs() <= Fx::from_int(a.speed));
                 assert!(b.drive.vel.abs() <= Fx::from_int(b.speed));
             }
@@ -3837,7 +3909,10 @@ mod tests {
         let improved = run(true);
         eprintln!("crossing: without={old:?}, with={improved:?}");
         assert!(improved.0 < old.0, "crossing did not improve");
-        assert!(improved.1.iter().all(|p| *p > Fx::from_int(350)), "crossing did not clear: {improved:?}");
+        assert!(
+            improved.1.iter().all(|p| *p > Fx::from_int(350)),
+            "crossing did not clear: {improved:?}"
+        );
     }
 
     #[test]
@@ -3857,15 +3932,42 @@ mod tests {
             leader.speed = 16;
             let mut blocked = 0;
             for tick in 0..160 {
-                let traffic = [Traffic::of(&follower, &body, true), Traffic::of(&leader, &body, true)];
-                let hint = with_hint.then(|| follower.traffic_hint(&body, 0, &traffic, crate::mobility::Mobility::intact(true))).flatten();
+                let traffic = [
+                    Traffic::of(&follower, &body, true),
+                    Traffic::of(&leader, &body, true),
+                ];
+                let hint = with_hint
+                    .then(|| {
+                        follower.traffic_hint(
+                            &body,
+                            0,
+                            &traffic,
+                            crate::mobility::Mobility::intact(true),
+                        )
+                    })
+                    .flatten();
                 follower.set_traffic_hint(hint);
                 leader.allow_start(false);
-                step(&mut leader, &w, &body, &[Obstacle::of(&follower, &body)], tick);
+                step(
+                    &mut leader,
+                    &w,
+                    &body,
+                    &[Obstacle::of(&follower, &body)],
+                    tick,
+                );
                 follower.allow_start(false);
-                step(&mut follower, &w, &body, &[Obstacle::of(&leader, &body)], tick);
+                step(
+                    &mut follower,
+                    &w,
+                    &body,
+                    &[Obstacle::of(&leader, &body)],
+                    tick,
+                );
                 blocked += u32::from(follower.blocked);
-                assert!(Obstacle::of(&follower, &body).penetration(&Obstacle::of(&leader, &body)) <= HULL_CONTACT_SLOP);
+                assert!(
+                    Obstacle::of(&follower, &body).penetration(&Obstacle::of(&leader, &body))
+                        <= HULL_CONTACT_SLOP
+                );
                 assert!(follower.drive.vel.abs() <= Fx::from_int(follower.speed));
             }
             (blocked, follower.pos[0])
@@ -3873,8 +3975,14 @@ mod tests {
         let old = run(false);
         let improved = run(true);
         eprintln!("intermediate convoy: without={old:?}, with={improved:?}");
-        assert!(improved.0 < old.0, "without traffic={old:?}, with traffic={improved:?}");
-        assert!(improved.1 > Fx::from_int(250), "follower made no progress: {improved:?}");
+        assert!(
+            improved.0 < old.0,
+            "without traffic={old:?}, with traffic={improved:?}"
+        );
+        assert!(
+            improved.1 > Fx::from_int(250),
+            "follower made no progress: {improved:?}"
+        );
     }
 
     #[test]
@@ -3925,10 +4033,17 @@ mod tests {
         follower.path = vec![[300, 300], [500, 300]];
         assert!(hint(&follower, &leader).unwrap() < Fx::from_int(follower.speed));
         follower.path = vec![[300, 320], [500, 300]];
-        assert!(hint(&follower, &leader).unwrap() < Fx::from_int(follower.speed), "gentle turn lost traffic advice");
+        assert!(
+            hint(&follower, &leader).unwrap() < Fx::from_int(follower.speed),
+            "gentle turn lost traffic advice"
+        );
         let mut side_leader = leader.clone();
         side_leader.pos[2] = side_leader.pos[2].add(Fx::from_int(100));
-        assert_eq!(hint(&follower, &side_leader), Some(Fx::from_int(follower.speed)), "other lane slowed the follower");
+        assert_eq!(
+            hint(&follower, &side_leader),
+            Some(Fx::from_int(follower.speed)),
+            "other lane slowed the follower"
+        );
         follower.path = vec![[300, 350], [500, 300]];
         assert!(hint(&follower, &leader).is_none());
         follower.path = vec![[300, 300]];
@@ -5743,7 +5858,10 @@ mod tests {
             step(&mut b, &w, &body, &[Obstacle::of(&a, &body)], tick);
             reversed |= a.drive.vel < Fx::ZERO || b.drive.vel < Fx::ZERO;
             let overlap = Obstacle::of(&a, &body).penetration(&Obstacle::of(&b, &body));
-            assert!(overlap <= old.max(HULL_CONTACT_SLOP), "penetration increased beyond contact tolerance at {tick}");
+            assert!(
+                overlap <= old.max(HULL_CONTACT_SLOP),
+                "penetration increased beyond contact tolerance at {tick}"
+            );
             old = overlap;
             if a.destination.is_none() && b.destination.is_none() {
                 break;
@@ -6159,21 +6277,21 @@ mod tests {
                         RangeUnitKind::Crawler => voxel::unit::crawler(),
                         RangeUnitKind::Strider => voxel::unit::strider(),
                         RangeUnitKind::Spider => voxel::unit::spider(),
-                RangeUnitKind::LightningTank => voxel::unit::lightning_tank(),
-                RangeUnitKind::EidolonTank => voxel::unit::eidolon_tank(),
+                        RangeUnitKind::LightningTank => voxel::unit::lightning_tank(),
+                        RangeUnitKind::EidolonTank => voxel::unit::eidolon_tank(),
                         RangeUnitKind::Artillery => voxel::unit::artillery(),
                         RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
                         RangeUnitKind::ArtilleryTurretT2 => voxel::unit::artillery_turret_t2(),
                         RangeUnitKind::ArtilleryTurretT3 => voxel::unit::artillery_turret_t3(),
                         RangeUnitKind::NuclearSilo => voxel::unit::nuclear_silo(),
-                RangeUnitKind::Walker04 => voxel::unit::walker04(),
-                RangeUnitKind::RazlomT3 => voxel::unit::razlom_t3(),
-                RangeUnitKind::GrebenStorage => voxel::unit::greben_storage(),
-                RangeUnitKind::KilFactoryT1 => voxel::unit::kil_factory(1),
-                RangeUnitKind::KilFactoryT2 => voxel::unit::kil_factory(2),
-                RangeUnitKind::KilFactoryT3 => voxel::unit::kil_factory(3),
-                RangeUnitKind::KilFactoryT4 => voxel::unit::kil_factory(4),
-                RangeUnitKind::SkobaDrone => voxel::unit::skoba(),
+                        RangeUnitKind::Walker04 => voxel::unit::walker04(),
+                        RangeUnitKind::RazlomT3 => voxel::unit::razlom_t3(),
+                        RangeUnitKind::GrebenStorage => voxel::unit::greben_storage(),
+                        RangeUnitKind::KilFactoryT1 => voxel::unit::kil_factory(1),
+                        RangeUnitKind::KilFactoryT2 => voxel::unit::kil_factory(2),
+                        RangeUnitKind::KilFactoryT3 => voxel::unit::kil_factory(3),
+                        RangeUnitKind::KilFactoryT4 => voxel::unit::kil_factory(4),
+                        RangeUnitKind::SkobaDrone => voxel::unit::skoba(),
                         RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                         RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
                         RangeUnitKind::Base => voxel::unit::command_base(),

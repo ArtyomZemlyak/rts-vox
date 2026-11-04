@@ -633,7 +633,17 @@ fn a_dead_producers_blank_breaches_and_is_reclaimed_by_digging() {
             break;
         }
     }
-    assert_eq!(r.matter.economy.ledger.held(blank), 0, "pos={:?} destination={:?} blocked={} tank={:?} hauling={} order={:?}", r.units[0].motion.pos.map(|v| v.to_int_trunc()), r.units[0].motion.destination, r.units[0].motion.blocked, r.tank_held(0), r.hauling(0), r.battle.actors[0].order);
+    assert_eq!(
+        r.matter.economy.ledger.held(blank),
+        0,
+        "pos={:?} destination={:?} blocked={} tank={:?} hauling={} order={:?}",
+        r.units[0].motion.pos.map(|v| v.to_int_trunc()),
+        r.units[0].motion.destination,
+        r.units[0].motion.blocked,
+        r.tank_held(0),
+        r.hauling(0),
+        r.battle.actors[0].order
+    );
     assert_eq!(r.tank_held(0), Some(paid - lost));
 }
 

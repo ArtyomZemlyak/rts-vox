@@ -129,11 +129,15 @@ impl Heat {
             }
         }
     }
-    pub(crate) fn quench(&mut self,p:[u32;3],amount:u32,kindling:u32) {
-        if let Some(c)=self.cells.get_mut(&p) {
-            c.heat=c.heat.saturating_sub(amount);
-            if kindling>0 && c.heat<kindling {c.burn=0;}
-            if c.heat==0 && c.burn==0 && !self.molten.contains(&p) {self.cells.remove(&p);}
+    pub(crate) fn quench(&mut self, p: [u32; 3], amount: u32, kindling: u32) {
+        if let Some(c) = self.cells.get_mut(&p) {
+            c.heat = c.heat.saturating_sub(amount);
+            if kindling > 0 && c.heat < kindling {
+                c.burn = 0;
+            }
+            if c.heat == 0 && c.burn == 0 && !self.molten.contains(&p) {
+                self.cells.remove(&p);
+            }
         }
     }
     pub fn hot(&self) -> usize {
@@ -182,8 +186,8 @@ impl Heat {
             .map(|(p, _)| *p)
     }
     /// Read-only active thermal cells for diagnostic rendering.
-    pub fn diagnostic_cells(&self) -> impl Iterator<Item=([u32;3],HeatCell)> + '_ {
-        self.cells.iter().map(|(&p,&cell)|(p,cell))
+    pub fn diagnostic_cells(&self) -> impl Iterator<Item = ([u32; 3], HeatCell)> + '_ {
+        self.cells.iter().map(|(&p, &cell)| (p, cell))
     }
     pub fn cell(&self, p: [u32; 3]) -> HeatCell {
         self.cells.get(&p).copied().unwrap_or_default()
@@ -494,10 +498,14 @@ impl Heat {
                     }
                 }
                 if c.heat > 0 {
-                    let lost = (u64::from(c.heat) * u64::from(t.cooling_milli) / 1000).max(1) as u32;
+                    let lost =
+                        (u64::from(c.heat) * u64::from(t.cooling_milli) / 1000).max(1) as u32;
                     c.heat = c.heat.saturating_sub(lost);
                 }
-                if c.heat == 0 && c.burn == 0 && !t.melt_flow.iter().flatten().any(|f| f.liquid == m) {
+                if c.heat == 0
+                    && c.burn == 0
+                    && !t.melt_flow.iter().flatten().any(|f| f.liquid == m)
+                {
                     self.cells.remove(&p);
                 } else {
                     self.cells.insert(p, c);
@@ -643,7 +651,13 @@ impl Heat {
             if !inside(w, p)
                 || heat > HEAT_CAP
                 || burn > u32::from(t.burn_ticks)
-                || (heat == 0 && burn == 0 && !t.melt_flow.iter().flatten().any(|f| f.liquid == w.material(p[0],p[1],p[2])))
+                || (heat == 0
+                    && burn == 0
+                    && !t
+                        .melt_flow
+                        .iter()
+                        .flatten()
+                        .any(|f| f.liquid == w.material(p[0], p[1], p[2])))
                 || previous.is_some_and(|q| q >= p)
             {
                 return None;
@@ -656,7 +670,11 @@ impl Heat {
                     burn: burn as u16,
                 },
             );
-            if t.melt_flow.iter().flatten().any(|f| f.liquid == w.material(p[0],p[1],p[2])) {
+            if t.melt_flow
+                .iter()
+                .flatten()
+                .any(|f| f.liquid == w.material(p[0], p[1], p[2]))
+            {
                 h.molten.insert(p);
             }
         }

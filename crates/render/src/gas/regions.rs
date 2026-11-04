@@ -38,8 +38,12 @@ pub struct Region {
     retire: Option<u32>, // Start of the short pressure fade, in 60 Hz steps.
 }
 impl Region {
-    pub(super) fn substep_budget(&self, simulated:u32)->u32 {
-        if simulated<self.replay_warmup_until {1}else{16}
+    pub(super) fn substep_budget(&self, simulated: u32) -> u32 {
+        if simulated < self.replay_warmup_until {
+            1
+        } else {
+            16
+        }
     }
     pub(super) fn opacity(&self, now: u32) -> f32 {
         let natural = ((self.last + LIFETIME).saturating_sub(now) as f32 / FADE as f32).min(1.0);
@@ -108,14 +112,23 @@ impl Atmosphere {
     }
     /// Approximate one historical explosion with the current terrain mask.
     /// The renderer advances the empty GPU field towards `now` over frames.
-    pub fn restore_replay_impact(&mut self, params: GasParams, born: u32, now: u32, words: &[u32], window: TerrainWindow) {
+    pub fn restore_replay_impact(
+        &mut self,
+        params: GasParams,
+        born: u32,
+        now: u32,
+        words: &[u32],
+        window: TerrainWindow,
+    ) {
         self.clear();
-        if born>now || now.saturating_sub(born)>=LIFETIME {return;}
-        self.emit_at(params,born);
-        self.advance_gpu(born,words,window,&[]);
-        self.advance_gpu(now,words,window,&[]);
+        if born > now || now.saturating_sub(born) >= LIFETIME {
+            return;
+        }
+        self.emit_at(params, born);
+        self.advance_gpu(born, words, window, &[]);
+        self.advance_gpu(now, words, window, &[]);
         for region in self.regions.iter_mut().flatten() {
-            region.replay_warmup_until=now.saturating_sub(region.born);
+            region.replay_warmup_until = now.saturating_sub(region.born);
         }
     }
     pub fn advance(
@@ -597,18 +610,31 @@ mod tests {
     }
     #[test]
     fn replay_impact_rebuilds_a_fresh_aged_region_and_expires_old_smoke() {
-        let mut a=Atmosphere::default();a.emit(shot(150.0,false));advance(&mut a,0);
-        let old=a.regions[0].as_ref().unwrap().id;
-        a.restore_replay_impact(shot(170.0,false),20,100,&[],TerrainWindow::default());
-        let region=a.regions[0].as_ref().unwrap();
-        assert!(region.id>old);assert_eq!(region.born,20);assert_eq!(region.last,20);
-        assert_eq!(region.deposits.len(),1);assert_eq!(region.deposits[0].step,0);
-        assert_eq!(region.replay_warmup_until,80);assert_eq!(a.clock,100);
-        assert_eq!(region.substep_budget(0),1);assert_eq!(region.substep_budget(79),1);
-        assert_eq!(region.substep_budget(80),16);
-        a.restore_replay_impact(shot(170.0,false),0,LIFETIME,&[],TerrainWindow::default());
+        let mut a = Atmosphere::default();
+        a.emit(shot(150.0, false));
+        advance(&mut a, 0);
+        let old = a.regions[0].as_ref().unwrap().id;
+        a.restore_replay_impact(shot(170.0, false), 20, 100, &[], TerrainWindow::default());
+        let region = a.regions[0].as_ref().unwrap();
+        assert!(region.id > old);
+        assert_eq!(region.born, 20);
+        assert_eq!(region.last, 20);
+        assert_eq!(region.deposits.len(), 1);
+        assert_eq!(region.deposits[0].step, 0);
+        assert_eq!(region.replay_warmup_until, 80);
+        assert_eq!(a.clock, 100);
+        assert_eq!(region.substep_budget(0), 1);
+        assert_eq!(region.substep_budget(79), 1);
+        assert_eq!(region.substep_budget(80), 16);
+        a.restore_replay_impact(
+            shot(170.0, false),
+            0,
+            LIFETIME,
+            &[],
+            TerrainWindow::default(),
+        );
         assert!(a.regions.iter().all(Option::is_none));
-        a.restore_replay_impact(shot(170.0,false),101,100,&[],TerrainWindow::default());
+        a.restore_replay_impact(shot(170.0, false), 101, 100, &[], TerrainWindow::default());
         assert!(a.regions.iter().all(Option::is_none));
     }
     #[test]

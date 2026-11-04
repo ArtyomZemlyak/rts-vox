@@ -92,11 +92,15 @@ impl Heat {
                 // A supported lone drop has no horizontal momentum: it must
                 // not random-walk across a flat floor until it freezes.
                 // A column above supplies pressure for lateral spreading.
-                let above=[p[0],p[1].saturating_add(1),p[2]];
-                let pressurised=inside(w,above)
-                    && changes.get(&above).copied().unwrap_or_else(||w.material(above[0],above[1],above[2]))==mat;
+                let above = [p[0], p[1].saturating_add(1), p[2]];
+                let pressurised = inside(w, above)
+                    && changes
+                        .get(&above)
+                        .copied()
+                        .unwrap_or_else(|| w.material(above[0], above[1], above[2]))
+                        == mat;
                 let dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
-                let mut level=None;
+                let mut level = None;
                 for i in 0..4 {
                     let d = dirs[(i + (h as usize + tick as usize) % 4) % 4];
                     let x = i64::from(p[0]) + i64::from(d[0]);
@@ -106,15 +110,21 @@ impl Heat {
                     }
                     let side = [x as u32, p[1], z as u32];
                     let diagonal = [side[0], side[1].saturating_sub(1), side[2]];
-                    let downhill=side[1]>0 && empty(diagonal,&changes);
-                    if (!downhill && !pressurised) || !empty(side,&changes) {continue;}
+                    let downhill = side[1] > 0 && empty(diagonal, &changes);
+                    if (!downhill && !pressurised) || !empty(side, &changes) {
+                        continue;
+                    }
                     if downhill {
-                        dest=Some(diagonal);
+                        dest = Some(diagonal);
                         break;
                     }
-                    if pressurised && level.is_none() {level=Some(side);}
+                    if pressurised && level.is_none() {
+                        level = Some(side);
+                    }
                 }
-                if dest.is_none() {dest=level;}
+                if dest.is_none() {
+                    dest = level;
+                }
             }
             let Some(q) = dest else { continue };
             changes.insert(p, AIR);
@@ -169,41 +179,84 @@ mod tests {
     }
     #[test]
     fn isolated_melt_does_not_drift_over_flat_ground_before_freezing() {
-        let mats=modding::data::materials_from_ron(include_str!("../../../data/range-materials.ron")).unwrap();
-        let t=HeatTuning::from_ron(include_str!("../../../data/heat.ron")).unwrap();
-        for (liquid,solid) in [(13,3),(14,2),(16,12)] {
-            let mut w=world();let p=[10,2,10];w.queue_transfer(Edit::put(p[0],p[1],p[2],liquid));w.flush_transfers();
-            let mut h=Heat::default();h.add(&w,p,5000);h.mark_molten(p);
-            for tick in 0..160 {h.step_molten(&mut w,&t,tick,|_|false);h.step(&mut w,&mats,&t,|_|false);}
-            assert_eq!(w.material(p[0],p[1],p[2]),solid,"liquid {liquid} drifted before solidifying");
+        let mats =
+            modding::data::materials_from_ron(include_str!("../../../data/range-materials.ron"))
+                .unwrap();
+        let t = HeatTuning::from_ron(include_str!("../../../data/heat.ron")).unwrap();
+        for (liquid, solid) in [(13, 3), (14, 2), (16, 12)] {
+            let mut w = world();
+            let p = [10, 2, 10];
+            w.queue_transfer(Edit::put(p[0], p[1], p[2], liquid));
+            w.flush_transfers();
+            let mut h = Heat::default();
+            h.add(&w, p, 5000);
+            h.mark_molten(p);
+            for tick in 0..160 {
+                h.step_molten(&mut w, &t, tick, |_| false);
+                h.step(&mut w, &mats, &t, |_| false);
+            }
+            assert_eq!(
+                w.material(p[0], p[1], p[2]),
+                solid,
+                "liquid {liquid} drifted before solidifying"
+            );
             assert!(h.molten.is_empty());
         }
     }
     #[test]
     fn molten_drop_descends_off_a_step_then_stays_on_flat_ground() {
-        let mut w=world();let t=HeatTuning::from_ron(include_str!("../../../data/heat.ron")).unwrap();
-        w.queue_transfer(Edit::put(10,2,10,2));w.queue_transfer(Edit::put(10,3,10,13));w.flush_transfers();
-        let mut h=Heat::default();h.add(&w,[10,3,10],5000);h.mark_molten([10,3,10]);
-        for tick in 0..20 {h.step_molten(&mut w,&t,tick,|_|false);}
-        let positions:Vec<_>=h.molten_cells().collect();assert_eq!(positions.len(),1);
-        let p=positions[0];assert_eq!(p[1],2,"melt must run off the higher support");
-        assert_eq!(p[0].abs_diff(10)+p[2].abs_diff(10),1);
-        for tick in 20..100 {h.step_molten(&mut w,&t,tick,|_|false);}
-        assert_eq!(h.molten_cells().collect::<Vec<_>>(),vec![p],"the drop must settle once it reaches flat ground");
+        let mut w = world();
+        let t = HeatTuning::from_ron(include_str!("../../../data/heat.ron")).unwrap();
+        w.queue_transfer(Edit::put(10, 2, 10, 2));
+        w.queue_transfer(Edit::put(10, 3, 10, 13));
+        w.flush_transfers();
+        let mut h = Heat::default();
+        h.add(&w, [10, 3, 10], 5000);
+        h.mark_molten([10, 3, 10]);
+        for tick in 0..20 {
+            h.step_molten(&mut w, &t, tick, |_| false);
+        }
+        let positions: Vec<_> = h.molten_cells().collect();
+        assert_eq!(positions.len(), 1);
+        let p = positions[0];
+        assert_eq!(p[1], 2, "melt must run off the higher support");
+        assert_eq!(p[0].abs_diff(10) + p[2].abs_diff(10), 1);
+        for tick in 20..100 {
+            h.step_molten(&mut w, &t, tick, |_| false);
+        }
+        assert_eq!(
+            h.molten_cells().collect::<Vec<_>>(),
+            vec![p],
+            "the drop must settle once it reaches flat ground"
+        );
     }
     #[test]
     fn stacked_melt_spreads_under_its_own_weight_without_losing_material() {
-        let mut w=world();let t=HeatTuning::from_ron(include_str!("../../../data/heat.ron")).unwrap();
-        let mut h=Heat::default();
-        for p in [[10,2,10],[10,3,10]] {w.queue_transfer(Edit::put(p[0],p[1],p[2],13));}
+        let mut w = world();
+        let t = HeatTuning::from_ron(include_str!("../../../data/heat.ron")).unwrap();
+        let mut h = Heat::default();
+        for p in [[10, 2, 10], [10, 3, 10]] {
+            w.queue_transfer(Edit::put(p[0], p[1], p[2], 13));
+        }
         w.flush_transfers();
-        for p in [[10,2,10],[10,3,10]] {h.add(&w,p,5000);h.mark_molten(p);}
-        for tick in 0..80 {h.step_molten(&mut w,&t,tick,|_|false);}
-        let positions:Vec<_>=h.molten_cells().collect();
-        assert_eq!(positions.len(),2);assert_eq!(mass(&w),2);
-        assert!(positions.iter().all(|p|p[1]==2));
-        assert!(positions.iter().any(|p|p[0]!=10||p[2]!=10),"a pile must still spread");
-        assert!(positions.iter().all(|p|p[0].abs_diff(10)+p[2].abs_diff(10)<=1));
+        for p in [[10, 2, 10], [10, 3, 10]] {
+            h.add(&w, p, 5000);
+            h.mark_molten(p);
+        }
+        for tick in 0..80 {
+            h.step_molten(&mut w, &t, tick, |_| false);
+        }
+        let positions: Vec<_> = h.molten_cells().collect();
+        assert_eq!(positions.len(), 2);
+        assert_eq!(mass(&w), 2);
+        assert!(positions.iter().all(|p| p[1] == 2));
+        assert!(
+            positions.iter().any(|p| p[0] != 10 || p[2] != 10),
+            "a pile must still spread"
+        );
+        assert!(positions
+            .iter()
+            .all(|p| p[0].abs_diff(10) + p[2].abs_diff(10) <= 1));
     }
     #[test]
     fn molten_steel_descends_cools_and_restores_deterministically() {

@@ -32,7 +32,16 @@ impl Constructor {
                     | LabAction::SectionSide
                     | LabAction::Metric(_)
                     | LabAction::MetricScale
-                    | LabAction::ReplayStart | LabAction::ReplayStop | LabAction::ReplaySeek(_) | LabAction::ReplayJump(_) | LabAction::ReplaySave | LabAction::ReplayOpen | LabAction::ReplayBrowse(_) | LabAction::ReplayPlay | LabAction::ReplayLeave | LabAction::Tab(31)
+                    | LabAction::ReplayStart
+                    | LabAction::ReplayStop
+                    | LabAction::ReplaySeek(_)
+                    | LabAction::ReplayJump(_)
+                    | LabAction::ReplaySave
+                    | LabAction::ReplayOpen
+                    | LabAction::ReplayBrowse(_)
+                    | LabAction::ReplayPlay
+                    | LabAction::ReplayLeave
+                    | LabAction::Tab(31)
                     | LabAction::Tab(30)
                     | LabAction::VoxelTool(_)
                     | LabAction::VoxelStroke
@@ -331,7 +340,11 @@ pub fn pointer(
             .with_scale(Vec3::splat(1.01)),
         colour,
     );
-    if valid && mouse.pressed(MouseButton::Left) && !mouse.pressed(MouseButton::Right) && !mouse.pressed(MouseButton::Middle) {
+    if valid
+        && mouse.pressed(MouseButton::Left)
+        && !mouse.pressed(MouseButton::Right)
+        && !mouse.pressed(MouseButton::Middle)
+    {
         let material = lab.constructor.material(&lab.definition, lab.recipe);
         let s = lab.constructor.voxel_edit.as_mut().unwrap();
         let stroke = s.stroke.get_or_insert_with(|| Stroke {

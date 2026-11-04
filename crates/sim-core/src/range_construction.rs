@@ -76,13 +76,16 @@ impl Construction {
         let mut c = Self::default();
         for (id, u) in units.iter().enumerate() {
             if u.kind == RangeUnitKind::SkobaDrone {
-                c.drones.insert(id as u16, Drone {
-                    home: nearest_home(units, sides, id) as u16,
-                    site: None,
-                    want: 0,
-                    leg: Leg::Idle,
-                    cargo: None,
-                });
+                c.drones.insert(
+                    id as u16,
+                    Drone {
+                        home: nearest_home(units, sides, id) as u16,
+                        site: None,
+                        want: 0,
+                        leg: Leg::Idle,
+                        cargo: None,
+                    },
+                );
             }
         }
         c
@@ -90,27 +93,38 @@ impl Construction {
 
     pub fn push_unit(&mut self, id: usize, units: &[RangeUnit], sides: &[bool]) {
         if units[id].kind == RangeUnitKind::SkobaDrone {
-            self.drones.insert(id as u16, Drone {
-                home: nearest_home(units, sides, id) as u16,
-                site: None,
-                want: 0,
-                leg: Leg::Idle,
-                cargo: None,
-            });
+            self.drones.insert(
+                id as u16,
+                Drone {
+                    home: nearest_home(units, sides, id) as u16,
+                    site: None,
+                    want: 0,
+                    leg: Leg::Idle,
+                    cargo: None,
+                },
+            );
         }
     }
 
     pub fn sites(&self) -> Vec<SiteView> {
-        self.sites.iter().enumerate().map(|(id, s)| SiteView {
-            id,
-            kind: s.kind,
-            at: s.at,
-            required: s.required,
-            delivered: s.delivered,
-            quota: s.quota,
-            assigned: self.drones.values().filter(|d| d.site == Some(id as u16)).count(),
-            complete: s.delivered == s.required,
-        }).collect()
+        self.sites
+            .iter()
+            .enumerate()
+            .map(|(id, s)| SiteView {
+                id,
+                kind: s.kind,
+                at: s.at,
+                required: s.required,
+                delivered: s.delivered,
+                quota: s.quota,
+                assigned: self
+                    .drones
+                    .values()
+                    .filter(|d| d.site == Some(id as u16))
+                    .count(),
+                complete: s.delivered == s.required,
+            })
+            .collect()
     }
 
     pub fn cargo(&self, id: usize) -> Option<Batch> {
@@ -123,7 +137,10 @@ impl Construction {
 
     pub fn active(&self) -> bool {
         !self.sites.is_empty()
-            || self.drones.values().any(|d| d.cargo.is_some() || d.site.is_some())
+            || self
+                .drones
+                .values()
+                .any(|d| d.cargo.is_some() || d.site.is_some())
             || self.delivered > 0
             || self.trips > 0
             || self.lost > 0
@@ -138,22 +155,33 @@ impl Construction {
         for s in &self.sites {
             b.u8(s.kind.index() as u8);
             b.bool(s.allied);
-            for v in s.at { b.i32(v); }
+            for v in s.at {
+                b.i32(v);
+            }
             b.u64(s.required);
             b.u64(s.delivered);
             b.u64(s.reserved);
             b.u8(s.quota);
             b.bool(s.unit.is_some());
-            if let Some(id) = s.unit { b.u16(id); }
+            if let Some(id) = s.unit {
+                b.u16(id);
+            }
         }
         b.u32(self.drones.len() as u32);
         for (&id, d) in &self.drones {
             b.u16(id);
             b.u16(d.home);
             b.bool(d.site.is_some());
-            if let Some(site) = d.site { b.u16(site); }
+            if let Some(site) = d.site {
+                b.u16(site);
+            }
             b.u64(d.want);
-            b.u8(match d.leg { Leg::Idle => 0, Leg::ToSource => 1, Leg::ToSite => 2, Leg::Returning => 3 });
+            b.u8(match d.leg {
+                Leg::Idle => 0,
+                Leg::ToSource => 1,
+                Leg::ToSite => 2,
+                Leg::Returning => 3,
+            });
             b.bool(d.cargo.is_some());
             if let Some(cargo) = d.cargo {
                 b.u64(cargo.id);
@@ -163,13 +191,20 @@ impl Construction {
         }
     }
 
-    pub fn load(&mut self, s: &mut Scan, units: &[RangeUnit], ledger: &crate::matter::Ledger) -> Option<()> {
+    pub fn load(
+        &mut self,
+        s: &mut Scan,
+        units: &[RangeUnit],
+        ledger: &crate::matter::Ledger,
+    ) -> Option<()> {
         self.next_batch = s.u64();
         self.delivered = s.u64();
         self.trips = s.u64();
         self.lost = s.u64();
         let n = s.u32() as usize;
-        if n > 32 || n > s.left() / 32 { return None; }
+        if n > 32 || n > s.left() / 32 {
+            return None;
+        }
         self.sites.clear();
         let mut delivered = 0u64;
         for _ in 0..n {
@@ -181,22 +216,42 @@ impl Construction {
             let reserved = s.u64();
             let quota = s.u8();
             let unit = if s.bool() { Some(s.u16()) } else { None };
-            if !matches!(kind, RangeUnitKind::TurretT1 | RangeUnitKind::KilFactoryT1 | RangeUnitKind::GrebenStorage)
-                || required == 0 || completed > required || reserved > required - completed
-                || quota > 32 || unit.is_some_and(|id| {
-                    units.get(usize::from(id)).is_none_or(|u| u.kind != kind || u.at != at)
+            if !matches!(
+                kind,
+                RangeUnitKind::TurretT1
+                    | RangeUnitKind::KilFactoryT1
+                    | RangeUnitKind::GrebenStorage
+            ) || required == 0
+                || completed > required
+                || reserved > required - completed
+                || quota > 32
+                || unit.is_some_and(|id| {
+                    units
+                        .get(usize::from(id))
+                        .is_none_or(|u| u.kind != kind || u.at != at)
                 })
             {
                 return None;
             }
             delivered = delivered.checked_add(completed)?;
             self.sites.push(Site {
-                kind, allied, at, required, delivered: completed, reserved, quota, unit,
+                kind,
+                allied,
+                at,
+                required,
+                delivered: completed,
+                reserved,
+                quota,
+                unit,
             });
         }
-        if delivered != self.delivered { return None; }
+        if delivered != self.delivered {
+            return None;
+        }
         let n = s.u32() as usize;
-        if n > units.len() || n > s.left() / 24 { return None; }
+        if n > units.len() || n > s.left() / 24 {
+            return None;
+        }
         self.drones.clear();
         let mut batches = std::collections::BTreeSet::new();
         let mut containers = std::collections::BTreeSet::new();
@@ -214,9 +269,15 @@ impl Construction {
                 _ => return None,
             };
             let cargo = if s.bool() {
-                let cargo = Batch { id: s.u64(), material: s.u16(), container: s.u32() };
+                let cargo = Batch {
+                    id: s.u64(),
+                    material: s.u16(),
+                    container: s.u32(),
+                };
                 if cargo.material != STEEL
-                    || ledger.try_get(cargo.container).is_none_or(|c| !c.alive || c.kind != Kind::Body)
+                    || ledger
+                        .try_get(cargo.container)
+                        .is_none_or(|c| !c.alive || c.kind != Kind::Body)
                     || !batches.insert(cargo.id)
                     || !containers.insert(cargo.container)
                 {
@@ -224,18 +285,36 @@ impl Construction {
                 }
                 last_batch = last_batch.max(cargo.id.saturating_add(1));
                 Some(cargo)
-            } else { None };
-            if units.get(usize::from(id)).is_none_or(|u| u.kind != RangeUnitKind::SkobaDrone)
+            } else {
+                None
+            };
+            if units
+                .get(usize::from(id))
+                .is_none_or(|u| u.kind != RangeUnitKind::SkobaDrone)
                 || usize::from(home) >= units.len()
                 || site.is_some_and(|site| usize::from(site) >= self.sites.len())
                 || want > BATCH
                 || cargo.is_some_and(|c| site.is_some() && ledger.held(c.container) != want)
-                || self.drones.insert(id, Drone { home, site, want, leg, cargo }).is_some()
+                || self
+                    .drones
+                    .insert(
+                        id,
+                        Drone {
+                            home,
+                            site,
+                            want,
+                            leg,
+                            cargo,
+                        },
+                    )
+                    .is_some()
             {
                 return None;
             }
         }
-        if self.next_batch < last_batch || !self.active() || !s.ok() { return None; }
+        if self.next_batch < last_batch || !self.active() || !s.ok() {
+            return None;
+        }
         Some(())
     }
 
@@ -245,17 +324,29 @@ impl Construction {
             if self.sites[site].delivered == self.sites[site].required {
                 continue;
             }
-            let mut assigned = self.drones.values().filter(|d| d.site == Some(site as u16)).count();
-            if assigned >= quota { continue; }
-            let idle: Vec<u16> = self.drones.iter()
+            let mut assigned = self
+                .drones
+                .values()
+                .filter(|d| d.site == Some(site as u16))
+                .count();
+            if assigned >= quota {
+                continue;
+            }
+            let idle: Vec<u16> = self
+                .drones
+                .iter()
                 .filter(|(_, d)| d.site.is_none() && d.cargo.is_none())
                 .map(|(&id, _)| id)
                 .collect();
             for id in idle {
-                if assigned == quota { break; }
+                if assigned == quota {
+                    break;
+                }
                 let s = &mut self.sites[site];
                 let left = s.required - s.delivered - s.reserved;
-                if left == 0 { break; }
+                if left == 0 {
+                    break;
+                }
                 let want = left.min(BATCH);
                 s.reserved += want;
                 let d = self.drones.get_mut(&id).expect("idle drone");
@@ -268,16 +359,28 @@ impl Construction {
     }
 
     pub fn set_quota(&mut self, site: usize, quota: u8) -> bool {
-        let Some(s) = self.sites.get_mut(site) else { return false; };
+        let Some(s) = self.sites.get_mut(site) else {
+            return false;
+        };
         s.quota = quota.min(32);
         let quota = usize::from(s.quota);
-        let mut assigned = self.drones.values().filter(|d| d.site == Some(site as u16)).count();
+        let mut assigned = self
+            .drones
+            .values()
+            .filter(|d| d.site == Some(site as u16))
+            .count();
         if assigned > quota {
-            let ids: Vec<u16> = self.drones.iter().rev()
+            let ids: Vec<u16> = self
+                .drones
+                .iter()
+                .rev()
                 .filter(|(_, d)| d.site == Some(site as u16))
-                .map(|(&id, _)| id).collect();
+                .map(|(&id, _)| id)
+                .collect();
             for id in ids {
-                if assigned <= quota { break; }
+                if assigned <= quota {
+                    break;
+                }
                 let d = self.drones.get_mut(&id).expect("assigned drone");
                 if d.cargo.is_none() {
                     self.sites[site].reserved -= d.want;
@@ -297,7 +400,10 @@ impl Construction {
     }
 
     fn step(&mut self, r: &mut BlastRange) {
-        if !matches!(r.battle.phase, battle::Phase::Setup | battle::Phase::Fighting) {
+        if !matches!(
+            r.battle.phase,
+            battle::Phase::Setup | battle::Phase::Fighting
+        ) {
             return;
         }
         self.assign_idle();
@@ -309,8 +415,12 @@ impl Construction {
 
     fn step_drone(&mut self, r: &mut BlastRange, id: u16) {
         let index = usize::from(id);
-        let Some(mut d) = self.drones.get(&id).copied() else { return; };
-        if index >= r.units.len() { return; }
+        let Some(mut d) = self.drones.get(&id).copied() else {
+            return;
+        };
+        if index >= r.units.len() {
+            return;
+        }
         if !r.units[index].status.alive {
             set_skoba_pose(&mut r.units[index], index, false);
             if let Some(batch) = d.cargo.take() {
@@ -325,7 +435,11 @@ impl Construction {
             return;
         }
         let allied = r.allied(index);
-        if !r.units.get(usize::from(d.home)).is_some_and(|u| u.status.alive && r.allied(usize::from(d.home)) == allied) {
+        if !r
+            .units
+            .get(usize::from(d.home))
+            .is_some_and(|u| u.status.alive && r.allied(usize::from(d.home)) == allied)
+        {
             let sides: Vec<bool> = (0..r.units.len()).map(|id| r.allied(id)).collect();
             d.home = nearest_home(&r.units, &sides, index) as u16;
         }
@@ -341,7 +455,10 @@ impl Construction {
                 let source = if r.units[usize::from(d.home)].kind == RangeUnitKind::Crawler {
                     r.mining.as_ref().and_then(|m| m.tank(usize::from(d.home)))
                 } else {
-                    r.mining.as_ref().and_then(|m| m.haul()).map(|h| h.store(allied))
+                    r.mining
+                        .as_ref()
+                        .and_then(|m| m.haul())
+                        .map(|h| h.store(allied))
                 };
                 let Some(source) = source else {
                     self.drones.insert(id, d);
@@ -361,7 +478,11 @@ impl Construction {
                     }
                     d.want = moved;
                 }
-                let batch = Batch { id: self.next_batch, material: STEEL, container: cargo };
+                let batch = Batch {
+                    id: self.next_batch,
+                    material: STEEL,
+                    container: cargo,
+                };
                 self.next_batch += 1;
                 d.cargo = Some(batch);
                 d.leg = Leg::ToSite;
@@ -378,7 +499,10 @@ impl Construction {
                     self.drones.insert(id, d);
                     return;
                 };
-                if !fly(&mut r.units[index], [site.at[0], site.at[1] + 100, site.at[2]]) {
+                if !fly(
+                    &mut r.units[index],
+                    [site.at[0], site.at[1] + 100, site.at[2]],
+                ) {
                     self.drones.insert(id, d);
                     return;
                 }
@@ -387,19 +511,32 @@ impl Construction {
                     self.drones.insert(id, d);
                     return;
                 };
-                if batch.material != STEEL || !ensure_site_unit(r, &mut self.sites[usize::from(site_id)]) {
+                if batch.material != STEEL
+                    || !ensure_site_unit(r, &mut self.sites[usize::from(site_id)])
+                {
                     self.drones.insert(id, d);
                     return;
                 }
                 let unit = self.sites[usize::from(site_id)].unit.expect("site unit");
                 let body = r.matter.body_container(usize::from(unit));
-                let moved = r.matter.economy.ledger.transfer(batch.container, body, d.want);
+                let moved = r
+                    .matter
+                    .economy
+                    .ledger
+                    .transfer(batch.container, body, d.want);
                 if moved > 0 {
                     let s = &mut self.sites[usize::from(site_id)];
                     s.reserved -= moved;
                     s.delivered += moved;
                     self.delivered += moved;
-                    apply_site_progress(r, usize::from(s.unit.expect("site unit")), s.kind, s.at, s.required, s.delivered);
+                    apply_site_progress(
+                        r,
+                        usize::from(s.unit.expect("site unit")),
+                        s.kind,
+                        s.at,
+                        s.required,
+                        s.delivered,
+                    );
                     if moved < d.want {
                         s.reserved = s.reserved.saturating_sub(d.want - moved);
                     }
@@ -422,10 +559,18 @@ impl Construction {
                     return;
                 }
                 if let Some(batch) = d.cargo.take() {
-                    let store = r.mining.as_ref().and_then(|m| m.haul()).map(|h| h.store(allied));
+                    let store = r
+                        .mining
+                        .as_ref()
+                        .and_then(|m| m.haul())
+                        .map(|h| h.store(allied));
                     if let Some(store) = store {
                         let amount = r.matter.economy.ledger.held(batch.container);
-                        let moved = r.matter.economy.ledger.transfer(batch.container, store, amount);
+                        let moved =
+                            r.matter
+                                .economy
+                                .ledger
+                                .transfer(batch.container, store, amount);
                         if moved < amount {
                             d.cargo = Some(batch);
                         } else {
@@ -445,18 +590,29 @@ impl Construction {
 }
 
 fn nearest_home(units: &[RangeUnit], sides: &[bool], id: usize) -> usize {
-    units.iter().enumerate()
-        .filter(|(home, u)| *home != id && u.status.alive && sides.get(*home) == sides.get(id)
-            && matches!(u.kind, RangeUnitKind::GrebenStorage | RangeUnitKind::Crawler))
+    units
+        .iter()
+        .enumerate()
+        .filter(|(home, u)| {
+            *home != id
+                && u.status.alive
+                && sides.get(*home) == sides.get(id)
+                && matches!(
+                    u.kind,
+                    RangeUnitKind::GrebenStorage | RangeUnitKind::Crawler
+                )
+        })
         .min_by_key(|(home, u)| {
             let a = u.motion.pos.map(Fx::to_int_trunc);
             let b = units[id].motion.pos.map(Fx::to_int_trunc);
             (
                 usize::from(u.kind != RangeUnitKind::GrebenStorage),
-                (0..3).map(|k| {
-                    let d = i64::from(a[k] - b[k]);
-                    d * d
-                }).sum::<i64>(),
+                (0..3)
+                    .map(|k| {
+                        let d = i64::from(a[k] - b[k]);
+                        d * d
+                    })
+                    .sum::<i64>(),
                 *home,
             )
         })
@@ -465,7 +621,9 @@ fn nearest_home(units: &[RangeUnit], sides: &[bool], id: usize) -> usize {
 }
 
 fn home_target(units: &[RangeUnit], home: usize) -> [i32; 3] {
-    let Some(u) = units.get(home) else { return [0, 100, 0]; };
+    let Some(u) = units.get(home) else {
+        return [0, 100, 0];
+    };
     let at = u.motion.pos.map(Fx::to_int_trunc);
     if u.kind == RangeUnitKind::GrebenStorage {
         [at[0] + 800, at[1] + 140, at[2]]
@@ -518,10 +676,8 @@ fn fly(u: &mut RangeUnit, target: [i32; 3]) -> bool {
         std::array::from_fn(|a| at[a] + delta[a] * FLY_SPEED / distance)
     };
     if delta[0] != 0 || delta[2] != 0 {
-        u.motion.drive.head = fx::angle::atan2(
-            Fx::from_int(delta[2]).raw(),
-            Fx::from_int(delta[0]).raw(),
-        );
+        u.motion.drive.head =
+            fx::angle::atan2(Fx::from_int(delta[2]).raw(), Fx::from_int(delta[0]).raw());
     }
     u.motion.pos = next.map(Fx::from_int);
     let head = u.motion.drive.head;
@@ -531,7 +687,10 @@ fn fly(u: &mut RangeUnit, target: [i32; 3]) -> bool {
 
 impl BlastRange {
     pub fn construction_sites(&self) -> Vec<SiteView> {
-        self.mining.as_ref().and_then(|m| m.construction.as_ref()).map_or_else(Vec::new, |c| c.sites())
+        self.mining
+            .as_ref()
+            .and_then(|m| m.construction.as_ref())
+            .map_or_else(Vec::new, |c| c.sites())
     }
 
     pub fn drone_cargo(&self, id: usize) -> Option<Batch> {
@@ -543,13 +702,27 @@ impl BlastRange {
     }
 
     pub fn set_construction_quota(&mut self, site: usize, quota: u8) -> bool {
-        self.mining.as_mut().and_then(|m| m.construction.as_mut()).is_some_and(|c| c.set_quota(site, quota))
+        self.mining
+            .as_mut()
+            .and_then(|m| m.construction.as_mut())
+            .is_some_and(|c| c.set_quota(site, quota))
     }
 
-    pub fn create_construction_site(&mut self, kind: RangeUnitKind, allied: bool, at: [i32; 3]) -> Option<usize> {
-        if !matches!(kind, RangeUnitKind::TurretT1 | RangeUnitKind::KilFactoryT1 | RangeUnitKind::GrebenStorage)
-            || self.units.len() >= MAX_RANGE_UNITS
-            || self.mining.as_ref().and_then(|m| m.construction.as_ref()).is_none()
+    pub fn create_construction_site(
+        &mut self,
+        kind: RangeUnitKind,
+        allied: bool,
+        at: [i32; 3],
+    ) -> Option<usize> {
+        if !matches!(
+            kind,
+            RangeUnitKind::TurretT1 | RangeUnitKind::KilFactoryT1 | RangeUnitKind::GrebenStorage
+        ) || self.units.len() >= MAX_RANGE_UNITS
+            || self
+                .mining
+                .as_ref()
+                .and_then(|m| m.construction.as_ref())
+                .is_none()
         {
             return None;
         }
@@ -564,7 +737,11 @@ impl BlastRange {
             return None;
         }
         let required = self.matter.template_matter(&probe);
-        let quota = if self.construction_sites().is_empty() { 8 } else { 4 };
+        let quota = if self.construction_sites().is_empty() {
+            8
+        } else {
+            4
+        };
         let m = self.mining.as_mut()?;
         let c = m.construction.as_mut()?;
         c.sites.push(Site {
@@ -581,24 +758,47 @@ impl BlastRange {
     }
 
     pub fn upgrade_crawler_drones(&mut self, id: usize) -> bool {
-        if !self.units.get(id).is_some_and(|u| u.kind == RangeUnitKind::Crawler && u.status.alive && self.allied(id))
+        if !self
+            .units
+            .get(id)
+            .is_some_and(|u| u.kind == RangeUnitKind::Crawler && u.status.alive && self.allied(id))
             || self.units.len() + 4 > MAX_RANGE_UNITS
-            || self.mining.as_ref().and_then(|m| m.construction.as_ref())
+            || self
+                .mining
+                .as_ref()
+                .and_then(|m| m.construction.as_ref())
                 .is_some_and(|c| c.drones.values().any(|d| usize::from(d.home) == id))
         {
             return false;
         }
-        let Some(price) = self.production_cost(RangeUnitKind::SkobaDrone) else { return false; };
+        let Some(price) = self.production_cost(RangeUnitKind::SkobaDrone) else {
+            return false;
+        };
         let total = price.saturating_mul(4);
         let allied = self.allied(id);
-        let Some(store) = self.mining.as_ref().and_then(|m| m.haul()).map(|h| h.store(allied)) else { return false; };
-        if self.matter.economy.ledger.held(store) < total { return false; }
+        let Some(store) = self
+            .mining
+            .as_ref()
+            .and_then(|m| m.haul())
+            .map(|h| h.store(allied))
+        else {
+            return false;
+        };
+        if self.matter.economy.ledger.held(store) < total {
+            return false;
+        }
         let paid = self.matter.economy.ledger.create(Kind::Body, 0, total);
-        assert_eq!(self.matter.economy.ledger.transfer(store, paid, total), total);
+        assert_eq!(
+            self.matter.economy.ledger.transfer(store, paid, total),
+            total
+        );
         let at = self.units[id].motion.pos.map(Fx::to_int_trunc);
         for offset in [-36, -12, 12, 36] {
             let blank = self.matter.economy.ledger.create(Kind::Body, 0, price);
-            assert_eq!(self.matter.economy.ledger.transfer(paid, blank, price), price);
+            assert_eq!(
+                self.matter.economy.ledger.transfer(paid, blank, price),
+                price
+            );
             let drone = self.spawn(
                 RangeUnitKind::SkobaDrone,
                 true,
@@ -619,7 +819,9 @@ impl BlastRange {
     }
 
     pub(crate) fn construction_phase(&mut self) {
-        let Some(mut c) = self.mining.as_mut().and_then(|m| m.construction.take()) else { return; };
+        let Some(mut c) = self.mining.as_mut().and_then(|m| m.construction.take()) else {
+            return;
+        };
         c.step(self);
         if let Some(m) = self.mining.as_mut() {
             m.construction = Some(c);
@@ -627,7 +829,10 @@ impl BlastRange {
     }
 
     pub(crate) fn has_construction(&self) -> bool {
-        self.mining.as_ref().and_then(|m| m.construction.as_ref()).is_some_and(|c| c.active())
+        self.mining
+            .as_ref()
+            .and_then(|m| m.construction.as_ref())
+            .is_some_and(|c| c.active())
     }
 
     pub(crate) fn save_construction(&self, b: &mut Blob) {
@@ -645,9 +850,15 @@ impl BlastRange {
 fn spawn_greben_crew(r: &mut BlastRange, home: usize) {
     let at = r.units[home].motion.pos.map(Fx::to_int_trunc);
     let allied = r.allied(home);
-    let direction = if at[0] + 900 < r.size[0] as i32 { 1 } else { -1 };
+    let direction = if at[0] + 900 < r.size[0] as i32 {
+        1
+    } else {
+        -1
+    };
     for n in 0..8 {
-        if r.units.len() >= MAX_RANGE_UNITS { break; }
+        if r.units.len() >= MAX_RANGE_UNITS {
+            break;
+        }
         spawn_initial_unit(
             r,
             RangeUnitKind::SkobaDrone,
@@ -656,12 +867,17 @@ fn spawn_greben_crew(r: &mut BlastRange, home: usize) {
         );
     }
     let crawler_near = r.units.iter().enumerate().any(|(id, u)| {
-        id != home && u.kind == RangeUnitKind::Crawler && r.allied(id) == allied
-            && (0..3).map(|a| {
-                let p = u.motion.pos[a].to_int_trunc();
-                let d = i64::from(p - at[a]);
-                d * d
-            }).sum::<i64>() <= 2000 * 2000
+        id != home
+            && u.kind == RangeUnitKind::Crawler
+            && r.allied(id) == allied
+            && (0..3)
+                .map(|a| {
+                    let p = u.motion.pos[a].to_int_trunc();
+                    let d = i64::from(p - at[a]);
+                    d * d
+                })
+                .sum::<i64>()
+                <= 2000 * 2000
     });
     if !crawler_near && r.units.len() < MAX_RANGE_UNITS {
         spawn_initial_unit(
@@ -678,13 +894,22 @@ fn spawn_initial_unit(r: &mut BlastRange, kind: RangeUnitKind, allied: bool, at:
     let cost = r.matter.template_matter(&probe);
     let body = r.matter.economy.ledger.create(Kind::Body, cost, cost);
     let tank = if kind == RangeUnitKind::Crawler {
-        let cap = r.mining.as_ref().and_then(|m| m.data().kind(kind)).map_or(0, |k| k.tank);
+        let cap = r
+            .mining
+            .as_ref()
+            .and_then(|m| m.data().kind(kind))
+            .map_or(0, |k| k.tank);
         Some(r.matter.economy.ledger.create(Kind::Hauler, 0, cap))
     } else {
         None
     };
     r.append_unit(super::produce::Spawned {
-        def: RangeUnitDef { allied, kind, at, weapon: None },
+        def: RangeUnitDef {
+            allied,
+            kind,
+            at,
+            weapon: None,
+        },
         body,
         tank,
     });
@@ -695,10 +920,17 @@ fn ensure_site_unit(r: &mut BlastRange, site: &mut Site) -> bool {
     if let Some(id) = site.unit {
         return r.units.get(usize::from(id)).is_some_and(|u| u.status.alive);
     }
-    if r.units.len() >= MAX_RANGE_UNITS { return false; }
+    if r.units.len() >= MAX_RANGE_UNITS {
+        return false;
+    }
     let body = r.matter.economy.ledger.create(Kind::Body, 0, site.required);
     let id = r.append_unit(super::produce::Spawned {
-        def: RangeUnitDef { allied: site.allied, kind: site.kind, at: site.at, weapon: None },
+        def: RangeUnitDef {
+            allied: site.allied,
+            kind: site.kind,
+            at: site.at,
+            weapon: None,
+        },
         body,
         tank: None,
     });
@@ -707,9 +939,18 @@ fn ensure_site_unit(r: &mut BlastRange, site: &mut Site) -> bool {
     true
 }
 
-fn apply_site_progress(r: &mut BlastRange, unit: usize, kind: RangeUnitKind, at: [i32; 3], required: Amount, delivered: Amount) {
+fn apply_site_progress(
+    r: &mut BlastRange,
+    unit: usize,
+    kind: RangeUnitKind,
+    at: [i32; 3],
+    required: Amount,
+    delivered: Amount,
+) {
     let density = r.matter.source_density(STEEL) as Amount;
-    if density == 0 { return; }
+    if density == 0 {
+        return;
+    }
     let keep = (delivered / density).min((required / density).max(1)) as usize;
     let id = usize::from(unit);
     let revision = r.units[id].revision;
@@ -729,7 +970,11 @@ fn apply_site_progress(r: &mut BlastRange, unit: usize, kind: RangeUnitKind, at:
 }
 
 fn connected_cells(body: &voxel::unit::UnitBody) -> Vec<[usize; 3]> {
-    let size = [usize::from(body.vol.nx), usize::from(body.vol.ny), usize::from(body.vol.nz)];
+    let size = [
+        usize::from(body.vol.nx),
+        usize::from(body.vol.ny),
+        usize::from(body.vol.nz),
+    ];
     let mut queue = VecDeque::new();
     let mut seen = std::collections::BTreeSet::new();
     for z in 0..size[2] {

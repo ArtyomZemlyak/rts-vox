@@ -110,8 +110,8 @@ pub struct Matter {
     fragment_box: u8,
     pub economy: Economy,
     pub tuning: modding::tuning::Blast,
-    phase_changes:[Option<modding::heat::Transformation>;4],
-    melt_flow:[Option<modding::heat::MeltFlow>;3],
+    phase_changes: [Option<modding::heat::Transformation>; 4],
+    melt_flow: [Option<modding::heat::MeltFlow>; 3],
     pub remaining_mj: u64,
     pub supplied_mj: u64,
     pub spent_mj: u64,
@@ -205,7 +205,9 @@ fn body_cells(u: &RangeUnit) -> u64 {
 
 impl Matter {
     #[cfg(test)]
-    pub(super) fn legacy_melt_for_test(&mut self) { self.melt_flow = [None; 3]; }
+    pub(super) fn legacy_melt_for_test(&mut self) {
+        self.melt_flow = [None; 3];
+    }
     /// Matter of an intact body of this unit's template: its cells times
     /// the fixed pack's density of body material — what a produced unit
     /// costs (ADR-675) and what a placed unit's body holds.
@@ -258,8 +260,14 @@ impl Matter {
             fragment_box: 2,
             economy,
             tuning: t.blast,
-            phase_changes:modding::heat::HeatTuning::from_ron(include_str!("../../../data/heat.ron")).expect("heat tuning").transforms,
-            melt_flow:modding::heat::HeatTuning::from_ron(include_str!("../../../data/heat.ron")).expect("heat tuning").melt_flow,
+            phase_changes: modding::heat::HeatTuning::from_ron(include_str!(
+                "../../../data/heat.ron"
+            ))
+            .expect("heat tuning")
+            .transforms,
+            melt_flow: modding::heat::HeatTuning::from_ron(include_str!("../../../data/heat.ron"))
+                .expect("heat tuning")
+                .melt_flow,
             remaining_mj: 0,
             supplied_mj: 0,
             spent_mj: 0,
@@ -1481,7 +1489,8 @@ impl Matter {
         // Unclaimed compare-and-remove edits are ablation, even alongside a
         // conventional wave. Claimed edits belong to debris, not this sink.
         for &(edit, old) in w.completed() {
-            if edit.mat == AIR && edit.expected_material() == Some(old)
+            if edit.mat == AIR
+                && edit.expected_material() == Some(old)
                 && old != AIR
                 && !self.debris.claimed([edit.x, edit.y, edit.z])
             {

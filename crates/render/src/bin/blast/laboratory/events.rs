@@ -24,11 +24,20 @@ pub fn action(lab: &mut Laboratory, action: LabAction, scene: &mut Scene) -> Res
         .get(index)
         .ok_or("Нет такого воздействия")?
         .clone();
-    if lab.constructor.base.as_ref().is_some_and(|b|b.battle) {return Err("В боевом сценарии редактируйте штатное оружие участника и его команду".into());}
+    if lab.constructor.base.as_ref().is_some_and(|b| b.battle) {
+        return Err("В боевом сценарии редактируйте штатное оружие участника и его команду".into());
+    }
     if lab.constructor.workspace.sources.len() >= 32 {
         return Err("В сцене не более 32 источников".into());
     }
-    if lab.constructor.experiment.as_ref().is_some_and(|p|p.inputs.len()>=32) {return Err("Не более 32 команд в сценарии".into());}
+    if lab
+        .constructor
+        .experiment
+        .as_ref()
+        .is_some_and(|p| p.inputs.len() >= 32)
+    {
+        return Err("Не более 32 команд в сценарии".into());
+    }
     if matches!(action, LabAction::PickEvent(_)) {
         lab.ui.event = Some(index);
         lab.constructor.mode = constructor::Mode::Event;

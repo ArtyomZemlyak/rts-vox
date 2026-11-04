@@ -28,7 +28,11 @@ pub(super) fn body_tint(allied: Option<bool>, id: usize) -> [f32; 3] {
 /// retaining the existing steel material and ordinary destructible voxels.
 pub(super) fn siege_steel(buf: &mut MeshBuf) {
     let ivory = look::to_linear([0.84, 0.82, 0.77]);
-    for c in &mut buf.col { c[0] = ivory[0]; c[1] = ivory[1]; c[2] = ivory[2]; }
+    for c in &mut buf.col {
+        c[0] = ivory[0];
+        c[1] = ivory[1];
+        c[2] = ivory[2];
+    }
 }
 fn build(unit: &Snapshot, pristine: &voxel::unit::UnitBody, skins: &SkinBindings) -> Vec<Built> {
     let config = &unit.config;
@@ -60,9 +64,13 @@ fn build(unit: &Snapshot, pristine: &voxel::unit::UnitBody, skins: &SkinBindings
             body_tint(unit.allied, id),
             1.0,
             rows,
-            if unit.revision.damage>0 {render::model::DAMAGE_BEVEL}
-            else if unit.revision.kind == RangeUnitKind::ArtilleryTurretT3 {render::model::BEVEL}
-            else {0.35},
+            if unit.revision.damage > 0 {
+                render::model::DAMAGE_BEVEL
+            } else if unit.revision.kind == RangeUnitKind::ArtilleryTurretT3 {
+                render::model::BEVEL
+            } else {
+                0.35
+            },
             pivot,
             &mut bufs,
         );
@@ -70,7 +78,11 @@ fn build(unit: &Snapshot, pristine: &voxel::unit::UnitBody, skins: &SkinBindings
             if buf.idx.is_empty() {
                 continue;
             }
-            if unit.revision.kind == RangeUnitKind::ArtilleryTurretT3 && k == usize::from(voxel::unit::FINISH_STEEL - 1) { siege_steel(buf); }
+            if unit.revision.kind == RangeUnitKind::ArtilleryTurretT3
+                && k == usize::from(voxel::unit::FINISH_STEEL - 1)
+            {
+                siege_steel(buf);
+            }
             weather(buf, k);
             if unit.revision.damage > 0 {
                 for j in 0..buf.pos.len() {
@@ -474,19 +486,51 @@ mod tests {
     }
     #[test]
     fn isolated_surviving_voxel_of_a_damaged_tank_keeps_wide_flat_faces() {
-        let sim=single(RangeUnitKind::Tank);let pristine=sim.units[0].body.clone();
-        let skins=SkinBindings::new(&pristine);let mut damaged=snapshot(&sim,0);
-        let (nx,ny,nz)=(usize::from(pristine.vol.nx),usize::from(pristine.turret_y),usize::from(pristine.vol.nz));
-        let cell=(0..nx).flat_map(|x|(0..ny).flat_map(move |y|(0..nz).map(move |z|[x,y,z])))
-            .find(|p|pristine.vol.get(p[0],p[1],p[2])).expect("occupied hull cell");
-        damaged.body.vol.cols.fill(0);damaged.body.vol.set(cell[0],cell[1],cell[2],true);damaged.revision.damage=1;
-        let built=build(&damaged,&pristine,&skins);
-        let piece=built.iter().find(|b|b.segment.is_none() && !b.turret).expect("isolated hull voxel");
-        let bevy::mesh::VertexAttributeValues::Float32x3(positions)=piece.mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap() else {panic!("positions")};
-        let bevy::mesh::VertexAttributeValues::Float32x3(normals)=piece.mesh.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap() else {panic!("normals")};
-        let face:Vec<_>=positions.iter().zip(normals).filter(|(_,n)|n[0]>0.99).map(|(p,_)|p).collect();
-        let extent=|a:usize|face.iter().map(|p|p[a]).fold(f32::NEG_INFINITY,f32::max)-face.iter().map(|p|p[a]).fold(f32::INFINITY,f32::min);
-        assert!(face.len()>=3 && extent(1)>0.7 && extent(2)>0.7,"damage bevel collapsed a cube into a diamond");
+        let sim = single(RangeUnitKind::Tank);
+        let pristine = sim.units[0].body.clone();
+        let skins = SkinBindings::new(&pristine);
+        let mut damaged = snapshot(&sim, 0);
+        let (nx, ny, nz) = (
+            usize::from(pristine.vol.nx),
+            usize::from(pristine.turret_y),
+            usize::from(pristine.vol.nz),
+        );
+        let cell = (0..nx)
+            .flat_map(|x| (0..ny).flat_map(move |y| (0..nz).map(move |z| [x, y, z])))
+            .find(|p| pristine.vol.get(p[0], p[1], p[2]))
+            .expect("occupied hull cell");
+        damaged.body.vol.cols.fill(0);
+        damaged.body.vol.set(cell[0], cell[1], cell[2], true);
+        damaged.revision.damage = 1;
+        let built = build(&damaged, &pristine, &skins);
+        let piece = built
+            .iter()
+            .find(|b| b.segment.is_none() && !b.turret)
+            .expect("isolated hull voxel");
+        let bevy::mesh::VertexAttributeValues::Float32x3(positions) =
+            piece.mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
+        else {
+            panic!("positions")
+        };
+        let bevy::mesh::VertexAttributeValues::Float32x3(normals) =
+            piece.mesh.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap()
+        else {
+            panic!("normals")
+        };
+        let face: Vec<_> = positions
+            .iter()
+            .zip(normals)
+            .filter(|(_, n)| n[0] > 0.99)
+            .map(|(p, _)| p)
+            .collect();
+        let extent = |a: usize| {
+            face.iter().map(|p| p[a]).fold(f32::NEG_INFINITY, f32::max)
+                - face.iter().map(|p| p[a]).fold(f32::INFINITY, f32::min)
+        };
+        assert!(
+            face.len() >= 3 && extent(1) > 0.7 && extent(2) > 0.7,
+            "damage bevel collapsed a cube into a diamond"
+        );
     }
     #[cfg(test)]
     #[test]

@@ -703,7 +703,8 @@ mod tests {
             dims: [64, 64, 64],
         };
         sim.world.queue_edit(voxel::world::Edit::put(72, 24, 82, 3));
-        sim.world.queue_edit(voxel::world::Edit::put(73, 24, 82, 10));
+        sim.world
+            .queue_edit(voxel::world::Edit::put(73, 24, 82, 10));
         sim.world.flush();
         sim.surface_work.insert([72, 24, 82], 380);
         let mut expected = vec![0; (window.dims[0] * window.dims[1] / 8) as usize];

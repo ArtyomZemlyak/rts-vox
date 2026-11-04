@@ -10,10 +10,10 @@ use modding::{
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use voxel::{bodies::Body, Edit, World};
-#[path = "range_water_moisture.rs"]
-mod moisture;
 #[path = "range_water_erosion.rs"]
 mod erosion;
+#[path = "range_water_moisture.rs"]
+mod moisture;
 #[path = "range_water_motion.rs"]
 mod motion;
 use motion::Fall;
@@ -27,8 +27,8 @@ const DIRS: [[i32; 3]; 6] = [
     [0, 0, 1],
     [0, 1, 0],
 ];
-use super::obstacles::Index as ObstacleIndex;
 use super::membership::Positions;
+use super::obstacles::Index as ObstacleIndex;
 pub use super::obstacles::Obstacle;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Stats {
@@ -64,9 +64,9 @@ pub struct Water {
     vapor: u64,
     pub wet_changed: Vec<Pos>,
     /// Bounded, presentation-only evaporation contacts for the current tick.
-    pub vapor_events: Vec<(Pos,u32)>,
+    pub vapor_events: Vec<(Pos, u32)>,
     /// Sub-unit thermal energy, carried with liquid and saved when nonzero.
-    thermal_remainder: BTreeMap<Pos,u32>,
+    thermal_remainder: BTreeMap<Pos, u32>,
     initial: u64,
     total: u64,
     transferred: u64,
@@ -75,8 +75,8 @@ pub struct Water {
     // Derived render metadata, omitted from saves and authoritative hashes.
     chunks: BTreeMap<Pos, (usize, u64)>,
     revision: u64,
-    falling: BTreeMap<Pos,Fall>,
-    fall_cursor:Option<Pos>,
+    falling: BTreeMap<Pos, Fall>,
+    fall_cursor: Option<Pos>,
     gravity: Fx,
 }
 impl Water {
@@ -104,9 +104,12 @@ impl Water {
             transfers: 0,
             chunks: BTreeMap::new(),
             revision: 0,
-            falling:BTreeMap::new(),
-            fall_cursor:None,
-            gravity:crate::gravity_per_tick(&crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("water gravity")),
+            falling: BTreeMap::new(),
+            fall_cursor: None,
+            gravity: crate::gravity_per_tick(
+                &crate::Tuning::from_ron(include_str!("../../../data/sim.ron"))
+                    .expect("water gravity"),
+            ),
         }
     }
     pub fn amount(&self, p: Pos) -> u32 {
@@ -115,11 +118,19 @@ impl Water {
     pub fn is_empty(&self) -> bool {
         self.cells.is_empty() && self.wet.is_empty()
     }
-    pub(crate) fn has_free_water(&self) -> bool { !self.cells.is_empty() }
-    pub(crate) fn has_water_in_x_span(&self,lo:i32,hi:i32)->bool {
-        if self.cells.is_empty() || hi<0 || lo>hi {return false;}
-        let a=lo.max(0) as u32;let b=hi.max(0) as u32;
-        self.cells.range([a,0,0]..=[b,u32::MAX,u32::MAX]).next().is_some()
+    pub(crate) fn has_free_water(&self) -> bool {
+        !self.cells.is_empty()
+    }
+    pub(crate) fn has_water_in_x_span(&self, lo: i32, hi: i32) -> bool {
+        if self.cells.is_empty() || hi < 0 || lo > hi {
+            return false;
+        }
+        let a = lo.max(0) as u32;
+        let b = hi.max(0) as u32;
+        self.cells
+            .range([a, 0, 0]..=[b, u32::MAX, u32::MAX])
+            .next()
+            .is_some()
     }
     pub fn stats(&self) -> Stats {
         Stats {
@@ -211,9 +222,13 @@ impl Water {
             return false;
         }
         self.set(p, value);
-        if value>0 {self.falling.insert(p,Fall::at(self.contact_tick));}
+        if value > 0 {
+            self.falling.insert(p, Fall::at(self.contact_tick));
+        }
         self.initial = self.initial - u64::from(old) + u64::from(value);
-        if self.falling.is_empty() {self.fall_cursor=None;}
+        if self.falling.is_empty() {
+            self.fall_cursor = None;
+        }
         self.wake(p);
         true
     }
@@ -245,8 +260,8 @@ impl Water {
                             "authored water exceeds cell budget"
                         );
                         self.set(p, self.tuning.units_per_voxel);
-                        if y>1 && self.amount([x,y-1,z])==0 && !w.solid(x,y-1,z) {
-                            self.falling.insert(p,Fall::at(self.contact_tick));
+                        if y > 1 && self.amount([x, y - 1, z]) == 0 && !w.solid(x, y - 1, z) {
+                            self.falling.insert(p, Fall::at(self.contact_tick));
                         }
                         self.initial += u64::from(self.tuning.units_per_voxel);
                         self.wake(p);
@@ -258,11 +273,13 @@ impl Water {
         // solid contact. It cannot flow or absorb until a neighbour changes;
         // wake_near will then enqueue it. Starting with the boundary avoids
         // spending the first seconds scanning thousands of inert cells.
-        let size=[w.nx,w.ny,w.nz];
-        let queued=std::mem::take(&mut self.queue);
+        let size = [w.nx, w.ny, w.nz];
+        let queued = std::mem::take(&mut self.queue);
         self.queued.clear();
         for p in queued {
-            if DIRS.iter().all(|&d| neighbour(p,d,size).is_some_and(|q|self.amount(q)>=self.tuning.units_per_voxel)) {
+            if DIRS.iter().all(|&d| {
+                neighbour(p, d, size).is_some_and(|q| self.amount(q) >= self.tuning.units_per_voxel)
+            }) {
                 continue;
             }
             self.queued.insert(p);
@@ -275,9 +292,9 @@ impl Water {
         }
         for e in edits {
             self.wake_near([e.x, e.y, e.z], size);
-            let above=[e.x,e.y+1,e.z];
-            if e.mat==0 && inside(above,size) && self.amount(above)>0 {
-                self.falling.insert(above,Fall::at(self.contact_tick));
+            let above = [e.x, e.y + 1, e.z];
+            if e.mat == 0 && inside(above, size) && self.amount(above) > 0 {
+                self.falling.insert(above, Fall::at(self.contact_tick));
             }
         }
     }
@@ -285,7 +302,7 @@ impl Water {
         w.solid(p[0], p[1], p[2]) || obstacles.contains(p)
     }
     fn transfer(&mut self, from: Pos, to: Pos, request: u32, size: Pos) -> u32 {
-        if from==to || self.transfers >= self.tuning.transfers_per_tick {
+        if from == to || self.transfers >= self.tuning.transfers_per_tick {
             return 0;
         }
         let dst = self.amount(to);
@@ -298,16 +315,22 @@ impl Water {
         if amount == 0 {
             return 0;
         }
-        let thermal=self.take_moving_heat(from,amount);
+        let thermal = self.take_moving_heat(from, amount);
         self.set(from, self.amount(from) - amount);
         self.set(to, dst + amount);
-        if thermal>0 {self.absorb_heat(to,thermal,size);}
+        if thermal > 0 {
+            self.absorb_heat(to, thermal, size);
+        }
         self.transferred += u64::from(amount);
         self.transfers += 1;
         // Pressure projection and obstacle ejection can jump many cells:
         // these are volume redistribution, not local current velocity.
         if (0..3).map(|a| from[a].abs_diff(to[a])).sum::<u32>() == 1 && to[1] <= from[1] {
-            self.flux.push(Flux { from, to, units: amount });
+            self.flux.push(Flux {
+                from,
+                to,
+                units: amount,
+            });
         }
         self.wake_near(from, size);
         self.wake_near(to, size);
@@ -336,11 +359,26 @@ impl Water {
     /// Conservative plug-flow projection within a bounded connected wet region.
     /// Intermediate cells exchange the same volume; walls and air gaps never
     /// connect endpoints. Large pools relax in overlapping regions from FIFO.
-    fn project_pressure(&mut self, w: &World, obstacles: &ObstacleIndex, size: Pos,airborne:&Positions) {
-        let Some(start) = self.queue.iter().take(self.tuning.pressure_checks).copied()
-            .find(|p|!airborne.contains(p)&&self.amount(*p)>0)
-            .or_else(||self.cells.iter().take(self.tuning.pressure_checks)
-                .map(|(&p,_)|key(p)).find(|p|!airborne.contains(p)))
+    fn project_pressure(
+        &mut self,
+        w: &World,
+        obstacles: &ObstacleIndex,
+        size: Pos,
+        airborne: &Positions,
+    ) {
+        let Some(start) = self
+            .queue
+            .iter()
+            .take(self.tuning.pressure_checks)
+            .copied()
+            .find(|p| !airborne.contains(p) && self.amount(*p) > 0)
+            .or_else(|| {
+                self.cells
+                    .iter()
+                    .take(self.tuning.pressure_checks)
+                    .map(|(&p, _)| key(p))
+                    .find(|p| !airborne.contains(p))
+            })
         else {
             return;
         };
@@ -457,7 +495,12 @@ impl Water {
         let index = ObstacleIndex::new(obstacles.to_vec());
         self.step_indexed(w, obstacles, &index);
     }
-    pub(super) fn step_indexed(&mut self, w:&World, obstacles:&[Obstacle], index:&ObstacleIndex) {
+    pub(super) fn step_indexed(
+        &mut self,
+        w: &World,
+        obstacles: &[Obstacle],
+        index: &ObstacleIndex,
+    ) {
         self.flux.clear();
         self.checks = 0;
         self.transfers = 0;
@@ -467,14 +510,27 @@ impl Water {
         self.wake_obstacles(size, obstacles);
         let obstacles = index;
         let turns = self.queue.len().min(self.tuning.checks_per_tick);
-        let project=self.pressure_active && self.contact_tick % u64::from(self.tuning.pressure_interval) == 0;
-        let pressure_reserve=if project {self.tuning.pressure_packets.min(self.tuning.transfers_per_tick/4)}else{0};
-        let transport_limit=self.tuning.transfers_per_tick-pressure_reserve;
+        let project = self.pressure_active
+            && self.contact_tick % u64::from(self.tuning.pressure_interval) == 0;
+        let pressure_reserve = if project {
+            self.tuning
+                .pressure_packets
+                .min(self.tuning.transfers_per_tick / 4)
+        } else {
+            0
+        };
+        let transport_limit = self.tuning.transfers_per_tick - pressure_reserve;
         self.contact_tick = self.contact_tick.wrapping_add(1);
-        let mut airborne=Positions::default();
-        let mut supported=Positions::default();
-        let mut motion_checks=self.tuning.motion.checks_per_tick;
-        self.advance_falling(w,obstacles,&mut motion_checks,&mut airborne,&mut supported);
+        let mut airborne = Positions::default();
+        let mut supported = Positions::default();
+        let mut motion_checks = self.tuning.motion.checks_per_tick;
+        self.advance_falling(
+            w,
+            obstacles,
+            &mut motion_checks,
+            &mut airborne,
+            &mut supported,
+        );
         for _ in 0..turns {
             if self.transfers >= transport_limit {
                 break;
@@ -484,7 +540,10 @@ impl Water {
             if self.amount(p) == 0 {
                 continue;
             }
-            if airborne.contains(&p) || self.checks>=self.tuning.checks_per_tick {self.wake(p);continue;}
+            if airborne.contains(&p) || self.checks >= self.tuning.checks_per_tick {
+                self.wake(p);
+                continue;
+            }
             self.checks += 1;
             self.absorb(w, p, size);
             if self.amount(p) == 0 {
@@ -523,7 +582,16 @@ impl Water {
                 }
                 continue;
             }
-            if self.fall_column(w,p,obstacles,&mut motion_checks,&mut airborne,&mut supported) {continue;}
+            if self.fall_column(
+                w,
+                p,
+                obstacles,
+                &mut motion_checks,
+                &mut airborne,
+                &mut supported,
+            ) {
+                continue;
+            }
             if let Some(q) =
                 neighbour(p, [0, -1, 0], size).filter(|&q| !Self::blocked(w, q, obstacles))
             {
@@ -548,7 +616,8 @@ impl Water {
             let mut sides = [None; 4];
             let mut count = 0;
             for &d in &DIRS[1..5] {
-                if let Some(q) = neighbour(p, d, size).filter(|&q| !Self::blocked(w, q, obstacles)) {
+                if let Some(q) = neighbour(p, d, size).filter(|&q| !Self::blocked(w, q, obstacles))
+                {
                     sides[count] = Some(q);
                     count += 1;
                 }
@@ -566,25 +635,36 @@ impl Water {
                 // cross a solid wall or an air gap. Work per candidate is
                 // bounded, and transfer() preserves volume and heat.
                 let capacity = self.tuning.units_per_voxel;
-                if self.amount(p) >= capacity && self.amount(q) < capacity
-                    && neighbour(q, [0,-1,0], size).is_some_and(|below|
-                        Self::blocked(w,below,obstacles) || self.amount(below)>=capacity)
+                if self.amount(p) >= capacity
+                    && self.amount(q) < capacity
+                    && neighbour(q, [0, -1, 0], size).is_some_and(|below| {
+                        Self::blocked(w, below, obstacles) || self.amount(below) >= capacity
+                    })
                 {
                     let mut top = p;
                     for _ in 0..12 {
-                        let Some(up)=neighbour(top,[0,1,0],size) else {break;};
+                        let Some(up) = neighbour(top, [0, 1, 0], size) else {
+                            break;
+                        };
                         // A partially filled top cell still adds hydrostatic
                         // head. Requiring a full cell stalled shallow streams
                         // just as their source column began to drain.
-                        let volume=self.amount(up);
-                        if volume==0 || airborne.contains(&up) || Self::blocked(w,up,obstacles) {break;}
-                        top=up;
+                        let volume = self.amount(up);
+                        if volume == 0 || airborne.contains(&up) || Self::blocked(w, up, obstacles)
+                        {
+                            break;
+                        }
+                        top = up;
                         // A partial cell is the surface, not a connection to
                         // another cell above its unfilled portion.
-                        if volume<capacity {break;}
+                        if volume < capacity {
+                            break;
+                        }
                     }
-                    let packet=self.rate(capacity-self.amount(q));
-                    if top!=p && self.transfer(top,q,packet,size)>0 {continue;}
+                    let packet = self.rate(capacity - self.amount(q));
+                    if top != p && self.transfer(top, q, packet, size) > 0 {
+                        continue;
+                    }
                 }
                 let diff = self.amount(p).saturating_sub(self.amount(q));
                 let amount = if diff > self.tuning.surface_tension {
@@ -614,8 +694,12 @@ impl Water {
                 }
             }
         }
-        if project {self.project_pressure(w,obstacles,size,&airborne);}
-        if self.falling.is_empty() {self.fall_cursor=None;}
+        if project {
+            self.project_pressure(w, obstacles, size, &airborne);
+        }
+        if self.falling.is_empty() {
+            self.fall_cursor = None;
+        }
     }
     /// Ambient displaced volume at four sides of a cohesive body. A light
     /// body remains dynamic on water; draining the water releases it again.
@@ -785,30 +869,56 @@ mod pressure_regressions {
     use super::*;
     struct Floor;
     impl voxel::Generator for Floor {
-        fn material(&self,_x:u32,y:u32,_z:u32)->u16 {if y<4 {6}else{0}}
+        fn material(&self, _x: u32, y: u32, _z: u32) -> u16 {
+            if y < 4 {
+                6
+            } else {
+                0
+            }
+        }
     }
     #[test]
     fn transfer_to_the_same_cell_does_not_create_water() {
-        let mut water=Water::new();let p=[10,10,10];assert!(water.edit_volume(p,true));
-        let before=water.stats();let amount=water.amount(p);
-        assert_eq!(water.transfer(p,p,amount/2,[64;3]),0);
-        assert_eq!(water.amount(p),amount);assert_eq!(water.stats().units,before.units);
-        assert_eq!(water.stats().transfers,before.transfers);
+        let mut water = Water::new();
+        let p = [10, 10, 10];
+        assert!(water.edit_volume(p, true));
+        let before = water.stats();
+        let amount = water.amount(p);
+        assert_eq!(water.transfer(p, p, amount / 2, [64; 3]), 0);
+        assert_eq!(water.amount(p), amount);
+        assert_eq!(water.stats().units, before.units);
+        assert_eq!(water.stats().transfers, before.transfers);
     }
     #[test]
     fn partially_filled_column_drives_a_stronger_outflow_without_losing_volume() {
-        let mut world=World::new(64,64,64,65536,Box::new(Floor));
-        for p in [[29,4,30],[30,4,29],[30,4,31]] {
-            world.queue_transfer(Edit::put(p[0],p[1],p[2],2));
+        let mut world = World::new(64, 64, 64, 65536, Box::new(Floor));
+        for p in [[29, 4, 30], [30, 4, 29], [30, 4, 31]] {
+            world.queue_transfer(Edit::put(p[0], p[1], p[2], 2));
         }
         world.flush_transfers();
-        let mut water=Water::new();let bottom=[30,4,30];let top=[30,5,30];let outlet=[31,4,30];
-        assert!(water.edit_volume(bottom,true));assert!(water.edit_volume(top,true));
-        let cap=water.tuning.units_per_voxel;water.set(top,cap*3/4);water.initial-=u64::from(cap/4);
-        let before=water.stats().units;water.step(&world,&[]);
-        assert_eq!(water.stats().units,before);
-        assert!(water.amount(outlet)>=cap*3/4,"partial upper water did not drive the outflow");
-        assert!(water.amount(bottom)>=cap*3/4,"the source column drained unrealistically");
-        assert!(water.checks<=water.tuning.checks_per_tick && water.transfers<=water.tuning.transfers_per_tick);
+        let mut water = Water::new();
+        let bottom = [30, 4, 30];
+        let top = [30, 5, 30];
+        let outlet = [31, 4, 30];
+        assert!(water.edit_volume(bottom, true));
+        assert!(water.edit_volume(top, true));
+        let cap = water.tuning.units_per_voxel;
+        water.set(top, cap * 3 / 4);
+        water.initial -= u64::from(cap / 4);
+        let before = water.stats().units;
+        water.step(&world, &[]);
+        assert_eq!(water.stats().units, before);
+        assert!(
+            water.amount(outlet) >= cap * 3 / 4,
+            "partial upper water did not drive the outflow"
+        );
+        assert!(
+            water.amount(bottom) >= cap * 3 / 4,
+            "the source column drained unrealistically"
+        );
+        assert!(
+            water.checks <= water.tuning.checks_per_tick
+                && water.transfers <= water.tuning.transfers_per_tick
+        );
     }
 }

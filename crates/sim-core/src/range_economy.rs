@@ -30,12 +30,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use voxel::store::AIR;
 
+#[path = "range_construction.rs"]
+pub mod construction;
 #[path = "range_haul.rs"]
 pub mod haul;
 #[path = "range_produce.rs"]
 pub mod produce;
-#[path = "range_construction.rs"]
-pub mod construction;
 #[path = "range_reclaim.rs"]
 pub mod reclaim;
 #[cfg(test)]
@@ -51,35 +51,71 @@ const TAG: u32 = 0xffff_0000;
 // The remaining work waits for a later tick, never bypassing solid cover.
 const DRILL_RAY_STEPS: usize = 8192;
 
-fn drill_front(world: &voxel::World, from: [i32; 3], target: [i32; 3], budget: &mut usize) -> Option<[i32; 3]> {
+fn drill_front(
+    world: &voxel::World,
+    from: [i32; 3],
+    target: [i32; 3],
+    budget: &mut usize,
+) -> Option<[i32; 3]> {
     if from.iter().all(|v| *v >= 0) && world.solid(from[0] as u32, from[1] as u32, from[2] as u32) {
         return Some(from);
     }
     let mut found = None;
     let mut exhausted = false;
-    voxel::los::walk((from[0], from[1], from[2]), (target[0], target[1], target[2]), |x, y, z| {
-        if *budget == 0 { exhausted = true; return false; }
-        *budget -= 1;
-        if x >= 0 && y >= 0 && z >= 0 && world.solid(x as u32, y as u32, z as u32) {
-            found = Some([x, y, z]);
-            false
-        } else { true }
-    });
-    if exhausted { None } else { Some(found.unwrap_or(target)) }
+    voxel::los::walk(
+        (from[0], from[1], from[2]),
+        (target[0], target[1], target[2]),
+        |x, y, z| {
+            if *budget == 0 {
+                exhausted = true;
+                return false;
+            }
+            *budget -= 1;
+            if x >= 0 && y >= 0 && z >= 0 && world.solid(x as u32, y as u32, z as u32) {
+                found = Some([x, y, z]);
+                false
+            } else {
+                true
+            }
+        },
+    );
+    if exhausted {
+        None
+    } else {
+        Some(found.unwrap_or(target))
+    }
 }
 
-fn drill_path_clear(world: &voxel::World, from: [i32; 3], target: [u32; 3], budget: &mut usize) -> Option<bool> {
+fn drill_path_clear(
+    world: &voxel::World,
+    from: [i32; 3],
+    target: [u32; 3],
+    budget: &mut usize,
+) -> Option<bool> {
     let mut clear = true;
     let mut exhausted = false;
-    voxel::los::walk((from[0], from[1], from[2]), (target[0] as i32, target[1] as i32, target[2] as i32), |x, y, z| {
-        if *budget == 0 { exhausted = true; return false; }
-        *budget -= 1;
-        if x >= 0 && y >= 0 && z >= 0 && world.solid(x as u32, y as u32, z as u32) {
-            clear = false;
-            false
-        } else { true }
-    });
-    if exhausted { None } else { Some(clear) }
+    voxel::los::walk(
+        (from[0], from[1], from[2]),
+        (target[0] as i32, target[1] as i32, target[2] as i32),
+        |x, y, z| {
+            if *budget == 0 {
+                exhausted = true;
+                return false;
+            }
+            *budget -= 1;
+            if x >= 0 && y >= 0 && z >= 0 && world.solid(x as u32, y as u32, z as u32) {
+                clear = false;
+                false
+            } else {
+                true
+            }
+        },
+    );
+    if exhausted {
+        None
+    } else {
+        Some(clear)
+    }
 }
 
 /// The digger a dig edit was queued for.
@@ -122,77 +158,159 @@ const CRAWLER_RECLAIM_REACH: u32 = 160;
 
 // Disassemble a dead hull directly into the hold. Geometry and the body
 // ledger move together; no temporary fragment pool or loss of material.
-fn reclaim_hulls(m: &mut Mining, units: &mut [RangeUnit], matter: &mut super::matter::Matter, diggers: &mut [Digger]) {
-    let Some(rc) = m.reclaim.as_ref() else { return; };
+fn reclaim_hulls(
+    m: &mut Mining,
+    units: &mut [RangeUnit],
+    matter: &mut super::matter::Matter,
+    diggers: &mut [Digger],
+) {
+    let Some(rc) = m.reclaim.as_ref() else {
+        return;
+    };
     let reach = i64::from(CRAWLER_RECLAIM_REACH.max(m.data.reclaim.as_ref().unwrap().reach));
     let density = u64::from(matter.source_density(3));
-    if density == 0 { return; }
+    if density == 0 {
+        return;
+    }
     let _ = rc;
     for d in diggers.iter_mut().filter(|d| d.reclaim_only) {
-        let target = units.iter().enumerate().filter(|(id, u)| {
-            *id != d.id && !u.status.alive && matter.economy.ledger.held(matter.body_container(*id)) > 0
-        }).filter_map(|(id, u)| {
-            let p = u.motion.pos.map(fx::Fx::to_int_trunc);
-            let dist = (0..3).map(|a| i64::from(p[a] - d.face[a]).pow(2)).sum::<i64>();
-            (dist <= reach * reach).then_some((dist, id))
-        }).min();
-        let Some((hull_distance, id)) = target else { continue; };
+        let target = units
+            .iter()
+            .enumerate()
+            .filter(|(id, u)| {
+                *id != d.id
+                    && !u.status.alive
+                    && matter.economy.ledger.held(matter.body_container(*id)) > 0
+            })
+            .filter_map(|(id, u)| {
+                let p = u.motion.pos.map(fx::Fx::to_int_trunc);
+                let dist = (0..3)
+                    .map(|a| i64::from(p[a] - d.face[a]).pow(2))
+                    .sum::<i64>();
+                (dist <= reach * reach).then_some((dist, id))
+            })
+            .min();
+        let Some((hull_distance, id)) = target else {
+            continue;
+        };
         // Respect the clicked point across both types, instead of always
         // consuming a nearby hull before a closer selected fragment.
         let capacity = matter.economy.ledger.get(m.tank(d.id).unwrap()).cap;
-        let closer_piece = matter.debris.fragments.iter().filter(|f| f.resting).any(|f| {
-            let p = [f.position.x, f.position.y, f.position.z].map(fx::Fx::to_int_trunc);
-            let dist = (0..3).map(|a| i64::from(p[a] - d.face[a]).pow(2)).sum::<i64>();
-            if dist > reach * reach || dist > hull_distance { return false; }
-            let held = matter.economy.ledger.held(f.held);
-            held > 0 && held <= capacity
-        });
-        if closer_piece { continue; }
+        let closer_piece = matter
+            .debris
+            .fragments
+            .iter()
+            .filter(|f| f.resting)
+            .any(|f| {
+                let p = [f.position.x, f.position.y, f.position.z].map(fx::Fx::to_int_trunc);
+                let dist = (0..3)
+                    .map(|a| i64::from(p[a] - d.face[a]).pow(2))
+                    .sum::<i64>();
+                if dist > reach * reach || dist > hull_distance {
+                    return false;
+                }
+                let held = matter.economy.ledger.held(f.held);
+                held > 0 && held <= capacity
+            });
+        if closer_piece {
+            continue;
+        }
         d.reclaim_pending = true;
         d.rate = 0;
         let tank = m.tank(d.id).unwrap();
-        let room = matter.economy.ledger.room(tank).saturating_sub(m.inflight[d.id]);
+        let room = matter
+            .economy
+            .ledger
+            .room(tank)
+            .saturating_sub(m.inflight[d.id]);
         let limit = (room / density).min(1024) as usize;
-        if limit == 0 { d.full = true; m.mark_full(d.id); continue; }
+        if limit == 0 {
+            d.full = true;
+            m.mark_full(d.id);
+            continue;
+        }
         let u = &mut units[id];
         // Existing section/shed jobs own their cells until they complete.
-        if u.section.is_some() || !u.seg_shed.is_empty() || u.seg_sections.iter().any(Option::is_some) { continue; }
+        if u.section.is_some()
+            || !u.seg_shed.is_empty()
+            || u.seg_sections.iter().any(Option::is_some)
+        {
+            continue;
+        }
         let mut cells = Vec::with_capacity(limit);
         for part in 0..=u.body.segments.len() {
-            let b = if part == 0 { &u.body } else { &u.body.segments[part - 1].body };
-            'outer: for z in 0..usize::from(b.vol.nz) { for y in 0..usize::from(b.vol.ny) { for x in 0..usize::from(b.vol.nx) {
-                if b.vol.get(x,y,z) { cells.push((part, [x,y,z])); }
-                if cells.len() == limit { break 'outer; }
-            }}}
-            if cells.len() == limit { break; }
+            let b = if part == 0 {
+                &u.body
+            } else {
+                &u.body.segments[part - 1].body
+            };
+            'outer: for z in 0..usize::from(b.vol.nz) {
+                for y in 0..usize::from(b.vol.ny) {
+                    for x in 0..usize::from(b.vol.nx) {
+                        if b.vol.get(x, y, z) {
+                            cells.push((part, [x, y, z]));
+                        }
+                        if cells.len() == limit {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            if cells.len() == limit {
+                break;
+            }
         }
-        if cells.is_empty() { continue; }
+        if cells.is_empty() {
+            continue;
+        }
         let count = cells.len();
-        let samples = count.min(8).min(RECLAIM_VISUAL_LIMIT.saturating_sub(m.reclaim_events.len()));
+        let samples = count
+            .min(8)
+            .min(RECLAIM_VISUAL_LIMIT.saturating_sub(m.reclaim_events.len()));
         for sample in 0..samples {
             let (part, cell) = cells[sample * count / samples];
-            let from = if part == 0 { u.world_pos(cell) } else {
-                let v = u.seg_frames[part - 1].world(cell.map(|v| fx::Fx::from_int(v as i32).add(fx::Fx::from_ratio(1, 2))));
+            let from = if part == 0 {
+                u.world_pos(cell)
+            } else {
+                let v = u.seg_frames[part - 1]
+                    .world(cell.map(|v| fx::Fx::from_int(v as i32).add(fx::Fx::from_ratio(1, 2))));
                 [v.x, v.y, v.z].map(fx::Fx::to_int_trunc)
             };
-            m.reclaim_events.push(ReclaimVisual { from, crawler: d.id, material: 3 });
+            m.reclaim_events.push(ReclaimVisual {
+                from,
+                crawler: d.id,
+                material: 3,
+            });
         }
         let amount = count as u64 * density;
-        assert_eq!(matter.economy.ledger.transfer(matter.body_container(id), tank, amount), amount);
+        assert_eq!(
+            matter
+                .economy
+                .ledger
+                .transfer(matter.body_container(id), tank, amount),
+            amount
+        );
         for (part, cell) in cells {
             let key = cell.map(|v| v as u8);
             if part == 0 {
                 assert!(u.body.remove(cell[0], cell[1], cell[2]));
-                u.removed.push(key); u.dents.remove(&key); u.detached += 1;
+                u.removed.push(key);
+                u.dents.remove(&key);
+                u.detached += 1;
             } else {
-                assert!(u.body.segments[part - 1].body.remove(cell[0], cell[1], cell[2]));
+                assert!(u.body.segments[part - 1]
+                    .body
+                    .remove(cell[0], cell[1], cell[2]));
                 u.seg_removed.push(((part - 1) as u8, key));
-                u.seg_dents.remove(&((part - 1) as u8, key)); u.seg_detached += 1;
+                u.seg_dents.remove(&((part - 1) as u8, key));
+                u.seg_detached += 1;
             }
         }
         u.revision += 1;
         u.refresh_damage(id);
-        if let Some(rc) = m.reclaim.as_mut() { rc.reclaimed += amount; }
+        if let Some(rc) = m.reclaim.as_mut() {
+            rc.reclaimed += amount;
+        }
     }
 }
 
@@ -253,7 +371,10 @@ impl Mining {
                     .map(|k| ledger.create(Kind::Hauler, 0, k.tank))
             })
             .collect();
-        let construction = data.bank.is_some().then(|| construction::Construction::new(units, &sides));
+        let construction = data
+            .bank
+            .is_some()
+            .then(|| construction::Construction::new(units, &sides));
         let haul = data
             .bank
             .is_some()
@@ -407,15 +528,24 @@ impl BlastRange {
     /// column. The dig phase stops it as soon as the face is in reach.
     pub(super) fn dig_approach(&self, id: usize, face: [i32; 3]) -> Option<[i32; 2]> {
         let u = &self.units[id];
-        if u.kind.emplacement() || self.in_dig_reach(u, face) { return None; }
+        if u.kind.emplacement() || self.in_dig_reach(u, face) {
+            return None;
+        }
         if matches!(u.kind, modding::range::RangeUnitKind::Crawler) {
-            let reach = self.mining.as_ref().and_then(|m| m.data.kind(u.kind)).map_or(0, |k| k.dig_reach) as i64;
+            let reach = self
+                .mining
+                .as_ref()
+                .and_then(|m| m.data.kind(u.kind))
+                .map_or(0, |k| k.dig_reach) as i64;
             let pos = u.motion.pos.map(fx::Fx::to_int_trunc);
             let dx = i64::from(face[0] - pos[0]);
             let dz = i64::from(face[2] - pos[2]);
             let dist = ((dx * dx + dz * dz) as u64).isqrt().max(1) as i64;
             let back = (reach * 3 / 4).min(dist);
-            return Some([face[0] - (dx * back / dist) as i32, face[2] - (dz * back / dist) as i32]);
+            return Some([
+                face[0] - (dx * back / dist) as i32,
+                face[2] - (dz * back / dist) as i32,
+            ]);
         }
         Some([face[0], face[2]])
     }
@@ -472,7 +602,11 @@ impl BlastRange {
                     id,
                     face,
                     k: *k,
-                    rate: if reclaim_only { 2048 } else { k.dig_edits_per_tick },
+                    rate: if reclaim_only {
+                        2048
+                    } else {
+                        k.dig_edits_per_tick
+                    },
                     full: false,
                     reclaim_pending: false,
                     reclaim_only,
@@ -487,18 +621,40 @@ impl BlastRange {
         let mut left = pool.saturating_sub(m.reserved.len());
         // Debris at the face goes first, from the same rate and sub-pool
         // (ADR-674); a digger away from its face forgets its reclaim.
-        let mut reclaimers: Vec<_> = diggers.iter().copied().filter(|d|
-            d.reclaim_only || (d.k.kind != modding::range::RangeUnitKind::Crawler && d.k.kind != modding::range::RangeUnitKind::Crawler)).collect();
+        let mut reclaimers: Vec<_> = diggers
+            .iter()
+            .copied()
+            .filter(|d| {
+                d.reclaim_only
+                    || (d.k.kind != modding::range::RangeUnitKind::Crawler
+                        && d.k.kind != modding::range::RangeUnitKind::Crawler)
+            })
+            .collect();
         reclaim_hulls(m, units, matter, &mut reclaimers);
-        let hull_work: Vec<_> = reclaimers.iter().filter(|d| d.reclaim_only && d.reclaim_pending).map(|d| d.id).collect();
+        let hull_work: Vec<_> = reclaimers
+            .iter()
+            .filter(|d| d.reclaim_only && d.reclaim_pending)
+            .map(|d| d.id)
+            .collect();
         // Reclaim changes ownership of existing debris, not terrain edits.
         // Give the crusher its own budget without consuming the dig queue.
-        let mut reclaim_left = if reclaimers.iter().any(|d| d.reclaim_only) { left.max(4096) } else { left };
-        let mut starved = reclaim::reclaim(m, units, matter, *tick, &mut reclaimers, &mut reclaim_left);
-        if !reclaimers.iter().any(|d| d.reclaim_only) { left = reclaim_left; }
-        for d in &mut reclaimers { d.reclaim_pending |= hull_work.contains(&d.id); }
+        let mut reclaim_left = if reclaimers.iter().any(|d| d.reclaim_only) {
+            left.max(4096)
+        } else {
+            left
+        };
+        let mut starved =
+            reclaim::reclaim(m, units, matter, *tick, &mut reclaimers, &mut reclaim_left);
+        if !reclaimers.iter().any(|d| d.reclaim_only) {
+            left = reclaim_left;
+        }
+        for d in &mut reclaimers {
+            d.reclaim_pending |= hull_work.contains(&d.id);
+        }
         for updated in reclaimers {
-            if let Some(d) = diggers.iter_mut().find(|d| d.id == updated.id) { *d = updated; }
+            if let Some(d) = diggers.iter_mut().find(|d| d.id == updated.id) {
+                *d = updated;
+            }
         }
         if diggers.is_empty() {
             return;
@@ -542,7 +698,9 @@ impl BlastRange {
             let mut rate = rate;
             let mut face_pending = false;
             let drill_origin = match k.kind {
-                modding::range::RangeUnitKind::Crawler => Some(units[id].world_pos(voxel::unit::CRAWLER_DRILL_TIP)),
+                modding::range::RangeUnitKind::Crawler => {
+                    Some(units[id].world_pos(voxel::unit::CRAWLER_DRILL_TIP))
+                }
                 _ => None,
             };
             let cut_face = if let Some(origin) = drill_origin {
@@ -551,7 +709,9 @@ impl BlastRange {
                     continue;
                 };
                 front
-            } else { face };
+            } else {
+                face
+            };
             let spans = Arc::clone(m.balls.get(&k.dig_radius).expect("dig ball is prepared"));
             // Visit the first solid voxel on the drill axis before scanning
             // the surrounding ball. Otherwise long rays to peripheral cells
@@ -574,18 +734,36 @@ impl BlastRange {
                         // Fixed, bounded work approximation: harder material
                         // accepts fewer cuts over time. A spatial phase spreads
                         // work across ticks and needs no per-voxel save state.
-                        let strength = matter.economy.mats.get(material).map_or(512, |m| m.strength);
+                        let strength = matter
+                            .economy
+                            .mats
+                            .get(material)
+                            .map_or(512, |m| m.strength);
                         let period = strength.div_ceil(16).clamp(1, 32);
-                        let phase = x.wrapping_mul(17).wrapping_add(y.wrapping_mul(31)).wrapping_add(z.wrapping_mul(47));
+                        let phase = x
+                            .wrapping_mul(17)
+                            .wrapping_add(y.wrapping_mul(31))
+                            .wrapping_add(z.wrapping_mul(47));
                         if tick.wrapping_add(phase) % period != 0 {
                             face_pending = true;
                             continue;
                         }
                         if [x as i32, y as i32, z as i32] != cut_face {
-                            match drill_path_clear(world, drill_origin.expect("crawler drill origin"), [x, y, z], &mut drill_steps) {
-                                Some(true) => {},
-                                Some(false) => { face_pending = true; continue; },
-                                None => { starved = true; break 'diggers; },
+                            match drill_path_clear(
+                                world,
+                                drill_origin.expect("crawler drill origin"),
+                                [x, y, z],
+                                &mut drill_steps,
+                            ) {
+                                Some(true) => {}
+                                Some(false) => {
+                                    face_pending = true;
+                                    continue;
+                                }
+                                None => {
+                                    starved = true;
+                                    break 'diggers;
+                                }
                             }
                         }
                     }
@@ -620,8 +798,11 @@ impl BlastRange {
             // the real crawler home once this face is exhausted, but never
             // while a reclaim search, claimed cell or dig edit is pending.
             if matches!(k.kind, modding::range::RangeUnitKind::Crawler)
-                && !reclaim_pending && !face_pending && m.inflight[id] == 0
-                && rate == k.dig_edits_per_tick && ledger.held(tank) > 0
+                && !reclaim_pending
+                && !face_pending
+                && m.inflight[id] == 0
+                && rate == k.dig_edits_per_tick
+                && ledger.held(tank) > 0
             {
                 m.mark_full(id);
             }
@@ -740,7 +921,9 @@ impl BlastRange {
             return None;
         }
         for (id, a) in self.battle.actors.iter().enumerate() {
-            if matches!(a.order, battle::Order::Dig(_) | battle::Order::Reclaim(_)) && m.tank(id).is_none() {
+            if matches!(a.order, battle::Order::Dig(_) | battle::Order::Reclaim(_))
+                && m.tank(id).is_none()
+            {
                 return None;
             }
         }

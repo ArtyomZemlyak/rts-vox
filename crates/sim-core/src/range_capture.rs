@@ -535,7 +535,8 @@ fn capture_inner<const COLUMNS: bool>(
             resistance.len().div_ceil(workers).max(512).div_ceil(n) * n
         } else {
             plane
-        }.min(plane);
+        }
+        .min(plane);
         resistance
             .par_chunks_mut(chunk)
             .enumerate()
@@ -848,14 +849,18 @@ mod tests {
 
     #[test]
     fn short_capture_slices_match_plane_tasks_with_multiple_workers() {
-        let mut c = ExplosionConfig::from_ron(include_str!("../../../data/siege-shell.ron")).unwrap();
+        let mut c =
+            ExplosionConfig::from_ron(include_str!("../../../data/siege-shell.ron")).unwrap();
         c.half_cells = 32;
         c.cell_units = 2;
         let w = World::new(192, 64, 192, 100, Box::new(Ground));
         let units = vec![RangeUnit::of_kind(RangeUnitKind::Tank, [96, 16, 96])];
         let dents = SurfaceWork::from([([96, 15, 96], 100)]);
         for workers in [2, 4] {
-            let pool = rayon::ThreadPoolBuilder::new().num_threads(workers).build().unwrap();
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
             for budget in [1024, 1536] {
                 let mut reference = Explosion::begin([96, 28, 96], &c, &units);
                 let n = reference.wave.size();
@@ -863,15 +868,28 @@ mod tests {
                 let mut actual = Explosion::begin([96, 28, 96], &c, &units);
                 actual.captured = reference.captured;
                 let start = std::time::Instant::now();
-                let before = pool.install(|| capture_inner::<true>(
-                    &mut reference, &w, &c, &units, &dents, budget, true, false,
-                ));
+                let before = pool.install(|| {
+                    capture_inner::<true>(
+                        &mut reference,
+                        &w,
+                        &c,
+                        &units,
+                        &dents,
+                        budget,
+                        true,
+                        false,
+                    )
+                });
                 let baseline = start.elapsed();
                 let start = std::time::Instant::now();
-                let after = pool.install(|| capture_inner::<true>(
-                    &mut actual, &w, &c, &units, &dents, budget, true, true,
-                ));
-                eprintln!("capture workers={workers} budget={budget} plane_us={} split_us={}", baseline.as_micros(), start.elapsed().as_micros());
+                let after = pool.install(|| {
+                    capture_inner::<true>(&mut actual, &w, &c, &units, &dents, budget, true, true)
+                });
+                eprintln!(
+                    "capture workers={workers} budget={budget} plane_us={} split_us={}",
+                    baseline.as_micros(),
+                    start.elapsed().as_micros()
+                );
                 let (mut a, mut b) = (Blob::new(), Blob::new());
                 reference.save(&mut a);
                 actual.save(&mut b);

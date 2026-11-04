@@ -52,7 +52,9 @@ fn pending_dig_counts_match_an_ordered_reference() {
 fn conditional_replacement_cannot_restore_a_removed_or_changed_voxel() {
     struct Sand;
     impl Generator for Sand {
-        fn material(&self, _: u32, _: u32, _: u32) -> Mat { 10 }
+        fn material(&self, _: u32, _: u32, _: u32) -> Mat {
+            10
+        }
     }
     let mut world = World::new(32, 32, 32, 128, Box::new(Sand));
     world.queue_transfer(Edit::dig(4, 4, 4));

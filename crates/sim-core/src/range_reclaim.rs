@@ -324,7 +324,13 @@ pub(super) fn reclaim(
             .map(|&(_, c)| c)
     };
     let near = Near::build(
-        rc.data.reach.max(if diggers.iter().any(|d| d.reclaim_only) { super::CRAWLER_RECLAIM_REACH } else { 0 }),
+        rc.data
+            .reach
+            .max(if diggers.iter().any(|d| d.reclaim_only) {
+                super::CRAWLER_RECLAIM_REACH
+            } else {
+                0
+            }),
         fragments,
         units,
         tanks,
@@ -339,14 +345,23 @@ pub(super) fn reclaim(
     }
     // Work still there, still in reach and still fitting the tank.
     let configured_reach = rc.data.reach;
-    let reach = |d: &Digger| if d.reclaim_only { configured_reach.max(super::CRAWLER_RECLAIM_REACH) } else { configured_reach };
+    let reach = |d: &Digger| {
+        if d.reclaim_only {
+            configured_reach.max(super::CRAWLER_RECLAIM_REACH)
+        } else {
+            configured_reach
+        }
+    };
     for d in diggers.iter() {
         let valid = match rc.work[d.id] {
             None => continue,
             Some(Work::Piece { id, .. }) => near.pieces.get(&id).is_some_and(|&i| {
                 let f = &fragments[i];
-                near.within(d.face, point([f.position.x, f.position.y, f.position.z]), reach(d))
-                    && ledger.held(f.held) <= cap(d.id)
+                near.within(
+                    d.face,
+                    point([f.position.x, f.position.y, f.position.z]),
+                    reach(d),
+                ) && ledger.held(f.held) <= cap(d.id)
             }),
             Some(Work::Tank(slot)) => {
                 let slot = usize::from(slot);
@@ -381,7 +396,9 @@ pub(super) fn reclaim(
     if n > 0 {
         // A queued search is still work; only the bounded search below can
         // establish that the candidates are too distant, held or too large.
-        for &i in &need { diggers[i].reclaim_pending = true; }
+        for &i in &need {
+            diggers[i].reclaim_pending = true;
+        }
         let take = (rc.data.searches_per_tick as usize).min(n);
         if take < n {
             rc.search_deferred += 1;
@@ -421,7 +438,10 @@ pub(super) fn reclaim(
                     }
                     rc.work[d.id] = Some(work);
                 }
-                None => { rc.search_misses += 1; diggers[index].reclaim_pending = false; },
+                None => {
+                    rc.search_misses += 1;
+                    diggers[index].reclaim_pending = false;
+                }
             }
         }
     }

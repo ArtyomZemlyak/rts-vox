@@ -11,7 +11,7 @@ pub fn commands(plan: &Plan) -> Vec<Command> {
         .iter()
         .map(|input| match *input {
             Input::Fire => Command::Gun(GunCommand::Refire),
-            Input::Detonate {at}=>Command::Gun(GunCommand::Detonate {at}),
+            Input::Detonate { at } => Command::Gun(GunCommand::Detonate { at }),
             Input::FreeControl => Command::BattleLifecycle(BattleLifecycle::FreeControl),
             Input::StartBattle => Command::BattleLifecycle(BattleLifecycle::StartBattle),
             Input::Move { actor, to } => Command::Order {
@@ -76,8 +76,8 @@ pub fn select(lab: &mut Laboratory, index: usize) -> Result<(), String> {
     base.shields.clear();
     lab.constructor.remember_scene(lab.recipe);
     lab.constructor.base = Some(base);
-    lab.constructor.workspace=Default::default();
-    lab.constructor.workspace.devices=e.layout.lab_devices.clone();
+    lab.constructor.workspace = Default::default();
+    lab.constructor.workspace.devices = e.layout.lab_devices.clone();
     lab.constructor.placed = parts;
     lab.constructor.selected = None;
     lab.constructor.aim = None;
@@ -90,12 +90,18 @@ pub fn select(lab: &mut Laboratory, index: usize) -> Result<(), String> {
     lab.constructor.revision += 1;
     lab.recipe = Recipe::default();
     lab.recipe.effect = e.weapon;
-    lab.constructor.workspace.observation_ticks=Some(e.plan.duration_ticks);
-    lab.ui.scenario_input=0;lab.ui.device=0;
+    lab.constructor.workspace.observation_ticks = Some(e.plan.duration_ticks);
+    lab.ui.scenario_input = 0;
+    lab.ui.device = 0;
     scenario::materialize(lab)?;
     lab.browser = false;
-    lab.ui.tab=if lab.constructor.workspace.sources.is_empty(){24}else{10};
-    lab.notice = "Сценарий открыт для редактирования: объекты, источники и команды. F — запустить.".into();
+    lab.ui.tab = if lab.constructor.workspace.sources.is_empty() {
+        24
+    } else {
+        10
+    };
+    lab.notice =
+        "Сценарий открыт для редактирования: объекты, источники и команды. F — запустить.".into();
     Ok(())
 }
 pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
@@ -114,26 +120,61 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
 }
 pub fn readout(sim: &BlastRange) -> String {
     let mined = sim.mining().map_or(0, |m| m.cells);
-    let (moved,pushed,pending,_) = sim.material_flow();
-    let water=sim.water.stats();
+    let (moved, pushed, pending, _) = sim.material_flow();
+    let water = sim.water.stats();
     let mut text=format!("Вода: {:.2} / {:.2} ед. объёма · активных ячеек: {}\nВпитано: {:.2} · пар: {:.2}\nОсыпание: {} клеток · сдвинуто при ударе: {} · активных участков: {}\nОгонь: {} · нагретых клеток корпуса: {} · передано тепла: {}\nЩиты: {}/{} · попаданий в щиты: {} · добыто клеток: {} · баланс материи: {}",
         water.units as f64/sim.water.tuning.units_per_voxel as f64,water.initial_units as f64/sim.water.tuning.units_per_voxel as f64,water.active,water.absorbed_units as f64/sim.water.tuning.units_per_voxel as f64,water.vapor_units as f64/sim.water.tuning.units_per_voxel as f64,moved,pushed,pending,sim.heat.burning(),sim.thermals.hot(),sim.heat_exchange.transferred,
         sim.shields.iter().filter(|s|s.standing()).count(),sim.shields.len(),sim.shields.iter().map(|s|u64::from(s.hits)).sum::<u64>(),
         mined,if sim.matter.economy.ledger.balanced(){"сходится"}else{"НАРУШЕН"});
-    for (i, unit) in sim.units.iter().enumerate().filter(|(_,u)| u.kind == RangeUnitKind::Crawler) {
+    for (i, unit) in sim
+        .units
+        .iter()
+        .enumerate()
+        .filter(|(_, u)| u.kind == RangeUnitKind::Crawler)
+    {
         if let Some((held, capacity)) = sim.tank_fill(i) {
             let (stored, limit) = sim.side_store(sim.allied(i)).unwrap_or((0, 0));
-            let ordered = sim.battle.actors.get(i).is_some_and(|a| matches!(a.order, Order::Dig(_)));
-            text.push_str(&format!("\nКраулер {} · {}\nБур: {} · бак: {} / {} · запас базы: {} / {}", i+1,
-                if !unit.status.alive {"УНИЧТОЖЕН"} else if sim.hauling(i) {"ДОСТАВКА НА БАЗУ"} else if !ordered {"ОЖИДАНИЕ ПРИКАЗА"} else if unit.motion.destination.is_some() {"ЕДЕТ К ТОЧКЕ"} else {"БУРЕНИЕ / СБОР"},
-                if unit.status.engine && unit.status.weapon {"ГОТОВ"} else {"ПОВРЕЖДЁН"},
-                held, capacity, stored, limit));
+            let ordered = sim
+                .battle
+                .actors
+                .get(i)
+                .is_some_and(|a| matches!(a.order, Order::Dig(_)));
+            text.push_str(&format!(
+                "\nКраулер {} · {}\nБур: {} · бак: {} / {} · запас базы: {} / {}",
+                i + 1,
+                if !unit.status.alive {
+                    "УНИЧТОЖЕН"
+                } else if sim.hauling(i) {
+                    "ДОСТАВКА НА БАЗУ"
+                } else if !ordered {
+                    "ОЖИДАНИЕ ПРИКАЗА"
+                } else if unit.motion.destination.is_some() {
+                    "ЕДЕТ К ТОЧКЕ"
+                } else {
+                    "БУРЕНИЕ / СБОР"
+                },
+                if unit.status.engine && unit.status.weapon {
+                    "ГОТОВ"
+                } else {
+                    "ПОВРЕЖДЁН"
+                },
+                held,
+                capacity,
+                stored,
+                limit
+            ));
         } else {
             text.push_str(&format!("\nКраулер {} · БАК И ДОБЫЧА НЕ АКТИВНЫ\nДля работы загрузите опыт «Краулер и база: добыча и доставка» с экономикой.", i+1));
         }
     }
-    for (i,d) in sim.layout.as_ref().into_iter().flat_map(|l|&l.lab_devices).enumerate() {
-        if let Some(c)=d.collector.as_ref() {
+    for (i, d) in sim
+        .layout
+        .as_ref()
+        .into_iter()
+        .flat_map(|l| &l.lab_devices)
+        .enumerate()
+    {
+        if let Some(c) = d.collector.as_ref() {
             text.push_str(&format!("\nКраулер {} · {}\nБак: {} / {} · склад: {}\nСобрано: {} обломков · сдано: {} · рейсов: {}",i+1,
                 if c.returning{"РАЗГРУЗКА / ВОЗВРАТ"}else if c.spent>0{"СБОР"}else if c.target.is_some(){"ЕДЕТ К ОБЛОМКАМ"}else{"ПОИСК"},
                 d.container.map_or(0,|id|sim.matter.economy.ledger.held(id)),c.capacity,c.depot.map_or(0,|id|sim.matter.economy.ledger.held(id)),c.pieces,c.delivered,c.trips));
@@ -143,7 +184,11 @@ pub fn readout(sim: &BlastRange) -> String {
 }
 pub fn weapon_label(lab: &Laboratory) -> Option<String> {
     let plan = lab.constructor.experiment.as_ref()?;
-    if plan.inputs.iter().any(|i|matches!(i,Input::Fire|Input::Detonate{..})) {
+    if plan
+        .inputs
+        .iter()
+        .any(|i| matches!(i, Input::Fire | Input::Detonate { .. }))
+    {
         return None;
     }
     let actor_weapon = plan

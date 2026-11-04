@@ -94,14 +94,21 @@ fn crater_publication_matches_full_rebuild_and_uploads_every_changed_word() {
         "unchanged words were published again"
     );
     assert_eq!(gas.terrain_words, full.terrain_words);
-    assert!(Arc::ptr_eq(&shared_upload, &gas.terrain_words), "an unchanged publication copied the shared GPU upload");
+    assert!(
+        Arc::ptr_eq(&shared_upload, &gas.terrain_words),
+        "an unchanged publication copied the shared GPU upload"
+    );
 }
 
 #[test]
 fn off_window_edits_keep_shared_upload_and_update_distant_columns() {
-    let layout = RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+    let layout =
+        RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
     let mut sim = BlastRange::with_layout(config(false, false), layout).unwrap();
-    let window = TerrainWindow { origin: [128, 0, 128], dims: [256, 96, 256] };
+    let window = TerrainWindow {
+        origin: [128, 0, 128],
+        dims: [256, 96, 256],
+    };
     let mut gas = GasInput::default();
     gas.terrain_words = Arc::new(vec![0; window.words()]);
     write_window(&sim, &mut gas, window, None);
@@ -110,7 +117,11 @@ fn off_window_edits_keep_shared_upload_and_update_distant_columns() {
     gas.distant_edits.clear();
     let shared = Arc::clone(&gas.terrain_words);
     sim.surface_changed.push([500, 20, 500]);
-    let starts = sim.units.iter().map(|u| u.removed.len()).collect::<Vec<_>>();
+    let starts = sim
+        .units
+        .iter()
+        .map(|u| u.removed.len())
+        .collect::<Vec<_>>();
     let revision = gas.terrain_revision;
     apply_terrain(&sim, &mut gas, &starts);
     assert!(Arc::ptr_eq(&shared, &gas.terrain_words));
@@ -127,7 +138,26 @@ fn surface_fast_path_preserves_the_full_material_palette_and_dent_levels() {
     let p = [230, 30, 290];
     for work in [0, 1, 100, u32::MAX] {
         sim.surface_work.insert(p, work);
-        for mat in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 16, 63, 64, u16::MAX] {
+        for mat in [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            12,
+            13,
+            14,
+            16,
+            63,
+            64,
+            u16::MAX,
+        ] {
             let expected = surface_tint(
                 mat,
                 work,

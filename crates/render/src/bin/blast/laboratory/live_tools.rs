@@ -17,7 +17,16 @@ pub fn allowed(lab: &Laboratory, a: LabAction) -> bool {
                 | LabAction::SectionSide
                 | LabAction::Metric(_)
                 | LabAction::MetricScale
-                | LabAction::ReplayStart | LabAction::ReplayStop | LabAction::ReplaySeek(_) | LabAction::ReplayJump(_) | LabAction::ReplaySave | LabAction::ReplayOpen | LabAction::ReplayBrowse(_) | LabAction::ReplayPlay | LabAction::ReplayLeave | LabAction::Tab(31)
+                | LabAction::ReplayStart
+                | LabAction::ReplayStop
+                | LabAction::ReplaySeek(_)
+                | LabAction::ReplayJump(_)
+                | LabAction::ReplaySave
+                | LabAction::ReplayOpen
+                | LabAction::ReplayBrowse(_)
+                | LabAction::ReplayPlay
+                | LabAction::ReplayLeave
+                | LabAction::Tab(31)
                 | LabAction::Tab(30)
                 | LabAction::LiveTool(_)
                 | LabAction::LivePoint
@@ -141,7 +150,9 @@ pub fn action(lab: &mut Laboratory, scene: &mut Scene, a: LabAction) {
             lab.tools.live_tick = None;
         }
         LabAction::LiveCapture => {
-            if let Some(camera)=lab.tools.flight.overview_return.take() {lab.tools.camera=Some(camera);}
+            if let Some(camera) = lab.tools.flight.overview_return.take() {
+                lab.tools.camera = Some(camera);
+            }
             lab.tools.flying = true;
             lab.tools.flight.request = true;
         }

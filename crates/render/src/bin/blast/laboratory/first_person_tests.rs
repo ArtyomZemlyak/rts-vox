@@ -287,38 +287,67 @@ fn first_person_capture_tab_escape_and_focus_loss_release_without_stuck_fire() {
 }
 #[test]
 fn overview_button_and_home_leave_flight_and_can_return_to_the_same_pose() {
-    for keyboard in [false,true] {
-        let mut app=app();
-        let camera=app.world_mut().spawn((GasCamera,Projection::Perspective(PerspectiveProjection::default()))).id();
-        let pose=Transform::from_xyz(300.5,60.5,300.5).looking_at(Vec3::new(315.0,20.0,325.0),Vec3::Y);
-        app.world_mut().resource_mut::<Laboratory>().tools.camera=Some(pose);
-        let before=app.world().resource::<Scene>().sim.state_hash();
-        assert!(ui::enabled(app.world().resource::<Laboratory>(),LabAction::Frame));
+    for keyboard in [false, true] {
+        let mut app = app();
+        let camera = app
+            .world_mut()
+            .spawn((
+                GasCamera,
+                Projection::Perspective(PerspectiveProjection::default()),
+            ))
+            .id();
+        let pose = Transform::from_xyz(300.5, 60.5, 300.5)
+            .looking_at(Vec3::new(315.0, 20.0, 325.0), Vec3::Y);
+        app.world_mut().resource_mut::<Laboratory>().tools.camera = Some(pose);
+        let before = app.world().resource::<Scene>().sim.state_hash();
+        assert!(ui::enabled(
+            app.world().resource::<Laboratory>(),
+            LabAction::Frame
+        ));
         if keyboard {
-            app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::Home);
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::Home);
             app.update();
-        } else {integration_tests::click(&mut app,LabAction::Frame);}
+        } else {
+            integration_tests::click(&mut app, LabAction::Frame);
+        }
         app.update();
-        let lab=app.world().resource::<Laboratory>();
-        assert!(lab.tools.live,"overview must keep the live tools session");
+        let lab = app.world().resource::<Laboratory>();
+        assert!(lab.tools.live, "overview must keep the live tools session");
         assert!(!lab.tools.flying && !lab.tools.flight.captured && lab.tools.camera.is_none());
-        let saved=lab.tools.flight.overview_return.unwrap();
-        assert!(saved.translation.distance(pose.translation)<0.001 && saved.rotation.dot(pose.rotation).abs()>0.99999);
-        assert_eq!(app.world().resource::<Scene>().sim.state_hash(),before);
-        assert!(matches!(app.world().get::<Projection>(camera),Some(Projection::Orthographic(_))));
+        let saved = lab.tools.flight.overview_return.unwrap();
+        assert!(
+            saved.translation.distance(pose.translation) < 0.001
+                && saved.rotation.dot(pose.rotation).abs() > 0.99999
+        );
+        assert_eq!(app.world().resource::<Scene>().sim.state_hash(), before);
+        assert!(matches!(
+            app.world().get::<Projection>(camera),
+            Some(Projection::Orthographic(_))
+        ));
         {
-            let w=app.world_mut();let c=w.query::<&CursorOptions>().single(w).unwrap();
-            assert_eq!(c.grab_mode,CursorGrabMode::None);assert!(c.visible);
+            let w = app.world_mut();
+            let c = w.query::<&CursorOptions>().single(w).unwrap();
+            assert_eq!(c.grab_mode, CursorGrabMode::None);
+            assert!(c.visible);
         }
         if keyboard {
-            app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::Tab);
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::Tab);
             app.update();
-        } else {integration_tests::click(&mut app,LabAction::LiveCapture);}
+        } else {
+            integration_tests::click(&mut app, LabAction::LiveCapture);
+        }
         app.update();
-        let lab=app.world().resource::<Laboratory>();
+        let lab = app.world().resource::<Laboratory>();
         assert!(lab.tools.flying && lab.tools.flight.captured);
-        let restored=lab.tools.camera.unwrap();
-        assert!(restored.translation.distance(pose.translation)<0.001 && restored.rotation.dot(pose.rotation).abs()>0.99999);
+        let restored = lab.tools.camera.unwrap();
+        assert!(
+            restored.translation.distance(pose.translation) < 0.001
+                && restored.rotation.dot(pose.rotation).abs() > 0.99999
+        );
     }
 }
 #[test]

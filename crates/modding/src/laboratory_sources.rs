@@ -77,20 +77,25 @@ pub struct Workspace {
     pub observation_ticks: Option<u32>,
     #[serde(default)]
     pub editor_step: Option<i32>,
-    #[serde(default)] pub surface_snap:Option<bool>,
-    #[serde(default)] pub allow_overlap:bool,
-    #[serde(default)] pub devices:Vec<crate::lab_tools::Device>,
+    #[serde(default)]
+    pub surface_snap: Option<bool>,
+    #[serde(default)]
+    pub allow_overlap: bool,
+    #[serde(default)]
+    pub devices: Vec<crate::lab_tools::Device>,
 }
 impl Workspace {
     pub fn validate(&self, layout: &RangeLayout, elements: usize) -> Result<(), String> {
-        if self.devices.len()>crate::lab_tools::Tuning::stock().devices
+        if self.devices.len() > crate::lab_tools::Tuning::stock().devices
             || self.sources.len() > 32
             || (!self.sources.is_empty() && self.selected >= self.sources.len())
             || self
                 .observation_ticks
                 .is_some_and(|v| !(1..=18000).contains(&v))
             || self.editor_step.is_some_and(|v| !(1..=16).contains(&v))
-            || self.selected_material.is_some_and(|id| ![1,2,3,4,5,6,8,10,11,12].contains(&id))
+            || self
+                .selected_material
+                .is_some_and(|id| ![1, 2, 3, 4, 5, 6, 8, 10, 11, 12].contains(&id))
             || self.material.len() > 32
             || self.material.iter().any(|(id, field, value)| {
                 ![1, 2, 3, 4, 5, 6, 8, 10, 11, 12].contains(id)
@@ -113,12 +118,24 @@ mod tests {
     use super::*;
     #[test]
     fn selected_material_is_optional_stable_and_validated() {
-        let mut w=Workspace::default();let layout=super::super::Definition::stock().layout;
-        let old=ron::to_string(&w).unwrap();assert!(!old.contains("selected_material"));
-        assert_eq!(ron::from_str::<Workspace>(&old).unwrap().selected_material,None);
-        w.selected_material=Some(5);w.validate(&layout,0).unwrap();
-        assert_eq!(ron::from_str::<Workspace>(&ron::to_string(&w).unwrap()).unwrap().selected_material,Some(5));
-        w.selected_material=Some(999);assert!(w.validate(&layout,0).is_err());
+        let mut w = Workspace::default();
+        let layout = super::super::Definition::stock().layout;
+        let old = ron::to_string(&w).unwrap();
+        assert!(!old.contains("selected_material"));
+        assert_eq!(
+            ron::from_str::<Workspace>(&old).unwrap().selected_material,
+            None
+        );
+        w.selected_material = Some(5);
+        w.validate(&layout, 0).unwrap();
+        assert_eq!(
+            ron::from_str::<Workspace>(&ron::to_string(&w).unwrap())
+                .unwrap()
+                .selected_material,
+            Some(5)
+        );
+        w.selected_material = Some(999);
+        assert!(w.validate(&layout, 0).is_err());
     }
     #[test]
     fn laboratory_local_charge_roundtrips_and_legacy_sources_keep_projectile_mode() {

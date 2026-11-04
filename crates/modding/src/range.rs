@@ -175,7 +175,11 @@ impl RangeUnitKind {
     pub const fn artillery(self) -> bool {
         matches!(
             self,
-            Self::Artillery | Self::ArtilleryT2 | Self::ArtilleryTurretT2 | Self::ArtilleryTurretT3 | Self::RazlomT3
+            Self::Artillery
+                | Self::ArtilleryT2
+                | Self::ArtilleryTurretT2
+                | Self::ArtilleryTurretT3
+                | Self::RazlomT3
         )
     }
 }
@@ -290,12 +294,12 @@ pub struct RangeLayout {
     /// A model-free emitter uses `gun` as its exact origin and has no physical chassis.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub gun_point: bool,
-    #[serde(default,skip_serializing_if="std::ops::Not::not")]
-    pub laboratory:bool,
-    #[serde(default,skip_serializing_if="std::ops::Not::not")]
-    pub allow_overlap:bool,
-    #[serde(default,skip_serializing_if="Vec::is_empty")]
-    pub lab_devices:Vec<crate::lab_tools::Device>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub laboratory: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_overlap: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lab_devices: Vec<crate::lab_tools::Device>,
     #[serde(default)]
     pub gun_kind: RangeUnitKind,
     #[serde(default)]
@@ -406,7 +410,11 @@ pub const fn stock_size() -> [u32; 3] {
 impl RangeLayout {
     pub fn unit_yaw(&self, index: usize) -> u8 {
         self.unit_yaws.get(index).copied().unwrap_or_else(|| {
-            if self.battle && !self.units[index].allied { 2 } else { 0 }
+            if self.battle && !self.units[index].allied {
+                2
+            } else {
+                0
+            }
         })
     }
     /// Translate the complete authored scene once, preserving sky clearance.
@@ -428,12 +436,24 @@ impl RangeLayout {
         for u in &mut self.units {
             shift(&mut u.at);
         }
-        for device in &mut self.lab_devices {shift(&mut device.at);if let Some(c)=device.collector.as_mut(){shift(&mut c.dock);shift(&mut c.area);if let Some(p)=c.aim.as_mut(){shift(p);}}}
+        for device in &mut self.lab_devices {
+            shift(&mut device.at);
+            if let Some(c) = device.collector.as_mut() {
+                shift(&mut c.dock);
+                shift(&mut c.area);
+                if let Some(p) = c.aim.as_mut() {
+                    shift(p);
+                }
+            }
+        }
         for b in &mut self.blocks {
             shift(&mut b.min);
             shift(&mut b.max);
         }
-        for b in &mut self.initial_debris { shift(&mut b.min); shift(&mut b.max); }
+        for b in &mut self.initial_debris {
+            shift(&mut b.min);
+            shift(&mut b.max);
+        }
         for m in &mut self.mounds {
             shift(&mut m.min);
             shift(&mut m.max);
@@ -487,11 +507,14 @@ impl RangeLayout {
             || r.ground_level >= size[1]
             || r.unit_resistance == 0
             || r.unit_resistance > 1_000_000
-            || r.lab_devices.len()>crate::lab_tools::Tuning::stock().devices
-            || (!r.laboratory && (!r.lab_devices.is_empty()||r.allow_overlap))
-            || r.lab_devices.iter().any(|d|d.turns>3 || (0..3).any(|a|d.at[a]<1||d.at[a]>=size[a]-1)
-                || (d.kind==crate::lab_tools::DeviceKind::Collector)!=d.collector.is_some()
-                || d.collector.as_ref().is_some_and(|c|!c.valid(size)))
+            || r.lab_devices.len() > crate::lab_tools::Tuning::stock().devices
+            || (!r.laboratory && (!r.lab_devices.is_empty() || r.allow_overlap))
+            || r.lab_devices.iter().any(|d| {
+                d.turns > 3
+                    || (0..3).any(|a| d.at[a] < 1 || d.at[a] >= size[a] - 1)
+                    || (d.kind == crate::lab_tools::DeviceKind::Collector) != d.collector.is_some()
+                    || d.collector.as_ref().is_some_and(|c| !c.valid(size))
+            })
             || r.units.len() > MAX_RANGE_UNITS
             || r.unit_yaws.len() > r.units.len()
             || r.unit_yaws.iter().any(|yaw| *yaw > 3)
@@ -502,8 +525,15 @@ impl RangeLayout {
             || r.initial_debris.iter().enumerate().any(|(i, b)| {
                 ![2, 3, 5, 6].contains(&b.material)
                     || b.min[1] != r.ground_level
-                    || (0..3).any(|a| b.min[a] <= 0 || b.max[a] >= size[a] || b.max[a] <= b.min[a] || b.max[a] - b.min[a] > 4)
-                    || r.initial_debris[..i].iter().any(|other| (0..3).all(|a| b.min[a] < other.max[a] && other.min[a] < b.max[a]))
+                    || (0..3).any(|a| {
+                        b.min[a] <= 0
+                            || b.max[a] >= size[a]
+                            || b.max[a] <= b.min[a]
+                            || b.max[a] - b.min[a] > 4
+                    })
+                    || r.initial_debris[..i].iter().any(|other| {
+                        (0..3).all(|a| b.min[a] < other.max[a] && other.min[a] < b.max[a])
+                    })
             })
             || r.mounds.len() > 16
             || r.mounds
@@ -529,9 +559,20 @@ impl RangeLayout {
                     || r.clear_max[a] > size[a * 2]
                     || r.clear_min[a] >= r.clear_max[a]
             })
-            || (r.blocks.iter().any(|b|b.material==crate::water::MATERIAL) && r.blocks.iter().filter(|b|b.material==crate::water::MATERIAL).map(|b|
-                (0..3).map(|a|u64::try_from(b.max[a]-b.min[a]).unwrap_or(u64::MAX)).fold(1u64,|v,n|v.saturating_mul(n))
-            ).fold(0u64,|v,n|v.saturating_add(n)) > crate::water::Tuning::stock().max_cells as u64)
+            || (r
+                .blocks
+                .iter()
+                .any(|b| b.material == crate::water::MATERIAL)
+                && r.blocks
+                    .iter()
+                    .filter(|b| b.material == crate::water::MATERIAL)
+                    .map(|b| {
+                        (0..3)
+                            .map(|a| u64::try_from(b.max[a] - b.min[a]).unwrap_or(u64::MAX))
+                            .fold(1u64, |v, n| v.saturating_mul(n))
+                    })
+                    .fold(0u64, |v, n| v.saturating_add(n))
+                    > crate::water::Tuning::stock().max_cells as u64)
             || r.blocks.iter().any(|b| {
                 ![0, 1, 2, 3, 4, 5, 6, 8, 10, 11, 12].contains(&b.material)
                     || (0..3).any(|a| b.min[a] < 0 || b.max[a] > size[a] || b.min[a] >= b.max[a])
@@ -668,18 +709,33 @@ mod tests {
 
     #[test]
     fn crawler_field_debris_survives_scene_roundtrip_and_ground_translation() {
-        let original = RangeLayout::from_ron(include_str!("../../../data/range-crawler-field.ron")).unwrap();
+        let original =
+            RangeLayout::from_ron(include_str!("../../../data/range-crawler-field.ron")).unwrap();
         assert!(!original.initial_debris.is_empty());
-        assert_eq!(RangeLayout::from_ron(&original.to_ron().unwrap()).unwrap(), original);
+        assert_eq!(
+            RangeLayout::from_ron(&original.to_ron().unwrap()).unwrap(),
+            original
+        );
         let shifted = original.clone().with_ground_level(80).unwrap();
-        assert_eq!(shifted.initial_debris[0].min[1], original.initial_debris[0].min[1] + 64);
+        assert_eq!(
+            shifted.initial_debris[0].min[1],
+            original.initial_debris[0].min[1] + 64
+        );
         assert_eq!(shifted.with_ground_level(16).unwrap(), original);
         let mut invalid = original.clone();
-        invalid.initial_debris.push(invalid.initial_debris[0].clone());
-        assert!(invalid.validate().is_err(), "overlapping fragments must be rejected");
+        invalid
+            .initial_debris
+            .push(invalid.initial_debris[0].clone());
+        assert!(
+            invalid.validate().is_err(),
+            "overlapping fragments must be rejected"
+        );
         invalid = original;
         invalid.initial_debris[0].max[0] += 1;
-        assert!(invalid.validate().is_err(), "oversized fragment must be rejected");
+        assert!(
+            invalid.validate().is_err(),
+            "oversized fragment must be rejected"
+        );
     }
 
     #[test]

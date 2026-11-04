@@ -48,7 +48,13 @@ pub fn encode(column: &[u16]) -> [u32; MAX_COLUMN_WORDS] {
             continue;
         }
         let y = y as u32;
-        let mat = if mat == 10 { 8 } else if mat==12 {11} else { u32::from(mat).min(14) };
+        let mat = if mat == 10 {
+            8
+        } else if mat == 12 {
+            11
+        } else {
+            u32::from(mat).min(14)
+        };
         if let Some(last) = runs.last_mut() {
             let ground = |m| matches!(m, 1 | 7 | 8);
             if last[1] == y && (last[3] == mat || (ground(last[2]) && ground(mat))) {
@@ -120,9 +126,13 @@ mod tests {
     }
     #[test]
     fn physical_sand_keeps_ochre_presentation_in_distant_columns() {
-        let mut column=[0;192]; column[..20].fill(1); column[20..24].fill(10);
-        let words=encode(&column);
-        for y in 20..24 { assert_eq!(material(words,192,y),8); }
+        let mut column = [0; 192];
+        column[..20].fill(1);
+        column[20..24].fill(10);
+        let words = encode(&column);
+        for y in 20..24 {
+            assert_eq!(material(words, 192, y), 8);
+        }
     }
     #[test]
     fn ground_surface_roof_and_empty_space_keep_exact_heights() {

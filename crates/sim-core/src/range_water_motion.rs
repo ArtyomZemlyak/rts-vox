@@ -22,9 +22,13 @@ impl Water {
     /// Resting and horizontally flowing water do not have a velocity here.
     pub fn falling_speed_at(&self, mut p: Pos) -> Option<Fx> {
         for _ in 0..self.tuning.motion.column_cells {
-            if self.amount(p)==0 {return None;}
-            if let Some(f)=self.falling.get(&p) {return Some(f.speed);}
-            p[1]=p[1].checked_sub(1)?;
+            if self.amount(p) == 0 {
+                return None;
+            }
+            if let Some(f) = self.falling.get(&p) {
+                return Some(f.speed);
+            }
+            p[1] = p[1].checked_sub(1)?;
         }
         None
     }
@@ -196,14 +200,19 @@ impl Water {
         if moved > 0 {
             // Copy the finite column once. Overlapping source/destination
             // ranges are cleared before writing: no lost volume or compression.
-            let heat:Vec<_>=column.iter().map(|&(q,amount)|self.take_moving_heat(q,amount)).collect();
+            let heat: Vec<_> = column
+                .iter()
+                .map(|&(q, amount)| self.take_moving_heat(q, amount))
+                .collect();
             for &(q, _) in &column {
                 self.set(q, 0);
             }
-            for (&(q, amount),thermal) in column.iter().zip(heat) {
+            for (&(q, amount), thermal) in column.iter().zip(heat) {
                 let to = [q[0], q[1] - moved, q[2]];
                 self.set(to, amount);
-                if thermal>0 {self.absorb_heat(to,thermal,size);}
+                if thermal > 0 {
+                    self.absorb_heat(to, thermal, size);
+                }
                 airborne.insert(to);
                 self.transferred += u64::from(amount) * u64::from(moved);
                 if moved == 1 {
@@ -301,6 +310,6 @@ impl Water {
     pub fn load(&mut self, s: &mut Scan, size: Pos) -> Option<()> {
         self.load_legacy(s, size)?;
         self.load_motion(s, size)?;
-        self.load_thermal_remainder(s,size)
+        self.load_thermal_remainder(s, size)
     }
 }

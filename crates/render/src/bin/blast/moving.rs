@@ -596,8 +596,29 @@ fn cached_cells_in(
     }
     next
 }
-pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
+pub(super) struct PreparedOccupancy {
+    next: Vec<usize>,
+    shifted: bool,
+}
+
+pub(super) fn prepare_occupancy(
+    sim: &BlastRange,
+    window: TerrainWindow,
+    v: &mut Visual,
+) -> PreparedOccupancy {
+    let shifted = v.window != Some(window);
+    let next = cached_cells(sim, &window, v);
+    PreparedOccupancy { next, shifted }
+}
+
+pub(super) fn finish_occupancy(
+    sim: &BlastRange,
+    gas: &mut GasInput,
+    v: &mut Visual,
+    prepared: PreparedOccupancy,
+) {
     let window = gas.window;
+    let PreparedOccupancy { next, shifted } = prepared;
     gas.terrain_column_top
         .resize((window.dims[0] * window.dims[2]) as usize, 0);
     // The moving bodies share the terrain volume. Keep its conservative top
@@ -611,8 +632,6 @@ pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
             .w
             .max((hi[1] + 1).min(window.span(1).end) as f32);
     }
-    let shifted = v.window != Some(window);
-    let next = cached_cells(sim, &window, v);
     if !shifted && next == v.occupied {
         v.scratch = next;
         return;
@@ -666,6 +685,12 @@ pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
     gas.terrain_revision += 1;
     v.scratch = std::mem::replace(&mut v.occupied, next);
 }
+
+pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
+    let prepared = prepare_occupancy(sim, gas.window, v);
+    finish_occupancy(sim, gas, v, prepared);
+}
+
 /// Coalesce the ordered dirty words as they are emitted by the cell merge.
 /// Matches sorting/deduplicating first, including the existing 16-word gap.
 fn append_dirty_word(spans: &mut Vec<std::ops::Range<usize>>, word: usize) {
@@ -725,6 +750,10 @@ pub fn animate(
             voxel::unit::walker04(),
             voxel::unit::razlom_t3(),
             voxel::unit::greben_storage(),
+            voxel::unit::kil_factory(1),
+            voxel::unit::kil_factory(2),
+            voxel::unit::kil_factory(3),
+            voxel::unit::kil_factory(4),
         ]
         .iter()
         .map(|b| gait::rigs_of(b, 0.01, &render::model::segment_frames(b, 0.01)))
@@ -829,7 +858,11 @@ pub fn gun_segments(scene: &Scene, v: &Visual, p: Pose) -> Vec<Transform> {
     let mut out: Vec<_> = frames
         .iter()
         .map(|f| {
-            let (rot, offset) = if f.turret { (weapon, weapon_offset) } else { (root, Vec3::ZERO) };
+            let (rot, offset) = if f.turret {
+                (weapon, weapon_offset)
+            } else {
+                (root, Vec3::ZERO)
+            };
             Transform::from_translation(p.pos + offset + rot * f.pos).with_rotation(rot * f.rot)
         })
         .collect();
@@ -1468,6 +1501,46 @@ mod tests {
             cells(&sim, &windows[0])
         );
         assert_eq!(visual.occupancy_rebuilds, returned);
+    }
+
+    #[test]
+    fn prepared_occupancy_matches_sequential_publication() {
+        let mut sim = occupancy_roster(8);
+        let window = TerrainWindow {
+            origin: [96, 0, 256],
+            dims: [256, 192, 256],
+        };
+        let mut sequential = GasInput::default();
+        let mut prepared = GasInput::default();
+        sequential.terrain_words = Arc::new(vec![0; window.words()]);
+        prepared.terrain_words = Arc::new(vec![0; window.words()]);
+        write_window(&sim, &mut sequential, window, None);
+        write_window(&sim, &mut prepared, window, None);
+        let mut sequential_visual = Visual::default();
+        let mut prepared_visual = Visual::default();
+        for stage in 0..3 {
+            if stage == 1 {
+                sim.units[0].turret_delta += 1000;
+            } else if stage == 2 {
+                sim.units[0].body.vol.cols.fill(0);
+                sim.units[0].revision += 1;
+            }
+            occupancy(&sim, &mut sequential, &mut sequential_visual);
+            let next = prepare_occupancy(&sim, window, &mut prepared_visual);
+            finish_occupancy(&sim, &mut prepared, &mut prepared_visual, next);
+            assert_eq!(
+                prepared.terrain_words, sequential.terrain_words,
+                "stage {stage}"
+            );
+            assert_eq!(
+                prepared.terrain_dirty, sequential.terrain_dirty,
+                "stage {stage}"
+            );
+            assert_eq!(prepared.terrain_column_top, sequential.terrain_column_top);
+            assert_eq!(prepared.terrain_revision, sequential.terrain_revision);
+            assert_eq!(prepared_visual.occupied, sequential_visual.occupied);
+            assert_eq!(prepared_visual.cached, sequential_visual.cached);
+        }
     }
 
     #[test]

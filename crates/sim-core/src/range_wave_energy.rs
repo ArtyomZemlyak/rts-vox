@@ -111,9 +111,14 @@ impl BlastRange {
     /// parked rubble and live fragments remain intact and round-trip in the
     /// existing debris-tuning snapshot. The normal path pays no extra scan.
     pub(crate) fn relieve_autonomous_damage_pressure(&mut self) {
-        if !self.battle_mode() || !self.battle.autonomous || self.tick % 10 != 0
-            || !(self.matter.felling_pending() > 0 || self.pending_kinetic_impacts() > 0
-                || self.battle.has_material_work() || self.thermals.hot() > 0) {
+        if !self.battle_mode()
+            || !self.battle.autonomous
+            || self.tick % 10 != 0
+            || !(self.matter.felling_pending() > 0
+                || self.pending_kinetic_impacts() > 0
+                || self.battle.has_material_work()
+                || self.thermals.hot() > 0)
+        {
             return;
         }
         let pools = self.matter.debris.fragment_pools(&self.matter.tuning);

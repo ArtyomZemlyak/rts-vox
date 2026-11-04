@@ -52,7 +52,7 @@ pub struct Body {
     floor: Vec<u16>,
     /// Derived from voxels, never a new field in the saved wire format.
     height: u16,
-    roof:Vec<u16>,
+    roof: Vec<u16>,
     /// Сколько вокселей тело уже пролетело. Из этого считается урон
     /// при приземлении (ADR-036).
     pub fallen: u32,
@@ -104,13 +104,14 @@ impl Body {
         }
         let (sx, sz) = ((x1 - x0 + 1) as u16, (z1 - z0 + 1) as u16);
         let mut floor = vec![u16::MAX; sx as usize * sz as usize];
-        let mut roof=vec![0;sx as usize*sz as usize];
+        let mut roof = vec![0; sx as usize * sz as usize];
         let mut voxels = Vec::with_capacity(cells.len());
-        let mut height=0;
+        let mut height = 0;
         for &(x, y, z) in cells {
             let (lx, ly, lz) = ((x - x0) as u16, (y - y0) as u16, (z - z0) as u16);
-            height=height.max(ly.saturating_add(1));
-            let index=lz as usize*sx as usize+lx as usize;roof[index]=roof[index].max(ly.saturating_add(1));
+            height = height.max(ly.saturating_add(1));
+            let index = lz as usize * sx as usize + lx as usize;
+            roof[index] = roof[index].max(ly.saturating_add(1));
             voxels.push(BodyVoxel {
                 x: lx,
                 y: ly,
@@ -160,42 +161,104 @@ impl Body {
                     self.oy + i64::from(v.y),
                     self.oz + i64::from(v.z),
                 );
-                x >= 0 && y >= 0 && z >= 0 && if self.vy<Fx::ZERO {w.has_pending_dig(x as u32,y as u32,z as u32)}else{w.solid(x as u32, y as u32, z as u32)}
+                x >= 0
+                    && y >= 0
+                    && z >= 0
+                    && if self.vy < Fx::ZERO {
+                        w.has_pending_dig(x as u32, y as u32, z as u32)
+                    } else {
+                        w.solid(x as u32, y as u32, z as u32)
+                    }
             })
     }
 
-    pub fn height(&self) -> u16 { self.height }
+    pub fn height(&self) -> u16 {
+        self.height
+    }
     /// Conservative world bounds; rolling rocks can extend beyond their
     /// original unrotated footprint.
-    pub fn bounds(&self) -> ([i64;3],[i64;3]) {
+    pub fn bounds(&self) -> ([i64; 3], [i64; 3]) {
         if self.tilt_axis < 3 {
-            return ([self.ox,self.oy,self.oz],[self.ox+i64::from(self.sx),self.oy+i64::from(self.height),self.oz+i64::from(self.sz)]);
+            return (
+                [self.ox, self.oy, self.oz],
+                [
+                    self.ox + i64::from(self.sx),
+                    self.oy + i64::from(self.height),
+                    self.oz + i64::from(self.sz),
+                ],
+            );
         }
-        let centre=[self.ox+i64::from(self.sx/2),self.oy+i64::from(self.height/2),self.oz+i64::from(self.sz/2)];
-        if self.tilt_axis==3 {
-            let radius=i64::from(self.sz/2+self.height/2)+2;
-            ([self.ox,centre[1]-radius,centre[2]-radius],
-             [self.ox+i64::from(self.sx),centre[1]+radius,centre[2]+radius])
+        let centre = [
+            self.ox + i64::from(self.sx / 2),
+            self.oy + i64::from(self.height / 2),
+            self.oz + i64::from(self.sz / 2),
+        ];
+        if self.tilt_axis == 3 {
+            let radius = i64::from(self.sz / 2 + self.height / 2) + 2;
+            (
+                [self.ox, centre[1] - radius, centre[2] - radius],
+                [
+                    self.ox + i64::from(self.sx),
+                    centre[1] + radius,
+                    centre[2] + radius,
+                ],
+            )
         } else {
-            let radius=i64::from(self.sx/2+self.height/2)+2;
-            ([centre[0]-radius,centre[1]-radius,self.oz],
-             [centre[0]+radius,centre[1]+radius,self.oz+i64::from(self.sz)])
+            let radius = i64::from(self.sx / 2 + self.height / 2) + 2;
+            (
+                [centre[0] - radius, centre[1] - radius, self.oz],
+                [
+                    centre[0] + radius,
+                    centre[1] + radius,
+                    self.oz + i64::from(self.sz),
+                ],
+            )
         }
     }
     /// Only the bounded buoyancy path uses this exact upward collision test.
-    pub fn can_rise(&self,w:&World)->bool {
-        if (self.tilt_axis==0 || self.tilt_angle==0) && self.roof.iter().zip(&self.floor).map(|(&hi,&lo)|if hi==0 {0}else{usize::from(hi.saturating_sub(lo))}).sum::<usize>()==self.voxels.len() {
-            return self.roof.iter().enumerate().filter(|(_,h)|**h>0).all(|(i,&h)| {
-                let x=self.ox+(i%usize::from(self.sx)) as i64;let z=self.oz+(i/usize::from(self.sx)) as i64;
-                let y=self.oy+i64::from(h);
-                x>=0&&z>=0&&y>=0&&x<i64::from(w.nx)&&z<i64::from(w.nz)&&y<i64::from(w.ny)
-                    && !w.solid(x as u32,y as u32,z as u32)
-            });
+    pub fn can_rise(&self, w: &World) -> bool {
+        if (self.tilt_axis == 0 || self.tilt_angle == 0)
+            && self
+                .roof
+                .iter()
+                .zip(&self.floor)
+                .map(|(&hi, &lo)| {
+                    if hi == 0 {
+                        0
+                    } else {
+                        usize::from(hi.saturating_sub(lo))
+                    }
+                })
+                .sum::<usize>()
+                == self.voxels.len()
+        {
+            return self
+                .roof
+                .iter()
+                .enumerate()
+                .filter(|(_, h)| **h > 0)
+                .all(|(i, &h)| {
+                    let x = self.ox + (i % usize::from(self.sx)) as i64;
+                    let z = self.oz + (i / usize::from(self.sx)) as i64;
+                    let y = self.oy + i64::from(h);
+                    x >= 0
+                        && z >= 0
+                        && y >= 0
+                        && x < i64::from(w.nx)
+                        && z < i64::from(w.nz)
+                        && y < i64::from(w.ny)
+                        && !w.solid(x as u32, y as u32, z as u32)
+                });
         }
         self.voxels.iter().all(|&v| {
-            let (x,y,z)=self.world_of(v);
-            x>=0 && y>=0 && z>=0 && x<i64::from(w.nx) && y+1<i64::from(w.ny) && z<i64::from(w.nz)
-                && !w.solid(x as u32,(y+1) as u32,z as u32)
+            let (x, y, z) = self.world_of(v);
+            x >= 0
+                && y >= 0
+                && z >= 0
+                && x < i64::from(w.nx)
+                && y + 1 < i64::from(w.ny)
+                && z < i64::from(w.nz)
+                && !w.solid(x as u32, (y + 1) as u32, z as u32)
         })
     }
 
@@ -203,10 +266,14 @@ impl Body {
     /// Empty columns return None; used by the shared material contact phase.
     pub fn floor_contact(&self, column: usize) -> Option<[i64; 3]> {
         let y = *self.floor.get(column)?;
-        if y == u16::MAX { return None; }
+        if y == u16::MAX {
+            return None;
+        }
         let (x, y, z) = self.world_of(BodyVoxel {
-            x: (column % usize::from(self.sx)) as u16, y,
-            z: (column / usize::from(self.sx)) as u16, mat: 0,
+            x: (column % usize::from(self.sx)) as u16,
+            y,
+            z: (column / usize::from(self.sx)) as u16,
+            mat: 0,
         });
         Some([x, y, z])
     }
@@ -220,9 +287,14 @@ impl Body {
         // Their bounded compact voxel set is checked instead of stale columns.
         if self.tilt_axis >= 3 {
             return self.voxels.iter().all(|&v| {
-                let (x,y,z)=self.world_of(v);
-                x>=1 && y>=1 && z>=1 && x<i64::from(w.nx)-1 && z<i64::from(w.nz)-1
-                    && y<i64::from(w.ny) && !w.solid(x as u32,(y-1) as u32,z as u32)
+                let (x, y, z) = self.world_of(v);
+                x >= 1
+                    && y >= 1
+                    && z >= 1
+                    && x < i64::from(w.nx) - 1
+                    && z < i64::from(w.nz) - 1
+                    && y < i64::from(w.ny)
+                    && !w.solid(x as u32, (y - 1) as u32, z as u32)
             });
         }
         for lz in 0..self.sz {
@@ -252,21 +324,27 @@ impl Body {
     /// Мировые координаты воксела тела.
     pub fn world_of(&self, v: BodyVoxel) -> (i64, i64, i64) {
         if self.tilt_axis >= 3 && self.tilt_angle != 0 {
-            let s=fx::angle::sin(self.tilt_angle);
-            let c=fx::angle::cos(self.tilt_angle);
-            let round=|a:Fx| (a.raw()+(1i64<<31))>>32;
-            let cx=i32::from(self.sx)/2;
-            let cy=i32::from(self.height)/2;
-            let cz=i32::from(self.sz)/2;
-            let x=Fx::from_int(i32::from(v.x)-cx);
-            let y=Fx::from_int(i32::from(v.y)-cy);
-            let z=Fx::from_int(i32::from(v.z)-cz);
-            if self.tilt_axis==3 {
-                return (self.ox+i64::from(v.x),self.oy+i64::from(cy)+round(y.mul(c).sub(z.mul(s))),
-                    self.oz+i64::from(cz)+round(y.mul(s).add(z.mul(c))));
+            let s = fx::angle::sin(self.tilt_angle);
+            let c = fx::angle::cos(self.tilt_angle);
+            let round = |a: Fx| (a.raw() + (1i64 << 31)) >> 32;
+            let cx = i32::from(self.sx) / 2;
+            let cy = i32::from(self.height) / 2;
+            let cz = i32::from(self.sz) / 2;
+            let x = Fx::from_int(i32::from(v.x) - cx);
+            let y = Fx::from_int(i32::from(v.y) - cy);
+            let z = Fx::from_int(i32::from(v.z) - cz);
+            if self.tilt_axis == 3 {
+                return (
+                    self.ox + i64::from(v.x),
+                    self.oy + i64::from(cy) + round(y.mul(c).sub(z.mul(s))),
+                    self.oz + i64::from(cz) + round(y.mul(s).add(z.mul(c))),
+                );
             }
-            return (self.ox+i64::from(cx)+round(x.mul(c).sub(y.mul(s))),
-                self.oy+i64::from(cy)+round(x.mul(s).add(y.mul(c))),self.oz+i64::from(v.z));
+            return (
+                self.ox + i64::from(cx) + round(x.mul(c).sub(y.mul(s))),
+                self.oy + i64::from(cy) + round(x.mul(s).add(y.mul(c))),
+                self.oz + i64::from(v.z),
+            );
         }
         if self.tilt_axis != 0 && self.tilt_angle != 0 {
             let s = fx::angle::sin(self.tilt_angle);
@@ -526,16 +604,24 @@ impl Bodies {
     /// `can_fall` перед каждым, — на четырёх вокселях за тик проверка
     /// только конечной высоты пропустила бы три пола из четырёх.
     pub fn step(&mut self, w: &mut World) -> BodyStats {
-        self.step_supported(w,|_,_|false)
+        self.step_supported(w, |_, _| false)
     }
     /// External medium may damp or support a body without baking it into a wall.
-    pub fn step_supported(&mut self,w:&mut World,supports:impl FnMut(&mut Body,&World)->bool)->BodyStats {
-        self.step_contact(w,supports,|_,_|false)
+    pub fn step_supported(
+        &mut self,
+        w: &mut World,
+        supports: impl FnMut(&mut Body, &World) -> bool,
+    ) -> BodyStats {
+        self.step_contact(w, supports, |_, _| false)
     }
     /// Resolve a new floor contact before baking, including contacts reached
     /// midway through this tick's swept fall. The medium hook still runs once.
-    pub fn step_contact(&mut self,w:&mut World,mut supports:impl FnMut(&mut Body,&World)->bool,
-        mut contact:impl FnMut(&mut Body,&mut World)->bool)->BodyStats {
+    pub fn step_contact(
+        &mut self,
+        w: &mut World,
+        mut supports: impl FnMut(&mut Body, &World) -> bool,
+        mut contact: impl FnMut(&mut Body, &mut World) -> bool,
+    ) -> BodyStats {
         let mut st = BodyStats::default();
         let mut marks: Option<Marks> = None;
         self.landed_log.clear();
@@ -560,15 +646,27 @@ impl Bodies {
                 i += 1;
                 continue;
             }
-            if supports(&mut self.list[i],w) {i+=1;continue;}
-            if self.list[i].vy<Fx::ZERO {
-                let b=&mut self.list[i];b.vy=b.vy.add(self.gravity);
-                let nf=b.fy.add(b.vy);let n=nf.to_int_trunc();b.fy=nf.sub(Fx::from_int(n));
+            if supports(&mut self.list[i], w) {
+                i += 1;
+                continue;
+            }
+            if self.list[i].vy < Fx::ZERO {
+                let b = &mut self.list[i];
+                b.vy = b.vy.add(self.gravity);
+                let nf = b.fy.add(b.vy);
+                let n = nf.to_int_trunc();
+                b.fy = nf.sub(Fx::from_int(n));
                 for _ in 0..n.saturating_neg().max(0) {
-                    if !b.can_rise(w) {b.vy=Fx::ZERO;b.fy=Fx::ZERO;break;}
-                    b.oy+=1;st.fell+=1;
+                    if !b.can_rise(w) {
+                        b.vy = Fx::ZERO;
+                        b.fy = Fx::ZERO;
+                        break;
+                    }
+                    b.oy += 1;
+                    st.fell += 1;
                 }
-                i+=1;continue;
+                i += 1;
+                continue;
             }
             self.list[i].advance_tilt(self.gravity);
             if self.list[i].can_fall(w) {
@@ -598,21 +696,30 @@ impl Bodies {
                 // Упёрлись посреди шага: приземление здесь, а не
                 // на высоте, куда донесла бы скорость.
             }
-            if contact(&mut self.list[i],w) {i+=1;continue;}
-            if self.list[i].tilt_axis >= 3 && self.list[i].tilt_angle != 0
+            if contact(&mut self.list[i], w) {
+                i += 1;
+                continue;
+            }
+            if self.list[i].tilt_axis >= 3
+                && self.list[i].tilt_angle != 0
                 && self.list[i].riders.is_empty()
             {
                 // Rounding each rotated voxel back to the world lattice
                 // distorts a rolling rock and creates artificial gaps. Keep
                 // its existing rigid mesh and authoritative local voxels.
-                let b=&mut self.list[i];
-                self.landed_log.push(Landed { id:b.id, fallen:b.fallen, oy:b.oy, riders:Vec::new() });
-                b.resting=true;
-                b.vy=Fx::ZERO;
-                b.fy=Fx::ZERO;
-                b.tilt_speed=0;
-                st.landed+=1;
-                i+=1;
+                let b = &mut self.list[i];
+                self.landed_log.push(Landed {
+                    id: b.id,
+                    fallen: b.fallen,
+                    oy: b.oy,
+                    riders: Vec::new(),
+                });
+                b.resting = true;
+                b.vy = Fx::ZERO;
+                b.fy = Fx::ZERO;
+                b.tilt_speed = 0;
+                st.landed += 1;
+                i += 1;
                 continue;
             }
             {
@@ -739,9 +846,18 @@ impl Bodies {
                     mat: s.u16(),
                 })
                 .collect();
-            let height=voxels.iter().map(|v|v.y.saturating_add(1)).max().unwrap_or(0);
-            let mut roof=vec![0;usize::from(sx)*usize::from(sz)];
-            for v in &voxels {let i=usize::from(v.z)*usize::from(sx)+usize::from(v.x);if let Some(h)=roof.get_mut(i) {*h=(*h).max(v.y.saturating_add(1));}}
+            let height = voxels
+                .iter()
+                .map(|v| v.y.saturating_add(1))
+                .max()
+                .unwrap_or(0);
+            let mut roof = vec![0; usize::from(sx) * usize::from(sz)];
+            for v in &voxels {
+                let i = usize::from(v.z) * usize::from(sx) + usize::from(v.x);
+                if let Some(h) = roof.get_mut(i) {
+                    *h = (*h).max(v.y.saturating_add(1));
+                }
+            }
             self.list.push(Body {
                 roof,
                 height,
@@ -820,35 +936,53 @@ mod tests {
 
     #[test]
     fn rotated_rock_keeps_shape_and_can_fall_again_after_support_is_removed() {
-        let mut w=world();
-        let cells=put_box(&mut w,[10,12,10],[13,15,13],3);
-        let mut bodies=Bodies::new(8,test_gravity());
-        assert!(bodies.detach(&mut w,&cells));
+        let mut w = world();
+        let cells = put_box(&mut w, [10, 12, 10], [13, 15, 13], 3);
+        let mut bodies = Bodies::new(8, test_gravity());
+        assert!(bodies.detach(&mut w, &cells));
         w.flush();
-        let original=bodies.list[0].voxels.clone();
-        bodies.list[0].tilt_axis=4;
-        bodies.list[0].tilt_angle=4096;
+        let original = bodies.list[0].voxels.clone();
+        bodies.list[0].tilt_axis = 4;
+        bodies.list[0].tilt_angle = 4096;
         for _ in 0..100 {
-            bodies.step(&mut w);w.flush();
-            if bodies.list[0].resting {break;}
+            bodies.step(&mut w);
+            w.flush();
+            if bodies.list[0].resting {
+                break;
+            }
         }
-        let b=&bodies.list[0];
+        let b = &bodies.list[0];
         assert!(b.resting);
-        assert_eq!(b.voxels,original);
-        assert_eq!((b.tilt_axis,b.tilt_angle),(4,4096));
-        assert_eq!(count(&w,3),0,"rotated voxels must not be baked into the grid");
-        let initial_y=b.oy;
-        let mut bytes=fx::blob::Blob::new();bodies.save(&mut bytes);
-        let mut restored=Bodies::new(8,test_gravity());
+        assert_eq!(b.voxels, original);
+        assert_eq!((b.tilt_axis, b.tilt_angle), (4, 4096));
+        assert_eq!(
+            count(&w, 3),
+            0,
+            "rotated voxels must not be baked into the grid"
+        );
+        let initial_y = b.oy;
+        let mut bytes = fx::blob::Blob::new();
+        bodies.save(&mut bytes);
+        let mut restored = Bodies::new(8, test_gravity());
         assert!(restored.load(&mut fx::blob::Scan::new(&bytes.v)));
         assert!(restored.list[0].resting);
-        assert_eq!(restored.list[0].voxels,original);
-        assert_eq!(restored.list[0].tilt_angle,4096);
-        for x in 1..31 {for z in 1..31 {w.queue_edit(crate::Edit::dig(x,3,z));}}
+        assert_eq!(restored.list[0].voxels, original);
+        assert_eq!(restored.list[0].tilt_angle, 4096);
+        for x in 1..31 {
+            for z in 1..31 {
+                w.queue_edit(crate::Edit::dig(x, 3, z));
+            }
+        }
         w.flush();
-        for _ in 0..15 {bodies.step(&mut w);w.flush();}
-        assert!(bodies.list[0].oy<initial_y,"rock did not react to removed support");
-        assert_eq!(bodies.list[0].voxels,original);
+        for _ in 0..15 {
+            bodies.step(&mut w);
+            w.flush();
+        }
+        assert!(
+            bodies.list[0].oy < initial_y,
+            "rock did not react to removed support"
+        );
+        assert_eq!(bodies.list[0].voxels, original);
     }
 
     /// Кусок, оторванный над полом, падает ровно до пола и запекается.
