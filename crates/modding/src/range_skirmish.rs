@@ -23,6 +23,10 @@ pub struct Skirmish {
     #[serde(default)]
     pub world_height: Option<u32>,
     #[serde(default)]
+    pub world_side: Option<u32>,
+    #[serde(default)]
+    pub ready: Option<crate::range::RangeReady>,
+    #[serde(default)]
     pub initial_debris: Vec<crate::range::RangeDebris>,
     #[serde(default)]
     pub focus: Option<usize>,
@@ -95,6 +99,24 @@ impl Skirmish {
         layout.initial_debris.extend(self.initial_debris.clone());
         if let Some(course) = &mut layout.course {
             course.patrols.clear();
+        }
+        if let Some(ready) = &self.ready {
+            let economy = layout.economy.get_or_insert_with(crate::range_economy::RangeEconomy::stock);
+            if let Some(bank) = economy.bank.as_mut() {
+                bank.base_store = bank.base_store.max(ready.store);
+            }
+        }
+        layout.ready = self.ready.clone();
+        if let Some(side) = self.world_side {
+            layout.size[0] = side;
+            layout.size[2] = side;
+            layout.blocks.retain(|b| (0..3).all(|a| b.min[a] >= 0 && b.max[a] <= layout.size[a] as i32));
+            layout.initial_debris.retain(|b| (0..3).all(|a| b.min[a] >= 0 && b.max[a] <= layout.size[a] as i32));
+            layout.roads.clear();
+            layout.mounds.clear();
+            layout.shields.clear();
+            layout.course = None;
+            layout.zones = vec![layout.zones[zone].clone()];
         }
         layout.validate()?;
         Ok(layout)
@@ -212,6 +234,7 @@ pub const STOCK: &[&str] = &[
     include_str!("../../../data/skirmish-staratel.ron"),
     include_str!("../../../data/skirmish-kil.ron"),
     include_str!("../../../data/skirmish-skoba.ron"),
+    include_str!("../../../data/skirmish-greben.ron"),
 ];
 pub fn stock(id: usize) -> Result<Skirmish, String> {
     Skirmish::from_ron(STOCK.get(id).ok_or("Unknown encounter")?)
@@ -271,7 +294,7 @@ mod tests {
             assert!(titles.insert(preset.title.clone()));
             let layout = preset.apply_to(stock_layout.clone()).unwrap();
             assert_eq!(layout.units, preset.units);
-            assert_eq!(layout.zones.len(), stock_layout.zones.len());
+            assert_eq!(layout.zones.len(), if preset.world_side.is_some() { 1 } else { stock_layout.zones.len() });
             if let Some(mission) = preset.mission {
                 focus.push(mission.focus);
                 for own in preset.units.iter().filter(|u| u.allied) {

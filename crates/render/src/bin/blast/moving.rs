@@ -40,6 +40,17 @@ pub struct Visual {
     frame_poses: Vec<ActorFrame>,
 }
 
+fn segment_picture(frame: &sim_core::damage::Frame) -> Transform {
+    let scalar = |v: fx::Fx| v.raw() as f32 / fx::ONE_RAW as f32;
+    let vector = |v: sim_core::damage::V3| Vec3::new(scalar(v.x), scalar(v.y), scalar(v.z));
+    let rotation = Quat::from_mat3(&Mat3::from_cols(vector(frame.x), vector(frame.y), vector(frame.z))).normalize();
+    let scale = 1.0 / scalar(frame.scale);
+    let centre = Vec3::from(frame.centre.map(scalar));
+    Transform::from_translation(vector(frame.base) - rotation * (centre * scale))
+        .with_rotation(rotation)
+        .with_scale(Vec3::splat(scale))
+}
+
 #[derive(Default)]
 struct ActorFrame {
     pos: Vec3,
@@ -48,9 +59,17 @@ struct ActorFrame {
     turret_offset: Vec3,
     kind: usize,
     legs: Vec<gait::LegPose>,
+    walker_segments: Vec<Transform>,
 }
 impl ActorFrame {
     fn transform(&self, witness: &Witness, rigs: &[Vec<LegRig>]) -> Transform {
+        if self.kind == RangeUnitKind::Walker04.index()
+            && witness.2.is_some_and(|segment| segment >= 10)
+        {
+            if let Some(frame) = self.walker_segments.get(witness.2.expect("arm segment")) {
+                return *frame;
+            }
+        }
         let rotation = if witness.3 { self.turret } else { self.hull };
         let mut local = witness.1;
         if let Some(segment) = witness.2 {
@@ -754,6 +773,7 @@ pub fn animate(
             voxel::unit::kil_factory(2),
             voxel::unit::kil_factory(3),
             voxel::unit::kil_factory(4),
+            voxel::unit::skoba(),
         ]
         .iter()
         .map(|b| gait::rigs_of(b, 0.01, &render::model::segment_frames(b, 0.01)))
@@ -779,6 +799,10 @@ pub fn animate(
         frame.turret = was.0.slerp(now.0, t);
         frame.turret_offset = was.1.lerp(now.1, t);
         frame.kind = u.kind.index();
+        frame.walker_segments.clear();
+        if u.kind == RangeUnitKind::Walker04 {
+            frame.walker_segments.extend(u.seg_frames.iter().map(segment_picture));
+        }
         frame.legs.clear();
         // The range plants the feet (ADR-279); the picture interpolates
         // their contacts between ticks and poses the links with the same

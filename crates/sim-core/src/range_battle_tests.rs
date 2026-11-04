@@ -694,6 +694,64 @@ fn razlom_wave_kills_t1_keeps_travelling_and_restores_exactly() {
 }
 
 #[test]
+fn razlom_wave_carves_ground_and_fades_on_dense_cover() {
+    let mut layout = arena_of([RangeUnitKind::RazlomT3, RangeUnitKind::Tank]).layout.unwrap();
+    layout.size[1] = 256;
+    layout.units[1].at = [600, 16, 336];
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [0, 0, 0],
+        max: [640, 256, 640],
+        material: 0,
+    });
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [0, 0, 0],
+        max: [640, 16, 640],
+        material: 1,
+    });
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [300, 16, 300],
+        max: [520, 128, 372],
+        material: 3,
+    });
+    let mut r = BlastRange::with_layout(
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
+        layout,
+    ).unwrap();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    r.start_battle().unwrap();
+    r.battle.actors[1].order = Order::Hold;
+    assert!(r.battle_order(0, Order::Ground([600, 16, 336]), None));
+    let mut fired = false;
+    for _ in 0..600 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        fired |= !r.battle.rounds.is_empty() || !r.battle.razlom_lasers.is_empty();
+        if fired && r.battle.rounds.is_empty() { break; }
+    }
+    let carved = (300..320).any(|x| (16..=20).any(|y| (300..372).any(|z| !r.world.solid(x, y, z))));
+    assert!(carved, "wave did not carve the ground");
+    assert!(r.battle.rounds.is_empty(), "dense cover did not dissipate the wave");
+    assert!(r.units[1].status.alive, "dissipated wave reached the distant target");
+}
+
+#[test]
+fn razlom_stock_scenario_reaches_tanks_without_crossing_cell_bounds() {
+    let preset = modding::range_skirmish::stock(22).unwrap();
+    let base = modding::range::RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+    let layout = preset.apply_to(base).unwrap();
+    let mut r = BlastRange::with_layout(
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
+        layout,
+    ).unwrap();
+    r.start_battle().unwrap();
+    for _ in 0..360 {
+        r.step();
+    }
+    assert!(r.units.iter().skip(1).any(|u| !u.status.alive), "the stock wave killed no T1 tank");
+}
+
+#[test]
 fn kil_produces_a_tank_and_upgrades_to_t4_without_losing_its_queue() {
     let mut layout = arena_of([RangeUnitKind::KilFactoryT1, RangeUnitKind::Tank])
         .layout

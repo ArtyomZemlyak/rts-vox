@@ -1012,7 +1012,7 @@ pub(super) fn muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
             .take(4)
             .map(|(arm, _)| {
                 let frame = &u.seg_frames[13 + arm * 4];
-                let v = frame.world([Fx::from_int(6), Fx::from_int(3), Fx::from_int(3)]);
+                let v = frame.world([Fx::from_int(4), Fx::from_int(2), Fx::from_int(2)]);
                 [v.x, v.y, v.z]
             })
             .collect();

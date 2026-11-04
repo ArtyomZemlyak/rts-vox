@@ -855,7 +855,25 @@ fn spawn_greben_crew(r: &mut BlastRange, home: usize) {
     } else {
         -1
     };
-    for n in 0..8 {
+    let drones_near = r
+        .units
+        .iter()
+        .enumerate()
+        .filter(|(id, u)| {
+            *id != home
+                && u.kind == RangeUnitKind::SkobaDrone
+                && r.allied(*id) == allied
+                && (0..3)
+                    .map(|a| {
+                        let p = u.motion.pos[a].to_int_trunc();
+                        let d = i64::from(p - at[a]);
+                        d * d
+                    })
+                    .sum::<i64>()
+                    <= 2000 * 2000
+        })
+        .count();
+    for n in drones_near..8 {
         if r.units.len() >= MAX_RANGE_UNITS {
             break;
         }
@@ -863,7 +881,7 @@ fn spawn_greben_crew(r: &mut BlastRange, home: usize) {
             r,
             RangeUnitKind::SkobaDrone,
             allied,
-            [at[0] + direction * 800, at[1] + 44, at[2] - 240 + n * 70],
+            [at[0] + direction * 800, at[1] + 44, at[2] - 240 + n as i32 * 70],
         );
     }
     let crawler_near = r.units.iter().enumerate().any(|(id, u)| {

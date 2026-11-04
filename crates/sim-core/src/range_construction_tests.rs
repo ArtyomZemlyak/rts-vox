@@ -193,8 +193,8 @@ fn a_loaded_flight_restores_and_continues_bit_for_bit() {
 }
 
 #[test]
-fn kil_and_skoba_menu_scenarios_start_real_construction() {
-    for id in [24, 25] {
+fn ready_menu_scenarios_start_real_construction() {
+    for id in [24, 25, 26] {
         let preset = modding::range_skirmish::stock(id).unwrap();
         let layout =
             modding::range::RangeLayout::from_ron(include_str!("../../../data/range-km.ron"))
@@ -212,11 +212,19 @@ fn kil_and_skoba_menu_scenarios_start_real_construction() {
                 .count(),
             8
         );
+        if matches!(id, 24 | 26) {
+            let factory = if id == 24 { 0 } else { 1 };
+            assert_eq!(r.production_queue(factory), Some(vec![RangeUnitKind::Tank]));
+            assert!(r.side_store(true).unwrap().0 > 0);
+        } else {
+            let sites = r.construction_sites();
+            assert_eq!(sites.len(), 2);
+            assert_eq!((sites[0].quota, sites[1].quota), (6, 2));
+        }
         r.start_battle().unwrap();
-        assert!(r
-            .create_construction_site(RangeUnitKind::TurretT1, true, [5500, 16, 8400])
-            .is_some());
         r.step();
-        assert!((0..r.units.len()).any(|id| r.drone_leg(id) == Some(Leg::ToSource)));
+        if id == 25 {
+            assert!((0..r.units.len()).any(|id| r.drone_leg(id) == Some(Leg::ToSource)));
+        }
     }
 }

@@ -1,0 +1,33 @@
+(
+ title: "Гребень: хранилище и снабжение",
+ briefing: "Станция уже построена: у неё 8 дронов, краулер и запас материалов. Краулер собирает обломки, бурит породу и выгружается в «Гребень». «Киль» уже получил заказ на танк; готовой машиной уничтожьте вражеский танк.",
+ world_height: Some(1024),
+ world_side: Some(5008),
+ ready: Some((store: 30000000, production: [(actor: 1, kind: Tank)])),
+ zone: (name: "Гребень: хранилище и снабжение", min: (800,1600), max: (4000,3200), spawn: (1000,16,2400), target: (3900,16,2400)),
+ idle_enemies: true,
+ units: [
+  (kind: GrebenStorage, allied: true, at: (1600,16,2400)),
+  (kind: KilFactoryT1, allied: true, at: (3200,16,2400)),
+  (kind: Crawler, allied: true, at: (1000,16,2400)),
+  (kind: TurretT1, allied: true, at: (3600,16,1800)),
+  (kind: Tank, allied: false, at: (3900,16,2400)),
+ ],
+ blocks: [
+  (min: (800,0,1500), max: (4100,160,3200), material: 0),
+  (min: (800,0,1500), max: (4100,16,3200), material: 1),
+  (min: (1400,16,2440), max: (1404,20,2444), material: 6),
+ ],
+ initial_debris: [
+  (min: (1100,16,2360), max: (1104,18,2364), material: 3),
+  (min: (1120,16,2400), max: (1124,19,2404), material: 3),
+  (min: (1140,16,2440), max: (1144,18,2444), material: 2),
+  (min: (1170,16,2360), max: (1174,20,2364), material: 3),
+  (min: (1200,16,2400), max: (1204,18,2404), material: 3),
+  (min: (1230,16,2440), max: (1234,19,2444), material: 2),
+ ],
+ script: [
+  (actor: 2, tick: 0, order: Reclaim((1102,18,2362))),
+  (actor: 2, tick: 240, order: Dig((1400,20,2440))),
+ ],
+)

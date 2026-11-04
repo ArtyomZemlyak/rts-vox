@@ -3072,7 +3072,7 @@ impl BlastRange {
                     .fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v)))
                     .sqrt()
                     .max(Fx::ONE);
-                let velocity = direction.map(|v| v.div(length).mul(Fx::from_int(20)));
+                let velocity = direction.map(|v| v.div(length).mul(Fx::from_int(120)));
                 completed("orders_misc");
                 b.rounds.push(Round {
                     owner: id,
@@ -3085,7 +3085,7 @@ impl BlastRange {
                 a.fired = a.fired.wrapping_add(1);
                 a.burst = 0;
                 a.charge = None;
-                a.next = self.tick + tuning.laser.reload_ticks;
+                a.next = self.tick + tuning.laser.reload_ticks.saturating_mul(4);
                 continue;
             }
             if kind == RangeUnitKind::Walker04 {
@@ -3558,6 +3558,8 @@ impl BlastRange {
                 let spacing = Fx::from_ratio(i32::from(self.units[r.owner].body.mm) * 12, 100);
                 let config = b.laser_config;
                 let mut centre = r.pos;
+                let mut contacts = 0;
+                let mut expired = false;
                 for channel in -3i32..=3 {
                     let offset = side.map(|v| v.mul(spacing).mul(Fx::from_int(channel)));
                     for vertical in [-4i32, 0, 4] {
@@ -3577,61 +3579,70 @@ impl BlastRange {
                             });
                             let p = point.map(Fx::to_int_trunc);
                             if (0..3).any(|axis| p[axis] < 0 || p[axis] >= self.size[axis] as i32) {
+                                expired = true;
                                 break;
                             }
                             end = point;
+                            if p == previous { continue; }
                             if let Some(shield) = self.dome_crossed(previous, p) {
                                 self.absorb_work(shield, p, tuning.work);
+                                contacts += 8;
                                 hit = true;
                                 break;
                             }
-                            let body_hit = self
+                            if let Some((id, unit)) = self
                                 .units
                                 .iter()
                                 .enumerate()
-                                .any(|(id, unit)| id != r.owner && unit.solid(p));
-                            if body_hit || material(&self.world, p) != 0 {
-                                if body_hit {
-                                    let id = self
-                                        .units
-                                        .iter()
-                                        .position(|unit| unit.solid(p))
-                                        .expect("contact unit");
-                                    if self.units[id].kind == RangeUnitKind::Tank {
-                                        let origin = [
-                                            self.units[id].body.core.0,
-                                            self.units[id].body.core.1,
-                                            self.units[id].body.core.2,
-                                        ]
-                                        .map(usize::from);
-                                        let size = usize::from(self.units[id].body.core_size);
-                                        for z in origin[2]..origin[2] + size {
-                                            for y in origin[1]..origin[1] + size {
-                                                for x in origin[0]..origin[0] + size {
-                                                    if self.units[id].body.part_at(x, y, z)
-                                                        == voxel::Part::Core
-                                                    {
-                                                        self.units[id].receive_cell(
-                                                            [x, y, z],
-                                                            u32::MAX,
-                                                            &config,
-                                                        );
-                                                    }
+                                .find(|(id, unit)| *id != r.owner && unit.solid(p))
+                                .map(|(id, unit)| (id, unit.hit(p)))
+                            {
+                                if let Some((part, cell)) = unit {
+                                    let target = &mut self.units[id];
+                                    for dz in -1i32..=1 {
+                                        for dy in -1i32..=1 {
+                                            for dx in -1i32..=1 {
+                                                let (Some(x), Some(y), Some(z)) = (
+                                                    cell[0].checked_add_signed(dx as isize),
+                                                    cell[1].checked_add_signed(dy as isize),
+                                                    cell[2].checked_add_signed(dz as isize),
+                                                ) else {
+                                                    continue;
+                                                };
+                                                let body = if part == 0 {
+                                                    &target.body
+                                                } else {
+                                                    &target.body.segments[part - 1].body
+                                                };
+                                                if x >= usize::from(body.vol.nx)
+                                                    || y >= usize::from(body.vol.ny)
+                                                    || z >= usize::from(body.vol.nz)
+                                                {
+                                                    continue;
+                                                }
+                                                if part == 0 {
+                                                    target.receive_cell(
+                                                        [x, y, z],
+                                                        u32::MAX / 16,
+                                                        &config,
+                                                    );
+                                                } else {
+                                                    target.receive_seg_cell(
+                                                        part - 1,
+                                                        [x, y, z],
+                                                        u32::MAX / 16,
+                                                        &config,
+                                                    );
                                                 }
                                             }
                                         }
                                     }
+                                    hit = true;
                                 }
-                                self.stream_contact_owned(
-                                    p,
-                                    &tuning,
-                                    false,
-                                    from.map(Fx::to_int_trunc),
-                                    &config,
-                                    Some(r.owner),
-                                );
+                            } else if material(&self.world, p) != 0 {
+                                self.world.queue_dig(p[0] as u32, p[1] as u32, p[2] as u32);
+                                contacts += 1;
                                 hit = true;
-                                break;
                             }
                             previous = p;
                         }
@@ -3657,6 +3668,8 @@ impl BlastRange {
                     .fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v)))
                     .sqrt();
                 r.distance = r.distance.sub(advanced.min(r.distance));
+                r.distance = r.distance.sub(Fx::from_int(contacts.min(16) * 2).min(r.distance));
+                if expired { r.distance = Fx::ZERO; }
                 r.pos = centre;
                 if r.distance > Fx::ZERO {
                     b.rounds.push(r);

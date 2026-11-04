@@ -47,7 +47,6 @@ pub fn section(editor: bool, a: Action) -> u8 {
     }
     match a {
         Action::Skirmish(_)
-        | Action::CrawlerField
         | Action::BattleWorld
         | Action::BattleWorldAuto
         | Action::BattlePreset
@@ -1616,18 +1615,18 @@ pub(crate) mod tests {
         assert!(!app.world().resource::<Panel>().electric_support_target);
     }
     #[test]
-    fn crawler_field_menu_enters_free_control_without_enemies() {
-        let layout = RangeLayout::from_ron(include_str!(
-            "../../../../../../data/range-crawler-field.ron"
-        ))
-        .unwrap();
+    fn crawler_menu_starts_the_authored_reclaim_order() {
+        let preset = modding::range_skirmish::stock(23).unwrap();
+        let layout =
+            RangeLayout::from_ron(include_str!("../../../../../../data/range-km.ron")).unwrap();
+        let layout = preset.apply_to(layout).unwrap();
         let config =
             ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron"))
                 .unwrap();
         let sim = BlastRange::with_layout(config, layout.clone()).unwrap();
         let mut app = app_with_scene(sim, Workshop::new(Some(layout), false));
-        click(&mut app, Action::CrawlerField);
-        assert!(app.world().resource::<Panel>().free_launch);
+        click(&mut app, Action::Skirmish(23));
+        assert!(app.world().resource::<Panel>().battle_launch);
         let (config, layout) = app
             .world_mut()
             .resource_mut::<Workshop>()
@@ -1639,19 +1638,9 @@ pub(crate) mod tests {
         app.update();
         let scene = app.world().resource::<Scene>();
         assert!(scene.sim.battle_mode() && scene.sim.player && !scene.paused);
-        assert!(scene
-            .sim
-            .units
-            .iter()
-            .enumerate()
-            .all(|(i, _)| scene.sim.allied(i)));
         assert_eq!(
             scene.sim.battle.actors[0].order,
-            sim_core::blast::battle::Order::Reclaim([314, 17, 282])
-        );
-        assert!(
-            scene.sim.explosion.is_some(),
-            "the first tank charge must start automatically"
+            sim_core::blast::battle::Order::Reclaim([1102, 18, 2362])
         );
         assert_eq!(app.world().resource::<Workshop>().controlled, Some(0));
         assert!(!app.world().resource::<Panel>().free_launch);

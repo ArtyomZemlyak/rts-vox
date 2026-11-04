@@ -803,9 +803,9 @@ impl RangeUnit {
             for (arm, target) in targets.into_iter().enumerate() {
                 let muzzle = 13 + arm * 4;
                 let from = self.seg_frames[muzzle].world([
-                    Fx::from_int(6),
-                    Fx::from_int(3),
-                    Fx::from_int(3),
+                    Fx::from_int(4),
+                    Fx::from_int(2),
+                    Fx::from_int(2),
                 ]);
                 let delta = [
                     Fx::from_int(target[0]).sub(from.x),
@@ -5497,8 +5497,37 @@ impl BlastRange {
                 }
             }
         }
+        result.apply_ready().expect("ready scenario initialization");
         completed("components");
         result
+    }
+    fn apply_ready(&mut self) -> Result<(), String> {
+        let Some(ready) = self.layout.as_ref().and_then(|layout| layout.ready.clone()) else {
+            return Ok(());
+        };
+        if ready.store > 0 {
+            let store = self.mining.as_ref().and_then(|m| m.haul()).map(|h| h.store(true))
+                .ok_or("ready stock needs a store")?;
+            let economy = &mut self.matter.economy;
+            if economy.ledger.reveal(economy.ground, ready.store) != ready.store
+                || economy.ledger.transfer(economy.ground, store, ready.store) != ready.store
+            {
+                return Err("ready stock exceeds its capacity".into());
+            }
+        }
+        for order in ready.construction {
+            let site = self.create_construction_site(order.kind, true, order.at)
+                .ok_or("ready construction site is occupied")?;
+            if !self.set_construction_quota(site, order.quota) {
+                return Err("ready construction quota is invalid".into());
+            }
+        }
+        for order in ready.production {
+            if self.enqueue_product(order.actor, order.kind, true) != battle::commands::Outcome::Applied {
+                return Err("ready production order was rejected".into());
+            }
+        }
+        Ok(())
     }
     pub fn heat_tuning(&self) -> &modding::heat::HeatTuning {
         &self.heat_tuning

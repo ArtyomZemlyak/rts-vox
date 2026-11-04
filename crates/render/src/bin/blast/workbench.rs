@@ -297,6 +297,7 @@ impl Workshop {
         self.pitch = 0.0;
         Ok(())
     }
+    #[cfg(test)]
     pub fn crawler_field(&mut self, _config: ExplosionConfig) -> Result<(), String> {
         let layout =
             RangeLayout::from_ron(include_str!("../../../../../data/range-crawler-field.ron"))?;
@@ -328,7 +329,7 @@ impl Workshop {
             .ok_or("Нет боевого участка")?;
         let layout = preset.apply_to(stock)?;
         self.commit(layout, config)?;
-        self.zone = zone;
+        self.zone = if preset.world_side.is_some() { 0 } else { zone };
         self.editing = true;
         self.selected = Some(Selection::Unit(0));
         self.controlled = Some(0);
@@ -375,6 +376,17 @@ impl Workshop {
         } else {
             0.85
         };
+        if id == 25 {
+            let at = preset.units[0].at;
+            self.selected = Some(Selection::Unit(0));
+            self.controlled = Some(0);
+            self.selected_units = vec![0];
+            self.pan = Vec2::new(
+                at[0] as f32 - (preset.zone.min[0] + preset.zone.max[0]) as f32 * 0.5,
+                at[2] as f32 - (preset.zone.min[1] + preset.zone.max[1]) as f32 * 0.5,
+            );
+            self.zoom = 3.0;
+        }
         self.orbit = 0.0;
         self.pitch = 0.0;
         Ok(preset.briefing)
@@ -2326,6 +2338,8 @@ mod tests {
             workshop.selected_units = vec![0];
             let mut app = panel::hud::tests::app_with_scene(sim, workshop);
             app.world_mut().resource_mut::<panel::Panel>().crawler_mode = mode;
+            app.world_mut().resource_mut::<panel::Panel>().script =
+                modding::range_skirmish::stock(23).unwrap().script;
             app.init_resource::<ButtonInput<MouseButton>>()
                 .add_message::<MouseWheel>()
                 .add_systems(Update, input);
@@ -2372,6 +2386,7 @@ mod tests {
                 "mode {mode:?}, order {order:?}: {}",
                 scene.notice
             );
+            assert!(app.world().resource::<panel::Panel>().script.is_empty());
         }
     }
     #[test]
@@ -2925,8 +2940,10 @@ mod tests {
         for id in 6..modding::range_skirmish::STOCK.len() {
             workshop.skirmish(id as u8, config.clone()).unwrap();
             let preset = modding::range_skirmish::stock(id).unwrap();
+            let Some(mission) = preset.mission else { continue; };
             let selected = workshop.controlled.unwrap();
-            assert_eq!(preset.units[selected].kind, preset.mission.unwrap().focus);
+            let expected = if id == 25 { RangeUnitKind::GrebenStorage } else { mission.focus };
+            assert_eq!(preset.units[selected].kind, expected);
             assert!(preset.units[selected].allied);
             let zone = workshop.sector().unwrap();
             let centre = Vec2::new(

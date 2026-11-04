@@ -422,7 +422,6 @@ pub enum Action {
     RosterPage(i32),
     BattleWeapon(Option<BattleWeapon>),
     Skirmish(u8),
-    CrawlerField,
     Play,
     BattlePreset,
     BattleWorld,
@@ -606,10 +605,6 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             (false, vec![("Лаборатория материалов", Action::Laboratory)]),
             (
                 false,
-                vec![("Полигон краулера · сбор и бурение", Action::CrawlerField)],
-            ),
-            (
-                false,
                 vec![("Прорыв укреплений · 3 на 3", Action::Skirmish(0))],
             ),
             (
@@ -626,18 +621,10 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             (false, vec![("Штурм турелей T1/T2", Action::Skirmish(3))]),
             (false, vec![("Артиллерия T2: картечь", Action::Skirmish(4))]),
             (false, vec![("Осадная артиллерия T3", Action::Skirmish(5))]),
-            (
-                false,
-                vec![("Walker 04: четыре лазера", Action::Skirmish(21))],
-            ),
-            (
-                false,
-                vec![("T3 Разлом: волновая турель", Action::Skirmish(22))],
-            ),
-            (
-                false,
-                vec![("Старатель: сбор и бурение", Action::Skirmish(23))],
-            ),
+            (false, vec![("Walker 04: четыре лазера", Action::Skirmish(21))]),
+            (false, vec![("T3 Разлом: волновая турель", Action::Skirmish(22))]),
+            (false, vec![("Crawler: сбор, бурение и выгрузка", Action::Skirmish(23))]),
+            (false, vec![("Гребень: хранилище и снабжение", Action::Skirmish(26))]),
             (false, vec![("Режим испытаний / сброс", Action::RangeMode)]),
             (false, vec![("Сценарии испытаний", Action::ScenarioMenu)]),
             (
@@ -990,7 +977,6 @@ pub fn actions(
         if matches!(
             action,
             Action::BattleWorld
-                | Action::CrawlerField
                 | Action::BattleWorldAuto
                 | Action::BattlePreset
                 | Action::FreeRange
@@ -1006,7 +992,6 @@ pub fn actions(
         if matches!(
             action,
             Action::FreeRange
-                | Action::CrawlerField
                 | Action::FreeControl
                 | Action::BattleStart
                 | Action::BattleReplay
@@ -1081,24 +1066,6 @@ pub fn actions(
                     scene.notice = "Выберите свой действующий танк".into();
                 }
             }
-            Action::CrawlerField => match edit.crawler_field(scene.sim.config.clone()) {
-                Ok(()) => {
-                    panel.battle_name = "Полигон краулера".into();
-                    panel.crawler_mode = CrawlerMode::Reclaim;
-                    panel.briefing = "Краулер автоматически собирает обломки. Выберите режим «Движение», «Сбор» или «Бурение» в панели приказов и укажите точку ПКМ. Груз и запас базы видны в панели выбранного юнита.".into();
-                    panel.mission = None;
-                    panel.free_launch = true;
-                    panel.crawler_charges = Some(0);
-                    panel.battle_launch = false;
-                    panel.battle_auto = false;
-                    panel.drawer = 0;
-                    panel.pending = None;
-                    panel.ground_fire = false;
-                    scene.repeat = false;
-                    scene.view = 1;
-                }
-                Err(e) => scene.notice = e,
-            },
             Action::Skirmish(id) => match edit.skirmish(id, scene.sim.config.clone()) {
                 Ok(briefing) => {
                     panel.battle_name = edit.sector().map_or_else(String::new, |z| z.name.clone());
@@ -1116,6 +1083,10 @@ pub fn actions(
                     panel.demo = false;
                     panel.ground_fire = false;
                     panel.construction_kind = None;
+                    if id == 23 {
+                        panel.crawler_mode = CrawlerMode::Reclaim;
+                        scene.notice = "Crawler: выберите машину ЛКМ, затем ПКМ по обломку для сбора, по породе для бурения или по земле для движения. Ручной приказ отключает авторежим.".into();
+                    }
                     scene.repeat = false;
                     scene.view = 1;
                 }
@@ -2411,6 +2382,7 @@ mod scenario_tests {
     fn mission_armies_start_quiet_and_accept_real_orders_on_every_layout() {
         for id in 6..modding::range_skirmish::STOCK.len() {
             let preset = modding::range_skirmish::stock(id).unwrap();
+            let Some(mission) = preset.mission.clone() else { continue; };
             let base =
                 RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
             let layout = preset.apply_to(base).unwrap();
@@ -2419,7 +2391,7 @@ mod scenario_tests {
             let cfg = super::super::scaled_config(true, false, 1000);
             let mut sim = BlastRange::with_layout(cfg, layout).unwrap();
             sim.start_battle().unwrap();
-            let mut run = MissionRun::new(preset.mission.unwrap());
+            let mut run = MissionRun::new(mission);
             run.begin(&mut sim, 1);
             for _ in 0..60 {
                 sim.step();

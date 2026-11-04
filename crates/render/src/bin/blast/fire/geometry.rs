@@ -257,6 +257,33 @@ fn walker_laser_emission(buf: &mut MeshBuf, from: Vec3, to: Vec3, hit: bool, sca
     }
 }
 
+fn razlom_wave_emission(buf: &mut MeshBuf, from: Vec3, to: Vec3, hit: bool, scale: f32, serial: u32, now: f32) {
+    let direction = to - from;
+    let axis = direction.normalize_or(Vec3::X);
+    let side = axis.cross(Vec3::Y).normalize_or(Vec3::Z);
+    let up = side.cross(axis).normalize_or(Vec3::Y);
+    let phase = serial as f32 * 0.37 + now * 8.0;
+    for lane in [-1.0, 0.0, 1.0] {
+        let offset = up * (lane * 4.0 * scale);
+        beam(buf, from + offset, to + offset, 2.2 * scale, [0.08, 1.8, 7.0, 0.42]);
+    }
+    for i in 0..6 {
+        let t = i as f32 / 5.0;
+        let at = from.lerp(to, t) + side * ((t * 6.0 + phase).sin() * 1.8 * scale);
+        cube(buf, at, (1.6 + t * 1.2) * scale, [0.25, 3.0, 10.0, 0.72]);
+    }
+    if hit {
+        let at = to - axis * (0.25 * scale);
+        cube(buf, at, 4.0 * scale, [0.55, 5.0, 12.0, 0.9]);
+        for i in 0..8 {
+            let angle = i as f32 * std::f32::consts::TAU / 8.0 + phase;
+            let spread = 3.0 + (i % 3) as f32;
+            let offset = (side * angle.cos() + up * angle.sin()) * spread * scale + axis * (i as f32 * 0.35 * scale);
+            cube(buf, at + offset, 1.2 * scale, [4.0, 1.2, 0.2, 0.55]);
+        }
+    }
+}
+
 fn hot(input: Input<'_>) -> MeshBuf {
     let Input {
         sim,
@@ -347,6 +374,7 @@ fn hot(input: Input<'_>) -> MeshBuf {
         beam(&mut hot, from, to, 30.0, [0.01, 0.65, 0.75, 0.12]);
         beam(&mut hot, from, to, 12.0, [0.02, 2.4, 2.8, 0.36]);
         beam(&mut hot, from, to, 4.0, [0.55, 9.0, 10.0, 0.96]);
+        razlom_wave_emission(&mut hot, from, to, trace.hit, 2.0, trace.serial, now);
         if trace.hit {
             cube(&mut hot, to, 6.0, [0.3, 5.0, 6.0, 0.75]);
         }
