@@ -1621,6 +1621,7 @@ fn setup(
     mut mediums: ResMut<Assets<ScatteringMedium>>,
     scene: Res<Scene>,
 ) {
+    frontend::setup_menu_target(&mut commands, &mut images);
     let finishes = render::unit_surface::materials(&mut images, &mut materials);
     commands.insert_resource(WitnessArt {
         materials: finishes.clone(),

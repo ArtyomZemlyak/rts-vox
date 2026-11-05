@@ -1,9 +1,31 @@
 //! Application navigation. Modes keep using their existing scene/control paths.
 use super::*;
+use bevy::camera::RenderTarget;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::ui::FocusPolicy;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use panel::theme;
+
+/// Bevy's atmosphere probes need an active 3D view to allocate their shared
+/// GPU uniforms. A tiny offscreen target keeps those resources valid while
+/// the menu covers the window, without drawing a full-resolution world.
+#[derive(Resource, Default)]
+pub struct MenuTarget {
+    image: Handle<Image>,
+    original: Option<RenderTarget>,
+}
+pub fn setup_menu_target(commands: &mut Commands, images: &mut Assets<Image>) {
+    let image = images.add(Image::new_target_texture(
+        32,
+        32,
+        bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+        None,
+    ));
+    commands.insert_resource(MenuTarget {
+        image,
+        original: None,
+    });
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Page {
@@ -419,8 +441,9 @@ pub fn sync(
     >,
     mut buttons: Query<(&Action, &Interaction, &mut BackgroundColor)>,
     mut notice: Query<&mut Text, With<Notice>>,
-    mut cameras: Query<(&mut Camera, Option<&GasCamera>), With<Camera3d>>,
+    mut cameras: Query<(&mut Camera, Option<&GasCamera>, &mut RenderTarget), With<Camera3d>>,
     mut cursors: Query<&mut CursorOptions>,
+    mut menu_target: ResMut<MenuTarget>,
 ) {
     for mut n in &mut root {
         n.display = if menu.shown() {
@@ -443,11 +466,19 @@ pub fn sync(
             Display::None
         };
     }
-    for (mut camera, gas) in &mut cameras {
-        if menu.shown() {
-            camera.is_active = scene.out.is_some() && gas.is_some();
-        } else if gas.is_some() {
+    for (mut camera, gas, mut target) in &mut cameras {
+        if gas.is_some() {
             camera.is_active = true;
+            if menu.shown() && scene.out.is_none() {
+                if menu_target.original.is_none() {
+                    menu_target.original = Some(target.clone());
+                    *target = RenderTarget::Image(menu_target.image.clone().into());
+                }
+            } else if let Some(original) = menu_target.original.take() {
+                *target = original;
+            }
+        } else if menu.shown() {
+            camera.is_active = false;
         }
     }
     let size = windows.single().map_or(Vec2::new(1920.0, 1080.0), |w| {
@@ -510,6 +541,7 @@ mod tests {
         let sim = BlastRange::with_layout(config(false, false), layout.clone()).unwrap();
         let mut app = panel::hud::tests::app_with_scene(sim, Workshop::new(Some(layout), false));
         app.insert_resource(Menu::new(open))
+            .init_resource::<MenuTarget>()
             .insert_resource(laboratory::Laboratory::new(false))
             .insert_resource(knobs::Overrides::new(false, true))
             .init_resource::<pilot::Pilot>()
@@ -682,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_hides_world_cameras_releases_cursor_and_scales_at_4k() {
+    fn menu_uses_offscreen_world_view_releases_cursor_and_restores_window_at_4k() {
         let mut app = app(false);
         app.add_systems(PostUpdate, sync);
         let root = app.world_mut().spawn((Root, Node::default())).id();
@@ -708,7 +740,11 @@ mod tests {
             app.world().get::<Node>(root).unwrap().display,
             Display::Flex
         );
-        assert!(!app.world().get::<Camera>(camera).unwrap().is_active);
+        assert!(app.world().get::<Camera>(camera).unwrap().is_active);
+        assert!(matches!(
+            app.world().get::<RenderTarget>(camera),
+            Some(RenderTarget::Image(_))
+        ));
         assert!(!app.world().get::<Camera>(overlay).unwrap().is_active);
         assert_eq!(
             app.world().get::<CursorOptions>(window).unwrap().grab_mode,
@@ -722,6 +758,10 @@ mod tests {
             Display::None
         );
         assert!(app.world().get::<Camera>(camera).unwrap().is_active);
+        assert!(matches!(
+            app.world().get::<RenderTarget>(camera),
+            Some(RenderTarget::Window(_))
+        ));
         assert_eq!(app.world().resource::<UiScale>().0, 1.0);
     }
 }

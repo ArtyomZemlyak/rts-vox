@@ -46,4 +46,7 @@ $env:WGPU_BACKEND = 'vulkan'
 Write-Output 'RTS VOX: choose the range, a battle against AI, or the laboratory in the main menu. F10 returns to the menu and pauses the session.'
 Write-Output 'Optional: wheel zoom, middle mouse pan. Layouts: -LayoutPath data/range-slab.ron (a slab on one pillar), out/range-layout.ron (saved from the editor).'
 # User-requested interactive game window.
-Start-Process -FilePath $binary -WorkingDirectory $repoRoot -WindowStyle Normal -ArgumentList $rangeArgs
+$launchLogs = Join-Path $repoRoot 'out/launch-logs'
+New-Item -ItemType Directory -Path $launchLogs -Force | Out-Null
+$launchTag = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff')
+Start-Process -FilePath $binary -WorkingDirectory $repoRoot -WindowStyle Normal -ArgumentList $rangeArgs -RedirectStandardOutput (Join-Path $launchLogs ($launchTag + '.out.log')) -RedirectStandardError (Join-Path $launchLogs ($launchTag + '.err.log'))
