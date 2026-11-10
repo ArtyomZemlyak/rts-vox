@@ -19,12 +19,15 @@ pub struct Visual {
     pub previous: Vec<Pose>,
     /// Foot contacts of the previous tick, per unit and leg (ADR-279).
     previous_feet: Vec<Vec<Option<Contact>>>,
+    /// Previous physical drill position, for tick-rate-independent rendering.
+    previous_bores: Vec<Option<(f32, Vec3)>>,
     pub fragments: super::fragments::history::History,
     pub turret: Option<i32>,
     pub battle_turrets: Vec<i32>,
     /// Previous authoritative weapon frames, including the fixed-point angle
     /// table and the hull-local traverse. Interpolate their picture only.
     battle_heads: Vec<(Quat, Vec3)>,
+    previous_arms: Vec<Option<[Transform; 20]>>,
     gun_head: Option<(Quat, Vec3)>,
     occupied: Vec<usize>,
     /// Reuse the merged occupancy allocation from the previous tick.
@@ -38,6 +41,228 @@ pub struct Visual {
     window: Option<TerrainWindow>,
     rigs: Vec<Vec<LegRig>>,
     frame_poses: Vec<ActorFrame>,
+    gates_generation: Option<u64>,
+    gates_count: usize,
+    cutter_clock: Option<(u64, f32)>,
+    cutters: Vec<(f32, f32)>,
+    cutter_depths: Vec<f32>,
+    cutter_offsets: Vec<Vec3>,
+    mechanism_generation: Option<u64>,
+    mechanism_count: usize,
+    jet_generation: Option<u64>,
+    jet_count: usize,
+}
+
+#[derive(Component)]
+pub(super) struct CrawlerMechanism { unit: usize, side: f32, piston: bool }
+#[derive(Component)]
+pub(super) struct GrebenConnector { dock: usize, bay: usize, section: u8 }
+
+fn link_transform(a: Vec3, b: Vec3, width: f32) -> Transform {
+    let delta = b - a;
+    let len = delta.length().max(0.001);
+    Transform::from_translation((a + b) * 0.5)
+        .with_rotation(Quat::from_rotation_arc(Vec3::Y, delta / len))
+        .with_scale(Vec3::new(width, len, width))
+}
+
+/// Low-cost mesh linkages and docking couplers; physical bodies remain the
+/// destructible voxel models. They follow the same interpolated unit pose.
+pub fn crawler_mechanisms(
+    mut commands: Commands, scene: Res<Scene>, art: Res<Art>, mut visual: ResMut<Visual>,
+    mut arms: Query<(Entity, &CrawlerMechanism, &mut Transform, &mut Visibility), Without<GrebenConnector>>,
+    mut sockets: Query<(Entity, &GrebenConnector, &mut Transform, &mut Visibility), Without<CrawlerMechanism>>,
+) {
+    if visual.mechanism_generation != Some(scene.generation) || visual.mechanism_count > scene.sim.units.len() {
+        for (e, _, _, _) in &mut arms { commands.entity(e).despawn(); }
+        for (e, _, _, _) in &mut sockets { commands.entity(e).despawn(); }
+        visual.mechanism_generation = Some(scene.generation);
+        visual.mechanism_count = 0;
+    }
+    for id in visual.mechanism_count..scene.sim.units.len() {
+        match scene.sim.units[id].kind {
+            RangeUnitKind::Crawler => for side in [-1.0, 1.0] {
+                for piston in [false, true] {
+                    commands.spawn((Mesh3d(art.cube.clone()), MeshMaterial3d(art.rock.clone()),
+                        Transform::default(), CrawlerMechanism { unit: id, side, piston }));
+                }
+            },
+            RangeUnitKind::GrebenStorage => for bay in 0..2 {
+                for section in 0..5 {
+                    let material = if section == 0 { art.rock.clone() } else { art.coil.clone() };
+                    commands.spawn((Mesh3d(art.cube.clone()), MeshMaterial3d(material),
+                        Transform::default(), GrebenConnector { dock: id, bay, section }));
+                }
+            },
+            _ => {}
+        }
+    }
+    visual.mechanism_count = scene.sim.units.len();
+    for (_, arm, mut tr, mut visibility) in &mut arms {
+        let Some(unit) = scene.sim.units.get(arm.unit) else { *visibility = Visibility::Hidden; continue; };
+        let Some(frame) = visual.frame_poses.get(arm.unit) else { *visibility = Visibility::Hidden; continue; };
+        if !unit.status.alive || !unit.status.weapon { *visibility = Visibility::Hidden; continue; }
+        *visibility = Visibility::Visible;
+        let pivot = Vec3::new(70.0, 26.0, 0.0);
+        let tilt = Quat::from_rotation_z(-frame.cutter.0 * std::f32::consts::FRAC_PI_2);
+        let start = if arm.piston { Vec3::new(38.0, 37.0, arm.side * 30.0) }
+            else { Vec3::new(39.0, 30.0, arm.side * 32.0) };
+        let end = pivot + tilt * if arm.piston { Vec3::new(-7.0, 8.0, arm.side * 15.0) }
+            else { Vec3::new(-4.0, 0.0, arm.side * 15.0) };
+        *tr = link_transform(frame.pos + frame.hull * start, frame.pos + frame.hull * end - Vec3::Y * frame.cutter_depth + frame.cutter_offset,
+            if arm.piston { 3.0 } else { 6.0 });
+    }
+    for (_, socket, mut tr, mut visibility) in &mut sockets {
+        *visibility = Visibility::Hidden;
+        let Some(dock) = scene.sim.units.get(socket.dock) else { continue; };
+        if !dock.status.alive || dock.seg_gone.get(socket.bay).copied().unwrap_or(true) { continue; }
+        let Some(bays) = scene.sim.greben_crawler_bays(socket.dock) else { continue; };
+        let bay = bays[socket.bay];
+        let crawler = scene.sim.units.iter().enumerate().find_map(|(id, u)| {
+            let (assigned, point) = scene.sim.crawler_unloading_bay(id)?;
+            if assigned != socket.dock || point != bay || !u.status.alive { return None; }
+            let frame = visual.frame_poses.get(id)?;
+            let dx = frame.pos.x - bay[0] as f32;
+            let dz = frame.pos.z - bay[1] as f32;
+            let distance = (dx * dx + dz * dz).sqrt();
+            let heading = fx::angle::diff(dock.motion.drive.head, u.motion.drive.head).abs();
+            (distance < 35.0 && heading < fx::angle::FULL * 25 / 360).then_some((frame, distance))
+        });
+        let Some((frame, distance)) = crawler else { continue; };
+        let mouth = dock.world_pos([0, 14, voxel::unit::GREBEN_CRAWLER_SOCKET_Z[socket.bay]]);
+        let a = Vec3::new(mouth[0] as f32, mouth[1] as f32, mouth[2] as f32);
+        let b = frame.pos + frame.hull * Vec3::new(61.0, 28.0, 0.0);
+        let end = a.lerp(b, ((35.0 - distance) / 23.0).clamp(0.0, 1.0));
+        *visibility = Visibility::Visible;
+        *tr = if socket.section == 0 {
+            link_transform(a, end, 7.0)
+        } else {
+            let t = f32::from(socket.section) / 5.0;
+            link_transform(a.lerp(end, (t - 0.035).max(0.0)), a.lerp(end, (t + 0.035).min(1.0)), 11.0)
+        };
+    }
+}
+
+#[derive(Component)]
+pub(super) struct SkobaJet { unit: usize, nozzle: usize, core: bool }
+
+/// Reusable emissive voxel jets. They contain no physics or per-frame entity
+/// creation; all drones share one mesh and two materials.
+pub fn skoba_thrusters(
+    mut commands: Commands, scene: Res<Scene>, art: Res<Art>, mut visual: ResMut<Visual>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut shared: Local<Option<[Handle<StandardMaterial>; 2]>>,
+    mut jets: Query<(Entity, &SkobaJet, &mut Transform, &mut Visibility)>,
+) {
+    let material = shared.get_or_insert_with(|| [
+        materials.add(StandardMaterial {
+            base_color: Color::srgba(0.10, 0.52, 1.0, 0.35),
+            emissive: LinearRgba::new(0.08, 0.60, 2.4, 1.0),
+            alpha_mode: AlphaMode::Blend, unlit: true, ..default()
+        }),
+        materials.add(StandardMaterial {
+            base_color: Color::srgb(0.63, 0.92, 1.0),
+            emissive: LinearRgba::new(1.0, 3.0, 5.0, 1.0),
+            unlit: true, ..default()
+        }),
+    ]);
+    if visual.jet_generation != Some(scene.generation) || visual.jet_count > scene.sim.units.len() {
+        for (entity, _, _, _) in &mut jets { commands.entity(entity).despawn(); }
+        visual.jet_generation = Some(scene.generation);
+        visual.jet_count = 0;
+    }
+    for id in visual.jet_count..scene.sim.units.len() {
+        if scene.sim.units[id].kind != RangeUnitKind::SkobaDrone { continue; }
+        for nozzle in 0..6 {
+            for core in [false, true] {
+                commands.spawn((Mesh3d(art.cube.clone()), MeshMaterial3d(material[usize::from(core)].clone()),
+                    Transform::default(), Visibility::Hidden, bevy::light::NotShadowCaster,
+                    SkobaJet { unit: id, nozzle, core }));
+            }
+        }
+    }
+    visual.jet_count = scene.sim.units.len();
+    for (_, jet, mut transform, mut visibility) in &mut jets {
+        *visibility = Visibility::Hidden;
+        let Some(unit) = scene.sim.units.get(jet.unit) else { continue; };
+        if !unit.status.alive || !unit.status.engine { continue; }
+        let Some(previous) = visual.previous.get(jet.unit) else { continue; };
+        let current = pose(unit);
+        if (current.pos - previous.pos).length_squared() < 0.04 { continue; }
+        let Some(frame) = visual.frame_poses.get(jet.unit) else { continue; };
+        let compact = unit.body.vol.get(64, 16, 26) && !unit.body.vol.get(64, 16, 5);
+        let z = if compact { [24usize, 38] } else { [2usize, 59] }[jet.nozzle / 3];
+        let x = [18usize, 66, 110][jet.nozzle % 3];
+        if !unit.body.vol.get(x, 12, z) { continue; }
+        let at = Vec3::from(unit.world_pos([x, 12, z]).map(|v| v as f32)) + frame.pos - current.pos;
+        let flicker = ((scene.sim.tick as usize + jet.unit * 7 + jet.nozzle * 3) % 5) as f32;
+        let length = if jet.core { 3.0 + flicker * 0.25 } else { 6.0 + flicker * 0.5 };
+        let width = if jet.core { 1.0 } else { 2.6 };
+        *transform = Transform::from_translation(at - Vec3::Y * (length * 0.5))
+            .with_rotation(frame.hull).with_scale(Vec3::new(width, length, width));
+        *visibility = Visibility::Visible;
+    }
+}
+
+#[derive(Component)]
+pub(super) struct FactoryGate { factory: usize, side: f32 }
+
+fn factory_tier(kind: RangeUnitKind) -> Option<u8> {
+    match kind {
+        RangeUnitKind::KilFactoryT1 => Some(1),
+        RangeUnitKind::KilFactoryT2 => Some(2),
+        RangeUnitKind::KilFactoryT3 => Some(3),
+        RangeUnitKind::KilFactoryT4 => Some(4),
+        _ => None,
+    }
+}
+
+fn gate_open(active: bool, elapsed: f32) -> f32 {
+    if active {
+        if elapsed.is_finite() { (elapsed / 0.25).clamp(0.0, 1.0) } else { 1.0 }
+    } else if elapsed.is_finite() { (1.0 - elapsed / 0.25).clamp(0.0, 1.0) } else { 0.0 }
+}
+
+/// The gate panels are presentation only; the factory voxel body remains the
+/// authoritative collision and damage geometry.
+pub fn factory_gates(
+    mut commands: Commands,
+    scene: Res<Scene>,
+    art: Res<Art>,
+    mut visual: ResMut<Visual>,
+    mut gates: Query<(Entity, &FactoryGate, &mut Transform, &mut Visibility)>,
+) {
+    if visual.gates_generation != Some(scene.generation) || visual.gates_count > scene.sim.units.len() {
+        for (entity, _, _, _) in &mut gates { commands.entity(entity).despawn(); }
+        visual.gates_generation = Some(scene.generation);
+        visual.gates_count = 0;
+    }
+    for id in visual.gates_count..scene.sim.units.len() {
+        if factory_tier(scene.sim.units[id].kind).is_some() {
+            for side in [-1.0, 1.0] {
+                commands.spawn((Mesh3d(art.cube.clone()), MeshMaterial3d(art.rock.clone()),
+                    Transform::default(), FactoryGate { factory: id, side }));
+            }
+        }
+    }
+    visual.gates_count = scene.sim.units.len();
+    for (_, gate, mut transform, mut visibility) in &mut gates {
+        let Some(u) = scene.sim.units.get(gate.factory) else { *visibility = Visibility::Hidden; continue };
+        let Some(tier) = factory_tier(u.kind) else { *visibility = Visibility::Hidden; continue };
+        if !u.status.alive { *visibility = Visibility::Hidden; continue }
+        *visibility = Visibility::Visible;
+        let (width, height) = match tier { 1 => (80.0, 56.0), 2 => (96.0, 80.0), 3 => (144.0, 112.0), _ => (224.0, 176.0) };
+        let tps = sim_core::TICKS_PER_SECOND as f32;
+        let elapsed = scene.sim.production_exit(gate.factory)
+            .map(|(_, tick)| scene.sim.tick.saturating_sub(tick) as f32 / tps)
+            .unwrap_or(f32::INFINITY);
+        let open = gate_open(scene.sim.factory_exiting_unit(gate.factory).is_some(), elapsed);
+        let pose = visible(u, visual.previous.get(gate.factory), &scene);
+        let rotation = render::realtime::hull_rotation(pose.up, pose.yaw);
+        let local = Vec3::new(-312.0, 16.0 + height * 0.5, gate.side * (width * 0.25 + open * width * 0.5));
+        *transform = Transform::from_translation(pose.pos + rotation * local)
+            .with_rotation(rotation).with_scale(Vec3::new(8.0, height, width * 0.5));
+    }
 }
 
 fn segment_picture(frame: &sim_core::damage::Frame) -> Transform {
@@ -49,11 +274,10 @@ fn segment_picture(frame: &sim_core::damage::Frame) -> Transform {
         vector(frame.z),
     ))
     .normalize();
-    let scale = 1.0 / scalar(frame.scale);
-    let centre = Vec3::from(frame.centre.map(scalar));
-    Transform::from_translation(vector(frame.base) - rotation * (centre * scale))
-        .with_rotation(rotation)
-        .with_scale(Vec3::splat(scale))
+    // Witness meshes are already scaled to world units and centred on the
+    // attachment pivot by witness::build. Applying the frame scale and
+    // subtracting the pivot again enlarges and displaces articulated parts.
+    Transform::from_translation(vector(frame.base)).with_rotation(rotation)
 }
 
 #[derive(Default)]
@@ -65,10 +289,22 @@ struct ActorFrame {
     kind: usize,
     legs: Vec<gait::LegPose>,
     walker_segments: Vec<Transform>,
+    cutter: (f32, f32),
+    cutter_depth: f32,
+    cutter_offset: Vec3,
 }
 impl ActorFrame {
     fn transform(&self, witness: &Witness, rigs: &[Vec<LegRig>]) -> Transform {
-        if self.kind == RangeUnitKind::Walker04.index()
+        if self.kind == RangeUnitKind::Crawler.index() && witness.2 == Some(255) {
+            let (deployment, spin) = self.cutter;
+            let pivot = Vec3::new(70.0, 26.0, 0.0);
+            let rotation = Quat::from_rotation_z(-deployment * std::f32::consts::FRAC_PI_2)
+                * Quat::from_rotation_x(spin);
+            return Transform::from_translation(self.pos + self.hull * (pivot - rotation * pivot)
+                - Vec3::Y * self.cutter_depth + self.cutter_offset)
+                .with_rotation(self.hull * rotation);
+        }
+        if (self.kind == RangeUnitKind::Walker04.index() || self.kind == RangeUnitKind::Commander.index())
             && witness.2.is_some_and(|segment| segment >= 10)
         {
             if let Some(frame) = self.walker_segments.get(witness.2.expect("arm segment")) {
@@ -168,6 +404,12 @@ pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWin
     v.turret = Some(sim.turret.angle);
     v.battle_turrets = sim.battle.actors.iter().map(|a| a.turret.angle).collect();
     v.battle_heads = sim.units.iter().map(weapon_picture).collect();
+    v.previous_arms = sim.units.iter().chain(std::iter::once(&sim.gun)).map(|u| {
+        ((u.kind == RangeUnitKind::Walker04 && u.seg_frames.len() >= 30)
+            || (u.kind == RangeUnitKind::Commander && u.seg_frames.len() >= 18))
+            .then(|| std::array::from_fn(|i| segment_picture(&u.seg_frames[
+                if u.kind == RangeUnitKind::Commander { 10 + i.min(7) } else if i < 16 { 10 + i } else { 26 + i - 16 }])))
+    }).collect();
     v.gun_head = Some(weapon_picture(&sim.gun));
     // Capture resting pieces too: one may wake during the upcoming step.
     // Reuse dense origins; each parallel picture leaf merges its sorted IDs.
@@ -184,6 +426,12 @@ pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWin
         .chain((!sim.battle_mode()).then_some(&sim.gun))
         .map(pose)
         .collect();
+    v.previous_bores = sim.units.iter().enumerate().map(|(id, unit)| {
+        let p = sim.crawler_bore_position(id)?;
+        let tip = unit.world_pos(voxel::unit::CRAWLER_BORE_TIP);
+        Some(((tip[1] - p[1]).max(0) as f32,
+            Vec3::new((p[0] - tip[0]) as f32, 0.0, (p[2] - tip[2]) as f32)))
+    }).collect();
     v.previous_feet = sim
         .units
         .iter()
@@ -731,7 +979,8 @@ fn append_dirty_word(spans: &mut Vec<std::ops::Range<usize>>, word: usize) {
     spans.push(word..word + 1);
 }
 pub(super) fn weapon_picture(u: &RangeUnit) -> (Quat, Vec3) {
-    let f = u.root_frame(usize::from(u.body.turret_y));
+    let f = if u.kind == RangeUnitKind::Walker04 { u.pose }
+        else { u.root_frame(usize::from(u.body.turret_y)) };
     let vec = |v: sim_core::damage::V3| {
         Vec3::new(
             v.x.to_f64_lossy() as f32,
@@ -756,7 +1005,7 @@ pub fn animate(
     mut query: Query<(&Witness, &mut Transform)>,
 ) {
     if v.rigs.is_empty() {
-        v.rigs = [
+        let templates: [voxel::unit::UnitBody; RangeUnitKind::COUNT] = [
             voxel::unit::tank(),
             voxel::unit::strider(),
             voxel::unit::spider(),
@@ -779,8 +1028,12 @@ pub fn animate(
             voxel::unit::kil_factory(3),
             voxel::unit::kil_factory(4),
             voxel::unit::skoba(),
-        ]
-        .iter()
+            voxel::unit::commander(),
+            voxel::unit::power_plant_t1(),
+            voxel::unit::power_plant_t2(),
+            voxel::unit::power_plant_t3(),
+        ];
+        v.rigs = templates.iter()
         .map(|b| gait::rigs_of(b, 0.01, &render::model::segment_frames(b, 0.01)))
         .collect();
     }
@@ -788,12 +1041,25 @@ pub fn animate(
     let Visual {
         previous,
         previous_feet,
+        previous_bores,
         battle_heads,
+        previous_arms,
         rigs,
         frame_poses,
+        cutter_clock,
+        cutters,
+        cutter_depths,
+        cutter_offsets,
         ..
     } = &mut *v;
     frame_poses.resize_with(scene.sim.units.len(), ActorFrame::default);
+    cutters.resize(scene.sim.units.len(), (0.0, 0.0));
+    cutter_depths.resize(scene.sim.units.len(), 0.0);
+    cutter_offsets.resize(scene.sim.units.len(), Vec3::ZERO);
+    let clock = scene.sim.tick as f32 + t;
+    let dt = cutter_clock.filter(|(generation, previous)| *generation == scene.generation && clock >= *previous)
+        .map_or(0.0, |(_, previous)| (clock - previous) / sim_core::TICKS_PER_SECOND as f32);
+    *cutter_clock = Some((scene.generation, clock));
     for (i, u) in scene.sim.units.iter().enumerate() {
         let p = visible(u, previous.get(i), &scene);
         let frame = &mut frame_poses[i];
@@ -804,15 +1070,58 @@ pub fn animate(
         frame.turret = was.0.slerp(now.0, t);
         frame.turret_offset = was.1.lerp(now.1, t);
         frame.kind = u.kind.index();
+        if u.kind == RangeUnitKind::Crawler {
+            use sim_core::blast::economy::CrawlerToolMode;
+            let mode = scene.sim.crawler_tool_mode(i);
+            let (deployment, spin) = &mut cutters[i];
+            let target = if mode == Some(CrawlerToolMode::Drill) { 1.0 } else { 0.0 };
+            *deployment += (target - *deployment).clamp(-dt * 1.5, dt * 1.5);
+            if let Some(mode) = mode {
+                *spin = (*spin + dt * if mode == CrawlerToolMode::Drill { 7.0 } else { 4.5 }) % std::f32::consts::TAU;
+            }
+            frame.cutter = (*deployment, *spin);
+            let tip = u.world_pos(voxel::unit::CRAWLER_BORE_TIP);
+            let current_bore = scene.sim.crawler_bore_position(i).map(|p| (
+                (tip[1] - p[1]).max(0) as f32,
+                Vec3::new((p[0] - tip[0]) as f32, 0.0, (p[2] - tip[2]) as f32),
+            ));
+            if scene.sim.crawler_bore_cutting(i) {
+                // Terrain already reflects this tick. Follow its real front;
+                // do not cap descent to an unrelated render-time speed.
+                *deployment = 1.0;
+                frame.cutter.0 = 1.0;
+                if let Some((depth, offset)) = current_bore {
+                    let (old_depth, old_offset) = previous_bores.get(i).copied().flatten().unwrap_or((depth, offset));
+                    cutter_depths[i] = old_depth + (depth - old_depth) * t;
+                    cutter_offsets[i] = old_offset.lerp(offset, t);
+                }
+            } else {
+                let target_depth = current_bore.map_or(0.0, |b| b.0) * *deployment;
+                cutter_depths[i] += (target_depth - cutter_depths[i]).clamp(-dt * 80.0, dt * 80.0);
+                let target_offset = current_bore.map_or(Vec3::ZERO, |b| b.1) * *deployment;
+                let delta = target_offset - cutter_offsets[i];
+                cutter_offsets[i] += delta.clamp_length_max(dt * 80.0);
+            }
+            frame.cutter_depth = cutter_depths[i];
+            frame.cutter_offset = cutter_offsets[i];
+        }
         frame.walker_segments.clear();
-        if u.kind == RangeUnitKind::Walker04 {
+        if matches!(u.kind, RangeUnitKind::Walker04 | RangeUnitKind::Commander) {
             let delta = frame.turret * now.0.inverse();
             let actual_origin = pose(u).pos + now.1;
             let visible_origin = frame.pos + frame.turret_offset;
-            frame.walker_segments.extend(u.seg_frames.iter().map(|f| {
+            frame.walker_segments.extend(u.seg_frames.iter().enumerate().map(|(index, f)| {
                 let mut tr = segment_picture(f);
-                tr.translation = visible_origin + delta * (tr.translation - actual_origin);
-                tr.rotation = delta * tr.rotation;
+                if u.kind == RangeUnitKind::Walker04 && index >= 10 {
+                    tr = walker_arm_picture(u, index, frame.hull, frame.pos,
+                        previous_arms.get(i).and_then(Option::as_ref), was.0, t);
+                } else if u.kind == RangeUnitKind::Commander && (10..18).contains(&index) {
+                    tr = commander_arm_picture(u, index, frame.turret, visible_origin,
+                        previous_arms.get(i).and_then(Option::as_ref), was.0, t);
+                } else {
+                    tr.translation = visible_origin + delta * (tr.translation - actual_origin);
+                    tr.rotation = delta * tr.rotation;
+                }
                 tr
             }));
         }
@@ -874,6 +1183,62 @@ pub fn animate(
     }
 }
 
+/// Interpolate the bearing, then each joint relative to its parent. Moving
+/// endpoints linearly would shorten links or separate a bending elbow.
+fn walker_arm_picture(u: &RangeUnit, index: usize, hull: Quat, pos: Vec3,
+    old: Option<&[Transform; 20]>, old_hull: Quat, t: f32) -> Transform {
+    let arm = if index >= 26 { index - 26 } else { (index - 10) / 4 };
+    let mount = segment_picture(&u.seg_frames[26 + arm]);
+    let shoulder = segment_picture(&u.seg_frames[10 + arm * 4]);
+    let now_hull = weapon_picture(u).0;
+    let relative = now_hull.inverse() * mount.rotation;
+    let relative = old.map_or(relative, |o| (old_hull.inverse() * o[16 + arm].rotation).slerp(relative, t));
+    let rotation = hull * relative;
+    let centre = pos + hull * now_hull.inverse() * (mount.translation - pose(u).pos);
+    if index >= 26 { return Transform::from_translation(centre).with_rotation(rotation); }
+    let relative = mount.rotation.inverse() * shoulder.rotation;
+    let relative = old.map_or(relative, |o| (o[16 + arm].rotation.inverse() * o[arm * 4].rotation).slerp(relative, t));
+    let arm_rotation = rotation * relative;
+    let at = centre + rotation * mount.rotation.inverse() * (shoulder.translation - mount.translation);
+    let first = 10 + arm * 4;
+    let mut drawn = Transform::from_translation(at).with_rotation(arm_rotation);
+    for child in first + 1..=index {
+        let parent = segment_picture(&u.seg_frames[child - 1]);
+        let current = segment_picture(&u.seg_frames[child]);
+        let relative = parent.rotation.inverse() * current.rotation;
+        let relative = old.map_or(relative, |o| {
+            (o[child - 11].rotation.inverse() * o[child - 10].rotation).slerp(relative, t)
+        });
+        let local = parent.rotation.inverse() * (current.translation - parent.translation);
+        drawn = Transform::from_translation(drawn.translation + drawn.rotation * local)
+            .with_rotation(drawn.rotation * relative);
+    }
+    drawn
+}
+
+/// Commander shoulders ride the crown, while elbow and wrist interpolate in
+/// their parent's space. Never interpolate joint endpoints independently.
+fn commander_arm_picture(u: &RangeUnit, index: usize, crown: Quat, origin: Vec3,
+    old: Option<&[Transform; 20]>, old_crown: Quat, t: f32) -> Transform {
+    let first = 10 + (index - 10) / 4 * 4;
+    let current = segment_picture(&u.seg_frames[first]);
+    let now = weapon_picture(u);
+    let relative = now.0.inverse() * current.rotation;
+    let relative = old.map_or(relative, |o| (old_crown.inverse() * o[first - 10].rotation).slerp(relative, t));
+    let at = origin + crown * now.0.inverse() * (current.translation - (pose(u).pos + now.1));
+    let mut drawn = Transform::from_translation(at).with_rotation(crown * relative);
+    for child in first + 1..=index {
+        let parent = segment_picture(&u.seg_frames[child - 1]);
+        let current = segment_picture(&u.seg_frames[child]);
+        let relative = parent.rotation.inverse() * current.rotation;
+        let relative = old.map_or(relative, |o| (o[child - 11].rotation.inverse() * o[child - 10].rotation).slerp(relative, t));
+        let local = parent.rotation.inverse() * (current.translation - parent.translation);
+        drawn = Transform::from_translation(drawn.translation + drawn.rotation * local)
+            .with_rotation(drawn.rotation * relative);
+    }
+    drawn
+}
+
 /// Player links use the same foot interpolation as target walkers.
 pub fn gun_segments(scene: &Scene, v: &Visual, p: Pose) -> Vec<Transform> {
     let u = &scene.sim.gun;
@@ -903,6 +1268,20 @@ pub fn gun_segments(scene: &Scene, v: &Visual, p: Pose) -> Vec<Transform> {
             Transform::from_translation(p.pos + offset + rot * f.pos).with_rotation(rot * f.rot)
         })
         .collect();
+    if u.kind == RangeUnitKind::Walker04 {
+        let old = v.previous_arms.get(scene.sim.units.len()).and_then(Option::as_ref);
+        let old_hull = v.gun_head.map_or(weapon, |p| p.0);
+        for index in 10..out.len() {
+            out[index] = walker_arm_picture(u, index, root, p.pos, old, old_hull, fraction(scene));
+        }
+    } else if u.kind == RangeUnitKind::Commander {
+        let old = v.previous_arms.get(scene.sim.units.len()).and_then(Option::as_ref);
+        let old_crown = v.gun_head.map_or(weapon, |p| p.0);
+        for index in 10..18.min(out.len()) {
+            out[index] = commander_arm_picture(u, index, weapon, p.pos + weapon_offset,
+                old, old_crown, fraction(scene));
+        }
+    }
     for (i, rig) in rigs.iter().enumerate() {
         let Some(now) = u
             .motion

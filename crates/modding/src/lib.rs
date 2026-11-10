@@ -350,3 +350,5 @@ mod tests {
 pub mod range_skirmish;
 
 pub mod unit_armour;
+pub mod walker_rig;
+pub mod commander_rig;

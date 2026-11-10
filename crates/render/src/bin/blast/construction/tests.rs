@@ -1,6 +1,36 @@
 use super::*;
 use modding::range::{RangeBlock, RangeLayout, RangeUnitDef};
 
+#[test]
+fn greben_preview_distinguishes_headroom_from_real_terrain() {
+    let at = [900, 16, 700];
+    for height in [192, 512] {
+        let mut l = RangeLayout::from_ron(include_str!("../../../../../../data/fixture-drive.ron")).unwrap();
+        l.size = [1600, height, 1600]; l.battle = true; l.course = None;
+        l.ready = None; l.shields.clear(); l.clear_min = [1, 1]; l.clear_max = [1599, 1599];
+        l.blocks = vec![RangeBlock { min: [0; 3], max: [1600, height as i32, 1600], material: 0 },
+            RangeBlock { min: [0; 3], max: [1600, 16, 1600], material: 1 }];
+        l.units = vec![RangeUnitDef { kind: RangeUnitKind::Commander, allied: true,
+            at: [250, 16, 700], weapon: None }];
+        l.economy = Some(modding::range_economy::RangeEconomy::stock());
+        let mut sim = BlastRange::with_layout(config(false, false), l).unwrap();
+        let issue = placement_issue(&sim, RangeUnitKind::GrebenStorage, at, 0, true);
+        if height == 192 {
+            assert!(issue.unwrap().contains("высоты карты"));
+        } else {
+            assert!(issue.is_none(), "clear level pad should have a green preview: {issue:?}");
+            let (lo, _) = sim_core::blast::placement::Validator::default()
+                .runtime_bounds(RangeUnitKind::GrebenStorage, at, 0);
+            sim.world.queue_edit(voxel::Edit::put(lo[0] as u32, lo[1] as u32, lo[2] as u32, 2));
+            sim.world.flush();
+            assert!(placement_issue(&sim, RangeUnitKind::GrebenStorage, at, 0, true)
+                .unwrap().contains("грунтом"));
+            assert!(placement_issue(&sim, RangeUnitKind::GrebenStorage, [40, 16, 40], 0, true)
+                .unwrap().contains("край карты"));
+        }
+    }
+}
+
 fn fixture() -> (BlastRange, Workshop) {
     let mut layout = modding::laboratory::Definition::stock().layout;
     layout.battle = true;
@@ -70,6 +100,72 @@ fn select(app: &mut App, id: usize) {
     app.world_mut().resource_mut::<Workshop>().selected_units = vec![id];
     app.update();
 }
+
+#[test]
+fn greben_switches_between_buildings_and_paid_unit_queue() {
+    let mut app=app();
+    select(&mut app,0);
+    assert_eq!(app.world().resource::<Catalog>().context,Context::Engineer(0));
+    click(&mut app,Action::GrebenMode);app.update();
+    assert_eq!(app.world().resource::<Catalog>().context,Context::Factory(0));
+    click(&mut app,Action::Choose(0));
+    assert_eq!(app.world().resource::<Scene>().sim.production_queue(0),Some(vec![RangeUnitKind::SkobaDrone]));
+    click(&mut app,Action::GrebenMode);app.update();
+    assert_eq!(app.world().resource::<Catalog>().context,Context::Engineer(0));
+    assert_eq!(queue_actor(Context::Engineer(0),&app.world().resource::<Scene>().sim),Some(0));
+    click(&mut app,Action::Cancel);
+    assert!(app.world().resource::<Scene>().sim.production_queue(0).is_none());
+    select(&mut app,1);
+    assert_eq!(app.world().resource::<Catalog>().context,Context::Factory(1));
+}
+
+#[test]
+fn blueprint_catalogue_queue_cancel_and_preview_fixture() {
+    let mut layout=RangeLayout::from_ron(include_str!("../../../../../../data/fixture-drive.ron")).unwrap();
+    layout.size=[1600,384,1600];layout.battle=true;layout.idle_enemies=true;layout.course=None;layout.ready=None;layout.shields.clear();layout.unit_yaws.clear();
+    layout.gun=[250,24,400];layout.target=[950,16,850];layout.clear_min=[1,1];layout.clear_max=[1599,1599];
+    layout.blocks=vec![RangeBlock{min:[0;3],max:[1600,384,1600],material:0},RangeBlock{min:[0;3],max:[1600,16,1600],material:1}];
+    layout.units=vec![RangeUnitDef{kind:RangeUnitKind::Commander,allied:true,at:[250,16,700],weapon:None},RangeUnitDef{kind:RangeUnitKind::Base,allied:true,at:[250,16,1050],weapon:None},RangeUnitDef{kind:RangeUnitKind::Tank,allied:false,at:[1450,16,1400],weapon:None}];
+    layout.economy=Some(modding::range_economy::RangeEconomy::stock());
+    let mut sim=BlastRange::with_layout(config(false,false),layout.clone()).unwrap();sim.start_battle().unwrap();sim.set_physics_workers(1);sim.set_navigation_workers(1);
+    let mut edit=Workshop::new(Some(layout),false);edit.controlled=Some(0);edit.selected_units=vec![0];
+    let first=place_selected_building(&mut sim,&edit,RangeUnitKind::TurretT1,[500,16,700],false).unwrap();
+    place_selected_building(&mut sim,&edit,RangeUnitKind::PowerPlantT1,[800,16,700],true).unwrap();
+    let last=place_selected_building(&mut sim,&edit,RangeUnitKind::KilFactoryT1,[1100,16,1100],true).unwrap();
+    assert_eq!(sim.order_queue(0).len(),3);assert_eq!(sim.battle.actors[0].order,sim_core::blast::battle::Order::Build(first));
+    let tank=sim.mining().unwrap().tank(0).unwrap();sim.matter.economy.ledger.generate(tank,2_000_000);
+    for _ in 0..24 {sim.step();}
+    let bytes=sim.snapshot();assert_eq!(BlastRange::restore(sim.config,&bytes).unwrap().state_hash(),sim.state_hash());
+    let fixture_dir=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out/build-plans-539");
+    std::fs::create_dir_all(&fixture_dir).unwrap();
+    std::fs::write(fixture_dir.join("preview.bin"),bytes).unwrap();
+    let mut app=panel::hud::tests::app_with_scene(sim,edit);
+    app.init_resource::<Catalog>().insert_resource(laboratory::Laboratory::new(false)).init_resource::<pilot::Pilot>()
+        .init_resource::<ButtonInput<MouseButton>>().add_systems(Update,input.after(panel::actions));
+    app.world_mut().resource_mut::<panel::Panel>().sandbox=false;
+    select(&mut app,0);click(&mut app,Action::Cancel);
+    assert!(app.world().resource::<Scene>().sim.construction_cancelled(last));
+    assert_eq!(app.world().resource::<Scene>().sim.order_queue(0).len(),2);
+}
+#[test]
+fn explicit_group_assigns_all_selected_drones_and_warehouse_resumes_automatic_dispatch() {
+    let (mut sim, mut edit) = fixture();
+    let drones: Vec<_> = sim.units.iter().enumerate().filter(|(id, u)|
+        sim.allied(*id) && u.kind == RangeUnitKind::SkobaDrone).map(|(id, _)| id).collect();
+    assert!(drones.len() >= 2);
+    edit.controlled = Some(drones[0]);
+    edit.selected_units = drones.clone();
+    let site = sim.create_construction_site(RangeUnitKind::TurretT1, true, [1800, 16, 1800]).unwrap();
+    assert_eq!(assign_selected_builders_queued(&mut sim, &edit, site,false), Some(drones.len()));
+    assert_eq!(sim.construction_sites()[site].quota, 0);
+    assert!(drones.iter().all(|&id| sim.battle.actors[id].order == sim_core::blast::battle::Order::Build(site)));
+    edit.controlled = Some(0);
+    edit.selected_units = vec![0];
+    let auto = sim.create_construction_site(RangeUnitKind::TurretT1, true, [2100, 16, 1800]).unwrap();
+    assert_eq!(assign_selected_builders_queued(&mut sim, &edit, auto,false), Some(1));
+    assert!(sim.construction_sites()[auto].quota > 0);
+}
+
 #[test]
 fn catalogue_modes_gate_engineer_factory_enemy_and_sandbox() {
     let mut app = app();
@@ -77,6 +173,7 @@ fn catalogue_modes_gate_engineer_factory_enemy_and_sandbox() {
         (3, Context::Hidden),
         (4, Context::Hidden),
         (2, Context::Engineer(2)),
+        (0, Context::Engineer(0)),
         (1, Context::Factory(1)),
     ] {
         select(&mut app, id);
@@ -85,6 +182,13 @@ fn catalogue_modes_gate_engineer_factory_enemy_and_sandbox() {
     app.world_mut().resource_mut::<panel::Panel>().sandbox = true;
     select(&mut app, 4);
     assert_eq!(app.world().resource::<Catalog>().context, Context::Sandbox);
+    select(&mut app, 2);
+    assert_eq!(app.world().resource::<Catalog>().context, Context::Engineer(2));
+    select(&mut app, 0);
+    assert_eq!(app.world().resource::<Catalog>().context, Context::Engineer(0));
+    select(&mut app, 1);
+    assert_eq!(app.world().resource::<Catalog>().context, Context::Factory(1));
+    select(&mut app, 4);
     assert_eq!(
         choices(
             app.world().resource::<Catalog>(),
@@ -96,6 +200,52 @@ fn catalogue_modes_gate_engineer_factory_enemy_and_sandbox() {
     app.world_mut().resource_mut::<pilot::Pilot>().actor = Some(3);
     app.update();
     assert_eq!(app.world().resource::<Catalog>().context, Context::Hidden);
+}
+#[test]
+fn free_placement_in_battle_can_be_toggled_without_changing_battle_mode() {
+    let mut layout = modding::laboratory::Definition::stock().layout;
+    layout.battle = true;
+    layout.units = [(true, [160, 16, 160]), (false, [480, 16, 480])]
+        .map(|(allied, at)| RangeUnitDef { kind: RangeUnitKind::Tank, allied, at, weapon: None })
+        .to_vec();
+    let mut sim = BlastRange::with_layout(config(false, false), layout.clone()).unwrap();
+    sim.set_physics_workers(1);
+    sim.set_navigation_workers(1);
+    sim.start_battle().unwrap();
+    let mut app = panel::hud::tests::app_with_scene(sim, Workshop::new(Some(layout), false));
+    app.init_resource::<Catalog>()
+        .insert_resource(laboratory::Laboratory::new(false))
+        .init_resource::<pilot::Pilot>()
+        .init_resource::<ButtonInput<MouseButton>>()
+        .add_systems(Update, input.after(panel::actions));
+    app.world_mut().resource_mut::<panel::Panel>().sandbox = false;
+    select(&mut app, 0);
+    assert_eq!(app.world().resource::<Catalog>().context, Context::Hidden);
+    let generation = app.world().resource::<Scene>().generation;
+    let e = app.world_mut().spawn((panel::Action::FreePlacement, Interaction::Pressed)).id();
+    app.update();
+    app.world_mut().despawn(e);
+    assert_eq!(app.world().resource::<Catalog>().context, Context::Sandbox);
+    assert_eq!(app.world().resource::<Scene>().generation, generation);
+    assert!(!app.world().resource::<panel::Panel>().sandbox);
+    assert!(!editing_allowed(&app.world().resource::<Scene>().sim, Some(app.world().resource::<panel::Panel>())));
+    assert!(choices(app.world().resource::<Catalog>(), &app.world().resource::<Scene>().sim)
+        .contains(&RangeUnitKind::Tank));
+    {
+        let mut scene = app.world_mut().resource_mut::<Scene>();
+        let count = scene.sim.units.len();
+        let tick = scene.sim.tick;
+        scene.sim.place_sandbox_unit(RangeUnitKind::Tank, true, [320, 16, 320], 0).unwrap();
+        assert_eq!(scene.sim.units.len(), count + 1);
+        assert_eq!(scene.sim.tick, tick);
+    }
+    select(&mut app, 1);
+    assert_eq!(app.world().resource::<Catalog>().context, Context::Sandbox);
+    let e = app.world_mut().spawn((panel::Action::FreePlacement, Interaction::Pressed)).id();
+    app.update();
+    app.world_mut().despawn(e);
+    assert_eq!(app.world().resource::<Catalog>().context, Context::Hidden);
+    assert_eq!(app.world().resource::<Scene>().generation, generation);
 }
 #[test]
 fn all_tiers_filter_real_recipes_and_factory_clicks_queue_and_refund() {
@@ -275,7 +425,7 @@ fn all_stock_scenarios_offer_only_their_live_allied_builders_recipes() {
             let u = &sim.units[actor];
             if !sim.allied(actor) || !u.status.alive || sim.unit_under_construction(actor) {
                 assert_eq!(actual, Context::Hidden, "{id}/{actor}");
-            } else if u.kind == RangeUnitKind::SkobaDrone {
+            } else if matches!(u.kind, RangeUnitKind::SkobaDrone | RangeUnitKind::Commander | RangeUnitKind::GrebenStorage) {
                 assert_eq!(actual, Context::Engineer(actor), "{id}/{actor}");
             } else {
                 let recipes = products(&sim, actor);
@@ -297,6 +447,7 @@ fn all_stock_scenarios_offer_only_their_live_allied_builders_recipes() {
             }
         }
         panel.sandbox = true;
+        edit.controlled = None;
         assert_eq!(
             context(&sim, &panel, &edit),
             Context::Sandbox,
@@ -323,6 +474,11 @@ fn catalogue_refresh_tracks_recipes_costs_upgrade_controls_and_hidden_modes() {
             .icons
             .insert(kind.index(), Handle::default());
     }
+    let queue_row = app.world_mut().spawn((QueueWidget, QueueRow, Node::default())).id();
+    let queue_card = app.world_mut().spawn((QueueWidget, QueueCard(0), Node::default(), BackgroundColor(theme::BUTTON), BorderColor::all(theme::FRAME))).id();
+    let queue_pip = app.world_mut().spawn((QueueWidget, QueuePip(0, 0), Node::default(), BackgroundColor(theme::FRAME))).id();
+    let queue_number = app.world_mut().spawn((QueueText(Some(0)), Text::new(""))).id();
+    let queue_header = app.world_mut().spawn((QueueText(None), Text::new(""))).id();
     let root = app.world_mut().spawn((Root, Node::default())).id();
     let deck = app
         .world_mut()
@@ -334,7 +490,7 @@ fn catalogue_refresh_tracks_recipes_costs_upgrade_controls_and_hidden_modes() {
         .id();
     let upgrade = app
         .world_mut()
-        .spawn((SandboxControl(false), Node::default()))
+        .spawn((SandboxControl(1), Node::default()))
         .id();
     let caption = app
         .world_mut()
@@ -368,7 +524,14 @@ fn catalogue_refresh_tracks_recipes_costs_upgrade_controls_and_hidden_modes() {
         Display::Flex
     );
     assert!(app.world().get::<Text>(caption).unwrap().0.contains("мат."));
+    assert_eq!(app.world().get::<Node>(queue_row).unwrap().display, Display::Flex);
+    assert_eq!(app.world().get::<Node>(queue_card).unwrap().display, Display::None);
+    assert!(app.world().get::<Text>(queue_header).unwrap().0.contains("пусто"));
     click(&mut app, Action::Choose(0));
+    assert_eq!(app.world().get::<Node>(queue_card).unwrap().display, Display::Flex);
+    assert_eq!(app.world().get::<Text>(queue_number).unwrap().0, "1");
+    assert_eq!(app.world().get::<Node>(queue_pip).unwrap().display, Display::Flex);
+    assert!(app.world().get::<Text>(queue_header).unwrap().0.contains("1 / 1"));
     assert!(app
         .world()
         .get::<Text>(hint)
@@ -380,7 +543,7 @@ fn catalogue_refresh_tracks_recipes_costs_upgrade_controls_and_hidden_modes() {
         .get::<Text>(heading)
         .unwrap()
         .0
-        .contains("оплачено 0%"));
+        .contains("заказов: 1"));
     for _ in 0..3 {
         assert!(app.world_mut().resource_mut::<Scene>().sim.upgrade_kil(1));
     }
@@ -390,17 +553,18 @@ fn catalogue_refresh_tracks_recipes_costs_upgrade_controls_and_hidden_modes() {
         Display::None
     );
     select(&mut app, 0);
+    assert_eq!(app.world().get::<Node>(queue_row).unwrap().display, Display::None);
     assert_eq!(
         app.world().get::<Node>(upgrade).unwrap().display,
         Display::None,
         "storage cannot upgrade like a Kil"
     );
-    assert!(app
-        .world()
-        .get::<Text>(caption)
-        .unwrap()
-        .0
-        .contains("Скоба"));
+    let first_building = choices(
+        app.world().resource::<Catalog>(),
+        &app.world().resource::<Scene>().sim,
+    )[0];
+    assert!(app.world().get::<Text>(caption).unwrap().0.contains(name(first_building)),
+        "Greben's engineer catalogue must show its selected building");
     select(&mut app, 2);
     assert!(
         app.world().get::<Text>(caption).unwrap().0.contains("мат."),

@@ -1,0 +1,17 @@
+// Captured defaults for pre-balance authored layouts and snapshots.
+(
+    initial_matter: 50000000,
+    commander_matter_per_second: 172700,
+    print_per_second: 863500,
+    repair_per_second: 502400,
+    print_power: 1000,
+    repair_power: 0,
+    drone_power: 0,
+    drone_batch: 4082000,
+    drone_service_ticks: 8,
+    crawler_unload_ticks: 40,
+    power_link_reach: 1000,
+    generation: (600, 2000, 1000, 2000, 4000),
+    factory_power: (0, 0, 0, 0),
+    unique_base: false, timed_upgrades: false,
+)

@@ -1,0 +1,15 @@
+// Heavy biped: slow, long steps and four independently traversing arm mounts.
+(
+    stride_cm: 750,
+    duty_pct: 60,
+    offset_pct: (0, 50, 0, 50),
+    lift_cm: 80,
+    turn_step_degrees: 32,
+    turn_deg_s: 45,
+    arm_turn_deg_s: 60,
+    arm_pitch_limit_degrees: 35,
+    // Visible elbow flex. Near/low targets fold the arm; high targets open it.
+    arm_elbow_rest_degrees: 55,
+    arm_elbow_swing_degrees: 20,
+    arm_fire_error_units: 1,
+)

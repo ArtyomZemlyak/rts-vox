@@ -134,7 +134,8 @@ mod tests {
         let mut m = motion(RangeUnitKind::Tank, &body, vec![[300, 180], [300, 460]]);
         m.pos[0] = Fx::from_int(280);
         m.drive.vel = Fx::from_int(20);
-        let neighbour = Obstacle {
+        let neighbour = Obstacle { height: Fx::ZERO,
+            moving: false,
             pos: [Fx::from_int(245), Fx::from_int(16), Fx::from_int(230)],
             head: 0,
             half: [Fx::from_int(8); 2],
@@ -281,7 +282,8 @@ mod tests {
         assert!(m
             .moving_steering(&w, &body, &[], &debris, 0, Fx::ONE)
             .is_some());
-        let parked = Obstacle {
+        let parked = Obstacle { height: Fx::ZERO,
+            moving: false,
             pos: [Fx::from_int(300), Fx::from_int(16), Fx::from_int(210)],
             head: 0,
             half: [Fx::from_int(8); 2],

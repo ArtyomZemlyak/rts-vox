@@ -297,7 +297,10 @@ fn catalog() {
         let cost = sim
             .production_cost(kind)
             .expect("catalog enables every product");
-        assert_eq!(cost, cells * density, "implemented cell-count price");
+        let grade=RangeEconomy::stock().kind(kind).unwrap().body_density;
+        let expected: u64=std::iter::once(&u.body).chain(u.body.segments.iter().map(|s| &s.body))
+            .map(|b| u64::from(b.solid_count()) * (u64::from(grade)*u64::from(b.mm).pow(3)).div_ceil(denominator)).sum();
+        assert_eq!(cost, expected, "implemented physical-volume price");
         println!(
             "{kind:?},{},{cells},{cost},{},{denominator}",
             u.body.mm,

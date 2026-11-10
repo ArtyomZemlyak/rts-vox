@@ -94,7 +94,7 @@ fn build(unit: &Snapshot, pristine: &voxel::unit::UnitBody, skins: &SkinBindings
                         cell.y as u8,
                         cell.z as u8,
                     ]);
-                    let owner = if let Some(seg) = segment {
+                    let owner = if let Some(seg) = segment.filter(|&seg| seg != 255) {
                         local_cell.and_then(|cell| skins.owner(pristine, seg, cell))
                     } else {
                         local_cell
@@ -111,7 +111,7 @@ fn build(unit: &Snapshot, pristine: &voxel::unit::UnitBody, skins: &SkinBindings
                             severity = (work as f32 / cost as f32).clamp(0.0, 1.0);
                         }
                     }
-                    if let (Some(seg), Some(cell)) = (segment, local_cell) {
+                    if let (Some(seg), Some(cell)) = (segment.filter(|&seg| seg != 255), local_cell) {
                         let work = unit
                             .segment_dents
                             .get(&(seg as u8, cell))
@@ -185,8 +185,26 @@ fn build(unit: &Snapshot, pristine: &voxel::unit::UnitBody, skins: &SkinBindings
             });
         }
     };
+    // The cutter remains authoritative voxels of the hull for damage and
+    // mining, but gets its own picture so it can pivot and spin.
+    let mut shell = None;
+    let mut cutter = None;
+    if unit.revision.kind == RangeUnitKind::Crawler {
+        let mut hull = unit.body.clone();
+        let mut head = voxel::unit::UnitBody::new_scaled(unit.body.vol.nx, unit.body.vol.ny, unit.body.vol.nz, 8, unit.body.mm);
+        for x in 150..174 { for y in 0..usize::from(unit.body.vol.ny) { for z in 0..usize::from(unit.body.vol.nz) {
+            if unit.body.vol.get(x, y, z) && unit.body.part_at(x, y, z) == voxel::unit::Part::Weapon {
+                head.set(x, y, z, voxel::unit::Part::Weapon);
+                head.set_finish(x, y, z, unit.body.finish_at(x, y, z));
+                hull.remove(x, y, z);
+            }
+        }}}
+        shell = Some(hull);
+        cutter = Some(head);
+    }
+    let root = shell.as_ref().unwrap_or(&unit.body);
     draw(
-        &unit.body,
+        root,
         centre.to_array(),
         Vec3::ZERO,
         Quat::IDENTITY,
@@ -195,7 +213,7 @@ fn build(unit: &Snapshot, pristine: &voxel::unit::UnitBody, skins: &SkinBindings
         false,
     );
     draw(
-        &unit.body,
+        root,
         centre.to_array(),
         Vec3::ZERO,
         Quat::IDENTITY,
@@ -203,6 +221,9 @@ fn build(unit: &Snapshot, pristine: &voxel::unit::UnitBody, skins: &SkinBindings
         (unit.body.turret_y as usize, usize::MAX),
         true,
     );
+    if let Some(head) = &cutter {
+        draw(head, centre.to_array(), Vec3::ZERO, Quat::IDENTITY, Some(255), (0, usize::MAX), false);
+    }
     for (seg, (segment, frame)) in unit
         .body
         .segments
@@ -368,6 +389,10 @@ pub(super) fn update(
             RangeUnitKind::KilFactoryT3 => 19,
             RangeUnitKind::KilFactoryT4 => 20,
             RangeUnitKind::SkobaDrone => 21,
+            RangeUnitKind::Commander => 22,
+            RangeUnitKind::PowerPlantT1 => 23,
+            RangeUnitKind::PowerPlantT2 => 24,
+            RangeUnitKind::PowerPlantT3 => 25,
         };
         let pristine = art.pristine.clone();
         let skins = art.skins.clone();
@@ -407,6 +432,23 @@ mod tests {
             },
         );
         view.mesh(sim, 1, id).unwrap()
+    }
+    #[test]
+    fn crawler_cutter_is_a_separate_damage_aware_picture() {
+        let sim = single(RangeUnitKind::Crawler);
+        let pristine = sim.units[0].body.clone();
+        let skins = SkinBindings::new(&pristine);
+        let mut snap = snapshot(&sim, 0);
+        let clean = build(&snap, &pristine, &skins);
+        assert!(clean.iter().any(|part| part.segment == Some(255)));
+        assert!(clean.iter().any(|part| part.segment.is_none()));
+        assert!(snap.body.remove(170, 30, 40));
+        snap.revision.damage += 1;
+        let damaged = build(&snap, &pristine, &skins);
+        assert!(damaged.iter().any(|part| part.segment == Some(255)));
+        let before: Vec<_> = clean.iter().filter(|part| part.segment == Some(255)).map(|p| p.mesh.attribute(Mesh::ATTRIBUTE_POSITION)).collect();
+        let after: Vec<_> = damaged.iter().filter(|part| part.segment == Some(255)).map(|p| p.mesh.attribute(Mesh::ATTRIBUTE_POSITION)).collect();
+        assert_ne!(before, after);
     }
     #[test]
     fn destruction_chars_every_root_and_segment_without_erasing_geometry() {

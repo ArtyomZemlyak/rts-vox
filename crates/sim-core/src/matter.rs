@@ -1,8 +1,8 @@
 //! Материя: контейнеры, переводы и закрытый перечень стоков.
 //!
 //! **Главное правило** (`docs/07-economy.md`): материя ни в один момент
-//! не существует вне контейнера. Любое начисление — **перевод между
-//! двумя контейнерами**, а не создание. Земля тоже контейнер.
+//! не существует вне контейнера. Перемещение — перевод; выявление породы
+//! и фабрикатор командира — явные входы, записанные в общий баланс.
 //!
 //! Без этого правила инвариант сохранения проверяет только то, что стоки
 //! перечислены, а источники остаются кодом, которому тест верит на слово.
@@ -87,6 +87,8 @@ pub enum Kind {
     Body,
     /// Combustible contents, separate from the body's steel geometry.
     Fuel,
+    /// Abstract underground connection; its material remains accounted for.
+    Pipeline,
 }
 
 impl Kind {
@@ -101,6 +103,7 @@ impl Kind {
             Kind::Depot => 3,
             Kind::Body => 4,
             Kind::Fuel => 5,
+            Kind::Pipeline => 6,
         }
     }
 
@@ -114,6 +117,7 @@ impl Kind {
             3 => Some(Kind::Depot),
             4 => Some(Kind::Body),
             5 => Some(Kind::Fuel),
+            6 => Some(Kind::Pipeline),
             _ => None,
         }
     }
@@ -131,7 +135,7 @@ pub struct Container {
 /// Учёт материи: контейнеры плюс счётчики стоков.
 ///
 /// Инвариант, ради которого всё это существует:
-/// **начальная сумма == сумма в контейнерах + сумма по стокам**.
+/// **начальный запас + учтённые входы == контейнеры + стоки**.
 pub struct Ledger {
     containers: Vec<Container>,
     /// Списано по каждому стоку. Длина — из самого перечня, а не
@@ -211,6 +215,18 @@ impl Ledger {
         self.initial += n;
         self.containers[id as usize].held += n;
         n
+    }
+
+    /// Explicit production source (e.g. a commander's fabricator). Unlike
+    /// terrain revelation this is newly generated matter, capped by the
+    /// destination, and included in the ledger's total input for saves.
+    pub fn generate(&mut self, id: ContainerId, n: Amount) -> Amount {
+        let Some(c) = self.containers.get_mut(id as usize) else { return 0; };
+        if !c.alive { return 0; }
+        let produced = n.min(c.cap.saturating_sub(c.held)).min(Amount::MAX - self.initial);
+        c.held += produced;
+        self.initial += produced;
+        produced
     }
 
     /// Освободить слот разрушенного и пустого контейнера.
@@ -496,6 +512,20 @@ pub fn resource_of(voxels: Amount, density: u32) -> Amount {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn generated_matter_respects_capacity_and_survives_snapshot() {
+        let mut ledger = Ledger::new();
+        let tank = ledger.create(Kind::Hauler, 0, 10);
+        assert_eq!(ledger.generate(tank, 7), 7);
+        assert_eq!(ledger.generate(tank, 7), 3);
+        assert_eq!(ledger.generate(tank, 1), 0);
+        assert!(ledger.balanced());
+        let (containers, sinks, input, head, free) = ledger.snapshot();
+        let restored = Ledger::from_snapshot(containers, sinks, input, head, free).unwrap();
+        assert_eq!(restored.held(tank), 10);
+        assert!(restored.balanced());
+    }
+
     #[test]
     fn releasing_a_slot_twice_cannot_reuse_a_live_container() {
         let mut l = Ledger::new();

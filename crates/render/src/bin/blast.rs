@@ -38,6 +38,8 @@ mod fragments;
 mod frontend;
 #[path = "blast/construction.rs"]
 mod construction;
+#[path = "blast/economy_display.rs"]
+mod economy_display;
 #[path = "blast/frame_limit.rs"]
 mod frame_limit;
 #[path = "blast/gun_art.rs"]
@@ -418,6 +420,7 @@ fn main() {
     let mut battle_weapon = None;
     let mut battle_eight = false;
     let mut world_battle = false;
+    let mut commander_battle = false;
     let mut ai_vs_ai = false;
     let mut skirmish = None;
     let mut hud_drawer = 0;
@@ -547,6 +550,7 @@ fn main() {
             }
             "--battle" => battle_preset = true,
             "--world-battle" => world_battle = true,
+            "--commander-battle" => commander_battle = true,
             "--ai-vs-ai" => ai_vs_ai = true,
             "--battle-weapon" => {
                 i += 1;
@@ -566,8 +570,8 @@ fn main() {
                 i += 1;
                 camera_zoom = args[i].parse::<f32>().expect("camera zoom factor");
                 assert!(
-                    camera_zoom.is_finite() && (0.3..=32.0).contains(&camera_zoom),
-                    "--zoom 0.3..=32"
+                    camera_zoom.is_finite() && (0.0001..=32.0).contains(&camera_zoom),
+                    "--zoom 0.0001..=32"
                 );
             }
             "--hud-drawer" => {
@@ -820,6 +824,18 @@ fn main() {
         anni = false;
         view = 1;
     }
+    if commander_battle {
+        battle_briefing = workshop
+            .commander_battle(config(false, false))
+            .expect("commander battle needs a sufficiently large range");
+        workshop.pending = None;
+        workshop.editing = edit;
+        battle_preset = true;
+        drive = true;
+        energy = false;
+        anni = false;
+        view = 1;
+    }
     if let Some(id) = skirmish {
         battle_briefing = workshop
             .skirmish(id, config(false, false))
@@ -842,7 +858,9 @@ fn main() {
         .and_then(|id| modding::range_skirmish::stock(id as usize).ok())
         .and_then(|s| s.mission)
         .map(panel::MissionRun::new);
-    hud.battle_name = if world_battle {
+    hud.battle_name = if commander_battle {
+        if ai_vs_ai { "Командиры · ИИ × ИИ".into() } else { "Бой командиров".into() }
+    } else if world_battle {
         if ai_vs_ai {
             "Война за базы · ИИ × ИИ".into()
         } else {
@@ -1142,6 +1160,7 @@ fn main() {
         .insert_resource(hud)
         .insert_resource(frontend::Menu::new(start_menu))
         .init_resource::<construction::Catalog>()
+        .init_resource::<construction::plans::Visuals>()
         .insert_resource(laboratory::Laboratory::new(start_laboratory))
         .insert_resource(knobs::Overrides::new(settings, stock_tuning))
         .insert_resource(pilot::Pilot::requested(view == 7))
@@ -1196,6 +1215,9 @@ fn main() {
                     profile::stamp,
                     (
                         moving::animate,
+                        moving::factory_gates,
+                        moving::crawler_mechanisms,
+                        moving::skoba_thrusters,
                         laboratory::section_clip_units,
                         laboratory::section_unit_caps,
                     )
@@ -1229,7 +1251,7 @@ fn main() {
                     surround::update,
                     laboratory::first_person_draw,
                     laboratory::collectors_draw,
-                    workbench::ghost::update,
+                    (workbench::ghost::update,construction::plans::update).chain(),
                     (workbench::overlay, strategic_icons::update).chain(),
                     (
                         ui_snapshot::publish,
@@ -1641,14 +1663,18 @@ fn setup(
             SkinBindings::new(&voxel::unit::crawler()),
             SkinBindings::new(&voxel::unit::lightning_tank()),
             SkinBindings::new(&voxel::unit::eidolon_tank()),
-            SkinBindings::new(&voxel::unit::walker04()),
+            SkinBindings::structural(&voxel::unit::walker04()),
             SkinBindings::new(&voxel::unit::razlom_t3()),
-            SkinBindings::new(&voxel::unit::greben_storage()),
+            SkinBindings::structural(&voxel::unit::greben_storage()),
             SkinBindings::new(&voxel::unit::kil_factory(1)),
             SkinBindings::new(&voxel::unit::kil_factory(2)),
             SkinBindings::new(&voxel::unit::kil_factory(3)),
             SkinBindings::new(&voxel::unit::kil_factory(4)),
             SkinBindings::new(&voxel::unit::skoba()),
+            SkinBindings::new(&voxel::unit::commander()),
+            SkinBindings::new(&voxel::unit::power_plant_t1()),
+            SkinBindings::new(&voxel::unit::power_plant_t2()),
+            SkinBindings::new(&voxel::unit::power_plant_t3()),
         ]),
         pristine: Arc::new([
             voxel::unit::tank(),
@@ -1673,6 +1699,10 @@ fn setup(
             voxel::unit::kil_factory(3),
             voxel::unit::kil_factory(4),
             voxel::unit::skoba(),
+            voxel::unit::commander(),
+            voxel::unit::power_plant_t1(),
+            voxel::unit::power_plant_t2(),
+            voxel::unit::power_plant_t3(),
         ]),
         seen: Vec::new(),
         pending: Vec::new(),
@@ -2758,12 +2788,14 @@ fn whole_map_frame(size: [u32; 3], ground: i32, offset: Vec3, aspect: f32) -> (V
 
 #[cfg(test)]
 fn orbit_offset(offset: Vec3, orbit: f32, pitch: f32) -> Vec3 {
-    orbit_offset_mode(offset, orbit, pitch, false)
+    orbit_offset_mode(offset, orbit, pitch, false, false)
 }
-fn orbit_offset_mode(offset: Vec3, orbit: f32, pitch: f32, editor: bool) -> Vec3 {
+fn orbit_offset_mode(offset: Vec3, orbit: f32, pitch: f32, editor: bool, battle: bool) -> Vec3 {
     let radius = offset.length();
     let (min, max) = if editor {
         (5.0f32, 85.0f32)
+    } else if battle {
+        (3.0f32, 85.0f32)
     } else {
         (20.0f32, 80.0f32)
     };
@@ -2787,6 +2819,35 @@ fn window_height_limit(offset: Vec3, aspect: f32, size: [u32; 3]) -> f32 {
         size[2].min(TERRAIN_WINDOW[2]),
     ];
     ((dims[0] as f32 - 16.0) / extent.x.max(0.01)).min((dims[1] as f32 - 16.0) / extent.z.max(0.01))
+}
+
+/// Keep the battle camera outside the current destructible terrain and unit
+/// geometry. The column height is cached by the world; only nearby unit
+/// volumes need the more precise voxel test.
+fn battle_camera_clearance(sim: &BlastRange, mut eye: Vec3) -> Vec3 {
+    let size = sim.size();
+    let (x, z) = (eye.x.floor() as i32, eye.z.floor() as i32);
+    let mut floor = None::<i32>;
+    for (dx, dz) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] {
+        let (x, z) = (x + dx, z + dz);
+        if x >= 0 && z >= 0 && x < size[0] as i32 && z < size[2] as i32 {
+            let top = sim_core::blast::motion::floor(&sim.world, x, z);
+            floor = Some(floor.map_or(top, |was| was.max(top)));
+        }
+    }
+    if let Some(floor) = floor { eye.y = eye.y.max(floor as f32 + 3.0); }
+    for unit in &sim.units {
+        if !unit.status.alive { continue; }
+        let (sx, sy, sz) = unit.body.extent_mm();
+        let reach = (sx.max(sz) as f32 / voxel::unit::WORLD_MM as f32) * 2.0 + 64.0;
+        let pos = Vec3::from(unit.motion.pos.map(|v| v.to_f64_lossy() as f32));
+        if (eye.x - pos.x).abs() > reach || (eye.z - pos.z).abs() > reach
+            || eye.y < pos.y - reach || eye.y > pos.y + sy as f32 / voxel::unit::WORLD_MM as f32 + reach { continue; }
+        if unit.solid([eye.x.floor() as i32, eye.y.floor() as i32, eye.z.floor() as i32]) {
+            eye.y = eye.y.max(unit.bounds().1[1] as f32 + 3.0);
+        }
+    }
+    eye
 }
 
 fn framing_far(base: f32, eye_offset: Vec3, height: f32, terrain_height: u32) -> f32 {
@@ -2890,6 +2951,7 @@ fn framing(
                     workshop.orbit,
                     workshop.pitch,
                     laboratory.as_ref().is_some_and(|l| l.editor_camera()),
+                    scene.sim.battle_mode(),
                 );
                 let sector_top = scene
                     .sim
@@ -3000,7 +3062,8 @@ fn framing(
                     (workshop.zoom, workshop.pan)
                 };
                 height =
-                    if scene.view == 1 && laboratory.as_ref().is_some_and(|l| l.editor_camera()) {
+                    if scene.view == 1 && (laboratory.as_ref().is_some_and(|l| l.editor_camera())
+                        || scene.sim.battle_mode() && zoom < 1.0) {
                         // Keep zoom proportional even when the default frame is
                         // wider than the detailed streaming window. Otherwise the
                         // first wheel steps pan without actually changing scale.
@@ -3049,6 +3112,24 @@ fn framing(
                         height = height.lerp(height.max(3800.0), blend);
                     }
                 }
+                if let Some(at) = workshop.initial_commander_focus {
+                    let loaded = workshop.pending.is_none() && scene.sim.battle_mode()
+                        && scene.sim.layout.as_ref().and_then(|l| l.units.first())
+                            .is_some_and(|u| u.allied && u.kind == RangeUnitKind::Commander && u.at == at);
+                    if loaded {
+                        // The overview may have been fitted high above the
+                        // ground. Place its focus on the camera ray through
+                        // the commander, so its actual position is centred.
+                        let focus_y = at[1] as f32 + 18.0;
+                        let direction = offset.normalize();
+                        let along = (aim.y - focus_y) / direction.y.max(0.001);
+                        workshop.pan = Vec2::new(
+                            at[0] as f32 + direction.x * along - aim.x,
+                            at[2] as f32 + direction.z * along - aim.z,
+                        );
+                        workshop.initial_commander_focus = None;
+                    }
+                }
                 aim = if scene.camera_sweep || tour.is_some() {
                     aim + Vec3::new(pan.x, 0.0, pan.y)
                 } else {
@@ -3070,7 +3151,11 @@ fn framing(
                 // the eye hundreds of units, abruptly changing atmospheric depth.
                 let eye_offset =
                     offset.normalize() * (offset.length() + (height - local_limit).max(0.0) * 1.15);
-                *transform = Transform::from_translation(aim + eye_offset).looking_at(aim, Vec3::Y);
+                let eye = if scene.sim.battle_mode()
+                    && !laboratory.as_ref().is_some_and(|l| l.editor_camera()) {
+                    battle_camera_clearance(&scene.sim, aim + eye_offset)
+                } else { aim + eye_offset };
+                *transform = Transform::from_translation(eye).looking_at(aim, Vec3::Y);
                 if let Projection::Orthographic(p) = &mut *projection {
                     p.scaling_mode = bevy::camera::ScalingMode::FixedVertical {
                         viewport_height: height,
@@ -3088,7 +3173,7 @@ fn framing(
                     } else {
                         1200.0
                     };
-                    p.far = framing_far(base, eye_offset, height, scene.sim.size()[1]);
+                    p.far = framing_far(base, eye - aim, height, scene.sim.size()[1]);
                 }
             }
         }

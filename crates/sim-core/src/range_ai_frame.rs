@@ -58,6 +58,10 @@ impl CommandRuntime {
                     phase = Phase::Fighting;
                     next_tick = self.world.tick;
                 }
+                Command::PlaceConstruction{actor,kind,at,queued} if self.world.ordered_construction_admitted(actor,kind,at,queued)=>{autonomous=false;}
+                Command::QueueOrder{actor,order,destination} if self.world.queued_input_admitted(actor,order,destination)=>{autonomous=false;}
+                Command::CancelLastOrder{actor} if self.world.units.get(actor).is_some_and(|u|u.status.alive && self.world.allied(actor)) && !self.world.order_queue(actor).is_empty()=>{autonomous=false;}
+                Command::Order{actor,order:Order::Build(site),destination:None} if self.world.greben_build_admitted(actor,site)=>{autonomous=false;}
                 Command::Order {
                     actor,
                     order,

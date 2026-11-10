@@ -101,6 +101,9 @@ pub fn emitters(
     coil: &Handle<StandardMaterial>,
 ) {
     let body = &scene.sim.gun.body;
+    // The articulated laser arms carry their emitters in the real segment
+    // geometry. Root-feed collars would be detached glowing duplicate rails.
+    if scene.sim.gun.kind == RangeUnitKind::Walker04 { return; }
     let scale = body.mm as f32 / voxel::unit::WORLD_MM as f32;
     let centre = render::model::root_centre(body);
     let origin = Vec3::from(GUN.map(|v| v as f32));
@@ -108,7 +111,7 @@ pub fn emitters(
         RangeUnitKind::Strider => 2.35,
         RangeUnitKind::Tank | RangeUnitKind::LightningTank | RangeUnitKind::EidolonTank => 3.0,
         RangeUnitKind::Spider => 12.0,
-        RangeUnitKind::Walker04 => 15.0,
+        RangeUnitKind::Walker04 | RangeUnitKind::Commander => 15.0,
         RangeUnitKind::Crawler => 8.0,
         RangeUnitKind::RazlomT3 => 8.0,
         RangeUnitKind::Artillery => 3.0,
@@ -119,6 +122,9 @@ pub fn emitters(
         RangeUnitKind::TurretT1 => 2.1,
         RangeUnitKind::TurretT2 => 3.5,
         RangeUnitKind::Base => 4.0,
+        RangeUnitKind::PowerPlantT1 => 8.0,
+        RangeUnitKind::PowerPlantT2 => 12.0,
+        RangeUnitKind::PowerPlantT3 => 14.0,
         RangeUnitKind::GrebenStorage => 60.0,
         RangeUnitKind::KilFactoryT1
         | RangeUnitKind::KilFactoryT2

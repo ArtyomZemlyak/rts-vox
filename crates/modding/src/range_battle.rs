@@ -172,7 +172,7 @@ impl Tuning {
             || !(20..=200).contains(&t.razlom_wave.speed)
             || !(4..=64).contains(&t.razlom_wave.half_width)
             || !(1..=12).contains(&t.razlom_wave.half_height)
-            || !(1..=1_000_000_000).contains(&t.razlom_wave.fracture_j_per_tick)
+            || !(1..=4_000_000_000).contains(&t.razlom_wave.fracture_j_per_tick)
             || !(1..=100).contains(&t.razlom_wave.attenuation_per_layer)
             || !(16384..=65536).contains(&t.razlom_wave.cells_per_tick)
             || t.razlom_wave.cells_per_tick < ((t.razlom_wave.speed / crate::clock::HZ as i32 + 3)

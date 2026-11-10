@@ -160,9 +160,13 @@ fn passable(t: Terrain, kind: RangeUnitKind, eighth: i32) -> bool {
         | RangeUnitKind::TurretT2 => 45,
         RangeUnitKind::Strider
         | RangeUnitKind::Spider
+        | RangeUnitKind::Commander
         | RangeUnitKind::Walker04
         | RangeUnitKind::SkobaDrone => 65,
         RangeUnitKind::Base
+        | RangeUnitKind::PowerPlantT1
+        | RangeUnitKind::PowerPlantT2
+        | RangeUnitKind::PowerPlantT3
         | RangeUnitKind::ArtilleryTurretT2
         | RangeUnitKind::ArtilleryTurretT3
         | RangeUnitKind::RazlomT3
@@ -224,9 +228,13 @@ fn run(t: Terrain, kind: RangeUnitKind, heading: i32, back: bool) -> Run {
         RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
         RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
         RangeUnitKind::Base => voxel::unit::command_base(),
+        RangeUnitKind::PowerPlantT1 => voxel::unit::power_plant_t1(),
+        RangeUnitKind::PowerPlantT2 => voxel::unit::power_plant_t2(),
+        RangeUnitKind::PowerPlantT3 => voxel::unit::power_plant_t3(),
         RangeUnitKind::LightningTank => voxel::unit::lightning_tank(),
         RangeUnitKind::EidolonTank => voxel::unit::eidolon_tank(),
         RangeUnitKind::Walker04 => voxel::unit::walker04(),
+        RangeUnitKind::Commander => voxel::unit::commander(),
         RangeUnitKind::RazlomT3 => voxel::unit::razlom_t3(),
         RangeUnitKind::GrebenStorage => voxel::unit::greben_storage(),
         RangeUnitKind::KilFactoryT1 => voxel::unit::kil_factory(1),
@@ -355,9 +363,13 @@ fn probe_poses_along_the_run() {
             RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
             RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
             RangeUnitKind::Base => voxel::unit::command_base(),
+            RangeUnitKind::PowerPlantT1 => voxel::unit::power_plant_t1(),
+            RangeUnitKind::PowerPlantT2 => voxel::unit::power_plant_t2(),
+            RangeUnitKind::PowerPlantT3 => voxel::unit::power_plant_t3(),
             RangeUnitKind::LightningTank => voxel::unit::lightning_tank(),
             RangeUnitKind::EidolonTank => voxel::unit::eidolon_tank(),
             RangeUnitKind::Walker04 => voxel::unit::walker04(),
+            RangeUnitKind::Commander => voxel::unit::commander(),
             RangeUnitKind::RazlomT3 => voxel::unit::razlom_t3(),
             RangeUnitKind::GrebenStorage => voxel::unit::greben_storage(),
             RangeUnitKind::KilFactoryT1 => voxel::unit::kil_factory(1),

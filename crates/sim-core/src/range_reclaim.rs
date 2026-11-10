@@ -409,7 +409,7 @@ pub(super) fn reclaim(
             let index = need[(start + step) % n];
             let d = diggers[index];
             rc.searches += 1;
-            let mut best: Option<((i64, u8, u64), Work)> = None;
+            let mut best: Option<((u8, i64, u8, u64), Work)> = None;
             for &(t, p) in near.around(d.face) {
                 if !near.within(d.face, p, reach(&d)) {
                     continue;
@@ -422,10 +422,11 @@ pub(super) fn reclaim(
                         if taken_by.contains(&f.id) || held == 0 || held > cap(d.id) {
                             continue;
                         }
-                        ((d2, 0, f.id), Work::Piece { id: f.id, spent: 0 })
+                        let room = ledger.room(tanks[d.id].expect("digger tank")).saturating_sub(inflight[d.id]);
+                        ((u8::from(held > room), d2, 0, f.id), Work::Piece { id: f.id, spent: 0 })
                     }
-                    Target::Tank(slot) => ((d2, 1, slot as u64), Work::Tank(slot as u16)),
-                    Target::Blank(slot) => ((d2, 2, slot as u64), Work::Blank(slot as u16)),
+                    Target::Tank(slot) => ((0, d2, 1, slot as u64), Work::Tank(slot as u16)),
+                    Target::Blank(slot) => ((0, d2, 2, slot as u64), Work::Blank(slot as u16)),
                 };
                 if best.is_none_or(|(b, _)| key < b) {
                     best = Some((key, work));
@@ -464,6 +465,13 @@ pub(super) fn reclaim(
             Work::Tank(_) | Work::Blank(_) => room == 0,
         };
         if full {
+            if d.reclaim_only && d.k.kind == modding::range::RangeUnitKind::Crawler && room > 0 {
+                // Search the neighbouring field for a smaller fitting piece
+                // before treating a single oversized fragment as a full hold.
+                rc.work[d.id] = None;
+                d.reclaim_pending = false;
+                continue;
+            }
             // The next thing at the face does not fit: the tank is full.
             d.full = true;
             if let Some(h) = haul.as_mut() {
@@ -481,17 +489,22 @@ pub(super) fn reclaim(
                 let f = &fragments[near.pieces[&id]];
                 let spend = (f.count.max(1).saturating_sub(spent) as usize).min(budget) as u32;
                 let spent = spent + spend;
+                // A shape-preserving wreck can take several ticks. Show work
+                // immediately while its indivisible container is processed;
+                // these presentation samples do not transfer or create matter.
+                if spend > 0 && d.reclaim_only && reclaim_events.len() < super::RECLAIM_VISUAL_LIMIT {
+                    let (lo,hi)=super::reclaim_piece_bounds(f);
+                    let collector=point(units[d.id].motion.pos);
+                    reclaim_events.push(super::ReclaimVisual {
+                        from: std::array::from_fn(|a|collector[a].clamp(lo[a],hi[a])),
+                        crawler: d.id,
+                        material: f.material,
+                    });
+                }
                 if spent >= f.count.max(1) {
                     let need = ledger.held(f.held);
                     assert_eq!(ledger.transfer(f.held, tank, need), need);
                     taken.insert(f.held);
-                    if d.reclaim_only && reclaim_events.len() < super::RECLAIM_VISUAL_LIMIT {
-                        reclaim_events.push(super::ReclaimVisual {
-                            from: point([f.position.x, f.position.y, f.position.z]),
-                            crawler: d.id,
-                            material: f.material,
-                        });
-                    }
                     rc.reclaimed += need;
                     rc.pieces += 1;
                     rc.work[d.id] = None;
@@ -564,6 +577,7 @@ impl BlastRange {
         let Some(rc) = m.reclaim.as_mut() else {
             return;
         };
+        let cargo_unit = self.matter.economy.per_voxel(2);
         let ledger = &mut self.matter.economy.ledger;
         let (num, den) = (rc.data.breach_num, rc.data.breach_den);
         for (id, u) in self.units.iter().enumerate() {
@@ -575,6 +589,54 @@ impl BlastRange {
             }
             rc.breached[id] = true;
             rc.work[id] = None;
+            if u.kind == modding::range::RangeUnitKind::Crawler {
+                // Cargo is universal matter. Show a bounded part as real rock
+                // fragments, conserving its ledger quantity. Excess and any
+                // sub-voxel remainder stay reclaimable in the wreck tank.
+                let material = 2;
+                let unit = cargo_unit;
+                let room = self.matter.debris.fragment_room(&self.matter.tuning).min(32);
+                if unit > 0 {
+                    let pieces = room.min((ledger.held(tank) / unit).min(u64::from(u32::MAX)) as u32);
+                    let half_width = (i32::from(u.body.vol.nz) * i32::from(u.body.mm)
+                        / i32::from(voxel::unit::WORLD_MM) / 2).max(1);
+                    for n in 0..pieces {
+                        // Divide small loads between both sides too, rather
+                        // than hiding a single full piece inside the body.
+                        let remaining = ledger.held(tank) / unit;
+                        let count = remaining.div_ceil(u64::from(pieces - n)).min(64) as u32;
+                        if count == 0 { break; }
+                        let held = ledger.create(crate::matter::Kind::Debris, 0, u64::MAX);
+                        let amount = unit * u64::from(count);
+                        assert_eq!(ledger.transfer(tank, held, amount), amount);
+                        let lane = ((n / 2) % 8) as i32 - 3;
+                        let side = if n % 2 == 0 { -1 } else { 1 };
+                        let row = (n / 16) as i32;
+                        let base = phys::V3::new(u.motion.pos[0], u.motion.pos[1], u.motion.pos[2]);
+                        let position = base
+                            .add(u.pose.x.scale(fx::Fx::from_int(lane * 10)))
+                            .add(u.pose.z.scale(fx::Fx::from_int(side * (half_width + 5 + row * 3))))
+                            .add(phys::V3::new(fx::Fx::ZERO, fx::Fx::from_int(25 + row * 4), fx::Fx::ZERO));
+                        let velocity = u.pose.z.scale(fx::Fx::from_ratio(side * (7 + row), 10))
+                            .add(u.pose.x.scale(fx::Fx::from_ratio(lane, 20)))
+                            .add(phys::V3::new(fx::Fx::ZERO, fx::Fx::from_ratio(4 + row, 5), fx::Fx::ZERO));
+                        let density = self.matter.tuning.density_kg_m3_per_density as u64;
+                        self.matter.debris.next_id += 1;
+                        let mut fragment = Fragment {
+                            id: self.matter.debris.next_id,
+                            position, velocity,
+                            material, paint: None, mm: voxel::unit::WORLD_MM,
+                            basis: crate::burst::IDENTITY,
+                            mass_g: unit * density * u64::from(count), count,
+                            shape: if count == 64 { u64::MAX } else { (1u64 << count) - 1 },
+                            side: 4, chunk: None, held, resting: false,
+                        };
+                        fragment.keep_on_map([self.size[0], self.size[2]]);
+                        self.matter.debris.fragments.push(fragment);
+                    }
+                }
+                continue;
+            }
             // In u128 and down: the loss never exceeds the cargo.
             let held = u128::from(ledger.held(tank));
             let loss = (held * u128::from(num) / u128::from(den)) as Amount;

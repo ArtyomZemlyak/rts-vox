@@ -27,7 +27,7 @@
  ],
  script: [
   (actor: 1, tick: 0, order: Reclaim((5052,18,7502))),
-  (actor: 1, tick: 240, order: Dig((5000,20,7700))),
+  (actor: 1, tick: 240, after_unload: true, order: Dig((5000,20,7700))),
  ],
  mission: Some((
   focus: SkobaDrone,

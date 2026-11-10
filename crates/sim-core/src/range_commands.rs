@@ -56,6 +56,10 @@ pub enum GunCommand {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
+    QueueOrder {actor:usize,order:Order,destination:Option<[i32;2]>},
+    PlaceConstruction {actor:usize,kind:crate::blast::RangeUnitKind,at:[i32;3],queued:bool},
+    CancelConstruction {site:usize},
+    CancelLastOrder {actor:usize},
     Sculpt {
         at: [i32; 3],
         edge: u32,
@@ -102,6 +106,8 @@ pub enum Command {
         destination: [i32; 2],
         fallback: [i32; 2],
     },
+    /// Send a loaded crawler to a friendly unloading dock.
+    UnloadCrawler { actor: usize, dock: Option<usize> },
     /// Queue a unit of `kind` at producer `actor` (ADR-675).
     Produce {
         actor: usize,

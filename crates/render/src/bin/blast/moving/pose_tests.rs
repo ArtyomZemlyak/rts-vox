@@ -1,4 +1,45 @@
 use super::*;
+
+#[test]
+fn crawler_cutting_head_pivots_down_and_spins_in_its_own_plane() {
+    let mut frame = ActorFrame::default();
+    frame.kind = RangeUnitKind::Crawler.index();
+    frame.hull = Quat::IDENTITY;
+    let witness = Witness(0, Transform::default(), Some(255), false);
+    frame.cutter = (0.0, 0.0);
+    let vertical = frame.transform(&witness, &[]);
+    assert!((vertical.rotation * Vec3::X - Vec3::X).length() < 0.001);
+    frame.cutter = (0.0, 1.0);
+    let spinning = frame.transform(&witness, &[]);
+    assert!((spinning.rotation * Vec3::X - Vec3::X).length() < 0.001);
+    assert_ne!(spinning.rotation, vertical.rotation);
+    frame.cutter = (1.0, 1.0);
+    let drill = frame.transform(&witness, &[]);
+    assert!((drill.rotation * Vec3::X - Vec3::NEG_Y).length() < 0.001);
+    let centre = drill.transform_point(Vec3::new(70.0, 26.0, 0.0));
+    assert!((centre - Vec3::new(70.0, 26.0, 0.0)).length() < 0.001);
+    // The simulation's lowered bore origin follows the animated head.
+    // Ignore spin: the tip lies on the head axis.
+    let nose = drill.transform_point(Vec3::new(81.5, 26.0, 0.0));
+    let bore = Vec3::new(70.5, 14.5, 0.5);
+    assert!((nose - bore).length() < 1.0, "animated tip {nose:?}, bore {bore:?}");
+    frame.cutter_depth = 24.0;
+    frame.cutter_offset = Vec3::new(12.0, 0.0, -8.0);
+    let extended = frame.transform(&witness, &[]);
+    let lowered = extended.transform_point(Vec3::new(70.0, 26.0, 0.0));
+    assert!((lowered - Vec3::new(82.0, 2.0, -8.0)).length() < 0.001);
+}
+
+#[test]
+fn factory_gate_opens_before_departure_and_closes_afterwards() {
+    assert_eq!(gate_open(true, 0.0), 0.0);
+    assert_eq!(gate_open(true, 0.25), 1.0);
+    assert_eq!(gate_open(true, 5.0), 1.0);
+    assert_eq!(gate_open(true, f32::INFINITY), 1.0);
+    assert_eq!(gate_open(false, 0.0), 1.0);
+    assert_eq!(gate_open(false, 0.25), 0.0);
+    assert_eq!(gate_open(false, f32::INFINITY), 0.0);
+}
 use fx::Fx;
 use sim_core::damage::V3;
 
@@ -423,13 +464,14 @@ fn walker_shoulders_elbows_and_guns_stay_joined_between_movement_and_focus_ticks
     unit.set_arm_targets([[1200, 80, 300]; 4], 0);
     let previous = pose(&unit);
     let previous_head = weapon_picture(&unit);
+    let previous_arms = std::array::from_fn(|i| segment_picture(&unit.seg_frames[if i < 16 { 10 + i } else { 26 + i - 16 }]));
     unit.motion.pos[0] = unit.motion.pos[0].add(Fx::from_int(30));
     unit.motion.drive.head = fx::angle::QUARTER / 2;
     unit.turret_pitch = fx::angle::QUARTER;
     unit.set_arm_targets([[900, 180, 800]; 4], fx::angle::QUARTER);
     app.world_mut().resource_mut::<Scene>().sim.units[0] = unit;
     let mut entities = Vec::new();
-    for segment in 10..26 {
+    for segment in 10..30 {
         entities.push(
             app.world_mut()
                 .spawn((
@@ -443,6 +485,7 @@ fn walker_shoulders_elbows_and_guns_stay_joined_between_movement_and_focus_ticks
         let mut v = app.world_mut().resource_mut::<Visual>();
         v.previous = vec![previous];
         v.battle_heads = vec![previous_head];
+        v.previous_arms = vec![Some(previous_arms)];
     }
     for alpha in [0.0, 0.25, 0.5, 0.9, 1.0] {
         {
@@ -460,22 +503,29 @@ fn walker_shoulders_elbows_and_guns_stay_joined_between_movement_and_focus_ticks
         let base = p.pos + previous_head.1.lerp(now.1, alpha);
         let centre = Vec3::new(u.body.vol.nx as f32 * 0.5, 0.0, u.body.vol.nz as f32 * 0.5);
         let scale = u.body.mm as f32 / voxel::unit::WORLD_MM as f32;
-        for segment in 10..26 {
+        for segment in 10..30 {
             let a = u.body.segments[segment].attach;
             let tr = w.get::<Transform>(entities[segment - 10]).unwrap();
-            let pivot = Vec3::new(a.pivot.0 as f32, a.pivot.1 as f32, a.pivot.2 as f32);
             let at = Vec3::new(a.at.0 as f32, a.at.1 as f32, a.at.2 as f32);
-            let expected = if a.parent == 0 {
+            let expected = if segment >= 26 {
                 base + rotation * ((at - centre) * scale)
+            } else if a.parent == 0 {
+                let arm = (segment - 10) / 4;
+                let bearing = w.get::<Transform>(entities[26 + arm - 10]).unwrap();
+                let offset = (at - Vec3::new(40.0, at.y, 40.0)) * scale;
+                bearing.translation + bearing.rotation * offset
             } else {
+                let parent = &u.body.segments[a.parent as usize - 1];
+                let pivot = Vec3::new(parent.attach.pivot.0 as f32, parent.attach.pivot.1 as f32, parent.attach.pivot.2 as f32);
+                let parent_scale = parent.body.mm as f32 / voxel::unit::WORLD_MM as f32;
                 w.get::<Transform>(entities[a.parent as usize - 1 - 10])
                     .unwrap()
-                    .transform_point(at)
+                    .transform_point((at - pivot) * parent_scale)
             };
             assert!(
-                (tr.transform_point(pivot) - expected).length() < 0.02,
+                (tr.translation - expected).length() < 0.02,
                 "separated joint segment={segment} alpha={alpha}: {:?} vs {expected:?}",
-                tr.transform_point(pivot)
+                tr.translation
             );
         }
     }
@@ -496,7 +546,156 @@ fn walker_arm_picture_matches_the_physical_muzzle_after_independent_aiming() {
             physical.y.to_f64_lossy() as f32,
             physical.z.to_f64_lossy() as f32,
         );
-        let rendered = segment_picture(&frame).transform_point(Vec3::new(4.0, 2.0, 2.0));
+        let local = (Vec3::new(4.0, 2.0, 2.0) - Vec3::from(frame.centre.map(|v| v.to_f64_lossy() as f32)))
+            / frame.scale.to_f64_lossy() as f32;
+        let rendered = segment_picture(&frame).transform_point(local);
+        assert_eq!(segment_picture(&frame).scale, Vec3::ONE, "mesh is already scaled during construction");
         assert!((rendered - expected).length() < 0.001, "arm={arm}");
     }
+}
+
+#[test]
+fn commander_arm_picture_keeps_joints_connected_through_tool_changes() {
+    let mut u = sim_core::blast::RangeUnit::of_kind(RangeUnitKind::Commander, [300,16,300]);
+    let old_crown = weapon_picture(&u).0;
+    let old: [Transform;20] = std::array::from_fn(|i| segment_picture(&u.seg_frames[10 + i.min(15)]));
+    for _ in 0..100 { u.set_arm_targets([[800,180,380],[800,180,380],[1,0,0],[0;3]],0); }
+    let now = weapon_picture(&u);
+    let origin = pose(&u).pos + now.1;
+    for alpha in [0.0,0.25,0.5,0.9,1.0] {
+        let drawn: Vec<_> = (10..18).map(|index| commander_arm_picture(&u,index,now.0,origin,Some(&old),old_crown,alpha)).collect();
+        for arm in 0..2 {
+            let first = 10 + arm*4;
+            assert!((drawn[first-10].translation - segment_picture(&u.seg_frames[first]).translation).length() < 0.01);
+            for child in first+1..first+4 {
+                let attach = u.body.segments[child].attach;
+                let parent = &u.body.segments[usize::from(attach.parent)-1];
+                let at = Vec3::new(attach.at.0 as f32,attach.at.1 as f32,attach.at.2 as f32);
+                let pivot = Vec3::new(parent.attach.pivot.0 as f32,parent.attach.pivot.1 as f32,parent.attach.pivot.2 as f32);
+                let expected = drawn[child-11].transform_point((at-pivot)*(parent.body.mm as f32 / voxel::unit::WORLD_MM as f32));
+                assert!((drawn[child-10].translation-expected).length() < 0.02,"separated joint {child}, alpha {alpha}");
+            }
+        }
+        if alpha == 1.0 {
+            for (index,tr) in drawn.iter().enumerate() {
+                let physical = segment_picture(&u.seg_frames[index+10]);
+                assert!((tr.translation-physical.translation).length() < 0.02);
+                assert!(tr.rotation.dot(physical.rotation).abs()>0.9999);
+            }
+        }
+    }
+}
+
+#[test]
+fn commander_arm_picture_stays_attached_while_crown_turns_and_hull_moves() {
+    let mut u = sim_core::blast::RangeUnit::of_kind(RangeUnitKind::Commander,[300,16,300]);
+    let old_crown = weapon_picture(&u);
+    let old_origin = pose(&u).pos + old_crown.1;
+    let old: [Transform;20] = std::array::from_fn(|i|segment_picture(&u.seg_frames[10+i.min(7)]));
+    u.motion.pos[0]=Fx::from_int(340);
+    u.motion.drive.head=fx::angle::QUARTER;
+    u.turret_pitch=fx::angle::FULL/36;
+    let yaw=fx::angle::QUARTER+fx::angle::FULL/24;
+    u.update_pose(yaw);
+    for _ in 0..60 {u.set_arm_targets([[700,180,700],[700,180,700],[1,0,0],[0;3]],yaw);}
+    let now=weapon_picture(&u);
+    let now_origin=pose(&u).pos+now.1;
+    for alpha in [0.0,0.25,0.5,0.9,1.0] {
+        let crown=old_crown.0.slerp(now.0,alpha);
+        let origin=old_origin.lerp(now_origin,alpha);
+        for arm in 0..2 {
+            let first=10+arm*4;
+            let frames: Vec<_>=(first..first+4).map(|i|commander_arm_picture(&u,i,crown,origin,Some(&old),old_crown.0,alpha)).collect();
+            let a=u.body.segments[first].attach;
+            let at=Vec3::new(a.at.0 as f32,a.at.1 as f32,a.at.2 as f32);
+            let centre=Vec3::from(u.pose.centre.map(|v|v.to_f64_lossy() as f32));
+            let expected=origin+crown*((at-centre)/u.pose.scale.to_f64_lossy() as f32);
+            assert!((frames[0].translation-expected).length()<0.02,"detached shoulder {arm}, alpha {alpha}");
+            for child in 1..4 {
+                let a=u.body.segments[first+child].attach;
+                let parent=&u.body.segments[usize::from(a.parent)-1];
+                let at=Vec3::new(a.at.0 as f32,a.at.1 as f32,a.at.2 as f32);
+                let pivot=Vec3::new(parent.attach.pivot.0 as f32,parent.attach.pivot.1 as f32,parent.attach.pivot.2 as f32);
+                let expected=frames[child-1].transform_point((at-pivot)*(parent.body.mm as f32/voxel::unit::WORLD_MM as f32));
+                assert!((frames[child].translation-expected).length()<0.02,"detached child {child}, alpha {alpha}");
+            }
+            if alpha==1.0 {
+                for (i,tr) in frames.iter().enumerate() {
+                    let expected=segment_picture(&u.seg_frames[first+i]);
+                    assert!((tr.translation-expected.translation).length()<0.02);
+                    assert!(tr.rotation.dot(expected.rotation).abs()>0.9999);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn crawler_picture_tracks_real_bore_front_without_frame_rate_lag() {
+    use sim_core::blast::battle::Order;
+    let experiment = modding::laboratory::experiments::stock().into_iter()
+        .find(|e| e.id == "crawler-base").unwrap();
+    let mut layout = experiment.layout;
+    layout.size = [256, 128, 256]; layout.clear_min = [1, 1]; layout.clear_max = [255, 255];
+    layout.gun = [96, 24, 128]; layout.target = [190, 8, 128];
+    layout.units[0].at = [155, 16, 128]; layout.units[1].at = [48, 16, 128];
+    layout.blocks[0].min = [180, 1, 120]; layout.blocks[0].max = [202, 16, 136];
+    layout.blocks[0].material = 6;
+    let crawler = layout.economy.as_mut().unwrap().kind_mut(RangeUnitKind::Crawler).unwrap();
+    crawler.tank = 9_000_000; crawler.dig_edits_per_tick = 1024;
+    let mut sim = BlastRange::with_layout(config(false, false), layout).unwrap();
+    sim.set_physics_workers(1); sim.set_navigation_workers(1);
+    sim.start_free_control().unwrap();
+    let tip = sim.units[0].world_pos(voxel::unit::CRAWLER_BORE_TIP);
+    assert!(sim.battle_order(0, Order::Dig([tip[0] - 12, 8, tip[2] + 5]), None));
+    let start = sim.crawler_bore_depth(0).unwrap();
+    for _ in 0..150 {
+        sim.step();
+        if sim.crawler_bore_depth(0).unwrap_or(start) >= start + 4 { break; }
+    }
+    assert!(sim.crawler_bore_cutting(0));
+    let expected = sim.crawler_bore_depth(0).unwrap() as f32;
+    assert!(expected >= start as f32 + 4.0);
+    let mut view = scene(); view.sim = sim; view.paused = true; view.realtime = true;
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, bevy::transform::TransformPlugin))
+        .insert_resource(view).init_resource::<Visual>().add_systems(Update, animate);
+    let id = app.world_mut().spawn((Witness(0, Transform::default(), Some(255), false), Transform::default())).id();
+    app.update();
+    let visual = app.world().resource::<Visual>();
+    let frame = &visual.frame_poses[0];
+    assert!((frame.cutter_depth - expected).abs() < 0.001, "head lags behind real terrain: {} vs {expected}", frame.cutter_depth);
+    assert_eq!(frame.cutter.0, 1.0, "cutting started before head was vertical");
+    let drawn_tip = app.world().get::<Transform>(id).unwrap().transform_point(Vec3::new(81.5, 26.0, 0.0));
+    let position = app.world().resource::<Scene>().sim.crawler_bore_position(0).unwrap();
+    assert!((drawn_tip - Vec3::from(position.map(|v| v as f32))).length() < 3.0,
+        "drawn tip {drawn_tip:?} is not at the physical face {position:?}");
+}
+
+#[test]
+fn crawler_head_deployment_catches_up_after_skipped_frames() {
+    use sim_core::blast::battle::Order;
+    let experiment = modding::laboratory::experiments::stock().into_iter()
+        .find(|e| e.id == "crawler-base").unwrap();
+    let mut layout = experiment.layout;
+    layout.size = [256, 128, 256]; layout.clear_min = [1, 1]; layout.clear_max = [255, 255];
+    layout.gun = [96, 24, 128]; layout.target = [190, 8, 128];
+    layout.units[0].at = [155, 16, 128]; layout.units[1].at = [48, 16, 128];
+    layout.blocks[0].min = [180, 1, 120]; layout.blocks[0].max = [202, 16, 136];
+    let mut sim = BlastRange::with_layout(config(false, false), layout).unwrap();
+    sim.set_physics_workers(1); sim.set_navigation_workers(1);
+    sim.start_free_control().unwrap();
+    let tip = sim.units[0].world_pos(voxel::unit::CRAWLER_BORE_TIP);
+    assert!(sim.battle_order(0, Order::Dig([tip[0], 8, tip[2]]), None));
+    sim.step();
+    let mut view = scene(); view.sim = sim; view.paused = false; view.realtime = true; view.acc = 0.0;
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, bevy::transform::TransformPlugin))
+        .insert_resource(view).init_resource::<Visual>().add_systems(Update, animate);
+    app.update();
+    for _ in 0..10 { app.world_mut().resource_mut::<Scene>().sim.step(); }
+    assert!(!app.world().resource::<Scene>().sim.crawler_bore_cutting(0));
+    app.update();
+    let frame = &app.world().resource::<Visual>().frame_poses[0];
+    assert!(frame.cutter.0 >= 0.70, "head failed to catch up after a frame gap: {}", frame.cutter.0);
 }

@@ -1,0 +1,19 @@
+(
+ title: "Краулер: разрушение и груз",
+ briefing: "Вражеский краулер неподвижен и заранее загружен массой. Паук автоматически открывает огонь. После разрушения груза вылетят реальные куски: выберите союзный краулер, включите «Сбор» и укажите обломки ПКМ.",
+ world_height: Some(256),
+ world_side: Some(2048),
+ zone: (name: "Краулер: разрушение и груз", min: (64,64), max: (1984,1984), spawn: (420,16,1000), target: (1200,16,1000)),
+ idle_enemies: true,
+ units: [
+  (kind: Spider, allied: true, at: (420,16,1000)),
+  (kind: Crawler, allied: false, at: (1200,16,1000)),
+  (kind: Crawler, allied: true, at: (650,16,1450)),
+ ],
+ ready: Some((tank_stock: [(actor: 1, amount: 491520)])),
+ focus: Some(0),
+ script: [(actor: 0, tick: 1, order: Attack(1))],
+ blocks: [
+  (min: (64,16,64), max: (1984,240,1984), material: 0),
+ ],
+)

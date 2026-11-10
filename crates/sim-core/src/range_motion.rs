@@ -17,7 +17,11 @@ mod steering;
 
 #[derive(Clone, Copy)]
 pub struct Obstacle {
+    /// Transient movement intent; never disables physical contact admission.
+    pub moving: bool,
     pub pos: [Fx; 3],
+    /// Physical height. Zero denotes a projected 2D planning/test boundary.
+    pub height: Fx,
     pub head: i32,
     pub half: [Fx; 2],
 }
@@ -34,7 +38,7 @@ impl Traffic {
     pub(super) fn of(m: &Motion, b: &UnitBody, active: bool) -> Self {
         Self {
             obstacle: Obstacle::of(m, b),
-            direction: [angle::cos(m.drive.head), angle::sin(m.drive.head)],
+            direction: m.travel_direction(),
             velocity: m.drive.vel,
             moving: active
                 && m.enabled
@@ -143,10 +147,22 @@ impl GroundMemo {
     }
 }
 impl Obstacle {
+    pub(super) fn of_unit(u: &super::RangeUnit) -> Self {
+        let mut obstacle = Self::of(&u.motion, &u.body);
+        obstacle.moving &= u.status.alive && u.status.engine && u.motion.can_drive(u.mobility);
+        obstacle
+    }
     pub fn of(m: &Motion, b: &UnitBody) -> Self {
         Self {
+            moving: m.enabled && !m.emplaced && m.destination.is_some()
+                && !m.blocked && m.escape_left == 0,
             pos: m.pos,
-            head: m.drive.head,
+            height: Fx::from_ratio(b.vol.ny as i32 * b.mm as i32, voxel::unit::WORLD_MM as i32),
+            // A biped's navigation footprint stays stable while its torso
+            // turns. Otherwise a square's diagonal wedges it between objects
+            // even though neither foot has moved toward either obstacle.
+            // Articulated hit geometry remains in the unit's damage volumes.
+            head: if m.leg_side_guard { 0 } else { m.drive.head },
             half: [
                 Fx::from_ratio(
                     b.vol.nx as i32 * b.mm as i32,
@@ -159,7 +175,12 @@ impl Obstacle {
             ],
         }
     }
+    fn overlaps_height(&self, y: Fx, height: Fx) -> bool {
+        self.height == Fx::ZERO || height == Fx::ZERO
+            || (self.pos[1] < y.add(height) && y < self.pos[1].add(self.height))
+    }
     pub(super) fn penetration(&self, other: &Self) -> Fx {
+        if !self.overlaps_height(other.pos[1], other.height) { return Fx::ZERO; }
         // A rotation cannot extend either hull beyond the sum of its half
         // extents. Reject distant pairs before trigonometry and four SAT axes.
         let reach = self.half[0]
@@ -200,20 +221,32 @@ impl Obstacle {
         }
         depth
     }
-    fn overlaps(&self, other: &Self) -> bool {
-        self.penetration(other) > Fx::ZERO
+    /// Path search uses the same small contact tolerance as movement.
+    fn blocks_route(&self, other: &Self) -> bool {
+        self.penetration(other) > HULL_CONTACT_SLOP
     }
     fn within(&self, from: [Fx; 2], radius: Fx) -> bool {
         let reach = radius.add(self.half[0].max(self.half[1]));
         self.pos[0].sub(from[0]).abs() <= reach && self.pos[2].sub(from[1]).abs() <= reach
     }
 }
-// A 20 cm margin lets corners graze instead of halting a whole column.
-// Beyond it, movement may only decrease an existing penetration.
-const HULL_CONTACT_SLOP: Fx = Fx::from_int(2);
+// Allow up to 40 cm of hull-edge contact for both moving units and
+// emplacements; beyond it, an existing penetration may only decrease.
+const HULL_CONTACT_SLOP: Fx = Fx::from_int(4);
 fn hull_contact_blocks(previous: &Obstacle, candidate: &Obstacle, other: &Obstacle) -> bool {
     let penetration = candidate.penetration(other);
-    penetration > HULL_CONTACT_SLOP && penetration >= previous.penetration(other)
+    if penetration <= HULL_CONTACT_SLOP { return false; }
+    let before = previous.penetration(other);
+    if penetration != before { return penetration > before; }
+    // A hull already touching a long side must be able to slide out along it.
+    // Equal SAT depth alone used to reject that escape on every tick. Do not
+    // allow the symmetric move toward the other hull's centre.
+    let distance = |p: &Obstacle| {
+        let x = p.pos[0].sub(other.pos[0]);
+        let z = p.pos[2].sub(other.pos[2]);
+        x.mul(x).add(z.mul(z))
+    };
+    distance(candidate) <= distance(previous)
 }
 /// Manoeuvres in one escape cycle: astern, ahead, then each turning both ways.
 const ESCAPES: u32 = 6;
@@ -235,6 +268,13 @@ pub struct Motion {
     /// Immutable template capability, reconstructed before loading motion.
     /// This is not a tuned speed and does not add saved state.
     emplaced: bool,
+    /// Reconstructed from kind; turn cadence and contact limits for Walker 04.
+    walker_turn_guard: bool,
+    /// Two-legged articulated rigs keep their contacts on their own sides.
+    leg_side_guard: bool,
+    /// First-line local yard detours for articulated bipeds and the collector.
+    /// Reconstructed capability, not saved state or a movement-speed setting.
+    flat_detours: bool,
     pub pos: [Fx; 3],
     pub drive: Drive,
     pub hull: Chassis,
@@ -431,6 +471,35 @@ fn stock_packs() -> &'static StockPacks {
     })
 }
 impl Motion {
+    /// Bipeds translate toward the next foothold while the torso turns.
+    /// Derived from saved route state, so lead/traffic agree after restore too.
+    fn travel_direction(&self) -> [Fx; 2] {
+        if self.leg_side_guard && self.pilot.is_none() && self.escape_left == 0 {
+            if let Some(goal) = self.path.get(self.cursor).copied().or(self.destination) {
+                let d = [Fx::from_int(goal[0]).sub(self.pos[0]), Fx::from_int(goal[1]).sub(self.pos[2])];
+                let length = d[0].mul(d[0]).add(d[1].mul(d[1])).sqrt();
+                if length > Fx::ZERO { return d.map(|v| v.div(length)); }
+            }
+        }
+        [angle::cos(self.drive.head), angle::sin(self.drive.head)]
+    }
+    pub(crate) fn velocity(&self) -> V3 {
+        let direction = self.travel_direction();
+        V3::new(direction[0].mul(self.drive.vel), Fx::ZERO, direction[1].mul(self.drive.vel))
+    }
+    /// Actual travel includes reversing and walkers' lateral route motion.
+    /// At rest the chassis heading is the neutral direction of its weapons.
+    pub(crate) fn travel_heading(&self) -> i32 {
+        if self.drive.vel == Fx::ZERO { return self.drive.head; }
+        let forward = if self.leg_side_guard && self.pilot.is_none() && self.escape_left == 0 {
+            self.path.get(self.cursor).copied().or(self.destination).and_then(|goal| {
+                let dx=Fx::from_int(goal[0]).sub(self.pos[0]);
+                let dz=Fx::from_int(goal[1]).sub(self.pos[2]);
+                (dx!=Fx::ZERO || dz!=Fx::ZERO).then(||angle::atan2(dz.raw(),dx.raw()))
+            }).unwrap_or(self.drive.head)
+        } else {self.drive.head};
+        angle::norm(forward + if self.drive.vel < Fx::ZERO {angle::FULL/2} else {0})
+    }
     fn invalidate_ground(&mut self, changed: Option<&nav::vehicle::Changed>) {
         if self
             .ground_memo
@@ -534,6 +603,7 @@ impl Motion {
         for (other_id, other) in traffic.iter().enumerate() {
             if other_id == id
                 || !other.moving
+                || !other.obstacle.overlaps_height(own.pos[1], own.height)
                 || other.velocity < Fx::ZERO
                 || !other.obstacle.within([self.pos[0], self.pos[2]], reach)
             {
@@ -633,7 +703,7 @@ impl Motion {
     pub fn new(at: [i32; 3], kind: modding::range::RangeUnitKind, body: &UnitBody) -> Self {
         let packs = stock_packs();
         let t = &packs.sim;
-        let chassis = match kind {
+        let mut chassis = match kind {
             modding::range::RangeUnitKind::Tank
             | modding::range::RangeUnitKind::LightningTank
             | modding::range::RangeUnitKind::EidolonTank
@@ -649,9 +719,40 @@ impl Motion {
             modding::range::RangeUnitKind::Spider => spider_tuning().chassis,
             _ => t.walking,
         };
+        if kind == modding::range::RangeUnitKind::Commander {
+            chassis.thrust = (chassis.thrust / 2).max(1);
+            chassis.turn = (chassis.turn / 2).max(1);
+            chassis.inertia = chassis.inertia.saturating_mul(2);
+            // This biped is several times taller than the standard strider.
+            // Cover more ground per cycle instead of rapidly shuffling at
+            // the unchanged drive speed; both feet keep opposite phases.
+            if let Some(gait) = chassis.gait.as_mut() {
+                gait.stride_cm = gait.stride_cm.saturating_mul(3) / 2;
+                gait.lift_cm = gait.lift_cm.saturating_mul(3) / 2;
+            }
+        }
+        if kind == modding::range::RangeUnitKind::Walker04 {
+            // A massive walker covers three times as much ground per cycle:
+            // cadence is distance-driven, so speed stays the same while feet
+            // lift three times less often and take correspondingly longer steps.
+            let rig = super::walker::tuning();
+            chassis.turn = rig.turn_deg_s;
+            if let Some(gait) = chassis.gait.as_mut() {
+                gait.stride_cm = rig.stride_cm;
+                gait.duty_pct = rig.duty_pct;
+                gait.lift_cm = rig.lift_cm;
+                gait.offset_pct = rig.offset_pct;
+            }
+            chassis.thrust = (chassis.thrust * 3 / 4).max(1);
+        }
         let r = crate::ride::ride_of(&chassis);
         let c = &packs.course;
-        let navigation = packs.navigation;
+        let mut navigation = packs.navigation;
+        if kind == modding::range::RangeUnitKind::Strider {
+            // One extra 10 cm cell prevents the gait from repeatedly
+            // clipping a wall corner while preserving narrow passages.
+            navigation.plan_margin = navigation.plan_margin.max(3);
+        }
         let yielding = navigation.fell.materials.to_vec();
         let rigs = crate::gait::rigs_of(body);
         let feet = vec![crate::gait::Foot::default(); rigs.len()];
@@ -662,6 +763,10 @@ impl Motion {
         let legs_buckled = vec![false; rigs.len()];
         Self {
             emplaced: kind.emplacement(),
+            walker_turn_guard: matches!(kind, modding::range::RangeUnitKind::Walker04 | modding::range::RangeUnitKind::Commander),
+            leg_side_guard: matches!(kind, modding::range::RangeUnitKind::Walker04 | modding::range::RangeUnitKind::Commander),
+            flat_detours: matches!(kind, modding::range::RangeUnitKind::Commander
+                | modding::range::RangeUnitKind::Walker04 | modding::range::RangeUnitKind::Crawler),
             step_cycle: Default::default(),
             pos: at.map(Fx::from_int),
             drive: Drive {
@@ -686,6 +791,10 @@ impl Motion {
                 0
             } else if kind == modding::range::RangeUnitKind::Spider {
                 spider_tuning().speed
+            } else if kind == modding::range::RangeUnitKind::Commander {
+                ((c.walker_speed * 9 / 10).max(1) / 3).max(1)
+            } else if kind == modding::range::RangeUnitKind::Walker04 {
+                (c.walker_speed * 9 / 10).max(1)
             } else if matches!(
                 kind,
                 modding::range::RangeUnitKind::Tank
@@ -1088,10 +1197,7 @@ impl Motion {
         let mut candidate = previous;
         candidate.pos[0] = nx;
         candidate.pos[2] = nz;
-        let collision = others.iter().position(|p| {
-            let penetration = candidate.penetration(p);
-            penetration > Fx::ZERO && penetration >= previous.penetration(p)
-        });
+        let collision = others.iter().position(|p| hull_contact_blocks(&previous, &candidate, p));
         let (x, z) = (nx.to_int_trunc(), nz.to_int_trunc());
         let terrain_allowed = (target.blocked == 0 || target.blocked < current.blocked)
             && !target.tilt
@@ -1424,6 +1530,10 @@ impl Motion {
                 foot.fold(rig, &root, self.drive.head, self.fold_milli, &floor);
             } else {
                 foot.step(rig, &stance);
+                if self.leg_side_guard && stance.grounded {
+                    let spread = if b.mm == 500 { Fx::ONE } else { Fx::from_ratio(6, 5) };
+                    foot.keep_walker_side(rig, &root, self.drive.head, spread, &floor);
+                }
             }
         }
         self.cut_feet(w, b);
@@ -1512,6 +1622,89 @@ impl Motion {
             self.cut.push(p);
         }
     }
+    fn keeps_move(&self, w: &World, to: [i32; 2]) -> bool {
+        self.destination == Some(to) && self.route.is_empty() && self.pilot.is_none()
+            && (0..2).all(|a| to[a] >= EDGE && to[a] < [w.nx, w.nz][a] as i32 - EDGE)
+            && (self.searching() || self.cursor < self.path.len())
+    }
+    /// A nearby final target in the rear cone of a tracked chassis.
+    /// Reverse travel uses the installed recovery gear, not a new speed cap.
+    fn reverse_aim(&self, to: [i32; 2], b: &UnitBody) -> Option<(i32, Fx)> {
+        if self.chassis.gait.is_some() { return None; }
+        let d = [Fx::from_int(to[0]).sub(self.pos[0]), Fx::from_int(to[1]).sub(self.pos[2])];
+        let reach = Fx::from_int(self.shape(b).half[0] * 2);
+        let distance = d[0].mul(d[0]).add(d[1].mul(d[1]));
+        if distance == Fx::ZERO || distance > reach.mul(reach) { return None; }
+        let way = angle::norm(angle::atan2(d[1].raw(), d[0].raw()) + angle::FULL / 2);
+        let alignment = angle::cos(angle::diff(way, self.drive.head));
+        (alignment > Fx::from_ratio(self.alignment, 100)).then_some((way, alignment))
+    }
+    /// Prove a short rear lane without reserving an unnecessary half-turn.
+    /// Flat tile bounds and a swept SAT test cover the whole translation.
+    fn flat_reverse_path(&mut self, w: &World, to: [i32; 2], b: &UnitBody,
+        others: &[Obstacle], rubble: &nav::vehicle::Rubble) -> bool {
+        if self.reverse_aim(to, b).is_none() || self.blocked || self.needs_recovery { return false; }
+        let own = Obstacle::of(self, b);
+        let from = [own.pos[0], own.pos[2]];
+        let end = to.map(Fx::from_int);
+        let delta = [end[0].sub(from[0]), end[1].sub(from[1])];
+        let axes = |head: i32| {
+            let c = angle::cos(head); let s = angle::sin(head);
+            [[c, s], [s.neg(), c]]
+        };
+        let dot = |a: [Fx; 2], b: [Fx; 2]| a[0].mul(b[0]).add(a[1].mul(b[1]));
+        let own_axes = axes(own.head);
+        for other in others {
+            if !other.overlaps_height(own.pos[1], own.height) { continue; }
+            let other_axes = axes(other.head);
+            let offset = [own.pos[0].sub(other.pos[0]), own.pos[2].sub(other.pos[2])];
+            let mut enter = Fx::ZERO; let mut leave = Fx::ONE;
+            for axis in own_axes.iter().chain(&other_axes) {
+                let radius = |basis: [[Fx; 2]; 2], half: [Fx; 2]| {
+                    dot(*axis, basis[0]).abs().mul(half[0])
+                        .add(dot(*axis, basis[1]).abs().mul(half[1]))
+                };
+                let reach = radius(own_axes, own.half).add(radius(other_axes, other.half))
+                    .sub(HULL_CONTACT_SLOP);
+                let at = dot(offset, *axis); let travel = dot(delta, *axis);
+                let end = at.add(travel);
+                if at.min(end) >= reach || at.max(end) <= reach.neg() {
+                    enter = Fx::ONE; leave = Fx::ZERO; break;
+                }
+                // Divide only at a crossing within this segment. Ratios stay
+                // in [0,1], even for an almost parallel one-bit translation.
+                if travel > Fx::ZERO {
+                    if at < reach.neg() { enter = enter.max(reach.neg().sub(at).div(travel)); }
+                    if end > reach { leave = leave.min(reach.sub(at).div(travel)); }
+                } else if travel < Fx::ZERO {
+                    if at > reach { enter = enter.max(reach.sub(at).div(travel)); }
+                    if end < reach.neg() { leave = leave.min(reach.neg().sub(at).div(travel)); }
+                }
+                if enter >= leave { break; }
+            }
+            if enter < leave { return false; }
+        }
+        let c = angle::cos(own.head).abs(); let s = angle::sin(own.head).abs();
+        let radius = [c.mul(own.half[0]).add(s.mul(own.half[1])),
+            s.mul(own.half[0]).add(c.mul(own.half[1]))];
+        let lo = [0, 1].map(|a| from[a].min(end[a]).sub(radius[a]).to_int_trunc() - 1);
+        let hi = [0, 1].map(|a| from[a].max(end[a]).add(radius[a]).to_int_trunc() + 1);
+        if lo.iter().any(|&a| a < 0) || hi[0] >= w.nx as i32 || hi[1] >= w.nz as i32
+            || rubble.touches(lo, hi) { return false; }
+        let mut floor: Option<[u16; 2]> = None;
+        for z in lo[1] as u32 / 8..=hi[1] as u32 / 8 {
+            for x in lo[0] as u32 / 8..=hi[0] as u32 / 8 {
+                let Some([low, high]) = w.prepared_floor_tile(x, z, self.navigation.fell.materials) else { return false; };
+                let [min, max] = floor.map_or([low, high], |[a, b]| [a.min(low), b.max(high)]);
+                if low != high || max.saturating_sub(min) > 1 { return false; }
+                floor = Some([min, max]);
+            }
+        }
+        self.path = vec![to]; self.cursor = 0; self.partial_path = false;
+        self.dry = false; self.blocked_ticks = 0; self.escape = 0;
+        self.last_plan = [0; 2]; self.last_probe = [0; 2];
+        true
+    }
     /// Ask for a route to `to` and walk one tick's worth of the search
     /// (ADR-306). `false` once the answer is known to be no route; while
     /// the search goes on the order stands and this is `true`.
@@ -1536,7 +1729,12 @@ impl Motion {
         prepared: Option<&PreparedGround<'_>>,
         completed: impl FnMut(&'static str),
     ) -> bool {
-        // An explicit order supersedes the old route, even to the same point.
+        if self.keeps_move(w, to) {
+            self.enabled = true;
+            return true;
+        }
+        // A changed order supersedes the old route. Repeating a live goal
+        // retains its path/frontier instead of returning to its first corner.
         self.path.clear();
         self.partial_path = false;
         self.cursor = 0;
@@ -1549,6 +1747,14 @@ impl Motion {
         let far = [w.nx as i32 - EDGE, w.nz as i32 - EDGE];
         if !(0..2).all(|a| (EDGE..far[a]).contains(&to[a])) {
             return false;
+        }
+        // Repeated clicks (and repeated AI intent) must not restart a useful
+        // detour at its first corner or erase a budgeted search every tick.
+        // A different destination, patrol override or spent path still starts
+        // a new order through the ordinary reset below.
+        if self.keeps_move(w, to) {
+            self.enabled = true;
+            return true;
         }
         self.route.clear();
         self.path.clear();
@@ -1566,24 +1772,134 @@ impl Motion {
         self.next_plan = 0;
         true
     }
-    /// Only nearby hulls matter to a contact detour. A distant actor is
-    /// handled if and when the moving hull reaches it, not by this search.
+    /// Fine routing keeps nearby hulls throughout a detour. Forgetting them
+    /// after the first accepted sidestep let a pending search plan straight
+    /// back through the very building it was going around.
     fn local_blockers(
         &self,
         from: [Fx; 2],
         shape: nav::vehicle::Shape,
         others: &[Obstacle],
     ) -> Vec<Obstacle> {
-        if self.blocked_ticks == 0 && self.escape == 0 {
-            return Vec::new();
-        }
         let radius =
             Fx::from_int(4 * (shape.half[0].max(shape.half[1]) + self.navigation.cell_units));
         others
             .iter()
             .copied()
+            .filter(|o| o.overlaps_height(self.pos[1], Fx::from_int(shape.height)))
+            .filter(|o| !o.moving || self.blocked_ticks > 0 || self.escape > 0)
             .filter(|o| o.within(from, radius))
             .collect()
+    }
+    /// A flat local yard needs two corners around a hull, not an oriented
+    /// voxel search. Tracked hulls reserve their whole turning radius;
+    /// bipeds translate along these legs while turning.
+    /// Mixed terrain/rubble or a second obstructed corridor falls back to A*.
+    fn flat_hull_detour(&mut self, w: &World, to: [i32; 2], b: &UnitBody,
+        others: &[Obstacle], rubble: &nav::vehicle::Rubble) -> bool {
+        if !self.flat_detours { return false; }
+        let from = [self.pos[0], self.pos[2]];
+        let end = to.map(Fx::from_int);
+        let mut own = Obstacle::of(self, b);
+        if !self.leg_side_guard {
+            let radius = own.half[0].mul(own.half[0]).add(own.half[1].mul(own.half[1])).sqrt();
+            own.half = [radius; 2];
+        }
+        let blockers = self.local_blockers(from, self.shape(b), others);
+        let bounds = |o: &Obstacle, padding: Fx| {
+            let c = angle::cos(o.head).abs(); let s = angle::sin(o.head).abs();
+            let reach = [c.mul(o.half[0]).add(s.mul(o.half[1])),
+                s.mul(o.half[0]).add(c.mul(o.half[1]))];
+            [0, 1].map(|a| {
+                let r = reach[a].add(own.half[a]).add(padding);
+                [o.pos[a * 2].sub(r), o.pos[a * 2].add(r)]
+            })
+        };
+        let intersects = |a: [Fx; 2], z: [Fx; 2], box_: [[Fx; 2]; 2]| -> Option<Fx> {
+            let mut enter = Fx::ZERO; let mut leave = Fx::ONE;
+            for axis in 0..2 {
+                let d = z[axis].sub(a[axis]);
+                if d == Fx::ZERO {
+                    if a[axis] < box_[axis][0] || a[axis] > box_[axis][1] { return None; }
+                } else {
+                    let x = box_[axis][0].sub(a[axis]).div(d);
+                    let y = box_[axis][1].sub(a[axis]).div(d);
+                    enter = enter.max(x.min(y)); leave = leave.min(x.max(y));
+                    if enter > leave { return None; }
+                }
+            }
+            (leave > Fx::ZERO).then_some(enter)
+        };
+        let padding = Fx::from_int(self.navigation.plan_margin.max(1));
+        let Some((_, blocker)) = blockers.iter().enumerate()
+            .filter_map(|(id, o)| intersects(from, end, bounds(o, HULL_CONTACT_SLOP.neg()))
+                .map(|t| ((t, id), o)))
+            .min_by_key(|(key, _)| *key) else { return false; };
+        // Moving traffic is followed/yielded to, not given a frozen yard
+        // detour. A real contact can still use the ordinary local search.
+        if blocker.moving { return false; }
+        let box_ = bounds(blocker, padding);
+        let axis = usize::from(end[1].sub(from[1]).abs() > end[0].sub(from[0]).abs());
+        let side = 1 - axis;
+        let forward = usize::from(end[axis] >= from[axis]);
+        let mut best: Option<(Fx, Vec<[i32; 2]>)> = None;
+        for edge in 0..2 {
+            // Round outwards so conversion to grid coordinates cannot put a
+            // corner back into the expanded obstacle.
+            let rounded = |value: Fx, high: bool| {
+                let n = value.to_int_trunc();
+                if high { n + 1 } else { n - 1 }
+            };
+            let mut a = [0; 2]; let mut z = [0; 2];
+            a[axis] = rounded(box_[axis][1 - forward], forward == 0);
+            z[axis] = rounded(box_[axis][forward], forward == 1);
+            a[side] = rounded(box_[side][edge], edge == 1); z[side] = a[side];
+            let mut path = vec![a, z];
+            // Keep this fast path local even for a cross-map order. The real
+            // destination is retained; its continuation uses normal routing.
+            if (0..2).all(|axis| (to[axis] - z[axis]).abs() <= self.navigation.global_min_distance) {
+                path.push(to);
+            }
+            if path.iter().any(|p| p[0] < EDGE || p[1] < EDGE
+                || p[0] >= w.nx as i32 - EDGE || p[1] >= w.nz as i32 - EDGE) { continue; }
+            let mut start = from; let mut cost = Fx::ZERO; let mut clear = true;
+            for &point in &path {
+                let end = point.map(Fx::from_int);
+                if blockers.iter().any(|o| intersects(start, end, bounds(o, HULL_CONTACT_SLOP.neg())).is_some()) {
+                    clear = false; break;
+                }
+                let delta = [end[0].sub(start[0]), end[1].sub(start[1])];
+                cost = cost.add(delta[0].mul(delta[0]).add(delta[1].mul(delta[1])).sqrt());
+                start = end;
+            }
+            if !clear { continue; }
+            let remaining = [end[0].sub(start[0]), end[1].sub(start[1])];
+            cost = cost.add(remaining[0].mul(remaining[0]).add(remaining[1].mul(remaining[1])).sqrt());
+            let mut lo = [from[0].to_int_trunc(), from[1].to_int_trunc()];
+            let mut hi = lo;
+            for p in &path { for a in 0..2 { lo[a] = lo[a].min(p[a]); hi[a] = hi[a].max(p[a]); } }
+            for a in 0..2 { let r = own.half[a].to_int_trunc() + self.navigation.plan_margin + 1;
+                lo[a] -= r; hi[a] += r; }
+            if lo.iter().any(|&v| v < 0) || hi[0] >= w.nx as i32 || hi[1] >= w.nz as i32
+                || rubble.touches(lo, hi) { continue; }
+            let mut floor: Option<[u16; 2]> = None;
+            'tiles: for z in lo[1] as u32 / 8..=hi[1] as u32 / 8 {
+                for x in lo[0] as u32 / 8..=hi[0] as u32 / 8 {
+                    let Some([low, high]) = w.prepared_floor_tile(x, z, self.navigation.fell.materials) else { clear = false; break 'tiles; };
+                    let [min, max] = floor.map_or([low, high], |[a, b]| [a.min(low), b.max(high)]);
+                    if low != high || max.saturating_sub(min) > 1 { clear = false; break 'tiles; }
+                    floor = Some([min, max]);
+                }
+            }
+            if clear && best.as_ref().is_none_or(|(old, _)| cost < *old) { best = Some((cost, path)); }
+        }
+        let Some((_, path)) = best else { return false; };
+        self.partial_path = path.last().copied() != Some(to);
+        self.path = path; self.cursor = 0;
+        self.blocked = false; self.needs_recovery = false; self.dry = false;
+        self.blocked_ticks = 0; self.escape = 0;
+        self.last_plan = [0; 2]; self.last_probe = [0; 2];
+        true
     }
     /// Replanning retains the current route while a replacement is pending.
     /// A temporary blocker can leave before the search finishes; execution
@@ -1628,9 +1944,18 @@ impl Motion {
         // whole-map (ADR-680): the hull owns at most one of each.
         self.hunt = None;
         self.coarse = None;
+        if self.destination.is_some() && self.flat_reverse_path(w, to, b, others, rubble) {
+            completed("plan_reverse");
+            return true;
+        }
         // Global routing is terrain-only. A hull enters dynamic avoidance
         // only after physical contact or an escape attempt on this order.
-        let avoid = self.blocked_ticks > 0 || self.escape > 0;
+        let avoid = self.blocked_ticks > 0 || self.escape > 0
+            || self.flat_detours && !self.local_blockers(from, shape, others).is_empty();
+        if self.destination.is_some() && self.flat_hull_detour(w, to, b, others, rubble) {
+            completed("plan_hull_detour");
+            return true;
+        }
         if !self.blocked
             && !self.needs_recovery
             && !avoid
@@ -1782,8 +2107,12 @@ impl Motion {
         let half = shape.half.map(Fx::from_int);
         let blockers = self.local_blockers(from, shape, others);
         let clear = |p: [Fx; 2], head: i32| {
+            // A biped may sidestep without rotating its torso into this edge's
+            // direction. Requiring that pivot beside a hull strands its search.
+            let head = if self.leg_side_guard { 0 } else { head };
             !blockers.iter().any(|o| {
-                o.overlaps(&Obstacle {
+                o.blocks_route(&Obstacle { height: Fx::ZERO,
+                    moving: false,
                     pos: [p[0], Fx::ZERO, p[1]],
                     head,
                     half,
@@ -2004,6 +2333,10 @@ impl Motion {
         rubble: &nav::vehicle::Rubble,
         completed: impl FnMut(&'static str),
     ) -> bool {
+        if self.keeps_move(w, to) {
+            self.enabled = true;
+            return true;
+        }
         if self.cursor >= self.path.len() || self.blocked || self.escape_left > 0 {
             return self.move_to_observed(w, to, b, others, rubble, None, completed);
         }
@@ -2270,9 +2603,12 @@ impl Motion {
         hunt.forget(changed);
         detail("route_forget_end");
         let half = self.shape(b).half.map(Fx::from_int);
+        let clearance_head = self.leg_side_guard.then_some(0);
         let is_clear = |p: [Fx; 2], head: i32| {
+            let head = clearance_head.unwrap_or(head);
             !blockers.iter().any(|o| {
-                o.overlaps(&Obstacle {
+                o.blocks_route(&Obstacle { height: Fx::ZERO,
+                    moving: false,
                     pos: [p[0], Fx::ZERO, p[1]],
                     head,
                     half,
@@ -2280,6 +2616,7 @@ impl Motion {
             })
         };
         let clear = |p: [Fx; 2], head: i32| {
+            let head = clearance_head.unwrap_or(head);
             let answer = is_clear(p, head);
             if let Some(checked) = checked {
                 checked.borrow_mut().push(HuntClearance {
@@ -2407,9 +2744,15 @@ impl Motion {
         rubble: &nav::vehicle::Rubble,
         tick: u32,
         changed: &nav::vehicle::Changed,
+        neighbours: impl Iterator<Item = Obstacle>,
         detail: impl Fn(&'static str) + Sync,
     ) {
         if self.enabled && self.hunt.is_some() && self.blocked_ticks == 0 && self.escape == 0 {
+            let shape = self.shape(b);
+            let radius = Fx::from_int(4 * (shape.half[0].max(shape.half[1]) + self.navigation.cell_units));
+            if neighbours.into_iter().any(|o| !o.moving && o.within([self.pos[0], self.pos[2]], radius)) {
+                return;
+            }
             detail("terrain_advance_begin");
             self.hunt_step(w, b, &[], rubble, tick, changed, &detail, |batch, begin| {
                 detail(sweep_event(batch, begin));
@@ -2435,7 +2778,6 @@ impl Motion {
         self.enabled
             && !self.prepared_hunt
             && self.resume_budget != Some(0)
-            && (self.blocked_ticks != 0 || self.escape != 0)
             && self.hunt.is_some()
     }
     #[cfg(test)]
@@ -2511,12 +2853,13 @@ impl Motion {
         let blockers = self.local_blockers(prepared.origin, shape, others);
         let unchanged = blockers.len() == prepared.blockers.len()
             && blockers.iter().zip(&prepared.blockers).all(|(a, b)| {
-                a.pos[0] == b.pos[0] && a.pos[2] == b.pos[2] && a.head == b.head && a.half == b.half
+                a.pos[0] == b.pos[0] && a.pos[2] == b.pos[2] && a.head == b.head && a.half == b.half && a.moving == b.moving
             });
         if !unchanged
             && !prepared.checked.iter().all(|q| {
                 let clear = !blockers.iter().any(|o| {
-                    o.overlaps(&Obstacle {
+                    o.blocks_route(&Obstacle { height: Fx::ZERO,
+                        moving: false,
                         pos: [q.position[0], Fx::ZERO, q.position[1]],
                         head: q.head,
                         half: shape.half.map(Fx::from_int),
@@ -2852,37 +3195,70 @@ impl Motion {
         }
         let mut want = drive::NO_WAY;
         let mut speed = Fx::ZERO;
+        let mut walk_direction = None;
         let base_limits = Limits::of(&self.chassis, TICKS);
         let drive_factor = self.drive_scale.mul(self.hull.load);
         let brake = response.limits(&base_limits, false).brake.mul(drive_factor);
         if self.pilot.is_none() {
-            if alive && engine && self.escape_left == 0 && self.cursor < self.path.len() {
-                let original = self.path[self.cursor].map(Fx::from_int);
+            // Consume reached intermediate biped points before choosing this
+            // tick's steering. Previously arrival requested NO_WAY for a full
+            // tick, braking at each corner even with a clear continuation.
+            if self.leg_side_guard && alive && engine && self.escape_left == 0 {
+                let arrival = Fx::from_ratio(self.navigation.corner_arrival_mm,
+                    voxel::unit::WORLD_MM as i32).min(Fx::from_int(self.arrival))
+                    .max(Fx::from_ratio(self.speed, TICKS));
+                while self.cursor + 1 < self.path.len() {
+                    let p = self.path[self.cursor];
+                    let dx = Fx::from_int(p[0]).sub(self.pos[0]);
+                    let dz = Fx::from_int(p[1]).sub(self.pos[2]);
+                    if dx.mul(dx).add(dz.mul(dz)) > arrival.mul(arrival) { break; }
+                    self.cursor += 1;
+                    self.escape = 0;
+                }
+            }
+            // Route work is shared and may take several ticks. Start toward
+            // the order now; every actual step still checks fresh terrain and
+            // hulls below. A refused step hands control back to the search.
+            let provisional = self.cursor >= self.path.len() && !self.blocked
+                && !self.needs_recovery && self.destination.is_some();
+            if alive && engine && self.escape_left == 0
+                && (self.cursor < self.path.len() || provisional) {
+                let original = if provisional { self.destination.unwrap() }
+                    else { self.path[self.cursor] }.map(Fx::from_int);
                 let original_way = angle::atan2(
                     original[1].sub(self.pos[2]).raw(),
                     original[0].sub(self.pos[0]).raw(),
                 );
                 let original_alignment =
                     angle::cos(angle::diff(original_way, self.drive.head)).max(Fx::ZERO);
-                let steering =
-                    self.moving_steering(w, b, others, rubble, original_way, original_alignment);
+                let steering = if provisional || self.leg_side_guard { None } else {
+                    self.moving_steering(w, b, others, rubble, original_way, original_alignment)
+                };
                 if steering.is_some_and(|s| s.passed) {
                     self.cursor += 1;
                     self.escape = 0;
                 }
-                let goal = self.path[self.cursor];
+                let goal = if provisional { self.destination.unwrap() } else { self.path[self.cursor] };
                 let dx = Fx::from_int(goal[0]).sub(self.pos[0]);
                 let dz = Fx::from_int(goal[1]).sub(self.pos[2]);
-                let arrival = if self.partial_path || self.cursor + 1 < self.path.len() {
+                let arrival = if !provisional && (self.partial_path || self.cursor + 1 < self.path.len()) {
                     Fx::from_ratio(
                         self.navigation.corner_arrival_mm,
                         voxel::unit::WORLD_MM as i32,
                     )
                     .min(Fx::from_int(self.arrival))
+                    // At 20 Hz a biped's full step can exceed the old 5 cm
+                    // waypoint radius, making it alternate across the corner.
+                    .max(if self.leg_side_guard { Fx::from_ratio(self.speed, TICKS) } else { Fx::ZERO })
                 } else {
                     Fx::from_int(self.arrival)
                 };
                 if dx.mul(dx).add(dz.mul(dz)) <= arrival.mul(arrival) {
+                    if provisional {
+                        self.destination = None;
+                        self.hunt = None;
+                        self.coarse = None;
+                    } else {
                     self.cursor += 1;
                     self.escape = 0;
                     let reached_end = self.cursor == self.path.len();
@@ -2907,6 +3283,7 @@ impl Motion {
                             self.laps += 1;
                         }
                     }
+                    }
                 } else {
                     let aim = steering.map_or([dx, dz], |s| s.delta);
                     want = steering.map_or(original_way, |s| s.way);
@@ -2929,7 +3306,7 @@ impl Motion {
                             [dx, dz]
                         },
                         self.path.get(self.cursor + 1).copied(),
-                        steering.is_some_and(|s| s.rounded),
+                        steering.is_some_and(|s| s.rounded) || self.leg_side_guard,
                     );
                     speed = drive::stopping_speed(distance, brake, crate::TICKS_PER_SECOND, speed);
                     // On a checked route, keep rolling through a modest
@@ -2938,7 +3315,7 @@ impl Motion {
                     // on every step and refuse any unsafe move.
                     let rolling_correction =
                         steering.is_none() && alignment > Fx::from_ratio(25, 100);
-                    if steering.is_some() || rolling_correction {
+                    if !self.leg_side_guard && (steering.is_some() || rolling_correction) {
                         speed = drive::corner_speed(
                             aim,
                             angle::diff(want, self.drive.head),
@@ -2954,7 +3331,25 @@ impl Motion {
                     } else {
                         self.alignment
                     };
-                    if alignment > Fx::from_ratio(threshold, 100)
+                    // A short final order behind a tracked hull does not
+                    // require a half-turn. Beside a wall that pivot may be
+                    // impossible even though the straight rear lane is open.
+                    // Use the existing low-speed reverse gear; normal braking
+                    // and live pose/contact checks still govern each step.
+                    let reverse = (steering.is_none() && !self.partial_path
+                        && self.cursor + 1 >= self.path.len())
+                        .then(|| self.reverse_aim(goal, b)).flatten();
+                    if self.leg_side_guard {
+                        // Bipeds can take a side/back step while their torso
+                        // slews. Treating them as tracked vehicles required a
+                        // full pivot before every nearby order.
+                        let length = dx.mul(dx).add(dz.mul(dz)).sqrt();
+                        walk_direction = Some([dx.div(length), dz.div(length)]);
+                    } else if let Some((reverse_way, reverse_alignment)) = reverse {
+                        want = reverse_way;
+                        speed = speed.mul(Fx::from_ratio(self.navigation.escape_speed_pct, 100))
+                            .mul(reverse_alignment).neg();
+                    } else if alignment > Fx::from_ratio(threshold, 100)
                         && (self.drive.vel > Fx::ZERO
                             || steering.is_some()
                             || rolling_correction
@@ -3032,7 +3427,8 @@ impl Motion {
                 );
             }
         }
-        let lim = response.limits(&base_limits, want == drive::NO_WAY);
+        let mut lim = response.limits(&base_limits, want == drive::NO_WAY);
+        if walk_direction.is_some() { lim.pivot_speed = Fx::ONE; }
         let old = self.drive;
         let old_pos = self.pos;
         // Retain bounded column pages across nearby ticks. The world's edits
@@ -3084,7 +3480,7 @@ impl Motion {
         if current.crush > 0 {
             speed = speed.mul(Fx::from_ratio(self.navigation.fell.speed_pct, 100));
         }
-        let (next, delta) = drive::advance(
+        let (next, mut delta) = drive::advance(
             old,
             want,
             speed,
@@ -3092,6 +3488,11 @@ impl Motion {
             drive_factor,
             Fx::from_ratio(1, TICKS),
         );
+        if let Some(direction) = walk_direction {
+            let travel = next.vel.div(Fx::from_int(TICKS));
+            delta.dx = direction[0].mul(travel);
+            delta.dz = direction[1].mul(travel);
+        }
         let previous = Obstacle::of(self, b);
         self.contact_velocity = V3::new(
             delta.dx.mul(Fx::from_int(TICKS)),
@@ -3102,17 +3503,17 @@ impl Motion {
         self.drive = next;
         // A burst's shove rides along with the drive's own step (ADR-286)
         // and is spent by the brakes, or by the terrain if it refuses.
-        let nx = self.pos[0]
+        let mut nx = self.pos[0]
             .add(delta.dx)
             .add(self.shove.x.div(Fx::from_int(TICKS)));
-        let nz = self.pos[2]
+        let mut nz = self.pos[2]
             .add(delta.dz)
             .add(self.shove.z.div(Fx::from_int(TICKS)));
         let (x, z) = (nx.to_int_trunc(), nz.to_int_trunc());
         // This probe only lives for the current tick. A stationary hull
         // has the same clearance answer, but still gets fresh support,
         // gravity and contact processing below.
-        let target = if nx == self.pos[0] && nz == self.pos[2] && next.head == old.head {
+        let mut target = if nx == self.pos[0] && nz == self.pos[2] && next.head == old.head {
             current
         } else {
             ground.pose([nx, nz], next.head, shape)
@@ -3121,7 +3522,7 @@ impl Motion {
         let mut candidate = Obstacle::of(self, b);
         candidate.pos[0] = nx;
         candidate.pos[2] = nz;
-        let collision = others
+        let mut collision = others
             .iter()
             .position(|p| hull_contact_blocks(&previous, &candidate, p));
         // A hull never enters a pose that leans it past its limit or
@@ -3141,18 +3542,134 @@ impl Motion {
                 ));
         let clear =
             belly_clear && !target.tilt && (self.escape_left > 0 || !target.steep || current.steep);
-        let terrain_allowed = clear
+        let mut terrain_allowed = clear
             && x >= EDGE
             && z >= EDGE
             && x < w.nx as i32 - EDGE
             && z < w.nz as i32 - EDGE
             && target.height.sub(current.height) <= Fx::from_int(self.step);
+        if alive && engine && next.head != old.head
+            && (!terrain_allowed || collision.is_some()) {
+            // Translation and yaw are independent freedoms at a contact.
+            // A tracked hull may continue straight until its rear clears a
+            // wall instead of repeatedly cancelling its entire rolling turn.
+            // Bipeds retain their independent side/back step. No lateral
+            // sliding is introduced for tracked vehicles.
+            let travel = next.vel.div(Fx::from_int(TICKS));
+            let (dx, dz) = if walk_direction.is_some() { (delta.dx, delta.dz) }
+                else { (angle::cos(old.head).mul(travel), angle::sin(old.head).mul(travel)) };
+            let ux = self.pos[0].add(dx).add(self.shove.x.div(Fx::from_int(TICKS)));
+            let uz = self.pos[2].add(dz).add(self.shove.z.div(Fx::from_int(TICKS)));
+            let unturned = ground.pose([ux, uz], old.head, shape);
+            candidate.pos[0] = ux;
+            candidate.pos[2] = uz;
+            candidate.head = previous.head;
+            let hull_clear = !others.iter().any(|p| hull_contact_blocks(&previous, &candidate, p));
+            let (x, z) = (ux.to_int_trunc(), uz.to_int_trunc());
+            if (ux != self.pos[0] || uz != self.pos[2])
+                && hull_clear && unturned.blocked == 0 && !unturned.tilt
+                && (!unturned.steep || current.steep)
+                && unturned.height.sub(current.height) <= Fx::from_int(self.step)
+                && x >= EDGE && z >= EDGE
+                && x < w.nx as i32 - EDGE && z < w.nz as i32 - EDGE {
+                target = unturned;
+                nx = ux;
+                nz = uz;
+                delta.dx = dx;
+                delta.dz = dz;
+                self.contact_velocity = V3::new(dx.mul(Fx::from_int(TICKS)), Fx::ZERO,
+                    dz.mul(Fx::from_int(TICKS))).add(self.shove);
+                self.drive.head = old.head;
+                self.drive.yaw_rate = 0;
+                terrain_allowed = true;
+                collision = None;
+            }
+        }
+        if alive && engine && self.pilot.is_none() && self.escape_left == 0
+            && self.shove == V3::ZERO && collision.is_some() {
+            // At a static hull edge, try its two tangents before giving up
+            // the whole tick. Each trial uses the installed transmission,
+            // fresh terrain and every live neighbour. Moving traffic retains
+            // the ordinary yielding/contact path; no speculative side push.
+            let blocker = &others[collision.unwrap()];
+            if !blocker.moving {
+                if let Some(goal) = self.destination {
+                    let aim = [Fx::from_int(goal[0]).sub(self.pos[0]),
+                        Fx::from_int(goal[1]).sub(self.pos[2])];
+                    let distance = aim[0].mul(aim[0]).add(aim[1].mul(aim[1]));
+                    let mut best = None;
+                    let mut best_cost = Fx::MAX;
+                    for axis in [blocker.head, angle::norm(blocker.head + angle::FULL / 4)] {
+                        let mut way = axis;
+                        let mut direction = [angle::cos(way), angle::sin(way)];
+                        let along = aim[0].mul(direction[0]).add(aim[1].mul(direction[1]));
+                        if along == Fx::ZERO { continue; }
+                        if along < Fx::ZERO {
+                            way = angle::norm(way + angle::FULL / 2);
+                            direction = direction.map(Fx::neg);
+                        }
+                        let alignment = angle::cos(angle::diff(way, old.head)).max(Fx::ZERO);
+                        let cap = if walk_direction.is_some() { speed }
+                            else { speed.mul(alignment) };
+                        let (drive, mut movement) = drive::advance(old, way, cap, &lim,
+                            drive_factor, Fx::from_ratio(1, TICKS));
+                        if walk_direction.is_some() {
+                            let travel = drive.vel.div(Fx::from_int(TICKS));
+                            movement.dx = direction[0].mul(travel);
+                            movement.dz = direction[1].mul(travel);
+                        }
+                        let at = [self.pos[0].add(movement.dx), self.pos[2].add(movement.dz)];
+                        let remaining = [Fx::from_int(goal[0]).sub(at[0]), Fx::from_int(goal[1]).sub(at[1])];
+                        let cost = remaining[0].mul(remaining[0]).add(remaining[1].mul(remaining[1]));
+                        if cost > distance || (cost == distance
+                            && angle::diff(way, drive.head).abs() >= angle::diff(way, old.head).abs()) { continue; }
+                        let (x, z) = (at[0].to_int_trunc(), at[1].to_int_trunc());
+                        if x < EDGE || z < EDGE || x >= w.nx as i32 - EDGE || z >= w.nz as i32 - EDGE { continue; }
+                        let mut alternative = previous;
+                        alternative.pos[0] = at[0]; alternative.pos[2] = at[1];
+                        if !self.leg_side_guard { alternative.head = drive.head; }
+                        if others.iter().any(|o| hull_contact_blocks(&previous, &alternative, o)) { continue; }
+                        let pose = ground.pose(at, drive.head, shape);
+                        if pose.blocked != 0 || pose.tilt || pose.steep && !current.steep
+                            || pose.height.sub(current.height) > Fx::from_int(self.step) { continue; }
+                        if cost < best_cost {
+                            best_cost = cost;
+                            best = Some((cost, drive, movement, at, pose, direction));
+                        }
+                    }
+                    if let Some((cost, drive, movement, at, pose, direction)) = best {
+                        self.drive = drive;
+                        delta = movement;
+                        nx = at[0]; nz = at[1]; target = pose;
+                        self.contact_velocity = V3::new(delta.dx.mul(Fx::from_int(TICKS)),
+                            Fx::ZERO, delta.dz.mul(Fx::from_int(TICKS)));
+                        terrain_allowed = true;
+                        collision = None;
+                        // Keep the chosen tangent for one existing steering
+                        // lookahead instead of steering straight back into the
+                        // same wall next tick. It is a provisional prefix:
+                        // every step still checks fresh terrain and neighbours.
+                        let along = aim[0].mul(direction[0]).add(aim[1].mul(direction[1]));
+                        let reach = Fx::from_int(self.navigation.corner_lookahead_units).min(along);
+                        let point = [self.pos[0].add(direction[0].mul(reach)).to_int_trunc(),
+                            self.pos[2].add(direction[1].mul(reach)).to_int_trunc()];
+                        if cost < distance && reach > Fx::from_int(self.arrival)
+                            && point[0] >= EDGE && point[1] >= EDGE
+                            && point[0] < w.nx as i32 - EDGE && point[1] < w.nz as i32 - EDGE {
+                            self.path = vec![point]; self.cursor = 0; self.partial_path = true;
+                            self.hunt = None; self.coarse = None;
+                            self.needs_recovery = false; self.dry = false;
+                        }
+                    }
+                }
+            }
+        }
         let allowed = terrain_allowed && collision.is_none();
         let path = if allowed {
             self.blocked = false;
             self.pos[0] = nx;
             self.pos[2] = nz;
-            next.vel.div(Fx::from_int(TICKS))
+            self.drive.vel.div(Fx::from_int(TICKS))
         } else {
             self.drive.vel = Fx::ZERO;
             self.drive.head = old.head;
@@ -3224,7 +3741,22 @@ impl Motion {
         completed("terrain");
         let mut advanced = 0;
         if let Some(c) = self.step_cycle.get(&self.chassis) {
-            advanced = c.advance(path, angle::diff(self.drive.head, old.head));
+            let yaw = angle::diff(self.drive.head, old.head);
+            advanced = c.advance(path, yaw);
+            if self.walker_turn_guard {
+                // Preserve the long stride while translating, but take more
+                // frequent steps when pivoting instead of twisting planted feet.
+                if b.mm == 500 {
+                    let step = super::walker::tuning().turn_step_degrees;
+                    // The actual feet are metres apart, unlike the strider's
+                    // 90 cm suspension probes. Derive turning cadence from yaw,
+                    // not those unrelated probe dimensions.
+                    let turning = (i64::from(yaw.abs()) * 360 / i64::from(step)) as i32;
+                    advanced = advanced.max(turning);
+                } else {
+                    advanced = advanced.saturating_add(c.advance(Fx::ZERO, yaw).saturating_mul(2));
+                }
+            }
             self.phase = angle::norm(self.phase.wrapping_add(advanced));
         }
         let nominal = crate::ride::supports_of(&self.chassis);
@@ -4492,7 +5024,8 @@ mod tests {
                         serial.navigation.search_nodes_per_tick = 32;
                         serial.blocked_ticks = u32::from(blocked);
                         let mut prepared = serial.clone();
-                        let others = [Obstacle {
+                        let others = [Obstacle { height: Fx::ZERO,
+                            moving: false,
                             pos: [Fx::from_int(240), Fx::from_int(16), Fx::from_int(300)],
                             head: angle::FULL / 7,
                             half: [Fx::from_int(30); 2],
@@ -4643,7 +5176,8 @@ mod tests {
                 });
                 // Live blockers are supplied after preparation, just as spatial
                 // acceptance sees earlier actors' moves in the enclosing tick.
-                let others = [Obstacle {
+                let others = [Obstacle { height: Fx::ZERO,
+                    moving: false,
                     pos: [
                         Fx::from_int(190 + (tick / 20) as i32),
                         Fx::from_int(16),
@@ -4773,7 +5307,8 @@ mod tests {
         let body = voxel::unit::tank();
         let rubble = nav::vehicle::Rubble::new();
         let changed = nav::vehicle::Changed::default();
-        let obstacle = Obstacle {
+        let obstacle = Obstacle { height: Fx::ZERO,
+            moving: false,
             pos: [Fx::from_int(240), Fx::from_int(16), Fx::from_int(300)],
             head: 0,
             half: [Fx::from_int(6), Fx::from_int(10)],
@@ -4831,7 +5366,8 @@ mod tests {
         let body = voxel::unit::tank();
         let rubble = nav::vehicle::Rubble::new();
         let changed = nav::vehicle::Changed::default();
-        let obstacle = Obstacle {
+        let obstacle = Obstacle { height: Fx::ZERO,
+            moving: false,
             pos: [Fx::from_int(240), Fx::from_int(16), Fx::from_int(300)],
             head: 0,
             half: [Fx::from_int(6), Fx::from_int(10)],
@@ -4842,12 +5378,16 @@ mod tests {
         rotated.head = angle::FULL / 8;
         let mut larger = obstacle;
         larger.half[0] = larger.half[0].add(Fx::ONE);
+        let grounded = Obstacle { height: Fx::from_int(40), ..obstacle };
+        let airborne = Obstacle { pos: [obstacle.pos[0], Fx::from_int(300), obstacle.pos[2]], ..grounded };
         for (before, after) in [
             (vec![obstacle], vec![moved]),
             (vec![obstacle], vec![rotated]),
             (vec![obstacle], vec![larger]),
             (vec![obstacle], vec![]),
             (vec![], vec![obstacle]),
+            (vec![airborne], vec![grounded]),
+            (vec![grounded], vec![airborne]),
         ] {
             let mut m = local_hunter(&w, &body, &before);
             let mut serial = m.clone();
@@ -4875,7 +5415,8 @@ mod tests {
             .prepare_local_hunt(&w, &body, &[], &rubble, &changed)
             .unwrap();
         let query = free.checked.iter().find(|q| q.clear).unwrap();
-        let obstacle = Obstacle {
+        let obstacle = Obstacle { height: Fx::ZERO,
+            moving: false,
             pos: [query.position[0], Fx::from_int(16), query.position[1]],
             head: query.head,
             half: source.shape(&body).half.map(Fx::from_int),
@@ -4909,7 +5450,8 @@ mod tests {
         let body = voxel::unit::tank();
         let rubble = nav::vehicle::Rubble::new();
         let changed = nav::vehicle::Changed::default();
-        let obstacle = Obstacle {
+        let obstacle = Obstacle { height: Fx::ZERO,
+            moving: false,
             pos: [Fx::from_int(160), Fx::from_int(16), Fx::from_int(350)],
             head: 0,
             half: [Fx::from_int(6), Fx::from_int(10)],
@@ -4982,7 +5524,8 @@ mod tests {
         let body = voxel::unit::tank();
         let rubble = nav::vehicle::Rubble::new();
         let changed = nav::vehicle::Changed::default();
-        let obstacle = Obstacle {
+        let obstacle = Obstacle { height: Fx::ZERO,
+            moving: false,
             pos: [Fx::from_int(160), Fx::from_int(16), Fx::from_int(350)],
             head: 0,
             half: [Fx::from_int(6), Fx::from_int(10)],
@@ -5021,7 +5564,8 @@ mod tests {
                         let q = answer.checked.iter().find(|q| q.clear).unwrap();
                         vec![
                             moved,
-                            Obstacle {
+                            Obstacle { height: Fx::ZERO,
+                                moving: false,
                                 pos: [q.position[0], Fx::from_int(16), q.position[1]],
                                 head: q.head,
                                 half: answer.shape.half.map(Fx::from_int),
@@ -5057,7 +5601,8 @@ mod tests {
     fn blocker_height_and_distant_motion_do_not_invalidate_local_hunt() {
         let w = ground(0);
         let body = voxel::unit::tank();
-        let obstacle = Obstacle {
+        let obstacle = Obstacle { height: Fx::ZERO,
+            moving: false,
             pos: [Fx::from_int(240), Fx::from_int(16), Fx::from_int(300)],
             head: 0,
             half: [Fx::from_int(6), Fx::from_int(10)],
@@ -5134,6 +5679,7 @@ mod tests {
                 RangeUnitKind::ArtilleryTurretT3 => voxel::unit::artillery_turret_t3(),
                 RangeUnitKind::NuclearSilo => voxel::unit::nuclear_silo(),
                 RangeUnitKind::Walker04 => voxel::unit::walker04(),
+                RangeUnitKind::Commander => voxel::unit::commander(),
                 RangeUnitKind::RazlomT3 => voxel::unit::razlom_t3(),
                 RangeUnitKind::GrebenStorage => voxel::unit::greben_storage(),
                 RangeUnitKind::KilFactoryT1 => voxel::unit::kil_factory(1),
@@ -5144,6 +5690,9 @@ mod tests {
                 RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                 RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
                 RangeUnitKind::Base => voxel::unit::command_base(),
+                RangeUnitKind::PowerPlantT1 => voxel::unit::power_plant_t1(),
+                RangeUnitKind::PowerPlantT2 => voxel::unit::power_plant_t2(),
+                RangeUnitKind::PowerPlantT3 => voxel::unit::power_plant_t3(),
             };
             let mut m = Motion::new([300, 16, 300], kind, &body);
             m.enabled = true;
@@ -5266,17 +5815,18 @@ mod tests {
         );
     }
     #[test]
-    fn hull_contact_tolerates_two_cells_but_blocks_deepening_and_allows_escape() {
-        let obstacle = |x| Obstacle {
+    fn hull_contact_tolerates_four_cells_but_blocks_deepening_and_allows_escape() {
+        let obstacle = |x| Obstacle { height: Fx::ZERO,
+            moving: false,
             pos: [Fx::from_int(x), Fx::ZERO, Fx::ZERO],
             head: 0,
             half: [Fx::from_int(10), Fx::from_int(10)],
         };
         let other = obstacle(20);
-        assert!(!hull_contact_blocks(&obstacle(0), &obstacle(2), &other));
-        assert!(hull_contact_blocks(&obstacle(2), &obstacle(3), &other));
-        assert!(!hull_contact_blocks(&obstacle(5), &obstacle(4), &other));
+        assert!(!hull_contact_blocks(&obstacle(0), &obstacle(4), &other));
         assert!(hull_contact_blocks(&obstacle(4), &obstacle(5), &other));
+        assert!(!hull_contact_blocks(&obstacle(6), &obstacle(5), &other));
+        assert!(hull_contact_blocks(&obstacle(5), &obstacle(6), &other));
     }
     #[test]
     fn early_separation_matches_all_four_contact_axes() {
@@ -5318,12 +5868,14 @@ mod tests {
             for other_heading in (0..angle::FULL).step_by(4096) {
                 for x in offsets {
                     for z in offsets {
-                        let a = Obstacle {
+                        let a = Obstacle { height: Fx::ZERO,
+                            moving: false,
                             pos: [Fx::from_ratio(1, 3), Fx::from_int(16), Fx::ZERO],
                             head: heading,
                             half: [Fx::from_int(30), Fx::from_ratio(151, 10)],
                         };
-                        let b = Obstacle {
+                        let b = Obstacle { height: Fx::ZERO,
+                            moving: false,
                             pos: [
                                 a.pos[0].add(Fx::from_ratio(x, 10)),
                                 Fx::ZERO,
@@ -5432,6 +5984,7 @@ mod tests {
                 RangeUnitKind::ArtilleryTurretT3 => voxel::unit::artillery_turret_t3(),
                 RangeUnitKind::NuclearSilo => voxel::unit::nuclear_silo(),
                 RangeUnitKind::Walker04 => voxel::unit::walker04(),
+                RangeUnitKind::Commander => voxel::unit::commander(),
                 RangeUnitKind::RazlomT3 => voxel::unit::razlom_t3(),
                 RangeUnitKind::GrebenStorage => voxel::unit::greben_storage(),
                 RangeUnitKind::KilFactoryT1 => voxel::unit::kil_factory(1),
@@ -5442,6 +5995,9 @@ mod tests {
                 RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                 RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
                 RangeUnitKind::Base => voxel::unit::command_base(),
+                RangeUnitKind::PowerPlantT1 => voxel::unit::power_plant_t1(),
+                RangeUnitKind::PowerPlantT2 => voxel::unit::power_plant_t2(),
+                RangeUnitKind::PowerPlantT3 => voxel::unit::power_plant_t3(),
             };
             for axis in [0, 1] {
                 let mut m = Motion::new([590, 16, 590], kind, &body);
@@ -5736,7 +6292,8 @@ mod tests {
         );
         assert!(response.inverse_mass > Fx::ONE);
         let half = Obstacle::of(&m, &body).half;
-        let neighbour = Obstacle {
+        let neighbour = Obstacle { height: Fx::ZERO,
+            moving: false,
             pos: [
                 Fx::from_int(290)
                     .add(half[0].mul(Fx::from_int(2)))
@@ -5878,6 +6435,47 @@ mod tests {
             "the leg did not fold under the body: {length:?} of {rest_length:?}"
         );
     }
+    #[test]
+    fn modest_hull_contact_is_consistent_for_units_and_buildings() {
+        let w = ground(0);
+        let tank = voxel::unit::tank();
+        for (kind, obstacle_body) in [
+            (RangeUnitKind::Tank, voxel::unit::tank()),
+            (RangeUnitKind::TurretT1, voxel::unit::turret_t1()),
+        ] {
+            let mut mover = Motion::new([200, 16, 300], RangeUnitKind::Tank, &tank);
+            let mut obstacle = Motion::new([300, 16, 300], kind, &obstacle_body);
+            let h1 = Obstacle::of(&mover, &tank).half[1];
+            let h2 = Obstacle::of(&obstacle, &obstacle_body).half[1];
+            obstacle.pos[2] = Fx::from_int(300).add(h1).add(h2).sub(Fx::from_int(3));
+            let other = Obstacle::of(&obstacle, &obstacle_body);
+            let grazing = Obstacle { height: Fx::ZERO, moving: false, pos: [other.pos[0], Fx::from_int(16), Fx::from_int(300)],
+                head: 0, half: Obstacle::of(&mover, &tank).half };
+            assert_eq!(grazing.penetration(&other), Fx::from_int(3));
+            assert!(!other.blocks_route(&grazing), "{kind:?}: planner rejected permitted contact");
+            assert!(!hull_contact_blocks(&Obstacle::of(&mover, &tank), &grazing, &other));
+            mover.enabled = true;
+            mover.destination = Some([430, 300]);
+            mover.path = vec![[430, 300]];
+            let mut max_depth = Fx::ZERO;
+            for tick in 0..400 {
+                mover.allow_start(false);
+                step(&mut mover, &w, &tank, &[other], tick);
+                let depth = Obstacle::of(&mover, &tank).penetration(&other);
+                max_depth = max_depth.max(depth);
+                assert!(depth <= HULL_CONTACT_SLOP, "{kind:?}: too much penetration at {tick}: {depth:?}");
+                if mover.pos[0] > Fx::from_int(365) { break; }
+            }
+            assert!(max_depth > Fx::from_int(2), "{kind:?}: did not exercise the relaxed margin");
+            assert!(mover.pos[0] > Fx::from_int(365), "{kind:?}: failed to pass a grazing contact: {:?}", mover.pos);
+            let mut deeper = other;
+            deeper.pos[2] = deeper.pos[2].sub(Fx::from_int(2));
+            let candidate = Obstacle { height: Fx::ZERO, moving: false, pos: [other.pos[0], Fx::from_int(16), Fx::from_int(300)],
+                head: 0, half: Obstacle::of(&mover, &tank).half };
+            assert!(deeper.blocks_route(&candidate), "{kind:?}: planner accepted a deeper overlap");
+        }
+    }
+
     #[test]
     fn opposing_tanks_recover_and_do_not_reenter_each_other() {
         let w = ground(0);
@@ -6181,17 +6779,17 @@ mod tests {
             assert!(mover.destination.is_none());
             assert_eq!(mover.cursor, mover.path.len());
         }
-        // Even another explicit order to the same point discards the fallback.
-        for next in [goal, [200, 430]] {
-            let mut ordered = retargeted.clone();
-            assert!(ordered.move_to(&w, next, &body, &[], &rubble));
-            assert!(
-                ordered.path.is_empty(),
-                "explicit order kept the previous route"
-            );
-            assert_eq!(ordered.destination, Some(next));
-            assert!(ordered.searching());
-        }
+        // Repeating a live goal preserves progress; an actual goal change
+        // still cancels the old fallback and starts its own frontier.
+        let mut repeated = retargeted.clone();
+        assert!(repeated.move_to(&w, goal, &body, &[], &rubble));
+        assert_eq!(motion_bytes(&repeated), motion_bytes(&retargeted));
+        let next = [200, 430];
+        let mut ordered = retargeted.clone();
+        assert!(ordered.move_to(&w, next, &body, &[], &rubble));
+        assert!(ordered.path.is_empty(), "changed order kept the previous route");
+        assert_eq!(ordered.destination, Some(next));
+        assert!(ordered.searching());
         retargeted.stop();
         assert!(retargeted.path.is_empty());
         assert!(!retargeted.searching());
@@ -6222,7 +6820,8 @@ mod tests {
         a.enabled = true;
         a.destination = Some([430, 300]);
         a.path = vec![[430, 300]];
-        let obstacle = Obstacle {
+        let obstacle = Obstacle { height: Fx::ZERO,
+            moving: false,
             pos: [Fx::from_int(250), Fx::from_int(16), Fx::from_int(300)],
             head: 0,
             half: [Fx::from_int(30), Fx::from_int(15)],
@@ -6268,7 +6867,8 @@ mod tests {
         // escape astern is abandoned the tick it is refused and the next
         // goes ahead, clear of both. No destination, so no search
         // intervenes: this is the manoeuvre cycle alone.
-        let neighbour = Obstacle {
+        let neighbour = Obstacle { height: Fx::ZERO,
+            moving: false,
             pos: [Fx::from_int(139), Fx::from_int(16), Fx::from_int(300)],
             head: 0,
             half: [Fx::from_int(30), Fx::from_int(15)],
@@ -6324,6 +6924,7 @@ mod tests {
                         RangeUnitKind::ArtilleryTurretT3 => voxel::unit::artillery_turret_t3(),
                         RangeUnitKind::NuclearSilo => voxel::unit::nuclear_silo(),
                         RangeUnitKind::Walker04 => voxel::unit::walker04(),
+                        RangeUnitKind::Commander => voxel::unit::commander(),
                         RangeUnitKind::RazlomT3 => voxel::unit::razlom_t3(),
                         RangeUnitKind::GrebenStorage => voxel::unit::greben_storage(),
                         RangeUnitKind::KilFactoryT1 => voxel::unit::kil_factory(1),
@@ -6334,6 +6935,9 @@ mod tests {
                         RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                         RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
                         RangeUnitKind::Base => voxel::unit::command_base(),
+                        RangeUnitKind::PowerPlantT1 => voxel::unit::power_plant_t1(),
+                        RangeUnitKind::PowerPlantT2 => voxel::unit::power_plant_t2(),
+                        RangeUnitKind::PowerPlantT3 => voxel::unit::power_plant_t3(),
                     };
                     let (start, end) = if reverse { (410, 230) } else { (230, 410) };
                     let mut m = Motion::new([start, 16, 300], kind, &body);
@@ -6381,11 +6985,777 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn walker_walks_with_long_slow_steps_and_keeps_its_stance_contacts() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(2048, 192, 1024, 65536, Box::new(Flat));
+        let body = voxel::unit::walker04();
+        let mut m = Motion::new([512, 16, 512], RangeUnitKind::Walker04, &body);
+        m.enabled = true; m.pilot = Some([1, 0]);
+        let mut previous = [None; 2];
+        let mut runs = [0u32; 2];
+        let mut longest = 0;
+        let mut steps = [0u32; 2];
+        for tick in 0..220 {
+            step(&mut m, &w, &body, &[], tick);
+            let root = m.frame(&body);
+            for (i, (rig, foot)) in m.rigs().iter().zip(&m.feet).enumerate() {
+                let Some(c) = foot.contact else { continue };
+                let d = c.pos.sub(root.base);
+                let local = V3::new(d.dot(root.x), d.dot(root.y), d.dot(root.z));
+                assert!(rig.solve(local).ankle.sub(local).len_sq().sqrt() < Fx::from_ratio(1, 2),
+                    "foot cannot reach the ground at tick {tick}, leg {i}");
+                if foot.planted() {
+                    if let Some(at) = previous[i] {
+                        assert!(c.pos.sub(at).len_sq() < Fx::from_ratio(1, 100), "stance foot slid at {tick}");
+                    }
+                    previous[i] = Some(c.pos);
+                    longest = longest.max(runs[i]); runs[i] = 0;
+                } else {
+                    if runs[i] == 0 { steps[i] += 1; }
+                    runs[i] += 1; previous[i] = None;
+                }
+            }
+        }
+        assert!(m.pos[0] > Fx::from_int(600));
+        assert!(longest >= 10, "heavy feet still flick rapidly: {longest} ticks");
+        assert!(steps.iter().all(|n| (1..=12).contains(n)), "unexpected cadence {steps:?}");
+    }
+
+    #[test]
+    fn walker_pivots_half_turn_without_crossing_its_feet() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(1024, 192, 1024, 65536, Box::new(Flat));
+        for (throttle, turn) in [(0, -1), (0, 1), (1, -1), (1, 1), (-1, 1)] {
+            let mut unit = super::super::RangeUnit::of_kind(RangeUnitKind::Walker04, [512, 16, 512]);
+            let body = unit.body.clone();
+            unit.motion.enabled = true;
+            unit.motion.pilot = Some([throttle, turn]);
+            let mut rotated = 0i32;
+            let mut last = unit.motion.drive.head;
+            let mut replay: Option<Motion> = None;
+            for tick in 0..600 {
+                step(&mut unit.motion, &w, &body, &[], tick);
+                if let Some(saved) = &mut replay {
+                    step(saved, &w, &body, &[], tick);
+                    assert_eq!(motion_bytes(&unit.motion), motion_bytes(saved), "restored turn diverged at {tick}");
+                }
+                if tick == 20 && throttle == 0 && turn == 1 {
+                    let bytes = motion_bytes(&unit.motion);
+                    let mut saved = Motion::new([512, 16, 512], RangeUnitKind::Walker04, &body);
+                    assert!(saved.load(&mut Scan::new(&bytes)));
+                    saved.pilot = Some([throttle, turn]);
+                    replay = Some(saved);
+                }
+                let head = unit.motion.drive.head;
+                rotated += angle::diff(head, last).abs();
+                last = head;
+                unit.update_pose(head);
+                let root = unit.motion.frame(&body);
+                for (i, (rig, foot)) in unit.motion.rigs().iter().zip(&unit.motion.feet).enumerate() {
+                    let Some(c) = foot.contact else { continue };
+                    let side = c.pos.sub(root.base).dot(root.z);
+                    let signed = side.mul(Fx::from_int(if rig.ankle.z < Fx::ZERO { -1 } else { 1 }));
+                    assert!(signed >= rig.ankle.z.abs().mul(Fx::from_ratio(99, 100)), "foot crossed the centre at tick {tick}, leg {i}: {signed:?}");
+                    assert!(angle::diff(c.head, head).abs() <= angle::FULL / 24 + 1, "foot twisted at {tick}");
+                    let d = c.pos.sub(root.base);
+                    let local = V3::new(d.dot(root.x), d.dot(root.y), d.dot(root.z));
+                    let solved = rig.solve(local);
+                    if foot.planted() {
+                        let error = solved.ankle.sub(local).len_sq().sqrt();
+                        assert!(error <= Fx::from_ratio(1, 2),
+                            "planted commander foot {i} lost contact by {error:?}: throttle {throttle}, turn {turn}, tick {tick}");
+                    }
+                    assert!(solved.ankle.z.mul(Fx::from_int(if rig.ankle.z < Fx::ZERO { -1 } else { 1 })) > rig.hip.z.abs().mul(Fx::from_ratio(8, 10)), "IK pulled ankle into other leg at {tick}: {solved:?}");
+                }
+                // Compare actual occupied foot, shin and thigh voxels of
+                // opposite legs along the turn (the attached joints within
+                // one leg are intentionally connected).
+                if tick % 8 == 0 {
+                    for a in 0..5 {
+                        for b in 5..10 {
+                            let left = &body.segments[a].body;
+                            let right = &body.segments[b].body;
+                            for z in 0..usize::from(left.vol.nz) {
+                                for y in 0..usize::from(left.vol.ny) {
+                                    for x in 0..usize::from(left.vol.nx) {
+                                        if !left.vol.get(x,y,z) { continue; }
+                                        let p = unit.seg_frames[a].world([x,y,z].map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1,2))));
+                                        let cell = [p.x,p.y,p.z].map(Fx::to_int_trunc);
+                                        if let Some(q) = super::super::local_in(right, cell, &unit.seg_frames[b]) {
+                                            assert!(!right.vol.get(q[0],q[1],q[2]),
+                                                "opposite leg parts {a}/{b} overlap: throttle {throttle}, turn {turn}, tick {tick}, point {cell:?}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if rotated >= angle::HALF {
+                    assert!(tick < 160, "half-turn too slow: {tick} ticks, throttle {throttle}, turn {turn}");
+                    break;
+                }
+            }
+            assert!(rotated >= angle::HALF, "walker did not complete a quick half-turn: {rotated}");
+        }
+    }
+
+    #[test]
+    fn commander_walk_has_slow_alternating_steps_without_changing_drive_speed() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(1024, 192, 1024, 65536, Box::new(Flat));
+        let body = voxel::unit::commander();
+        let mut motion = Motion::new([400, 16, 512], RangeUnitKind::Commander, &body);
+        let chassis = motion.chassis.gait.unwrap();
+        assert_eq!(chassis.stride_cm, 240);
+        assert_eq!(chassis.lift_cm, 60);
+        let expected_speed = (modding::range::RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap()
+            .course.unwrap().walker_speed * 9 / 10 / 3).max(1);
+        assert_eq!(motion.speed, expected_speed);
+        motion.enabled = true; motion.pilot = Some([1, 0]);
+        let mut previous = [true; 2];
+        let mut steps = [0u32; 2];
+        let mut simultaneous = 0;
+        for tick in 0..200 {
+            step(&mut motion, &w, &body, &[], tick);
+            if motion.feet.len() != 2 { continue; }
+            let root = motion.frame(&body);
+            for (i, (rig, foot)) in motion.rigs().iter().zip(&motion.feet).enumerate() {
+                if let Some(contact) = foot.contact {
+                    let d = contact.pos.sub(root.base);
+                    let local = V3::new(d.dot(root.x), d.dot(root.y), d.dot(root.z));
+                    let error = rig.solve(local).ankle.sub(local).len_sq().sqrt();
+                    assert!(error <= Fx::from_ratio(1, 2), "leg {i} lost contact by {error:?} at tick {tick}");
+                }
+            }
+            let planted = [motion.feet[0].planted(), motion.feet[1].planted()];
+            for i in 0..2 { if previous[i] && !planted[i] { steps[i] += 1; } }
+            if !planted[0] && !planted[1] { simultaneous += 1; }
+            previous = planted;
+        }
+        assert!(motion.pos[0] > Fx::from_int(450), "commander did not advance");
+        assert!(steps.iter().all(|n| (2..=14).contains(n)), "too frequent or missing steps: {steps:?}");
+        assert!(simultaneous <= 2, "both legs lost support on {simultaneous} ticks");
+    }
+
+    #[test]
+    fn commander_executes_short_move_orders_on_open_ground() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(1024, 192, 1024, 65536, Box::new(Flat));
+        let body = voxel::unit::commander();
+        let rubble = nav::vehicle::Rubble::new();
+        for delta in [8, 16, 32, 80, 160] {
+            let mut m = Motion::new([512, 16, 512], RangeUnitKind::Commander, &body);
+            let goal = [512 + delta, 512];
+            assert!(m.move_to(&w, goal, &body, &[], &rubble), "short order refused: {delta}");
+            for tick in 0..600 {
+                step(&mut m, &w, &body, &[], tick);
+                if m.destination.is_none() { break; }
+            }
+            assert!((m.pos[0].to_int_trunc() - goal[0]).abs() <= m.arrival + 1,
+                "short order {delta}: pos {:?}, dest {:?}, path {:?}, blocked {}", m.pos, m.destination, m.path, m.blocked);
+        }
+    }
+
+    #[test]
+    fn fresh_orders_move_while_the_route_budget_is_busy() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(2048, 768, 2048, 65536, Box::new(Flat));
+        for kind in [RangeUnitKind::Commander, RangeUnitKind::Walker04,
+            RangeUnitKind::Spider, RangeUnitKind::Crawler, RangeUnitKind::Tank] {
+            let unit = super::super::RangeUnit::of_kind(kind, [800, 16, 800]);
+            let mut m = unit.motion.clone();
+            assert!(m.queue_move(&w, [1200, 800]));
+            m.allow_start(false);
+            for tick in 0..4 { step(&mut m, &w, &unit.body, &[], tick); }
+            assert!(m.pos[0] > Fx::from_int(800), "{kind:?} waits for the planner: {:?}", m.pos);
+            assert_eq!(m.destination, Some([1200, 800]));
+            assert!(m.drive.vel <= Fx::from_int(m.speed));
+        }
+    }
+
+    #[test]
+    fn a_moving_neighbour_is_followed_instead_of_routed_around_as_a_building() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(1536, 192, 1536, 65536, Box::new(Flat));
+        w.prepare_navigation([4, 5]);
+        let body = voxel::unit::commander();
+        let mut follower = Motion::new([300, 16, 700], RangeUnitKind::Commander, &body);
+        let mut leader = Motion::new([520, 16, 700], RangeUnitKind::Commander, &body);
+        leader.queue_move(&w, [1200, 700]);
+        let other = Obstacle::of(&leader, &body);
+        assert!(follower.move_to(&w, [1000, 700], &body, &[other], &nav::vehicle::Rubble::new()));
+        assert!(follower.path.iter().all(|p| p[1] == 700),
+            "a moving leader caused a static detour: {:?}", follower.path);
+        assert!(follower.local_blockers([follower.pos[0], follower.pos[2]], follower.shape(&body), &[other]).is_empty());
+        follower.blocked_ticks = 1;
+        assert!(!follower.local_blockers([follower.pos[0], follower.pos[2]], follower.shape(&body), &[other]).is_empty(),
+            "real contact must still admit a local avoidance query");
+        leader.stop();
+        follower.blocked_ticks = 0;
+        let parked = Obstacle::of(&leader, &body);
+        assert!(!parked.moving);
+        assert!(follower.move_to(&w, [1000, 700], &body, &[parked], &nav::vehicle::Rubble::new()));
+        // The identical order keeps its current route. Live contact must still
+        // discover the stopped leader and replace that route with a detour.
+        let mut detoured = false;
+        for tick in 0..1400 {
+            assert!(follower.queue_move(&w, [1000, 700]));
+            step(&mut follower, &w, &body, &[parked], tick);
+            detoured |= follower.path.iter().any(|p| p[1] != 700);
+            assert!(Obstacle::of(&follower, &body).penetration(&parked) <= HULL_CONTACT_SLOP);
+            if follower.destination.is_none() { break; }
+        }
+        assert!(detoured, "a stopped neighbour must be avoided");
+        assert!(follower.destination.is_none(), "stopped leader stranded the follower at {:?}", follower.pos);
+    }
+
+    #[test]
+    fn repeating_the_same_move_keeps_the_pending_detour_search() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let mut m = local_hunter(&w, &body, &[]);
+        let goal = m.destination.unwrap();
+        assert!(m.searching());
+        let before = motion_bytes(&m);
+        assert!(m.queue_move(&w, goal));
+        assert!(m.searching(), "identical order discarded the pending search");
+        assert_eq!(m.destination, Some(goal));
+        assert_eq!(before, motion_bytes(&m));
+        assert!(m.move_to(&w, goal, &body, &[], &nav::vehicle::Rubble::new()));
+        assert_eq!(before, motion_bytes(&m), "direct move reset the same search");
+        assert!(m.retarget(&w, goal, &body, &[], &nav::vehicle::Rubble::new()));
+        assert_eq!(before, motion_bytes(&m), "pursuit reset the same search");
+        let different = [goal[0], goal[1] + 8];
+        assert!(m.queue_move(&w, different));
+        assert_eq!(m.destination, Some(different));
+        assert!(!m.searching(), "a changed goal kept the old search");
+    }
+
+    #[test]
+    fn repeated_move_clicks_still_finish_a_commander_building_detour() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(1400, 192, 1400, 65536, Box::new(Flat));
+        w.prepare_navigation([4, 5]);
+        let unit = super::super::RangeUnit::of_kind(RangeUnitKind::Commander, [300, 16, 700]);
+        let mut m = unit.motion.clone();
+        let building = Obstacle { height: Fx::ZERO, moving: false,
+            pos: [Fx::from_int(600), Fx::from_int(16), Fx::from_int(700)],
+            head: 0, half: [Fx::from_int(45), Fx::from_int(90)] };
+        let goal = [1000, 700];
+        for tick in 0..1400 {
+            assert!(m.queue_move(&w, goal));
+            step(&mut m, &w, &unit.body, &[building], tick);
+            assert!(Obstacle::of(&m, &unit.body).penetration(&building) <= HULL_CONTACT_SLOP);
+            if m.destination.is_none() { break; }
+        }
+        assert!(m.destination.is_none(), "repeated clicks stranded commander at {:?}, path {:?}", m.pos, m.path);
+    }
+
+    #[test]
+    fn biped_keeps_rolling_through_a_reached_intermediate_waypoint() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(1536, 768, 1536, 65536, Box::new(Flat));
+        w.prepare_navigation([4, 5]);
+        for kind in [RangeUnitKind::Commander, RangeUnitKind::Walker04] {
+            let unit = super::super::RangeUnit::of_kind(kind, [600, 16, 600]);
+            let body = unit.body;
+            let mut m = unit.motion;
+            m.enabled = true; m.destination = Some([1100, 600]);
+            m.path = vec![[600, 600], [1100, 600]];
+            m.drive.vel = Fx::from_int(m.speed);
+            let speed = m.drive.vel;
+            let mut final_point = m.clone();
+            final_point.destination = Some([600, 600]); final_point.path = vec![[600, 600]];
+            m.allow_start(false);
+            step(&mut m, &w, &body, &[], 0);
+            assert_eq!(m.cursor, 1);
+            assert_eq!(m.drive.vel, speed, "a passed waypoint requested a braking tick");
+            assert!(m.pos[0] > Fx::from_int(600));
+            final_point.allow_start(false);
+            step(&mut final_point, &w, &body, &[], 0);
+            assert!(final_point.destination.is_none());
+            assert!(final_point.drive.vel < speed, "the final point must still brake");
+        }
+    }
+
+    #[test]
+    fn disabled_or_destroyed_neighbours_keep_their_static_navigation_obstacle() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(1024, 192, 1024, 65536, Box::new(Flat));
+        let mut unit = super::super::RangeUnit::of_kind(RangeUnitKind::Commander, [300, 16, 512]);
+        unit.motion.queue_move(&w, [800, 512]);
+        assert!(Obstacle::of_unit(&unit).moving);
+        unit.status.engine = false;
+        assert!(!Obstacle::of_unit(&unit).moving, "immobile unit still treated as moving traffic");
+        unit.status.engine = true; unit.status.alive = false;
+        assert!(!Obstacle::of_unit(&unit).moving, "wreck still treated as moving traffic");
+    }
+
+    #[test]
+    fn biped_steps_sideways_immediately_without_waiting_for_a_pivot() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(2048, 768, 2048, 65536, Box::new(Flat));
+        for kind in [RangeUnitKind::Commander, RangeUnitKind::Walker04] {
+            for offset in [[0, 240], [0, -240], [-240, 0], [160, 160]] {
+                let unit = super::super::RangeUnit::of_kind(kind, [800, 16, 800]);
+                let mut m = unit.motion.clone();
+                let goal = [800 + offset[0], 800 + offset[1]];
+                m.queue_move(&w, goal); m.allow_start(false);
+                for tick in 0..4 { step(&mut m, &w, &unit.body, &[], tick); }
+                let progress = m.pos[0].sub(Fx::from_int(800)).mul(Fx::from_int(offset[0]))
+                    .add(m.pos[2].sub(Fx::from_int(800)).mul(Fx::from_int(offset[1])));
+                assert!(progress > Fx::ZERO, "{kind:?} cannot step toward {offset:?}: {:?}", m.pos);
+                assert!(m.drive.vel <= Fx::from_int(m.speed));
+            }
+        }
+    }
+
+    #[test]
+    fn commander_side_and_back_orders_keep_feet_reachable_and_on_their_own_sides() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(1024, 192, 1024, 65536, Box::new(Flat));
+        let body = voxel::unit::commander();
+        for goal in [[512, 800], [512, 240], [240, 512]] {
+            let mut m = Motion::new([512, 16, 512], RangeUnitKind::Commander, &body);
+            m.queue_move(&w, goal); m.allow_start(false);
+            for tick in 0..140 {
+                step(&mut m, &w, &body, &[], tick);
+                let root = m.frame(&body);
+                for (i, (rig, foot)) in m.rigs().iter().zip(&m.feet).enumerate() {
+                    if let Some(contact) = foot.contact {
+                        let d = contact.pos.sub(root.base);
+                        let local = V3::new(d.dot(root.x), d.dot(root.y), d.dot(root.z));
+                        assert!(local.z.mul(rig.ankle.z) >= Fx::ZERO,
+                            "leg {i} crossed at {tick}, goal {goal:?}");
+                        let error = rig.solve(local).ankle.sub(local).len_sq().sqrt();
+                        assert!(error <= Fx::ONE, "leg {i} unreachable by {error:?} at {tick}, goal {goal:?}");
+                    }
+                }
+            }
+            let velocity = m.velocity();
+            let delta = [Fx::from_int(goal[0]).sub(m.pos[0]), Fx::from_int(goal[1]).sub(m.pos[2])];
+            assert!(velocity.x.mul(delta[0]).add(velocity.z.mul(delta[1])) >= Fx::ZERO,
+                "combat lead uses torso orientation instead of walking direction");
+        }
+    }
+
+    #[test]
+    fn an_overlapping_hull_can_slide_out_but_not_deeper_through_its_neighbour() {
+        let previous = Obstacle { height: Fx::ZERO, moving: false, pos: [Fx::ZERO; 3], head: 0, half: [Fx::from_int(10); 2] };
+        let neighbour = Obstacle { height: Fx::ZERO, moving: false, pos: [Fx::from_int(15), Fx::ZERO, Fx::from_int(5)], ..previous };
+        let escaping = Obstacle { height: Fx::ZERO, moving: false, pos: [Fx::ZERO, Fx::ZERO, Fx::from_int(-1)], ..previous };
+        assert!(!hull_contact_blocks(&previous, &escaping, &neighbour), "tangential escape refused");
+        let entering = Obstacle { height: Fx::ZERO, moving: false, pos: [Fx::ZERO, Fx::ZERO, Fx::ONE], ..previous };
+        assert!(hull_contact_blocks(&previous, &entering, &neighbour));
+    }
+
+    #[test]
+    fn biped_leaves_a_building_side_without_waiting_for_room_to_rotate() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(2048, 768, 2048, 65536, Box::new(Flat));
+        for kind in [RangeUnitKind::Commander, RangeUnitKind::Walker04] {
+            let unit = super::super::RangeUnit::of_kind(kind, [800, 16, 800]);
+            let mut m = unit.motion.clone();
+            let own = Obstacle::of(&m, &unit.body);
+            let building = Obstacle { height: Fx::ZERO, moving: false, pos: [Fx::from_int(800), Fx::from_int(16),
+                Fx::from_int(800).sub(own.half[1]).sub(Fx::from_int(40)).add(Fx::from_int(3))],
+                head: 0, half: [Fx::from_int(200), Fx::from_int(40)] };
+            m.queue_move(&w, [800, 1100]); m.allow_start(false);
+            for tick in 0..90 {
+                step(&mut m, &w, &unit.body, &[building], tick);
+                assert!(Obstacle::of(&m, &unit.body).penetration(&building) <= HULL_CONTACT_SLOP);
+            }
+            assert!(m.pos[2] > Fx::from_int(820), "{kind:?} blocked by its turn beside a building: {:?}", m.pos);
+        }
+    }
+
+    #[test]
+    fn height_separated_hulls_do_not_block_ground_motion() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(1536, 1024, 1536, 65536, Box::new(Flat));
+        w.prepare_navigation([4, 5]);
+        for kind in [RangeUnitKind::Tank, RangeUnitKind::Commander, RangeUnitKind::Crawler] {
+            let unit = super::super::RangeUnit::of_kind(kind, [300, 16, 700]);
+            let mut drone = super::super::RangeUnit::of_kind(RangeUnitKind::SkobaDrone, [380, 700, 700]);
+            drone.motion.queue_move(&w, [900, 700]);
+            drone.motion.path = vec![[900, 700]]; drone.motion.drive.vel = Fx::ONE;
+            let upper = Obstacle::of_unit(&drone);
+            let mut lower = upper; lower.pos[1] = Fx::from_int(16);
+            let mut m = unit.motion;
+            m.blocked_ticks = 1;
+            let from = [m.pos[0], m.pos[2]];
+            assert!(m.local_blockers(from, m.shape(&unit.body), &[upper]).is_empty());
+            assert!(!m.local_blockers(from, m.shape(&unit.body), &[lower]).is_empty());
+            let mut beneath = Obstacle::of(&m, &unit.body); beneath.pos[0] = upper.pos[0];
+            assert_eq!(beneath.penetration(&upper), Fx::ZERO);
+            assert!(beneath.penetration(&lower) > HULL_CONTACT_SLOP);
+            m.blocked_ticks = 0;
+            assert!(m.move_to(&w, [1000, 700], &unit.body, &[upper], &nav::vehicle::Rubble::new()));
+            let traffic = [Traffic::of(&m, &unit.body, true), Traffic::of(&drone.motion, &drone.body, true)];
+            assert!(m.traffic_hint(&unit.body, 0, &traffic, crate::mobility::Mobility::intact(true))
+                .is_none_or(|hint| hint.speed == Fx::from_int(m.speed)));
+            for tick in 0..1000 {
+                step(&mut m, &w, &unit.body, &[upper], tick);
+                assert!(!m.blocked, "{kind:?} hit the shadow of an elevated drone");
+                if m.destination.is_none() { break; }
+            }
+            assert!(m.destination.is_none(), "{kind:?} failed to pass underneath a drone");
+        }
+    }
+
+    #[test]
+    fn short_orders_beside_a_wall_start_without_waiting_for_a_pivot() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(2048, 768, 2048, 65536, Box::new(Flat));
+        w.prepare_navigation([4, 5]);
+        for kind in [RangeUnitKind::Commander, RangeUnitKind::Walker04, RangeUnitKind::Crawler, RangeUnitKind::Tank] {
+            for heading in [0, angle::FULL / 2] {
+                let unit = super::super::RangeUnit::of_kind(kind, [900, 16, 900]);
+                let mut m = unit.motion;
+                m.drive.head = heading;
+                let own = Obstacle::of(&m, &unit.body);
+                let wall = Obstacle { height: Fx::ZERO, moving: false,
+                    pos: [Fx::from_int(900), Fx::from_int(16),
+                        Fx::from_int(900).add(own.half[1]).add(Fx::from_int(40)).sub(Fx::from_int(3))],
+                    head: 0, half: [Fx::from_int(240), Fx::from_int(40)] };
+                let goal = [860, 900];
+                assert!(m.queue_move(&w, goal));
+                m.allow_start(false);
+                for tick in 0..4 { step(&mut m, &w, &unit.body, &[wall], tick); }
+                assert!(m.pos[0] < Fx::from_int(900), "{kind:?}, heading {heading}: did not start beside wall: {:?}", m.pos);
+                let mut restored = None;
+                for tick in 4..1200 {
+                    m.allow_start(true);
+                    step(&mut m, &w, &unit.body, &[wall], tick);
+                    assert!(Obstacle::of(&m, &unit.body).penetration(&wall) <= HULL_CONTACT_SLOP);
+                    if let Some(copy) = restored.as_mut() {
+                        let copy: &mut Motion = copy;
+                        copy.allow_start(true);
+                        step(copy, &w, &unit.body, &[wall], tick);
+                        assert_eq!(motion_bytes(&m), motion_bytes(copy));
+                    } else if tick == 8 {
+                        let mut copy = m.clone();
+                        assert!(copy.load(&mut Scan::new(&motion_bytes(&m))));
+                        restored = Some(copy);
+                    }
+                    if m.destination.is_none() { break; }
+                }
+                assert!(m.destination.is_none(), "{kind:?}, heading {heading}: short order stalled at {:?}", m.pos);
+            }
+        }
+    }
+
+    #[test]
+    fn short_reverse_lane_refuses_terrain_rubble_and_parked_hulls() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let mut w = World::new(2048, 192, 2048, 65536, Box::new(Flat));
+        w.prepare_navigation([4, 5]);
+        let unit = super::super::RangeUnit::of_kind(RangeUnitKind::Crawler, [900, 16, 900]);
+        let half = unit.motion.shape(&unit.body).half[0];
+        let goal = [900 - half * 2, 900];
+        let rubble = nav::vehicle::Rubble::new();
+        let mut motion = unit.motion.clone();
+        assert!(motion.flat_reverse_path(&w, goal, &unit.body, &[], &rubble));
+        let mut parallel = unit.motion.clone();
+        parallel.pos[2] = parallel.pos[2].add(Fx::from_ratio(1, i32::MAX));
+        let side_wall = Obstacle { height: Fx::ZERO, moving: false, head: 0,
+            pos: [Fx::from_int(900), Fx::from_int(16),
+                Fx::from_int(900 + parallel.shape(&unit.body).half[1] + 40 - 3)],
+            half: [Fx::from_int(240), Fx::from_int(40)] };
+        assert!(parallel.flat_reverse_path(&w, goal, &unit.body, &[side_wall], &rubble),
+            "nearly parallel rear lane lost fixed-point precision");
+        for head in [0, angle::FULL / 8, angle::FULL / 4] {
+            let parked = Obstacle { height: Fx::ZERO, moving: false, head,
+                pos: [Fx::from_int(900 - half - 20), Fx::from_int(16), Fx::from_int(900)],
+                half: [Fx::from_int(8); 2] };
+            assert!(!unit.motion.clone().flat_reverse_path(&w, goal, &unit.body, &[parked], &rubble),
+                "rear lane crossed a parked hull at heading {head}");
+        }
+        let mut rubble = rubble;
+        rubble.insert([900 - half - 1, 900], 32);
+        assert!(!unit.motion.clone().flat_reverse_path(&w, goal, &unit.body, &[], &rubble));
+        w.queue_edit(voxel::Edit::put((900 - half - 1) as u32, 16, 900, 2)); w.flush();
+        assert!(!unit.motion.clone().flat_reverse_path(&w, goal, &unit.body, &[], &nav::vehicle::Rubble::new()));
+    }
+
+    #[test]
+    fn short_reverse_changes_gear_through_rest_and_checks_a_fresh_blocker() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(2048, 192, 2048, 65536, Box::new(Flat));
+        w.prepare_navigation([4, 5]);
+        let unit = super::super::RangeUnit::of_kind(RangeUnitKind::Tank, [900, 16, 900]);
+        let mut m = unit.motion.clone();
+        let half = m.shape(&unit.body).half[0];
+        m.drive.vel = Fx::from_int(m.speed / 2);
+        m.queue_move(&w, [900 - half, 900]);
+        let mut stopped = false;
+        for tick in 0..200 {
+            let old = m.drive.vel;
+            step(&mut m, &w, &unit.body, &[], tick);
+            stopped |= m.drive.vel == Fx::ZERO;
+            if m.drive.vel < Fx::ZERO {
+                assert!(stopped && old == Fx::ZERO, "reverse skipped braking to rest");
+                break;
+            }
+        }
+        assert!(m.drive.vel < Fx::ZERO && m.drive.head == 0);
+        let parked = Obstacle { height: Fx::ZERO, moving: false, head: 0,
+            pos: [m.pos[0].sub(Fx::from_int(half + 12)), Fx::from_int(16), m.pos[2]],
+            half: [Fx::from_int(8); 2] };
+        let mut refused = false;
+        for tick in 200..300 {
+            m.allow_start(false);
+            step(&mut m, &w, &unit.body, &[parked], tick);
+            refused |= m.blocked;
+            assert!(Obstacle::of(&m, &unit.body).penetration(&parked) <= HULL_CONTACT_SLOP);
+        }
+        assert!(refused, "rear lane ignored a newly arrived hull: pos {:?}, goal {:?}", m.pos, m.destination);
+    }
+
+    #[test]
+    fn commander_and_crawler_start_then_detour_a_blocking_building() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(1400, 256, 1400, 65536, Box::new(Flat));
+        w.prepare_navigation([4, 5]);
+        for kind in [RangeUnitKind::Commander, RangeUnitKind::Crawler] {
+            let unit = super::super::RangeUnit::of_kind(kind, [300, 16, 700]);
+            let mut m = unit.motion.clone();
+            let building = Obstacle { height: Fx::ZERO, moving: false, pos: [Fx::from_int(600), Fx::from_int(16), Fx::from_int(700)],
+                head: 0, half: [Fx::from_int(45), Fx::from_int(90)] };
+            m.queue_move(&w, [1000, 700]);
+            // A valid replacement must supersede the old contact's recovery
+            // timer instead of backing away again after finding this route.
+            m.blocked = true; m.blocked_ticks = m.navigation.recovery_ticks;
+            m.escape = 2;
+            let mut restored = None;
+            let mut first_motion = None;
+            let mut bypassed = false;
+            for tick in 0..1800 {
+                step(&mut m, &w, &unit.body, &[building], tick);
+                bypassed |= m.pos[2].sub(Fx::from_int(700)).abs() > Fx::from_int(90);
+                if m.pos[0] > Fx::from_int(300) { first_motion.get_or_insert(tick); }
+                assert!(Obstacle::of(&m, &unit.body).penetration(&building) <= HULL_CONTACT_SLOP,
+                    "{kind:?} entered the building at {tick}");
+                if let Some(copy) = restored.as_mut() {
+                    step(copy, &w, &unit.body, &[building], tick);
+                    assert_eq!(motion_bytes(&m), motion_bytes(copy), "{kind:?} diverged at {tick}");
+                } else if tick == 20 {
+                    let mut copy = unit.motion.clone();
+                    assert!(copy.load(&mut Scan::new(&motion_bytes(&m))));
+                    restored = Some(copy);
+                }
+                if m.destination.is_none() { break; }
+            }
+            assert!(first_motion.is_some_and(|tick| tick <= 1), "{kind:?} delayed startup: {first_motion:?}");
+            assert!(m.destination.is_none(), "{kind:?} never passed building: {:?}, blocked {}, path {:?}", m.pos, m.blocked, m.path);
+            assert!(restored.is_some() && bypassed, "{kind:?} did not exercise a saved detour: {:?}", m.pos);
+        }
+    }
+
+    #[test]
+    fn commander_can_stop_and_restart_without_foot_teleportation() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(1024, 192, 1024, 65536, Box::new(Flat));
+        let body = voxel::unit::commander();
+        let mut m = Motion::new([400, 16, 512], RangeUnitKind::Commander, &body);
+        m.enabled = true; m.pilot = Some([1, 0]);
+        let mut tick = 0;
+        while tick < 150 {
+            step(&mut m, &w, &body, &[], tick); tick += 1;
+            if m.feet.iter().any(|f| !f.planted()) { break; }
+        }
+        assert!(m.feet.iter().any(|f| !f.planted()), "fixture did not start a step");
+        m.pilot = Some([0, 0]);
+        for _ in 0..100 { step(&mut m, &w, &body, &[], tick); tick += 1; }
+        assert!(m.feet.iter().all(|f| f.planted()), "feet did not settle: {:?}, velocity {:?}, phase {}", m.feet, m.drive.vel, m.phase);
+        let mut previous: Vec<_> = m.feet.iter().map(|f| f.contact.unwrap().pos).collect();
+        m.pilot = Some([1, 0]);
+        for resumed_tick in 0..100 {
+            step(&mut m, &w, &body, &[], tick); tick += 1;
+            for (i, foot) in m.feet.iter().enumerate() {
+                let p = foot.contact.unwrap().pos;
+                let d = p.sub(previous[i]).len_sq().sqrt();
+                // The powered swing can cover over 30 cm per tick at full speed;
+                // its first tick after a stop must remain much gentler.
+                if resumed_tick < 5 {
+                    assert!(d <= Fx::from_int(3), "foot {i} jumped by {d:?} at tick {tick}");
+                }
+                previous[i] = p;
+            }
+        }
+    }
+
+    #[test]
+    fn commander_pivot_keeps_planted_feet_from_sliding_abruptly() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(1024, 192, 1024, 65536, Box::new(Flat));
+        let body = voxel::unit::commander();
+        let mut m = Motion::new([512, 16, 512], RangeUnitKind::Commander, &body);
+        m.enabled = true; m.pilot = Some([0, 1]);
+        let mut previous = [None; 2];
+        let mut largest = Fx::ZERO;
+        for tick in 0..160 {
+            step(&mut m, &w, &body, &[], tick);
+            for (i, foot) in m.feet.iter().enumerate() {
+                let current = foot.planted().then(|| foot.contact.map(|c| c.pos)).flatten();
+                if let (Some(old), Some(now)) = (previous[i], current) {
+                    let d = now.sub(old);
+                    let slide = d.x.mul(d.x).add(d.z.mul(d.z)).sqrt();
+                    largest = largest.max(slide);
+                }
+                previous[i] = current;
+            }
+        }
+        assert!(largest <= Fx::from_ratio(3, 20), "planted foot slid by {largest:?} world cells in one tick");
+    }
+
+    #[test]
+    fn commander_turns_and_walks_without_crossing_its_legs() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        let w = World::new(1024, 192, 1024, 65536, Box::new(Flat));
+        for (throttle, turn) in [(0, -1), (0, 1), (1, -1), (1, 1), (-1, 1), (1, 0)] {
+            let mut unit = super::super::RangeUnit::of_kind(RangeUnitKind::Commander, [512, 16, 512]);
+            let body = unit.body.clone();
+            unit.motion.enabled = true;
+            unit.motion.pilot = Some([throttle, turn]);
+            let mut rotated = 0i32;
+            let mut last = unit.motion.drive.head;
+            let mut replay: Option<Motion> = None;
+            for tick in 0..600 {
+                step(&mut unit.motion, &w, &body, &[], tick);
+                if let Some(saved) = &mut replay {
+                    step(saved, &w, &body, &[], tick);
+                    assert_eq!(motion_bytes(&unit.motion), motion_bytes(saved), "restored turn diverged at {tick}");
+                }
+                if tick == 20 && throttle == 0 && turn == 1 {
+                    let bytes = motion_bytes(&unit.motion);
+                    let mut saved = Motion::new([512, 16, 512], RangeUnitKind::Commander, &body);
+                    assert!(saved.load(&mut Scan::new(&bytes)));
+                    saved.pilot = Some([throttle, turn]);
+                    replay = Some(saved);
+                }
+                let head = unit.motion.drive.head;
+                rotated += angle::diff(head, last).abs();
+                last = head;
+                unit.update_pose(head);
+                let root = unit.motion.frame(&body);
+                for (i, (rig, foot)) in unit.motion.rigs().iter().zip(&unit.motion.feet).enumerate() {
+                    let Some(c) = foot.contact else { continue };
+                    let side = c.pos.sub(root.base).dot(root.z);
+                    let signed = side.mul(Fx::from_int(if rig.ankle.z < Fx::ZERO { -1 } else { 1 }));
+                    assert!(signed >= rig.ankle.z.abs().mul(Fx::from_ratio(119, 100)), "foot crossed the centre at tick {tick}, leg {i}: {signed:?}");
+                    assert!(angle::diff(c.head, head).abs() <= angle::FULL / 24 + 1, "foot twisted at {tick}");
+                    let d = c.pos.sub(root.base);
+                    let local = V3::new(d.dot(root.x), d.dot(root.y), d.dot(root.z));
+                    let solved = rig.solve(local);
+                    assert!(solved.ankle.z.mul(Fx::from_int(if rig.ankle.z < Fx::ZERO { -1 } else { 1 })) > rig.hip.z.abs().mul(Fx::from_ratio(8, 10)), "IK pulled ankle into other leg at {tick}: {solved:?}");
+                }
+                // Compare actual occupied foot, shin and thigh voxels of
+                // opposite legs along the turn (the attached joints within
+                // one leg are intentionally connected).
+                if tick % 12 == 0 {
+                    for a in 0..5 {
+                        for b in 5..10 {
+                            let left = &body.segments[a].body;
+                            let right = &body.segments[b].body;
+                            for z in 0..usize::from(left.vol.nz) {
+                                for y in 0..usize::from(left.vol.ny) {
+                                    for x in 0..usize::from(left.vol.nx) {
+                                        if !left.vol.get(x,y,z) { continue; }
+                                        let p = unit.seg_frames[a].world([x,y,z].map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1,2))));
+                                        let cell = [p.x,p.y,p.z].map(Fx::to_int_trunc);
+                                        if let Some(q) = super::super::local_in(right, cell, &unit.seg_frames[b]) {
+                                            assert!(!right.vol.get(q[0],q[1],q[2]),
+                                                "opposite leg parts {a}/{b} overlap: throttle {throttle}, turn {turn}, tick {tick}, point {cell:?}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if turn == 0 && tick >= 120 { break; }
+                if turn != 0 && rotated >= angle::HALF {
+                    assert!(tick < 360, "half-turn too slow: {tick} ticks, throttle {throttle}, turn {turn}");
+                    break;
+                }
+            }
+            if turn != 0 { assert!(rotated >= angle::HALF, "commander did not complete a half-turn: {rotated}"); }
+            else { assert!(unit.motion.pos[0] != Fx::from_int(512) || unit.motion.pos[2] != Fx::from_int(512), "commander did not walk"); }
+        }
+    }
+
 }
 
 #[cfg(test)]
 #[path = "range_local_sweep_tests.rs"]
 mod local_sweep_tests;
+
+#[cfg(test)]
+#[path = "range_contact_motion_tests.rs"]
+mod contact_motion_tests;
 
 /// Navigation observers pair each independent leaf by unit and sweep batch.
 pub(super) fn sweep_event(batch: usize, begin: bool) -> &'static str {
@@ -6401,6 +7771,7 @@ pub(super) fn sweep_event(batch: usize, begin: bool) -> &'static str {
     } else {
         END[batch]
     }
+
 }
 
 #[cfg(test)]

@@ -48,7 +48,7 @@ impl BlastRange {
                 .iter()
                 .enumerate()
                 .filter(|(other, _)| *other != id)
-                .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
+                .map(|(_, u)| motion::Obstacle::of_unit(u))
                 .collect();
             let u = &mut self.units[id];
             // The whole-map search is walked by the range (ADR-680).
@@ -113,7 +113,7 @@ impl BlastRange {
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| *i != id)
-                .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
+                .map(|(_, u)| motion::Obstacle::of_unit(u))
                 .collect();
             // Between ticks: the rubble of the present state (ADR-426).
             let rubble = self.current_rubble();

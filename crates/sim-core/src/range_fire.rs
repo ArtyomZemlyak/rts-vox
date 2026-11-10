@@ -19,6 +19,8 @@ fn fuel_cell(kind: modding::range::RangeUnitKind, at: [u8; 3]) -> [u8; 3] {
         at.map(|v| v * 3 + 1)
     } else if kind == modding::range::RangeUnitKind::LightningTank {
         at.map(|v| v * 3 / 2)
+    } else if kind == modding::range::RangeUnitKind::Commander {
+        [66, 54, 72]
     } else if kind == modding::range::RangeUnitKind::Walker04 {
         [37, 30, 40]
     } else if kind == modding::range::RangeUnitKind::SkobaDrone {

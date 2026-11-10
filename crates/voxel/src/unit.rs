@@ -1038,6 +1038,11 @@ pub const BODY_MM: u16 = 100;
 
 /// Local voxel at the front of the crawler's shield cutting head.
 pub const CRAWLER_DRILL_TIP: [usize; 3] = [173, 30, 40];
+/// Tip of the same head after its 90-degree downward deployment, expressed
+/// in hull-local cells. The static body keeps the undeployed cutting head.
+pub const CRAWLER_BORE_TIP: [usize; 3] = [162, 14, 40];
+/// Cutting-head radius in 10 cm world cells (24 model cells at 100 mm).
+pub const CRAWLER_BORE_RADIUS: i32 = 24;
 /// Heavy tracked recycler with a closed hold, intake jaws and a separate drill.
 #[allow(dead_code)]
 fn legacy_crawler() -> UnitBody {
@@ -1235,8 +1240,8 @@ pub fn crawler() -> UnitBody {
         &mut u,
         0,
         (156, 170),
-        (30, 40),
-        28,
+        (26, 40),
+        24,
         0,
         Part::Weapon,
         FINISH_GUN,
@@ -1245,19 +1250,19 @@ pub fn crawler() -> UnitBody {
         &mut u,
         0,
         (150, 156),
-        (30, 40),
+        (26, 40),
         7,
         0,
         Part::Weapon,
         FINISH_STEEL,
     );
     for x in [150usize, 160, 166] {
-        mark_cyl(&mut u, 0, (x, x + 2), (30, 40), 28, FINISH_STEEL);
+        mark_cyl(&mut u, 0, (x, x + 2), (26, 40), 24, FINISH_STEEL);
     }
-    for dy in -30i32..30 {
-        for dz in -30i32..30 {
+    for dy in -24i32..=24 {
+        for dz in -24i32..=24 {
             let r2 = dy * dy + dz * dz;
-            if r2 > 30 * 30 {
+            if r2 > 24 * 24 {
                 continue;
             }
             let angle = fx::angle::norm(fx::angle::atan2(i64::from(dz), i64::from(dy)));
@@ -1265,12 +1270,12 @@ pub fn crawler() -> UnitBody {
             if r2 > 100 && in_sector < fx::angle::FULL / 4 {
                 continue;
             }
-            let finish = if r2 > 27 * 27 {
+            let finish = if r2 > 21 * 21 {
                 FINISH_IVORY
             } else {
                 FINISH_STEEL
             };
-            let (y, z) = ((30 + dy) as usize, (40 + dz) as usize);
+            let (y, z) = ((26 + dy) as usize, (40 + dz) as usize);
             fill_f(
                 &mut u,
                 (170, 174),
@@ -1285,7 +1290,7 @@ pub fn crawler() -> UnitBody {
         &mut u,
         0,
         (168, 174),
-        (30, 40),
+        (26, 40),
         7,
         0,
         Part::Weapon,
@@ -2343,11 +2348,23 @@ pub fn razlom_t3() -> UnitBody {
     u
 }
 
+/// Eight drone stations on the lower hub and upper storage roof. Positions
+/// are voxel coordinates in the Greben's own frame, not world-space offsets.
+pub const GREBEN_DRONE_PADS: [[usize; 3]; 8] = [
+    [22, 27, 10], [22, 27, 30], [22, 27, 50], [22, 27, 70],
+    [60, 104, 10], [60, 104, 30], [60, 104, 50], [60, 104, 70],
+];
+
+/// Centres of the two crawler intake portals in Greben-local voxels.
+pub const GREBEN_CRAWLER_SOCKET_Z: [usize; 2] = [20, 60];
+
 /// «Гребень»: closed storage slabs, a fixed two-dock hub and amber fill gauges.
 pub fn greben_storage_modules(modules: u8) -> UnitBody {
     assert!((1..=4).contains(&modules));
     let extra = modules.saturating_sub(2) * 40;
-    let mut u = UnitBody::new_scaled(80 + extra, 104, 176, 8, 800);
+    // A compact storage station: retain the authored geometry while scaling
+    // all three dimensions to one quarter of the old 800 mm model.
+    let mut u = UnitBody::new_scaled(80 + extra, 104, 176, 8, 200);
     let a = Part::Armour;
 
     fill_f(&mut u, (0, 40), (0, 4), (0, 176), a, FINISH_GUN);
@@ -2362,9 +2379,27 @@ pub fn greben_storage_modules(modules: u8) -> UnitBody {
     for z in [8usize, 48] {
         fill_f(&mut u, (0, 4), (8, 16), (z, z + 2), a, FINISH_STEEL);
         fill_f(&mut u, (0, 4), (8, 16), (z + 22, z + 24), a, FINISH_STEEL);
+        // Mark the two actual intake frames on the existing armour. Keeping
+        // occupancy unchanged preserves old damage and matter snapshots.
+        mark(&mut u, (0, 2), (16, 23), (z, z + 24), FINISH_PLATE);
+        mark(&mut u, (0, 2), (2, 6), (z, z + 24), FINISH_STEEL);
+        mark(&mut u, (0, 2), (8, 16), (z, z + 2), FINISH_IVORY);
+        mark(&mut u, (0, 2), (8, 16), (z + 22, z + 24), FINISH_IVORY);
         for y in [9usize, 13] {
             mark(&mut u, (0, 2), (y, y + 1), (z + 4, z + 20), FINISH_OPTIC);
         }
+        mark(&mut u, (0, 2), (18, 20), (z + 7, z + 17), FINISH_ENERGY);
+    }
+
+    // Recessed, solid receiver housings around the two unloading sockets.
+    // These are part of the destructible station, not ground guide lines.
+    for z in GREBEN_CRAWLER_SOCKET_Z {
+        fill_f(&mut u, (0, 12), (8, 22), (z - 14, z - 11), a, FINISH_IVORY);
+        fill_f(&mut u, (0, 12), (8, 22), (z + 11, z + 14), a, FINISH_IVORY);
+        fill_f(&mut u, (0, 12), (19, 23), (z - 14, z + 14), a, FINISH_IVORY);
+        fill_f(&mut u, (2, 12), (8, 11), (z - 11, z + 11), a, FINISH_GUN);
+        fill_f(&mut u, (8, 12), (11, 18), (z - 9, z + 9), a, FINISH_GUN);
+        mark(&mut u, (8, 9), (13, 16), (z - 6, z + 6), FINISH_ENERGY);
     }
 
     for index in 0..modules {
@@ -2450,6 +2485,18 @@ pub fn greben_storage_modules(modules: u8) -> UnitBody {
             );
         }
     }
+    // Four raised pads on the loading hub, four outlined pads on the roof.
+    // Frames and status lights are actual voxel surfaces of the station.
+    for z in [10usize, 30, 50, 70] {
+        fill_f(&mut u, (8, 36), (24, 27), (z - 9, z + 9), a, FINISH_STEEL);
+        mark(&mut u, (10, 34), (26, 27), (z - 7, z + 7), FINISH_GUN);
+        mark(&mut u, (18, 26), (26, 27), (z - 2, z + 2), FINISH_ENERGY);
+        // A module only has a roof where it was built; mark never invents
+        // support on absent modules.
+        mark(&mut u, (46, 75), (103, 104), (z - 9, z + 9), FINISH_GUN);
+        mark(&mut u, (49, 72), (103, 104), (z - 6, z + 6), FINISH_STEEL);
+        mark(&mut u, (56, 64), (103, 104), (z - 2, z + 2), FINISH_ENERGY);
+    }
     fill(&mut u, (70, 78), (12, 20), (16, 24), Part::Core);
     fill_f(
         &mut u,
@@ -2468,6 +2515,37 @@ pub fn greben_storage_modules(modules: u8) -> UnitBody {
         FINISH_OPTIC,
     );
     pack(&mut u, (36, 40), (8, 12), (36, 44));
+    // Walk-in loading gantries extend in front of the storage face. The
+    // crawler fits between the uprights and under the lintel; these are
+    // real, destructible voxel segments attached to the building, not UI
+    // markings. Their rear edge meets the existing intake frame at x=0.
+    for (bay, z) in GREBEN_CRAWLER_SOCKET_Z.into_iter().enumerate() {
+        let mut portal = UnitBody::new_scaled(32, 36, 44, 1, 200);
+        fill_f(&mut portal, (0, 32), (0, 1), (0, 44), a, FINISH_GUN);
+        // One wide double entrance with no central post: a crawler can
+        // finish aligning near either bay without clipping an inner pillar.
+        for side in [if bay == 0 { (0, 2) } else { (42, 44) }] {
+            fill_f(&mut portal, (0, 32), (1, 3), side, a, FINISH_STEEL);
+            fill_f(&mut portal, (0, 4), (1, 33), side, a, FINISH_GUN);
+            fill_f(&mut portal, (1, 4), (4, 33), side, a, FINISH_IVORY);
+            fill_f(&mut portal, (25, 32), (1, 33), side, a, FINISH_STEEL);
+            for y in [7, 13, 19, 25] {
+                mark(&mut portal, (0, 1), (y, y + 2), side, FINISH_CORE);
+            }
+        }
+        fill_f(&mut portal, (0, 5), (31, 35), (0, 44), a, FINISH_GUN);
+        fill_f(&mut portal, (1, 4), (33, 36), (1, 43), a, FINISH_IVORY);
+        fill_f(&mut portal, (1, 3), (31, 32), (8, 36), a, FINISH_CORE);
+        for x in [8usize, 16, 24] {
+            mark(&mut portal, (x, x + 3), (0, 1), (4, 6), FINISH_CORE);
+            mark(&mut portal, (x, x + 3), (0, 1), (38, 40), FINISH_CORE);
+        }
+        // Portal roof rails run back to the solid receiver housing.
+        for side in [if bay == 0 { (1, 3) } else { (41, 43) }] {
+            fill_f(&mut portal, (3, 32), (30, 33), side, a, FINISH_STEEL);
+        }
+        u.push_segment(Attach::flat((0, 0, z as i16), (32, 0, 22)), portal);
+    }
     let mut u = seat(u, "Гребень · модульное хранилище");
     u.turret_y = u.vol.ny;
     u
@@ -2625,7 +2703,6 @@ pub fn kil_factory(tier: u8) -> UnitBody {
         (63, 4, 14, 15, 4),
         (4, 43, 15, 12, 5),
         (62, 43, 14, 13, 5),
-        (4, 23, 10, 12, 3),
         (66, 23, 10, 12, 3),
     ] {
         fill_f(&mut u, (x, x + w), (2, 2 + h), (z, z + d), a, FINISH_IVORY);
@@ -2864,7 +2941,7 @@ pub fn kil_factory(tier: u8) -> UnitBody {
     );
     fill_f(&mut u, (22, 30), (2, 10), (26, 34), Part::Core, FINISH_GUN);
     fill_f(&mut u, (48, 54), (2, 8), (50, 56), Part::Engine, FINISH_GUN);
-    fill_f(&mut u, (4, 8), (4, 8), (27, 33), Part::Sensor, FINISH_OPTIC);
+    fill_f(&mut u, (4, 8), (4, 8), (30 - gate_width / 2 - wall, 30 - gate_width / 2), Part::Sensor, FINISH_OPTIC);
     pack(&mut u, (back - wall, back), (2, 4), (27, 33));
     let mut u = seat(
         u,
@@ -3102,7 +3179,8 @@ mod command_base_tests {
                 status.alive && status.engine && status.sensor && status.detached == 0,
                 "modules={modules}: {status:?}"
             );
-            assert_eq!(body.extent_mm().1, 83_200);
+            assert_eq!(body.extent_mm().1, 20_800);
+            assert_eq!(body.mm, 200);
             for z in [20usize, 60] {
                 assert!(!body.vol.get(0, 8, z), "dock is solid at z={z}");
                 assert!(!body.vol.get(20, 12, z), "dock is blocked at z={z}");
@@ -3150,6 +3228,7 @@ mod command_base_tests {
             );
             assert_eq!((body.vol.nx, body.vol.nz), (80, 60));
             assert!(!body.vol.get(3, 2, 30), "tier={tier}: gate is solid");
+            assert!(!body.vol.get(5, 5, 30), "tier={tier}: gate centre must remain clear");
             let back = match tier {
                 1 => 25,
                 2 => 31,
@@ -3212,6 +3291,14 @@ mod command_base_tests {
         assert!(status.alive && status.engine && status.weapon);
         assert_eq!(status.detached, 0);
         assert!(unit.weapon_paths().iter().any(|p| p.max[0] == 96));
+    }
+    #[test]
+    fn crawler_cutter_rim_is_not_clipped_by_the_body_volume() {
+        let body = crawler();
+        for [y, z] in [[2, 40], [50, 40], [26, 16], [26, 64]] {
+            assert!(body.vol.get(160, y, z), "missing rim at {y}, {z}");
+            assert_eq!(body.part_at(160, y, z), Part::Weapon);
+        }
     }
     #[test]
     fn crawler_drill_is_a_connected_destructible_subsystem() {
@@ -3573,12 +3660,235 @@ pub fn strider() -> UnitBody {
     u
 }
 
+/// T1 power station: a vertical, armoured reactor disc on a narrow plinth.
+pub fn power_plant_t1() -> UnitBody {
+    static TEMPLATE: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+    TEMPLATE.get_or_init(build_power_plant_t1).clone()
+}
+
+fn build_power_plant_t1() -> UnitBody {
+    let mut u = UnitBody::new_scaled(64, 36, 16, 4, 250);
+    let a = Part::Armour;
+    fill_f(&mut u, (1, 63), (0, 2), (1, 15), a, FINISH_GUN);
+    fill_f(&mut u, (3, 61), (2, 4), (2, 14), a, FINISH_STEEL);
+    for z in [(2, 4), (12, 14)] {
+        fill_f(&mut u, (5, 59), (3, 5), z, a, FINISH_GUN);
+        for x in [8, 16, 24, 40, 48, 56] {
+            mark(&mut u, (x, x + 2), (4, 5), z, FINISH_IVORY);
+        }
+    }
+    for x in [(4, 13), (51, 60)] {
+        fill_f(&mut u, x, (4, 9), (4, 12), a, FINISH_GUN);
+        fill_f(&mut u, (x.0 + 1, x.1 - 1), (5, 10), (5, 11), a, FINISH_IVORY);
+        fill_f(&mut u, (x.0 + 2, x.1 - 2), (6, 9), (4, 5), a, FINISH_CORE);
+    }
+    fill_f(&mut u, (27, 37), (3, 11), (4, 12), a, FINISH_GUN);
+    fill(&mut u, (29, 35), (4, 8), (6, 10), Part::Engine);
+    fill(&mut u, (6, 10), (5, 9), (6, 10), Part::Core);
+    // A stepped annulus with a dark solid hub and a warm inner energy track.
+    for x in 17usize..48 {
+        for y in 5usize..36 {
+            let dx = x as i32 - 32;
+            let dy = y as i32 - 20;
+            let r2 = dx * dx + dy * dy;
+            if r2 > 225 { continue; }
+            for z in 6usize..10 {
+                u.set(x, y, z, a);
+                let finish = if (100..=143).contains(&r2) { FINISH_CORE }
+                    else if r2 >= 144 { FINISH_STEEL } else { FINISH_GUN };
+                u.set_finish(x, y, z, finish);
+            }
+        }
+    }
+    for x in [31, 32] {
+        for y in 10..31 { for z in 5..11 {
+            if u.vol.get(x, y, 7) { u.set(x, y, z, a); u.set_finish(x, y, z, FINISH_STEEL); }
+        }}
+    }
+    seat(u, "T1 power plant").resampled(BODY_MM).expect("T1 power plant scale")
+}
+
+/// T2 reactor: two horizontal rings on a central mast and braced platform.
+pub fn power_plant_t2() -> UnitBody {
+    static TEMPLATE: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+    TEMPLATE.get_or_init(build_power_plant_t2).clone()
+}
+
+fn build_power_plant_t2() -> UnitBody {
+    let mut u = UnitBody::new_scaled(80, 60, 40, 4, 300);
+    let a = Part::Armour;
+    fill_f(&mut u, (1, 79), (0, 2), (2, 38), a, FINISH_GUN);
+    fill_f(&mut u, (3, 77), (2, 4), (4, 36), a, FINISH_STEEL);
+    for z in [(5, 8), (32, 35)] {
+        fill_f(&mut u, (5, 75), (4, 6), z, a, FINISH_GUN);
+        for x in [8, 16, 24, 56, 64, 72] {
+            mark(&mut u, (x, x + 2), (5, 6), z, FINISH_IVORY);
+        }
+    }
+    for x in [(5, 15), (65, 75)] {
+        fill_f(&mut u, x, (4, 9), (15, 25), a, FINISH_GUN);
+        fill_f(&mut u, (x.0 + 1, x.1 - 1), (5, 10), (16, 24), a, FINISH_IVORY);
+        fill_f(&mut u, (x.0 + 2, x.1 - 2), (6, 9), (15, 16), a, FINISH_CORE);
+    }
+    fill(&mut u, (7, 11), (5, 9), (17, 21), Part::Core);
+    fill_f(&mut u, (35, 45), (3, 12), (15, 25), a, FINISH_GUN);
+    fill(&mut u, (37, 43), (5, 10), (17, 23), Part::Engine);
+    fill_f(&mut u, (37, 43), (10, 57), (17, 23), a, FINISH_GUN);
+    for (x, z) in [(37, 17), (42, 17), (37, 22), (42, 22)] {
+        fill_f(&mut u, (x, x + 1), (11, 56), (z, z + 1), a, FINISH_CORE);
+    }
+    fill_f(&mut u, (38, 42), (57, 59), (18, 22), a, FINISH_IVORY);
+    // Two concentric, fully connected horizontal assemblies.
+    for y in [22usize, 41] {
+        for x in 25usize..56 { for z in 5usize..36 {
+            let dx = x as i32 - 40;
+            let dz = z as i32 - 20;
+            let r2 = dx * dx + dz * dz;
+            if !(100..=225).contains(&r2) { continue; }
+            for yy in y..y + 3 {
+                u.set(x, yy, z, a);
+                u.set_finish(x, yy, z, if (144..=196).contains(&r2) && yy == y + 1 {
+                    FINISH_CORE
+                } else if r2 > 196 { FINISH_IVORY } else { FINISH_GUN });
+            }
+        }}
+        fill_f(&mut u, (39, 42), (y, y + 3), (8, 33), a, FINISH_STEEL);
+        fill_f(&mut u, (28, 53), (y, y + 3), (19, 22), a, FINISH_STEEL);
+    }
+    // Four broad stepped braces connect the upper ring to the platform.
+    for side in [-1i32, 1] { for z in [8usize, 29] {
+        for y in 5usize..43 {
+            let x = (40 + side * (29 - (y as i32 - 5) * 20 / 37)) as usize;
+            fill_f(&mut u, (x - 2, x + 3), (y, y + 1), (z, z + 3), a, FINISH_GUN);
+            mark(&mut u, (x - 1, x + 2), (y, y + 1), (z, z + 1), FINISH_IVORY);
+        }
+    }}
+    seat(u, "T2 power plant").resampled(BODY_MM).expect("T2 power plant scale")
+}
+
+/// T3 reactor: a recessed core surrounded by massive inclined armour plates.
+pub fn power_plant_t3() -> UnitBody {
+    static TEMPLATE: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+    TEMPLATE.get_or_init(build_power_plant_t3).clone()
+}
+
+fn build_power_plant_t3() -> UnitBody {
+    let mut u = UnitBody::new_scaled(80, 76, 80, 4, 250);
+    let a = Part::Armour;
+    disc(&mut u, (40, 40), 38, (0, 3), a);
+    mark_cyl(&mut u, 1, (0, 3), (40, 40), 38, FINISH_GUN);
+    disc(&mut u, (40, 40), 34, (3, 5), a);
+    mark_cyl(&mut u, 1, (3, 5), (40, 40), 34, FINISH_STEEL);
+    fill(&mut u, (36, 44), (3, 10), (36, 44), Part::Engine);
+    fill(&mut u, (38, 42), (5, 9), (38, 42), Part::Core);
+    fill_f(&mut u, (36, 44), (10, 66), (36, 44), a, FINISH_GUN);
+    for (x, z) in [(36, 36), (43, 36), (36, 43), (43, 43)] {
+        fill_f(&mut u, (x, x + 1), (12, 65), (z, z + 1), a, FINISH_CORE);
+    }
+    fill_f(&mut u, (39, 41), (66, 74), (39, 41), a, FINISH_CORE);
+    for y in [19usize, 38] {
+        for x in 25usize..56 { for z in 25usize..56 {
+            let dx = x as i32 - 40; let dz = z as i32 - 40;
+            let r2 = dx * dx + dz * dz;
+            if !(100..=225).contains(&r2) { continue; }
+            for yy in y..y + 3 {
+                u.set(x, yy, z, a);
+                u.set_finish(x, yy, z, if (144..=196).contains(&r2) && yy == y + 1 {
+                    FINISH_CORE
+                } else if r2 > 196 { FINISH_IVORY } else { FINISH_GUN });
+            }
+        }}
+        fill_f(&mut u, (39, 42), (y, y + 3), (27, 54), a, FINISH_STEEL);
+        fill_f(&mut u, (27, 54), (y, y + 3), (39, 42), a, FINISH_STEEL);
+    }
+    // Eight tapered, stepped slabs surround the exposed reactor. Each joins
+    // the platform and includes a dark side rail and an energy channel.
+    for (dx, dz) in [(10,0), (7,7), (0,10), (-7,7), (-10,0), (-7,-7), (0,-10), (7,-7)] {
+        for y in 4usize..58 {
+            let radius = 30 - (y as i32 - 4) * 13 / 53;
+            let x = (40 + dx * radius / 10) as usize;
+            let z = (40 + dz * radius / 10) as usize;
+            fill_f(&mut u, (x - 4, x + 5), (y, y + 1), (z - 4, z + 5), a, FINISH_GUN);
+            fill_f(&mut u, (x - 3, x + 4), (y, y + 1), (z - 3, z + 4), a, FINISH_IVORY);
+            if y >= 9 && y < 54 {
+                mark(&mut u, (x - 4, x - 3), (y, y + 1), (z - 2, z + 3), FINISH_CORE);
+            }
+        }
+    }
+    seat(u, "T3 power plant").resampled(BODY_MM).expect("T3 power plant scale")
+}
+
+#[cfg(test)]
+#[test]
+fn power_plant_has_a_narrow_base_and_connected_vertical_disc() {
+    let b = power_plant_t1();
+    assert!(b.vol.nx > b.vol.nz * 3);
+    assert!(b.vol.ny > b.vol.nz);
+    assert!(b.solid_count() > 0);
+    assert_eq!(b.part_at(b.core.0 as usize, b.core.1 as usize, b.core.2 as usize), Part::Core);
+    assert!(b.subsystem_count(Part::Engine) > 0);
+    assert_eq!(b.subsystem_count(Part::Weapon), 0);
+    let x = b.vol.nx as usize / 2;
+    let z = b.vol.nz as usize / 2;
+    assert!(b.vol.get(x, 2, z));
+    assert!(b.vol.get(x, b.vol.ny as usize - 3, z));
+}
+
+#[cfg(test)]
+#[test]
+fn t2_power_plant_has_two_horizontal_reactor_rings() {
+    let b = power_plant_t2();
+    let t1 = power_plant_t1();
+    assert!(b.vol.nx > t1.vol.nx && b.vol.ny > t1.vol.ny);
+    assert_eq!(b.part_at(b.core.0 as usize, b.core.1 as usize, b.core.2 as usize), Part::Core);
+    assert!(b.subsystem_count(Part::Engine) > 0);
+    assert_eq!(b.subsystem_count(Part::Weapon), 0);
+    let x = 40usize * 3 + 3;
+    let z = 32usize * 3;
+    assert!(b.vol.get(x, 23 * 3, z));
+    assert!(b.vol.get(x, 42 * 3, z));
+    assert!(!b.vol.get(x, 32 * 3, z), "separate rings should have a visible gap");
+}
+
+#[cfg(test)]
+#[test]
+fn t3_power_plant_has_connected_reactor_and_eight_armour_plates() {
+    let b = power_plant_t3();
+    let t2 = power_plant_t2();
+    assert!(b.vol.ny > t2.vol.ny && b.vol.nz > t2.vol.nz);
+    let status = b.status(&mut CoreBufs::new());
+    assert!(status.alive && status.engine);
+    assert!(!status.weapon);
+    let scale = |p: i32| (p * 5 / 2) as usize;
+    for (dx, dz) in [(10,0), (7,7), (0,10), (-7,7), (-10,0), (-7,-7), (0,-10), (7,-7)] {
+        let radius = 30 - (30 - 4) * 13 / 53;
+        let x = 40 + dx * radius / 10;
+        let z = 40 + dz * radius / 10;
+        assert!(b.vol.get(scale(x), scale(30), scale(z)), "missing plate {dx},{dz}");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn power_station_templates_keep_damage_per_instance() {
+    for factory in [power_plant_t1 as fn() -> UnitBody, power_plant_t2, power_plant_t3] {
+        let mut damaged = factory();
+        let (x, y, z) = (damaged.core.0 as usize, damaged.core.1 as usize, damaged.core.2 as usize);
+        assert!(damaged.remove(x, y, z));
+        assert!(factory().vol.get(x, y, z), "damage leaked into the cached template");
+    }
+}
+
 /// Heavy Walker 04 with four independently aimed arms.
 pub fn walker04() -> UnitBody {
+    walker04_with_arm_layout(true)
+}
+
+fn walker04_with_arm_layout(stacked_arms: bool) -> UnitBody {
     fn at(p: (i32, i32, i32)) -> (i16, i16, i16) {
         (p.0 as i16, p.1 as i16, p.2 as i16)
     }
-    let mut u = UnitBody::new_scaled(80, 52, 80, 4, BODY_MM);
+    let mut u = UnitBody::new_scaled(80, if stacked_arms { 76 } else { 52 }, 80, 4, BODY_MM);
     let a = Part::Armour;
 
     fill_f(&mut u, (35, 46), (15, 21), (32, 49), a, FINISH_IVORY);
@@ -3624,9 +3934,9 @@ pub fn walker04() -> UnitBody {
     mark(&mut u, (39, 42), (50, 51), (38, 41), FINISH_PLATE);
 
     for sx in [-1i32, 1] {
-        let hip = (40, 16, 40 + sx * 7);
-        let knee = (34, 11, 40 + sx * 8);
-        let ankle = (40, 4, 40 + sx * 8);
+        let hip = (40, 16, 40 + sx * if stacked_arms { 8 } else { 7 });
+        let knee = (34, 11, 40 + sx * if stacked_arms { 10 } else { 8 });
+        let ankle = (40, 4, 40 + sx * if stacked_arms { 10 } else { 8 });
         ball(&mut u, hip, 5, a);
         mark_ball(&mut u, hip, 5, FINISH_GUN);
         let first = u.segments.len() as u8;
@@ -3704,22 +4014,47 @@ pub fn walker04() -> UnitBody {
 
     for sy in [-1i32, 1] {
         for sx in [-1i32, 1] {
-            let shoulder = (40 - sy * 9, 42, 40 + sx * 9);
-            let elbow = (40 - sy * 22, 35, 40 + sx * 13);
-            ball(&mut u, shoulder, 3, a);
-            mark_ball(&mut u, shoulder, 3, FINISH_STEEL);
-            let mut upper = UnitBody::new_scaled(17, 4, 4, 1, BODY_MM);
-            fill_f(&mut upper, (0, 17), (0, 4), (0, 4), a, FINISH_IVORY);
+            let (shoulder, elbow) = if stacked_arms {
+                // One separate bearing per arm, vertically staggered so that
+                // its support can travel around the spine independently.
+                let arm = ((sy + 1) + (sx + 1) / 2) as usize;
+                let shoulder = (40, 36 + arm as i32 * 10, 40 + sx * 18);
+                (shoulder, (53, shoulder.1, shoulder.2))
+            } else {
+                ((40 - sy * 9, 42, 40 + sx * if sy > 0 { 22 } else { 9 }),
+                 (40 - sy * 22, 35, 40 + sx * 13))
+            };
+            if !stacked_arms && sy > 0 {
+                let z = if sx < 0 { (18, 32) } else { (49, 63) };
+                fill_f(&mut u, (28, 35), (39, 45), z, a, FINISH_STEEL);
+            }
+            if !stacked_arms {
+                ball(&mut u, shoulder, 3, a);
+                mark_ball(&mut u, shoulder, 3, FINISH_STEEL);
+            }
+            let mut upper = UnitBody::new_scaled(12, 4, 4, 1, BODY_MM);
+            fill_f(&mut upper, (0, 12), (0, 4), (0, 4), a, FINISH_IVORY);
             mark(&mut upper, (0, 2), (0, 4), (0, 4), FINISH_GUN);
-            mark(&mut upper, (14, 17), (0, 4), (0, 4), FINISH_GUN);
-            mark(&mut upper, (3, 13), (3, 4), (1, 2), FINISH_PLATE);
-            mark(&mut upper, (3, 13), (3, 4), (2, 3), FINISH_PLATE);
-            for x in [4, 11] {
+            mark(&mut upper, (10, 12), (0, 4), (0, 4), FINISH_GUN);
+            mark(&mut upper, (3, 9), (3, 4), (1, 2), FINISH_PLATE);
+            mark(&mut upper, (3, 9), (3, 4), (2, 3), FINISH_PLATE);
+            if stacked_arms {
+                mark(&mut upper, (2, 10), (0, 1), (0, 4), FINISH_STEEL);
+                mark(&mut upper, (3, 9), (2, 4), (0, 1), FINISH_PLATE);
+                mark(&mut upper, (3, 9), (2, 4), (3, 4), FINISH_PLATE);
+            }
+            for x in [4, 8] {
                 mark(&mut upper, (x, x + 1), (3, 4), (1, 3), FINISH_STEEL);
+            }
+            if stacked_arms {
+                // The elbow ball occupies x=7..13 in the upper link's frame.
+                // Keep the feed inside that joint, not duplicate armour faces.
+                for z in 0..4 { for y in 0..4 { for x in 7..12 { upper.remove(x, y, z); }}}
+                fill_f(&mut upper, (7, 10), (1, 3), (1, 3), a, FINISH_GUN);
             }
             u.push_segment(
                 Attach {
-                    turret: true,
+                    turret: !stacked_arms,
                     ..Attach::aimed(
                         at(shoulder),
                         (0, 2, 2),
@@ -3739,32 +4074,43 @@ pub fn walker04() -> UnitBody {
             mark_ball(&mut elbow_hub, (4, 4, 4), 3, FINISH_STEEL);
             fill_f(&mut elbow_hub, (6, 8), (2, 6), (2, 6), a, FINISH_IVORY);
             mark(&mut elbow_hub, (6, 8), (3, 5), (3, 5), FINISH_PLATE);
+            if stacked_arms {
+                for z in 0..8 { for y in 0..8 { for x in 6..8 { elbow_hub.remove(x, y, z); }}}
+            }
             u.push_segment(
                 Attach {
-                    turret: true,
+                    turret: !stacked_arms,
                     parent: arm_root,
-                    ..Attach::flat((15, 2, 2), (4, 4, 4))
+                    ..Attach::flat((10, 2, 2), (4, 4, 4))
                 },
                 elbow_hub,
             );
 
-            let mut forearm = UnitBody::new_scaled(16, 4, 5, 1, BODY_MM);
-            fill_f(&mut forearm, (0, 16), (0, 4), (0, 5), a, FINISH_IVORY);
+            let mut forearm = UnitBody::new_scaled(11, 4, 5, 1, BODY_MM);
+            fill_f(&mut forearm, (0, 11), (0, 4), (0, 5), a, FINISH_IVORY);
             mark(&mut forearm, (0, 2), (0, 4), (0, 5), FINISH_GUN);
-            mark(&mut forearm, (14, 16), (0, 4), (0, 5), FINISH_GUN);
-            fill_f(&mut forearm, (4, 11), (3, 4), (1, 4), a, FINISH_ENERGY);
-            mark(&mut forearm, (3, 12), (3, 4), (0, 1), FINISH_GUN);
-            mark(&mut forearm, (3, 12), (3, 4), (4, 5), FINISH_GUN);
-            mark(&mut forearm, (12, 13), (1, 3), (1, 4), FINISH_PLATE);
+            mark(&mut forearm, (9, 11), (0, 4), (0, 5), FINISH_GUN);
+            fill_f(&mut forearm, (4, 8), (3, 4), (1, 4), a, FINISH_ENERGY);
+            if stacked_arms {
+                mark(&mut forearm, (1, 10), (0, 1), (0, 5), FINISH_STEEL);
+                mark(&mut forearm, (3, 9), (2, 4), (0, 1), FINISH_PLATE);
+                mark(&mut forearm, (3, 9), (2, 4), (4, 5), FINISH_PLATE);
+            }
+            mark(&mut forearm, (3, 9), (3, 4), (0, 1), FINISH_GUN);
+            mark(&mut forearm, (3, 9), (3, 4), (4, 5), FINISH_GUN);
+            mark(&mut forearm, (8, 9), (1, 3), (1, 4), FINISH_PLATE);
             for z in [1, 3] {
                 mark(&mut forearm, (3, 4), (2, 3), (z, z + 1), FINISH_STEEL);
-                mark(&mut forearm, (12, 13), (2, 3), (z, z + 1), FINISH_STEEL);
+                mark(&mut forearm, (8, 9), (2, 3), (z, z + 1), FINISH_STEEL);
+            }
+            if stacked_arms {
+                for z in 0..5 { for y in 0..4 { for x in 0..3 { forearm.remove(x, y, z); }}}
             }
             u.push_segment(
                 Attach {
-                    turret: true,
+                    turret: !stacked_arms,
                     parent: arm_root + 1,
-                    ..Attach::aimed((4, 4, 4), (0, 2, 2), (14, -4, 0))
+                    ..Attach::aimed((4, 4, 4), (0, 2, 2), if stacked_arms { (14, 0, 0) } else { (14, -4, 0) })
                 },
                 forearm,
             );
@@ -3798,24 +4144,26 @@ pub fn walker04() -> UnitBody {
             );
             u.push_segment(
                 Attach {
-                    turret: true,
+                    turret: !stacked_arms,
                     parent: arm_root + 2,
-                    ..Attach::flat((14, 2, 2), (0, 2, 2))
+                    // Butt joint, not two overlapping cubes at the muzzle.
+                    ..Attach::flat((11, 2, 2), (0, 2, 2))
                 },
                 laser,
             );
 
             // Weapon feed stays inside the shoulder socket. Articulated arms
             // supply their real muzzles; fixed root rails were ghost barrels.
+            let feed = if stacked_arms { (40, shoulder.1, 40) } else { shoulder };
             let min = [
-                (shoulder.0 - 1) as u8,
-                (shoulder.1 - 1) as u8,
-                (shoulder.2 - 1) as u8,
+                (feed.0 - 1) as u8,
+                (feed.1 - 1) as u8,
+                (feed.2 - 1) as u8,
             ];
             let max = [
-                (shoulder.0 + 2) as u8,
-                (shoulder.1 + 2) as u8,
-                (shoulder.2 + 2) as u8,
+                (feed.0 + 2) as u8,
+                (feed.1 + 2) as u8,
+                (feed.2 + 2) as u8,
             ];
             fill(
                 &mut u,
@@ -3828,14 +4176,158 @@ pub fn walker04() -> UnitBody {
         }
     }
 
+    if stacked_arms {
+        // Remove the shared crown and fixed shoulder rails. The narrow spine
+        // stays inside four hollow, independently damageable rotating collars.
+        for z in 0..80 { for y in 35..76 { for x in 0..80 {
+            u.remove(x, y, z);
+        }}}
+        fill_f(&mut u, (36, 45), (35, 72), (36, 45), a, FINISH_GUN);
+        for arm in 0..4 {
+            let y = 36 + arm * 10;
+            fill(&mut u, (39, 42), (y - 1, y + 2), (39, 42), Part::Weapon);
+            let mut mount = UnitBody::new_scaled(44, 6, 44, 1, BODY_MM);
+            disc(&mut mount, (22, 22), 12, (1, 5), a);
+            mark_cyl(&mut mount, 1, (1, 5), (22, 22), 12, FINISH_STEEL);
+            for z in 0..44 { for yy in 0..6 { for x in 0..44 {
+                let dx = x as i32 - 22; let dz = z as i32 - 22;
+                if dx * dx + dz * dz < 8 * 8 { mount.remove(x, yy, z); }
+            }}}
+            let z = if arm % 2 == 0 { (1, 13) } else { (31, 43) };
+            fill_f(&mut mount, (19, 25), (0, 6), z, a, FINISH_IVORY);
+            let z = if arm % 2 == 0 { 4 } else { 40 };
+            ball(&mut mount, (22, 3, z), 3, a);
+            mark_ball(&mut mount, (22, 3, z), 3, FINISH_GUN);
+            u.push_segment(Attach::flat((40, y as i16, 40), (22, 3, 22)), mount);
+        }
+        fill_f(&mut u, (37, 44), (72, 75), (37, 44), a, FINISH_IVORY);
+        fill_f(&mut u, (44, 45), (73, 75), (38, 43), Part::Sensor, FINISH_OPTIC);
+    }
     let mut u = seat(u, "Walker 04 · силовые рамы");
     u.mm = 500;
     for segment in &mut u.segments {
         segment.body.mm = 500;
     }
-    // The complete shoulder balls (y=39..45) belong to the moving crown.
-    // Cutting through their middle left half of every socket on the chassis.
-    u.turret_y = 38;
+    // The heavy walker has a fixed spine and separate segment bearings.
+    // The commander's older two-arm shoulder rig still uses a root crown.
+    u.turret_y = if stacked_arms { 76 } else { 38 };
+    u
+}
+
+/// Two-legged command unit with a cannon and a separate fabrication claw.
+/// Reuse the proven articulated leg/shoulder rig, but give it its own
+/// silhouette and keep the final simulation grid at 100 mm.
+pub fn commander() -> UnitBody {
+    let mut u = walker04_with_arm_layout(false);
+    let a = Part::Armour;
+    // Broad shoulder armour, stepped at the outer edges. The inner strips
+    // join the torso without covering its weapon feeds or engine.
+    for (inner, outer) in [((30, 34), (23, 30)), ((47, 51), (51, 58))] {
+        fill_f(&mut u, (34, 46), (30, 40), inner, a, FINISH_GUN);
+        fill_f(&mut u, (33, 47), (32, 43), outer, a, FINISH_IVORY);
+        mark(&mut u, (35, 45), (42, 43), (outer.0 + 1, outer.1 - 1), FINISH_STEEL);
+        fill_f(&mut u, (46, 48), (34, 40), (outer.0 + 2, outer.1 - 2), a, FINISH_GUN);
+        fill_f(&mut u, (48, 49), (35, 39), (outer.0 + 3, outer.1 - 3), a, FINISH_CORE);
+    }
+    // Layered breastplate and a recessed vertical reactor grille.
+    fill_f(&mut u, (49, 51), (22, 39), (32, 49), a, FINISH_GUN);
+    for z in [(32, 37), (44, 49)] {
+        fill_f(&mut u, (51, 53), (23, 39), z, a, FINISH_IVORY);
+        mark(&mut u, (52, 53), (25, 37), (z.0 + 1, z.1 - 1), FINISH_PLATE);
+    }
+    fill_f(&mut u, (51, 52), (25, 37), (38, 43), a, FINISH_CORE);
+    for y in [27, 30, 33, 36] {
+        mark(&mut u, (51, 52), (y, y + 1), (38, 43), FINISH_GUN);
+    }
+    // A short sensor mast, backed by a dark mechanical housing.
+    fill_f(&mut u, (38, 45), (48, 52), (36, 45), a, FINISH_GUN);
+    fill_f(&mut u, (44, 46), (48, 51), (38, 43), Part::Sensor, FINISH_CORE);
+
+    // Two front assemblies remain. Empty the rear pair in place so leg and
+    // arm segment indices remain stable for damage and articulation.
+    for index in 18..26 {
+        u.segments[index].body = UnitBody::new_scaled(1, 1, 1, 1, BODY_MM);
+    }
+    // Walker 04's long four-arm rig is disproportionate on the smaller
+    // commander. Keep the same articulated joints and shorten both links.
+    for first in [10usize, 14] {
+        // Put the spherical shoulder outside the wide crown armour. A hanging
+        // articulated forearm otherwise enters the old inner shoulder plate.
+        let side = if first == 10 { 22 } else { 58 };
+        u.segments[first].attach.at.2 = side;
+        ball(&mut u, (49, 42, i32::from(side)), 3, a);
+        mark_ball(&mut u, (49, 42, i32::from(side)), 3, FINISH_STEEL);
+        fill_f(&mut u, (44, 49), (39, 44),
+            (side as usize - 2, side as usize + 3), a, FINISH_GUN);
+        let mut upper = UnitBody::new_scaled(10, 4, 4, 1, BODY_MM);
+        fill_f(&mut upper, (0, 10), (0, 4), (0, 4), a, FINISH_IVORY);
+        mark(&mut upper, (0, 2), (0, 4), (0, 4), FINISH_GUN);
+        mark(&mut upper, (8, 10), (0, 4), (0, 4), FINISH_GUN);
+        mark(&mut upper, (3, 8), (3, 4), (1, 3), FINISH_PLATE);
+        u.segments[first].body = upper;
+        u.segments[first + 1].attach.at.0 = 9;
+        let mut forearm = UnitBody::new_scaled(10, 4, 5, 1, BODY_MM);
+        fill_f(&mut forearm, (0, 10), (0, 4), (0, 5), a, FINISH_IVORY);
+        mark(&mut forearm, (0, 2), (0, 4), (0, 5), FINISH_GUN);
+        mark(&mut forearm, (8, 10), (0, 4), (0, 5), FINISH_GUN);
+        fill_f(&mut forearm, (3, 8), (3, 4), (1, 4), a, FINISH_CORE);
+        u.segments[first + 2].body = forearm;
+        u.segments[first + 3].attach.at.0 = 9;
+    }
+    let mut cannon = UnitBody::new_scaled(13, 6, 6, 1, BODY_MM);
+    fill_f(&mut cannon, (0, 13), (0, 6), (0, 6), Part::Weapon, FINISH_GUN);
+    fill_f(&mut cannon, (1, 11), (1, 5), (0, 1), Part::Weapon, FINISH_IVORY);
+    fill_f(&mut cannon, (1, 11), (1, 5), (5, 6), Part::Weapon, FINISH_IVORY);
+    fill_f(&mut cannon, (2, 11), (4, 6), (1, 5), Part::Weapon, FINISH_IVORY);
+    fill_f(&mut cannon, (3, 11), (1, 2), (0, 1), Part::Weapon, FINISH_CORE);
+    fill_f(&mut cannon, (12, 13), (1, 5), (1, 5), Part::Weapon, FINISH_CORE);
+    u.segments[13].body = cannon;
+
+    let mut claw = UnitBody::new_scaled(10, 7, 7, 1, BODY_MM);
+    fill_f(&mut claw, (0, 5), (0, 7), (0, 7), a, FINISH_GUN);
+    fill_f(&mut claw, (1, 4), (1, 6), (1, 6), a, FINISH_IVORY);
+    for z in [(0, 2), (5, 7)] {
+        fill_f(&mut claw, (4, 9), (1, 6), z, a, FINISH_STEEL);
+        fill_f(&mut claw, (8, 10), (1, 6), z, a, FINISH_IVORY);
+    }
+    fill_f(&mut claw, (4, 5), (2, 5), (2, 5), a, FINISH_CORE);
+    u.segments[17].body = claw;
+
+    fn warm_energy(body: &mut UnitBody) {
+        for z in 0..usize::from(body.vol.nz) {
+            for y in 0..usize::from(body.vol.ny) {
+                for x in 0..usize::from(body.vol.nx) {
+                    if body.vol.get(x, y, z) && body.finish_at(x, y, z) == FINISH_ENERGY {
+                        body.set_finish(x, y, z, FINISH_CORE);
+                    }
+                }
+            }
+        }
+    }
+    warm_energy(&mut u);
+    for segment in &mut u.segments {
+        warm_energy(&mut segment.body);
+    }
+
+    // 52 * 180 mm is about 3.1 times the tank's 3 m height.
+    // Resampling restores the normal 10 cm cells for simulation/editing.
+    u.mm = 180;
+    for segment in &mut u.segments {
+        segment.body.mm = 180;
+    }
+    let mut u = u.resampled(BODY_MM).expect("commander fits the 10 cm grid");
+    // Rounding the rotated leg links to 10 cm can put a corner one cell
+    // below the ground plane. Raise the rig together, preserving the joints.
+    for segment in &mut u.segments[..10] {
+        if segment.attach.parent == 0 {
+            segment.attach.at.1 += 3;
+        }
+    }
+    for leg in &mut u.legs {
+        leg.hip.1 += 3;
+        leg.knee.1 += 3;
+        leg.ankle.1 += 3;
+    }
     u
 }
 
@@ -4257,6 +4749,21 @@ pub fn biped() -> UnitBody {
 mod tests {
     use super::*;
 
+    #[test]
+    fn commander_is_three_tank_heights_and_has_two_distinct_tools() {
+        let mut c = commander();
+        let t = tank();
+        assert_eq!(c.mm, BODY_MM);
+        assert!((c.extent_mm().1 as i64 - 3 * i64::from(t.extent_mm().1)).abs() <= 1000);
+        assert_eq!(c.legs.len(), 2);
+        assert_eq!(c.segments.len(), 26);
+        assert!(c.segments[13].body.subsystem_count(Part::Weapon) > 0);
+        assert!(c.segments[17].body.solid_count() > 0);
+        assert!(c.segments[18..26].iter().all(|s| s.body.solid_count() == 0));
+        assert!(c.seat_core());
+    }
+
+
     /// Пересчёт ролей по всему тому. Габарит берётся у тела, а не
     /// пишется числом: тест обязан переживать смену сетки, иначе он
     /// сторожит не роли, а свои литералы.
@@ -4415,11 +4922,12 @@ mod tests {
     #[test]
     fn strider_has_every_part_and_the_right_size() {
         let s = walker04();
-        // 40×26×40 м при вокселе 0,5 м — вдвое меньше прежнего корпуса.
-        assert_eq!((s.vol.nx, s.vol.ny, s.vol.nz), (80, 52, 80));
+        // Four independently traversing bearing levels need a taller spine.
+        // The 0.5 m body grid and horizontal envelope stay unchanged.
+        assert_eq!((s.vol.nx, s.vol.ny, s.vol.nz), (80, 76, 80));
         assert_eq!(
             s.extent_mm(),
-            (40_000, 26_000, 40_000),
+            (40_000, 38_000, 40_000),
             "шагоход сменил габарит"
         );
         let seen = roles(&s);
@@ -4469,7 +4977,12 @@ mod tests {
     /// которое поворачивается целиком; и то и другое молча.
     #[test]
     fn the_turret_line_cuts_something_off() {
-        for b in [tank(), walker04()] {
+        // Walker 04 has no shared root turret: its four moving bearings are
+        // structural segments. Only the tank uses this root-volume cut.
+        let walker = walker04();
+        assert_eq!(walker.turret_y, walker.vol.ny);
+        assert_eq!(walker.segments.len(), 30);
+        for b in [tank()] {
             let ty = b.turret_y as usize;
             assert!(
                 ty > 0 && ty < b.vol.ny as usize,

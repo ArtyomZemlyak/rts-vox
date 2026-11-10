@@ -9,6 +9,8 @@ use modding::{explosion::Delivery, range_battle::Tuning};
 mod orders;
 #[path = "range_razlom.rs"]
 mod razlom;
+#[path = "range_idle_aim.rs"]
+mod idle_aim;
 
 #[path = "range_commands.rs"]
 pub mod commands;
@@ -101,6 +103,8 @@ pub enum Order {
     Auto,
     Hold,
     Move,
+    /// A factory's persistent destination for subsequently produced units.
+    Rally([i32; 2]),
     Attack(usize),
     Ground([i32; 3]),
     /// Dig the ball around this face into the unit's tank (ADR-672). The
@@ -108,6 +112,10 @@ pub enum Order {
     Dig([i32; 3]),
     /// Collect wreckage without drilling the ground.
     Reclaim([i32; 3]),
+    /// Directly fabricate an existing allied construction site.
+    Build(usize),
+    /// Restore damaged cells of a living allied unit using the commander's matter.
+    Repair(usize),
     /// Transfer charge to another allied electric tank.
     Support(usize),
     /// Persistent direct control; axes are -1, 0, 1. Uses ordinary hull physics.
@@ -190,7 +198,8 @@ pub struct Actor {
     pub target: Option<usize>,
     next: u32,
     charge: Option<u32>,
-    pursuit: u32,
+    // Also the deployment deadline while a crawler has an active Dig order.
+    pub(super) pursuit: u32,
     burst: u32,
     pub fired: u32,
     /// None selects ammunition by target; explicit choices belong to this actor.
@@ -337,7 +346,7 @@ fn loft(t: &Tuning, weapon: Weapon) -> i32 {
 }
 
 /// One loadout rule for combat, presentation and controller observations.
-fn effective_weapon(
+pub(super) fn effective_weapon(
     kind: RangeUnitKind,
     explicit: Option<Weapon>,
     ground: bool,
@@ -347,9 +356,15 @@ fn effective_weapon(
     if kind == RangeUnitKind::NuclearSilo {
         return Some(Weapon::Nuclear);
     }
+    if kind == RangeUnitKind::Commander {
+        return Some(Weapon::Energy);
+    }
     if matches!(
         kind,
         RangeUnitKind::Base
+            | RangeUnitKind::PowerPlantT1
+            | RangeUnitKind::PowerPlantT2
+            | RangeUnitKind::PowerPlantT3
             | RangeUnitKind::Crawler
             | RangeUnitKind::GrebenStorage
             | RangeUnitKind::KilFactoryT1
@@ -732,6 +747,7 @@ impl Battle {
                 Order::Auto => b.u8(0),
                 Order::Hold => b.u8(1),
                 Order::Move => b.u8(2),
+                Order::Rally(p) => { b.u8(11); for v in p { b.i32(v); } }
                 Order::Attack(i) => {
                     b.u8(3);
                     b.usize(i);
@@ -753,6 +769,14 @@ impl Battle {
                     for v in p {
                         b.i32(v);
                     }
+                }
+                Order::Build(site) => {
+                    b.u8(9);
+                    b.usize(site);
+                }
+                Order::Repair(target) => {
+                    b.u8(10);
+                    b.usize(target);
                 }
                 Order::Support(id) => {
                     b.u8(8);
@@ -822,6 +846,11 @@ impl Battle {
                 0 => Order::Auto,
                 1 => Order::Hold,
                 2 => Order::Move,
+                11 if matches!(units[id].kind, RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4) => {
+                    let p = [s.i32(), s.i32()];
+                    if p[0] < 40 || p[1] < 40 || p[0] >= size[0] as i32 - 40 || p[1] >= size[2] as i32 - 40 { return None; }
+                    Order::Rally(p)
+                }
                 3 => {
                     let i = s.usize();
                     if i >= units.len() {
@@ -862,6 +891,20 @@ impl Battle {
                         return None;
                     }
                     Order::Support(target)
+                }
+                9 if version >= 65 && matches!(units[id].kind, RangeUnitKind::Commander | RangeUnitKind::SkobaDrone) => {
+                    let site = s.usize();
+                    if site >= modding::range::MAX_RANGE_UNITS {
+                        return None;
+                    }
+                    Order::Build(site)
+                }
+                10 if version >= 62 && units[id].kind == RangeUnitKind::Commander => {
+                    let target = s.usize();
+                    if target >= units.len() || target == id || allied[target] != allied[id] {
+                        return None;
+                    }
+                    Order::Repair(target)
                 }
                 6 => {
                     let throttle = s.u8();
@@ -1120,6 +1163,40 @@ pub(super) fn aim_point(u: &RangeUnit) -> [i32; 3] {
     u.world_pos(best.map_or(origin, |(_, _, p)| p))
 }
 impl BlastRange {
+    /// Economy controller uses the same validation and movement executor as
+    /// player orders, without changing the side's AI ownership.
+    pub(crate) fn economy_ai_order(&mut self, id: usize, order: Order, side: bool) -> bool {
+        let request = orders::Request { actor: id, order, destination: None };
+        match orders::validate(self, &self.battle.actors, request, side, orders::Replacement::Explicit) {
+            orders::Admission::Rejected => false,
+            orders::Admission::Unchanged => true,
+            orders::Admission::Apply => {
+                let request = match order {
+                    Order::Dig(face) => orders::Request { destination: self.dig_approach(id, face), ..request },
+                    Order::Reclaim(face) => orders::Request { destination: self.reclaim_approach(id, face), ..request },
+                    _ => request,
+                };
+                let outcome = orders::Executor {
+                    units: &mut self.units,
+                    actors: &mut self.battle.actors,
+                    world: &self.world,
+                    rubble: &self.rubble,
+                    tick: self.tick,
+                }.apply(request, orders::Replacement::Explicit);
+                if outcome.accepted() {
+                    if let Some(m) = self.mining.as_mut() { m.reset_leg(id); }
+                }
+                outcome.accepted()
+            }
+        }
+    }
+    pub(crate) fn economy_ai_move(&mut self, id: usize, destination: [i32; 2], side: bool) -> bool {
+        let request = orders::Request { actor: id, order: Order::Move, destination: Some(destination) };
+        if !matches!(orders::validate(self, &self.battle.actors, request, side, orders::Replacement::Explicit), orders::Admission::Apply) { return false; }
+        orders::Executor { units: &mut self.units, actors: &mut self.battle.actors,
+            world: &self.world, rubble: &self.rubble, tick: self.tick }
+            .apply(request, orders::Replacement::Explicit).accepted()
+    }
     /// The reference scenario (ADR-662): the authored world battle on the
     /// kilometre range, both sides under rules AI, already started. The
     /// golden test and `sim-cli` hash exactly this, so the scenario is
@@ -1179,6 +1256,23 @@ impl BlastRange {
             (Some(unit), Some(actor)) => weapons::muzzles(unit, actor.turret.angle),
             _ => Vec::new(),
         }
+    }
+    /// Tip of the commander's articulated fabrication tool.
+    pub fn commander_tool_tip(&self, id: usize) -> Option<[Fx; 3]> {
+        let u = self.units.get(id)?;
+        if u.kind != RangeUnitKind::Commander || !u.status.alive
+            || u.seg_gone.get(14..18)?.iter().any(|gone| *gone)
+        {
+            return None;
+        }
+        let body = &u.body.segments.get(17)?.body;
+        if body.solid_count() == 0 { return None; }
+        let p = u.seg_frames.get(17)?.world([
+            Fx::from_int(i32::from(body.vol.nx)),
+            Fx::from_ratio(i32::from(body.vol.ny), 2),
+            Fx::from_ratio(i32::from(body.vol.nz), 2),
+        ]);
+        Some([p.x, p.y, p.z])
     }
     pub fn battle_attack_range(&self, id: usize) -> Option<i32> {
         let weapon = self.battle_weapon(id)?;
@@ -1351,6 +1445,7 @@ impl BlastRange {
                     alive: unit.status.alive,
                     armed: unit.status.weapon
                         && unit.kind != RangeUnitKind::NuclearSilo
+                        && effective_weapon(unit.kind, battle.actors[id].weapon, false, None, &battle.tuning).is_some()
                         && !self.idle_enemy(id),
                     mobile: unit.status.engine
                         && unit.motion.can_drive(unit.mobility)
@@ -1724,6 +1819,14 @@ impl BlastRange {
     pub fn execute_battle_command(&mut self, command: commands::Command) -> commands::Outcome {
         self.execute_command(command)
     }
+    pub(super) fn queued_order_admitted(&self,actor:usize,order:Order,destination:Option<[i32;2]>)->bool {
+        !matches!(self.manual_order_admission(self.battle.phase,orders::Request{actor,order,destination}),orders::Admission::Rejected)
+    }
+    pub(super) fn execute_order_continuation(&mut self,command:commands::Command)->commands::Outcome {
+        let capture=self.battle.command_capture.take();
+        let result=self.execute_command(command);
+        self.battle.command_capture=capture;result
+    }
     fn manual_order_admission(&self, phase: Phase, request: orders::Request) -> orders::Admission {
         if !self.battle_mode()
             || !(phase == Phase::Fighting
@@ -1731,9 +1834,12 @@ impl BlastRange {
                     && matches!(
                         request.order,
                         Order::Move
+                            | Order::Rally(_)
                             | Order::Hold
                             | Order::Dig(_)
                             | Order::Reclaim(_)
+                            | Order::Build(_)
+                            | Order::Repair(_)
                             | Order::Support(_)
                             | Order::Pilot { fire: false, .. }
                     ))
@@ -1753,6 +1859,25 @@ impl BlastRange {
     /// own admission rules; external owners schedule this same operation.
     pub fn execute_command(&mut self, command: commands::Command) -> commands::Outcome {
         let (id, order, destination, fallback) = match command {
+            commands::Command::Order{actor,order:Order::Build(site),destination:None} if self.greben_build_admitted(actor,site)=>{
+                self.clear_order_queue(actor);
+                let outcome=self.append_order(actor,super::build_plans::PlannedOrder{order:Order::Build(site),destination:None});
+                self.record_player_command(command,outcome);return outcome;
+            }
+            commands::Command::QueueOrder{actor,order,destination}=>{
+                let outcome=self.append_order(actor,super::build_plans::PlannedOrder{order,destination});
+                self.record_player_command(command,outcome);return outcome;
+            }
+            commands::Command::PlaceConstruction{actor,kind,at,queued}=>{
+                let outcome=self.place_ordered_construction(actor,kind,at,queued);
+                self.record_player_command(command,outcome);return outcome;
+            }
+            commands::Command::CancelConstruction{site}=>{
+                let outcome=self.cancel_construction_plan(site);self.record_player_command(command,outcome);return outcome;
+            }
+            commands::Command::CancelLastOrder{actor}=>{
+                let outcome=self.cancel_last_planned_order(actor);self.record_player_command(command,outcome);return outcome;
+            }
             commands::Command::Sculpt {
                 at,
                 edge,
@@ -1822,6 +1947,11 @@ impl BlastRange {
                 self.record_player_command(command, outcome);
                 return outcome;
             }
+            commands::Command::UnloadCrawler { actor, dock } => {
+                let outcome = self.order_crawler_unload(actor, dock);
+                self.record_player_command(command, outcome);
+                return outcome;
+            }
             commands::Command::Produce { actor, kind } => {
                 let outcome = self.enqueue_product(actor, kind, true);
                 self.record_player_command(command, outcome);
@@ -1855,10 +1985,8 @@ impl BlastRange {
                 // A digger out of reach drives to its face; the route
                 // is derived, never part of the command (ADR-672).
                 let request = match order {
-                    Order::Dig(face) | Order::Reclaim(face) => orders::Request {
-                        destination: self.dig_approach(id, face),
-                        ..request
-                    },
+                    Order::Dig(face) => orders::Request { destination: self.dig_approach(id, face), ..request },
+                    Order::Reclaim(face) => orders::Request { destination: self.reclaim_approach(id, face), ..request },
                     _ => request,
                 };
                 // Between ticks, a manual Move uses the current physical rubble.
@@ -1891,6 +2019,11 @@ impl BlastRange {
             }
         }
         // A new order ends a haul: it decides where to go (ADR-673).
+        if outcome.admitted() {
+            let had_queue=self.build_plans.queues.contains_key(&(id as u16));
+            self.clear_order_queue(id);
+            if had_queue && outcome==commands::Outcome::Unchanged {outcome=commands::Outcome::Applied;}
+        }
         if matches!(
             outcome,
             commands::Outcome::Applied | commands::Outcome::Queued
@@ -2228,6 +2361,12 @@ impl BlastRange {
                     .any(|a| matches!(a.order, Order::Pilot { .. } | Order::Support(_)))
         {
             self.battle_orders(&mut battle, &mut completed, physics);
+        } else if battle.phase == Phase::Setup {
+            for (unit, actor) in self.units.iter_mut().zip(&mut battle.actors) {
+                if !matches!(actor.order, Order::Build(_) | Order::Repair(_) | Order::Dig(_) | Order::Reclaim(_)) {
+                    idle_aim::follow(unit, actor, self.turret_limits);
+                }
+            }
         }
         completed("battle_orders");
         // New live beam deposits must reserve admission before wave/crater work.
@@ -2248,10 +2387,24 @@ impl BlastRange {
             }
         }
         completed("battle_damage");
-        if battle.phase == Phase::Fighting {
+        if battle.phase == Phase::Fighting && !self.layout.as_ref().is_some_and(|layout| layout.endless_battle) {
+            // Commander-start scenarios use their authored commanders as the
+            // objectives even after factories and other units are constructed.
+            let commanders = self.layout.as_ref().and_then(|layout| {
+                let own = layout.units.iter().position(|u| u.allied && u.kind == RangeUnitKind::Commander)?;
+                let enemy = layout.units.iter().position(|u| !u.allied && u.kind == RangeUnitKind::Commander)?;
+                Some([self.units.get(own)?.status.alive, self.units.get(enemy)?.status.alive])
+            });
             // A base is the objective itself: an unrelated round still in
             // flight must not postpone the outcome indefinitely.
-            if let Some([own, enemy]) = self.battle_base_integrity() {
+            if let Some([own, enemy]) = commanders {
+                battle.phase = match (own, enemy) {
+                    (false, false) => Phase::Draw,
+                    (false, true) => Phase::Defeat,
+                    (true, false) => Phase::Victory,
+                    (true, true) => Phase::Fighting,
+                };
+            } else if let Some([own, enemy]) = self.battle_base_integrity() {
                 // A disabled attacker and two distant garrisons cannot ever
                 // reach either base. Keep nearby stationary gunfights alive,
                 // but do not leave a whole-map AI battle in Fighting forever.
@@ -2266,6 +2419,9 @@ impl BlastRange {
                     self.units.iter().enumerate().any(|(id, u)| {
                         let weapon = match u.kind {
                             RangeUnitKind::Base
+                            | RangeUnitKind::PowerPlantT1
+                            | RangeUnitKind::PowerPlantT2
+                            | RangeUnitKind::PowerPlantT3
                             | RangeUnitKind::GrebenStorage
                             | RangeUnitKind::KilFactoryT1
                             | RangeUnitKind::KilFactoryT2
@@ -2278,6 +2434,7 @@ impl BlastRange {
                             RangeUnitKind::Strider => Some(Weapon::MachineGun),
                             RangeUnitKind::TurretT1 => Some(Weapon::Kinetic),
                             RangeUnitKind::TurretT2 => Some(Weapon::Energy),
+                            RangeUnitKind::Commander => Some(Weapon::Energy),
                             RangeUnitKind::ArtilleryTurretT3 => Some(Weapon::Siege),
                             RangeUnitKind::NuclearSilo => Some(Weapon::Nuclear),
                             RangeUnitKind::ArtilleryT2 | RangeUnitKind::ArtilleryTurretT2 => {
@@ -2416,6 +2573,9 @@ impl BlastRange {
             if b.phase == Phase::Setup
                 && !matches!(b.actors[id].order, Order::Pilot { .. } | Order::Support(_))
             {
+                if !matches!(b.actors[id].order, Order::Build(_) | Order::Repair(_) | Order::Dig(_) | Order::Reclaim(_)) {
+                    idle_aim::follow(&mut self.units[id], &mut b.actors[id], self.turret_limits);
+                }
                 continue;
             }
             if !self.units[id].status.alive || !self.units[id].status.weapon {
@@ -2426,6 +2586,15 @@ impl BlastRange {
                 continue;
             }
             let kind = self.units[id].kind;
+            if self.factory_launch_for_order(id, b.actors[id].order).is_some() {
+                // The marker is not a firing target. Keep the visible turret
+                // aligned with the chassis throughout the physical exit.
+                let head = self.units[id].motion.drive.head;
+                b.actors[id].turret = crate::turret::Traverse::new(head);
+                self.units[id].update_pose(head);
+                b.actors[id].target = None;
+                continue;
+            }
             if let Order::Support(target) = b.actors[id].order {
                 let valid = target < self.units.len()
                     && target != id
@@ -2443,6 +2612,7 @@ impl BlastRange {
                 let dz = i64::from(to[2] - from[2]);
                 let distance = ((dx * dx + dz * dz) as u64).isqrt().max(1) as i64;
                 if distance > i64::from(LINK_RANGE) {
+                    idle_aim::follow(&mut self.units[id], &mut b.actors[id], self.turret_limits);
                     if self.tick % 20 == 0 || self.units[id].motion.destination.is_none() {
                         let back = 120i64.min(distance);
                         self.units[id].motion.queue_move(
@@ -2483,6 +2653,13 @@ impl BlastRange {
                 b.actors[id].target = None;
                 continue;
             }
+            // Each arm bearing traverses independently. A shared pitched
+            // crown would move all sockets even when only one arm is aiming.
+            if kind == RangeUnitKind::Walker04 {
+                b.actors[id].elevation = crate::turret::Traverse::new(0);
+                self.units[id].turret_pitch = 0;
+                self.units[id].update_pose(b.actors[id].turret.angle);
+            }
             let from = self.units[id].motion.pos;
             let distance = |other: usize| {
                 let p = self.units[other].motion.pos;
@@ -2509,7 +2686,13 @@ impl BlastRange {
             {
                 a.order = Order::Auto;
             }
-            if matches!(a.order, Order::Hold | Order::Dig(_) | Order::Reclaim(_)) {
+            if matches!(a.order, Order::Hold | Order::Rally(_) | Order::Dig(_) | Order::Reclaim(_) | Order::Build(_) | Order::Repair(_)) {
+                if !matches!(a.order, Order::Build(_) | Order::Repair(_) | Order::Dig(_) | Order::Reclaim(_)) {
+                    idle_aim::follow(&mut self.units[id], a, self.turret_limits);
+                }
+                if matches!(a.order, Order::Dig(_) | Order::Reclaim(_)) {
+                    self.units[id].relax_commander_arms(a.turret.angle);
+                }
                 record_gate(&mut b.fire_trace, id, FireGate::Hold);
                 if kind == RangeUnitKind::LightningTank {
                     stop_active_beam(a, kind, self.tick);
@@ -2546,6 +2729,7 @@ impl BlastRange {
             ) else {
                 record_gate(&mut b.fire_trace, id, FireGate::Hold);
                 a.target = None;
+                idle_aim::follow(&mut self.units[id], a, self.turret_limits);
                 continue;
             };
             let mut range = attack_range(&b.tuning, kind, weapon, stream.range);
@@ -2570,6 +2754,7 @@ impl BlastRange {
                 aim_point(&self.units[other])
             } else {
                 stop_active_beam(a, kind, self.tick);
+                idle_aim::follow(&mut self.units[id], a, self.turret_limits);
                 continue;
             };
             let mut target_velocity = [Fx::ZERO; 3];
@@ -2577,20 +2762,12 @@ impl BlastRange {
                 !matches!(weapon, Weapon::Laser | Weapon::Lightning) && a.order.point().is_none()
             }) {
                 let u = &self.units[other];
-                target_velocity = [
-                    u.motion.drive.vel.mul(fx::angle::cos(u.motion.drive.head)),
-                    Fx::ZERO,
-                    u.motion.drive.vel.mul(fx::angle::sin(u.motion.drive.head)),
-                ];
+                let velocity = u.motion.velocity();
+                target_velocity = [velocity.x, velocity.y, velocity.z];
                 if !kind.artillery() {
                     let time = distance(other).sqrt().div(Fx::from_int(config.shell_speed));
-                    let travel = u.motion.drive.vel.mul(time);
-                    p[0] += travel
-                        .mul(fx::angle::cos(u.motion.drive.head))
-                        .to_int_trunc();
-                    p[2] += travel
-                        .mul(fx::angle::sin(u.motion.drive.head))
-                        .to_int_trunc();
+                    p[0] += velocity.x.mul(time).to_int_trunc();
+                    p[2] += velocity.z.mul(time).to_int_trunc();
                 }
             }
             // Traverse independently of the hull and before entering range,
@@ -2616,40 +2793,80 @@ impl BlastRange {
             let angle = artillery_aim
                 .as_ref()
                 .map_or_else(|| fx::angle::atan2(dz.raw(), dx.raw()), |aim| aim.yaw);
-            let tracking = (kind == RangeUnitKind::Spider)
-                .then(|| motion::spider_tuning().laser_tracking)
-                .flatten();
-            let yaw_limits = tracking.map_or(self.turret_limits, |t| {
-                crate::turret::Limits::of(t.yaw, crate::TICKS_PER_SECOND)
-            });
-            if kind == RangeUnitKind::NuclearSilo {
-                // A silo launches freely into its ballistic arc; no traversing barrel.
-                a.turret.angle = angle;
-                a.turret.rate = 0;
-            } else {
-                a.turret.step(angle, yaw_limits);
-            }
-            if let Some(aim) = &artillery_aim {
-                a.elevation.step(aim.pitch, self.turret_limits);
-                let pitch = fx::angle::diff(a.elevation.angle, 0);
-                let bounded = pitch.clamp(-fx::angle::QUARTER, fx::angle::QUARTER);
-                if pitch != bounded {
-                    a.elevation.rate = 0;
-                    a.elevation.angle = fx::angle::norm(bounded);
-                }
-                self.units[id].turret_pitch = bounded;
-            }
-            completed("orders_misc");
-            self.units[id].update_pose(a.turret.angle);
-            completed("orders_pose");
-            // Acquisition/AI/UI use horizontal actor-centre distance, not
-            // a selected body cell or the projectile's predicted intercept.
             let tactical_distance = if a.order.point().is_some() {
                 dx.mul(dx).add(dz.mul(dz))
             } else {
                 target_distance.unwrap_or_else(|| dx.mul(dx).add(dz.mul(dz)))
             };
             let in_range = tactical_distance <= Fx::from_int(range).mul(Fx::from_int(range));
+            let commander_facing = kind != RangeUnitKind::Commander || !in_range
+                || self.units[id].commander_face(p);
+            let tracking = (kind == RangeUnitKind::Spider)
+                .then(|| motion::spider_tuning().laser_tracking)
+                .flatten();
+            let yaw_limits = tracking.map_or(self.turret_limits, |t| {
+                crate::turret::Limits::of(t.yaw, crate::TICKS_PER_SECOND)
+            });
+            let travel_aim = !kind.emplacement() && !in_range
+                && !matches!(a.order, Order::Attack(_) | Order::Pilot { .. })
+                && a.order.point().is_none() && a.charge.is_none() && a.burst == 0;
+            let mut walker_goals = None;
+            if travel_aim {
+                idle_aim::follow(&mut self.units[id], a, self.turret_limits);
+            } else {
+                if kind == RangeUnitKind::NuclearSilo {
+                    // A silo launches freely into its ballistic arc; no traversing barrel.
+                    a.turret.angle = angle;
+                    a.turret.rate = 0;
+                } else {
+                    let desired = if kind == RangeUnitKind::Commander && !in_range {
+                        self.units[id].motion.drive.head
+                    } else { angle };
+                    a.turret.step(desired, yaw_limits);
+                }
+                if let Some(aim) = &artillery_aim {
+                    a.elevation.step(aim.pitch, self.turret_limits);
+                    let pitch = fx::angle::diff(a.elevation.angle, 0);
+                    let bounded = pitch.clamp(-fx::angle::QUARTER, fx::angle::QUARTER);
+                    if pitch != bounded {
+                        a.elevation.rate = 0;
+                        a.elevation.angle = fx::angle::norm(bounded);
+                    }
+                    self.units[id].turret_pitch = bounded;
+                }
+                completed("orders_misc");
+                if kind == RangeUnitKind::Commander {
+                    let aim = if in_range { p } else {
+                        let head = self.units[id].motion.drive.head;
+                        [from[0].add(fx::angle::cos(head).mul(Fx::from_int(300))).to_int_trunc(),
+                         from[1].to_int_trunc() + 60,
+                         from[2].add(fx::angle::sin(head).mul(Fx::from_int(300))).to_int_trunc()]
+                    };
+                    self.units[id].set_arm_targets([aim, aim, [0, 0, 0], [0, 0, 0]], a.turret.angle);
+                } else if kind == RangeUnitKind::Walker04 {
+                    // Begin slewing all four arms while approaching and charging,
+                    // not only on the tick after the charge has completed.
+                    let mut targets = [p; 4];
+                    if !matches!(a.order, Order::Attack(_)) && a.order.point().is_none() {
+                        let alternatives: Vec<[i32; 3]> = self.units.iter().enumerate()
+                            .filter(|(other, unit)| unit.status.alive && Some(*other) != target
+                                && self.allied(*other) != self.allied(id)
+                                && { let dx = unit.motion.pos[0].sub(from[0]); let dz = unit.motion.pos[2].sub(from[2]);
+                                    dx.mul(dx).add(dz.mul(dz)) <= Fx::from_int(range).mul(Fx::from_int(range)) })
+                            .map(|(_, unit)| aim_point(unit)).collect();
+                        for (arm, target) in targets.iter_mut().enumerate().skip(1) {
+                            if !alternatives.is_empty() { *target = alternatives[(arm - 1) % alternatives.len()]; }
+                        }
+                    }
+                    walker_goals = Some(targets);
+                    self.units[id].set_arm_targets(targets, a.turret.angle);
+                } else {
+                    self.units[id].update_pose(a.turret.angle);
+                }
+            }
+            completed("orders_pose");
+            // Acquisition/AI/UI use horizontal actor-centre distance, not
+            // a selected body cell or the projectile's predicted intercept.
             // Direct rounds need a clear line. Siege lasers can melt hard
             // cover, but should change position instead of indefinitely
             // burning foliage or firing into terrain that cannot melt.
@@ -2658,7 +2875,7 @@ impl BlastRange {
             let blocked_direct = in_range
                 && matches!(
                     weapon,
-                    Weapon::MachineGun | Weapon::Kinetic | Weapon::Laser | Weapon::Lightning
+                    Weapon::MachineGun | Weapon::Kinetic | Weapon::Energy | Weapon::Laser | Weapon::Lightning
                 )
                 && !kind.emplacement()
                 && a.order.point().is_none()
@@ -2690,6 +2907,13 @@ impl BlastRange {
                 stop_active_beam(a, kind, self.tick);
                 a.charge = None;
                 if kind.emplacement() {
+                    continue;
+                }
+                // The player's commander defends from its position by default.
+                // Only an explicit attack may turn a distant target into pursuit;
+                // AI-controlled commanders retain their ordinary behaviour.
+                if kind == RangeUnitKind::Commander && self.allied(id)
+                    && !b.autonomous && a.order == Order::Auto {
                     continue;
                 }
                 // A move order owns its route. Track and fire at hostiles that
@@ -2884,7 +3108,7 @@ impl BlastRange {
                                     "plan_coarse" => "orders_retarget_coarse",
                                     "plan_target" => "orders_retarget_target",
                                     "plan_prepare" => "orders_retarget_prepare",
-                                    "plan_direct" => "orders_retarget_direct",
+                                    "plan_direct" | "plan_reverse" | "plan_hull_detour" => "orders_retarget_direct",
                                     "plan_fine" => "orders_retarget_fine",
                                     _ => unreachable!("unknown pursuit route phase"),
                                 });
@@ -2943,6 +3167,10 @@ impl BlastRange {
             if kind != RangeUnitKind::Walker04
                 && tracking.is_none()
                 && (!a.turret.aligned(angle, yaw_limits)
+                    || !commander_facing
+                    || (kind == RangeUnitKind::Commander && self.units[id].arm_targets.is_some_and(|targets| {
+                        (0..3).any(|axis| (i64::from(targets[0][axis]) - i64::from(p[axis])).abs() > 20)
+                    }))
                     || artillery_aim.as_ref().is_some_and(|aim| {
                         !a.elevation.aligned(aim.pitch, self.turret_limits)
                             || !artillery::same_direction(a.turret.angle, aim.yaw)
@@ -3098,46 +3326,62 @@ impl BlastRange {
                 if self.tick < ready {
                     continue;
                 }
-                let focus = matches!(a.order, Order::Attack(_));
-                let mut targets = [p; 4];
-                if !focus {
-                    let alternatives: Vec<[i32; 3]> = self
-                        .units
-                        .iter()
-                        .enumerate()
-                        .filter(|(other, unit)| {
-                            unit.status.alive
-                                && Some(*other) != target
-                                && self.allied(*other) != self.allied(id)
-                        })
-                        .map(|(_, unit)| aim_point(unit))
-                        .collect();
-                    for (arm, target) in targets.iter_mut().enumerate().skip(1) {
-                        if !alternatives.is_empty() {
-                            *target = alternatives[(arm - 1) % alternatives.len()];
-                        }
-                    }
-                }
-                self.units[id].turret_pitch = if focus { fx::angle::QUARTER } else { 0 };
-                a.elevation.angle = self.units[id].turret_pitch;
-                a.elevation.rate = 0;
-                self.units[id].set_arm_targets(targets, a.turret.angle);
                 let muzzles = weapons::walker_muzzles(&self.units[id]);
                 if muzzles.is_empty() {
                     record_gate(&mut b.fire_trace, id, FireGate::NoMuzzle);
                     continue;
                 }
                 completed("orders_misc");
+                let mut walker_laser = tuning.laser.clone();
+                walker_laser.work = (walker_laser.work / 2).max(1);
+                walker_laser.heat = (walker_laser.heat / 2).max(1);
+                walker_laser.fracture_j = (walker_laser.fracture_j / 2).max(1);
+                let targets = walker_goals.expect("walker goals are chosen before firing");
+                let current = self.units[id].arm_targets.expect("walker arms are aimed before firing");
+                let mut fired = false;
                 for (arm, from) in muzzles {
+                    let target = targets[arm];
+                    if (0..3).any(|axis| (i64::from(current[arm][axis]) - i64::from(target[axis])).abs()
+                        > i64::from(super::walker::tuning().arm_fire_error_units)) {
+                        continue;
+                    }
+                    let axis = self.units[id].seg_frames[13 + arm * 4].x;
+                    let delta = phys::V3::new(Fx::from_int(target[0]).sub(from[0]),
+                        Fx::from_int(target[1]).sub(from[1]), Fx::from_int(target[2]).sub(from[2]));
+                    let length = delta.len_sq().sqrt();
+                    if length <= Fx::ONE || axis.dot(delta).div(length) < Fx::from_ratio(998, 1000) {
+                        continue;
+                    }
+                    // Never send a ray into terrain while an arm is still slewing
+                    // or its independently chosen target is behind the ground.
+                    if target[0] < 0 || target[2] < 0 || target[0] >= self.world.nx as i32
+                        || target[2] >= self.world.nz as i32
+                        || target[1] < self.world.column_ceiling(target[0] as u32, target[2] as u32) as i32
+                        || !voxel::los::line_of_sight(&self.world,
+                            (from[0].to_int_trunc(), from[1].to_int_trunc(), from[2].to_int_trunc()),
+                            (target[0], target[1], target[2])).clear {
+                        continue;
+                    }
+                    let length = length.add(Fx::from_int(4)).min(Fx::from_int(walker_laser.range));
+                    let mut arm_laser = walker_laser.clone();
+                    arm_laser.range = length.to_int_trunc().max(1);
+                    let end = [from[0].add(axis.x.mul(length)).to_int_trunc(),
+                        from[1].add(axis.y.mul(length)).to_int_trunc(),
+                        from[2].add(axis.z.mul(length)).to_int_trunc()];
                     let trace = self.laser_ray(
                         from,
-                        targets[arm],
+                        end,
                         Some(id),
-                        &tuning.laser,
+                        &arm_laser,
                         config,
                         (&mut completed, physics),
                     );
                     b.walker_lasers.push(trace);
+                    fired = true;
+                }
+                if !fired {
+                    record_gate(&mut b.fire_trace, id, FireGate::Aiming);
+                    continue;
                 }
                 a.fired = a.fired.wrapping_add(1);
                 a.burst += 1;
@@ -3534,13 +3778,13 @@ impl BlastRange {
         let boxes: Vec<_> = self.units.iter().map(|u| u.bounds()).collect();
         let mut razlom_work = b.tuning.razlom_wave.cells_per_tick;
         for mut r in std::mem::take(&mut b.rounds) {
-            r.previous = r.pos;
             if r.weapon == Weapon::Laser && self.units[r.owner].kind == RangeUnitKind::RazlomT3 {
                 if let Some(round) = self.step_razlom_wave(b, r, &mut razlom_work) {
                     b.rounds.push(round);
                 }
                 continue;
             }
+            r.previous = r.pos;
             // Stable owner kind survives its destruction; already flying rounds
             // retain their emplacement identity, including after restore.
             let config = b.shot_config(r.weapon, self.units[r.owner].kind);
@@ -3890,7 +4134,7 @@ impl BlastRange {
             if let Some(before) = before {
                 for (id, (u, (root, seg))) in self.units.iter().zip(before).enumerate() {
                     self.matter
-                        .annihilate_body(id, u.removed.len() - root + u.seg_removed.len() - seg);
+                        .annihilate_removed(id, u, root, seg);
                 }
             }
             completed("battle_wave_step");

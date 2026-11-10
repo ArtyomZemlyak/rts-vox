@@ -8,6 +8,10 @@ use workbench::ghost::Templates;
 use workbench::Selection;
 
 const SLOTS: usize = 16;
+const QUEUE_SLOTS: usize = 16;
+const QUEUE_HEIGHT: f32 = 68.0;
+#[path="construction/plans.rs"]
+pub mod plans;
 #[cfg(test)]
 #[path = "construction/tests.rs"]
 mod tests;
@@ -32,12 +36,15 @@ pub struct Catalog {
     tier: u8,
     category: u8,
     page: usize,
+    queue_page: usize,
     per_page: usize,
     pending: Option<RangeUnitKind>,
+    production_mode: bool,
     allied: bool,
     yaw: u8,
     pub hover: Option<([i32; 3], bool)>,
     hover_tick: Option<u32>,
+    hover_issue: Option<String>,
     icons: BTreeMap<usize, Handle<Image>>,
     costs: BTreeMap<usize, u64>,
     capture_initialized: bool,
@@ -66,34 +73,68 @@ impl Catalog {
 pub fn engineer_selected(sim: &BlastRange, edit: &Workshop) -> bool {
     edit.controlled.is_some_and(|id| {
         sim.units.get(id).is_some_and(|u| {
-            sim.allied(id) && u.status.alive && u.kind == RangeUnitKind::SkobaDrone
+            sim.allied(id) && u.status.alive && matches!(u.kind, RangeUnitKind::SkobaDrone | RangeUnitKind::Commander | RangeUnitKind::GrebenStorage)
         })
     })
+}
+/// Explicitly selected engineers build this site themselves. Selecting only
+/// a warehouse keeps its automatic quota-based dispatch.
+pub(super) fn assign_selected_builders_queued(sim:&mut BlastRange,edit:&Workshop,site:usize,queued:bool)->Option<usize> {
+    let mut builders = edit.battle_selected_ids(sim);
+    builders.sort_unstable();
+    builders.dedup();
+    builders.retain(|&id| matches!(sim.units[id].kind, RangeUnitKind::SkobaDrone | RangeUnitKind::Commander));
+    if builders.is_empty() {
+        let actor=edit.controlled?;
+        if !sim.greben_build_admitted(actor,site) {return None;}
+        let order=sim_core::blast::battle::Order::Build(site);
+        return Some(usize::from(if queued {sim.execute_command(Command::QueueOrder{actor,order,destination:None}).accepted()}else{sim.battle_order(actor,order,None)}));
+    }
+    sim.set_construction_quota(site, 0);
+    Some(builders.into_iter().filter(|&actor| {
+        let order=sim_core::blast::battle::Order::Build(site);
+        if queued {sim.execute_command(Command::QueueOrder{actor,order,destination:None}).accepted()}
+        else {sim.battle_order(actor,order,None)}
+    }).count())
+}
+pub(super) fn place_selected_building(sim:&mut BlastRange,edit:&Workshop,kind:RangeUnitKind,at:[i32;3],queued:bool)->Option<usize> {
+    let mut builders=edit.battle_selected_ids(sim);
+    builders.retain(|&id|matches!(sim.units[id].kind,RangeUnitKind::Commander|RangeUnitKind::SkobaDrone));
+    builders.sort_unstable();builders.dedup();
+    let actor=builders.first().copied().or(edit.controlled)?;
+    if !sim.execute_command(Command::PlaceConstruction{actor,kind,at,queued}).accepted() {return None;}
+    let site=sim.construction_site_at(at)?;
+    for &actor in builders.iter().skip(1) {
+        let order=sim_core::blast::battle::Order::Build(site);
+        if queued {sim.execute_command(Command::QueueOrder{actor,order,destination:None});}
+        else {sim.battle_order(actor,order,None);}
+    }
+    Some(site)
 }
 pub(super) fn context(sim: &BlastRange, panel: &panel::Panel, edit: &Workshop) -> Context {
     if edit.layout.is_none() || edit.pending.is_some() {
         return Context::Hidden;
     }
-    if panel.sandbox || (edit.editing && sim.battle.phase == Phase::Setup) {
+    if panel.free_placement || (edit.editing && sim.battle.phase == Phase::Setup) {
         return Context::Sandbox;
     }
     if edit.editing || !sim.battle_mode() || sim.battle.phase != Phase::Fighting {
-        return Context::Hidden;
+        return if panel.sandbox { Context::Sandbox } else { Context::Hidden };
     }
     let Some(id) = edit.controlled else {
-        return Context::Hidden;
+        return if panel.sandbox { Context::Sandbox } else { Context::Hidden };
     };
     if sim.unit_under_construction(id) {
-        return Context::Hidden;
+        return if panel.sandbox { Context::Sandbox } else { Context::Hidden };
     }
     let Some(u) = sim
         .units
         .get(id)
         .filter(|u| u.status.alive && sim.allied(id))
     else {
-        return Context::Hidden;
+        return if panel.sandbox { Context::Sandbox } else { Context::Hidden };
     };
-    if u.kind == RangeUnitKind::SkobaDrone {
+    if matches!(u.kind, RangeUnitKind::SkobaDrone | RangeUnitKind::Commander | RangeUnitKind::GrebenStorage) {
         return Context::Engineer(id);
     }
     if sim.mining().is_some_and(|m| {
@@ -105,13 +146,26 @@ pub(super) fn context(sim: &BlastRange, panel: &panel::Panel, edit: &Workshop) -
     }) {
         return Context::Factory(id);
     }
-    Context::Hidden
+    if panel.sandbox { Context::Sandbox } else { Context::Hidden }
+}
+fn view_context(c:&Catalog,sim:&BlastRange,panel:&panel::Panel,edit:&Workshop)->Context {
+    let base=context(sim,panel,edit);
+    match base {
+        Context::Engineer(id) if c.production_mode && sim.units[id].kind==RangeUnitKind::GrebenStorage=>Context::Factory(id),
+        _=>base,
+    }
+}
+fn queue_actor(context:Context,sim:&BlastRange)->Option<usize> {
+    match context {
+        Context::Factory(id)=>Some(id),
+        Context::Engineer(id) if sim.units[id].kind==RangeUnitKind::GrebenStorage=>Some(id), _=>None,
+    }
 }
 pub fn tier(kind: RangeUnitKind) -> u8 {
     use RangeUnitKind::*;
     match kind {
-        Strider | TurretT2 | ArtilleryT2 | ArtilleryTurretT2 | LightningTank | KilFactoryT2 => 2,
-        Spider | Walker04 | ArtilleryTurretT3 | NuclearSilo | RazlomT3 | KilFactoryT3 => 3,
+        Strider | TurretT2 | ArtilleryT2 | ArtilleryTurretT2 | LightningTank | KilFactoryT2 | PowerPlantT2 => 2,
+        Spider | Walker04 | ArtilleryTurretT3 | NuclearSilo | RazlomT3 | KilFactoryT3 | PowerPlantT3 => 3,
         KilFactoryT4 => 4,
         _ => 1,
     }
@@ -137,6 +191,10 @@ pub fn name(kind: RangeUnitKind) -> &'static str {
         RazlomT3 => "Разлом",
         GrebenStorage => "Гребень · склад",
         SkobaDrone => "Скоба · инженер",
+        Commander => "Командир",
+        PowerPlantT1 => "Электростанция T1",
+        PowerPlantT2 => "Электростанция T2",
+        PowerPlantT3 => "Электростанция T3",
         KilFactoryT1 | KilFactoryT2 | KilFactoryT3 | KilFactoryT4 => "Киль · завод",
     }
 }
@@ -152,7 +210,7 @@ fn products(sim: &BlastRange, actor: usize) -> Vec<RangeUnitKind> {
 fn choices(c: &Catalog, sim: &BlastRange) -> Vec<RangeUnitKind> {
     let kinds = match c.context {
         Context::Hidden => vec![],
-        Context::Sandbox => RangeUnitKind::ALL.to_vec(),
+        Context::Sandbox => RangeUnitKind::ALL.into_iter().collect(),
         Context::Engineer(_) => RangeUnitKind::ALL
             .into_iter()
             .filter(|k| k.emplacement())
@@ -172,11 +230,13 @@ pub(super) enum Action {
     Tier(u8),
     Category(u8),
     Page(i32),
+    QueuePage(i32),
     Choose(usize),
     Side(bool),
     Cancel,
     Rotate,
     Upgrade,
+    GrebenMode,
     Focus(bool),
 }
 #[derive(Component)]
@@ -192,7 +252,19 @@ pub(super) enum Caption {
     Item(usize),
 }
 #[derive(Component)]
-pub(super) struct SandboxControl(bool);
+pub(super) struct QueueWidget;
+#[derive(Component)]
+pub(super) struct QueueRow;
+#[derive(Component)]
+pub(super) struct QueueCard(usize);
+#[derive(Component)]
+pub(super) struct QueueImage(usize);
+#[derive(Component)]
+pub(super) struct QueueText(Option<usize>);
+#[derive(Component)]
+pub(super) struct QueuePip(usize, usize);
+#[derive(Component)]
+pub(super) struct SandboxControl(u8);
 
 pub fn input(
     mut c: ResMut<Catalog>,
@@ -221,7 +293,7 @@ pub fn input(
                         scene.sim.allied(*id)
                             && u.status.alive
                             && if engineer {
-                                u.kind == RangeUnitKind::SkobaDrone
+                                matches!(u.kind, RangeUnitKind::SkobaDrone | RangeUnitKind::Commander)
                             } else {
                                 matches!(
                                     u.kind,
@@ -252,6 +324,8 @@ pub fn input(
         let want = match case.as_str() {
             "factory" => Some(RangeUnitKind::KilFactoryT1),
             "engineer" => Some(RangeUnitKind::SkobaDrone),
+            "plans" => Some(RangeUnitKind::Commander),
+              "walker" => Some(RangeUnitKind::Walker04),
             _ => None,
         };
         if let Some(kind) = want {
@@ -270,13 +344,14 @@ pub fn input(
                 edit.editing = false;
                 edit.controlled = Some(actor);
                 edit.selected_units = vec![actor];
+                  if matches!(case.as_str(), "plans" | "walker") {scene.paused=true;scene.view=6;}
             }
         }
     }
     let next = if lab.active() || pilot.active() {
         Context::Hidden
     } else {
-        context(&scene.sim, &panel, &edit)
+        view_context(&c,&scene.sim, &panel, &edit)
     };
     if next != c.context || c.generation != scene.generation {
         c.context = next;
@@ -287,6 +362,7 @@ pub fn input(
         c.tier = 0;
         c.category = 0;
         c.page = 0;
+        c.queue_page = 0;
         c.yaw = 0;
         c.allied = true;
         panel.construction_kind = None;
@@ -318,6 +394,9 @@ pub fn input(
             Action::Page(delta) => {
                 c.page = (c.page as i32 + delta).max(0) as usize;
             }
+            Action::QueuePage(delta) => {
+                c.queue_page = (c.queue_page as i32 + delta).max(0) as usize;
+            }
             Action::Side(allied) if next == Context::Sandbox => {
                 c.allied = allied;
                 c.hover = None;
@@ -326,10 +405,16 @@ pub fn input(
                 c.yaw = (c.yaw + 1) % 4;
                 c.hover = None;
             }
+            Action::GrebenMode => {
+                if queue_actor(next,&scene.sim).is_some_and(|id|scene.sim.units[id].kind==RangeUnitKind::GrebenStorage) {
+                    c.production_mode=!c.production_mode; c.pending=None; c.hover=None;
+                    panel.construction_kind=None; return;
+                }
+            }
             Action::Upgrade => {
                 if let Context::Factory(actor) = next {
                     scene.notice = if scene.sim.upgrade_kil(actor) {
-                        "Завод улучшен, очередь сохранена"
+                        "Заказ улучшения принят"
                     } else {
                         "Улучшение недоступно: проверьте материал, тир и состояние завода"
                     }
@@ -337,7 +422,10 @@ pub fn input(
                 }
             }
             Action::Cancel => {
-                if let Context::Factory(actor) = next {
+                let planner=match next {Context::Engineer(actor) if c.pending.is_none() && !scene.sim.order_queue(actor).is_empty()=>Some(actor),_=>None};
+                if let Some(actor)=planner {
+                    scene.notice=if scene.sim.execute_command(Command::CancelLastOrder{actor}).accepted() {"Последний приказ отменён; начатую стройку можно продолжить"}else{"Планов нет"}.into();
+                } else if let Some(actor) = queue_actor(next,&scene.sim).filter(|_|c.pending.is_none()) {
                     let outcome = scene.sim.execute_command(Command::Cancel { actor });
                     scene.notice = if outcome.accepted() {
                         "Последний заказ отменён"
@@ -436,18 +524,19 @@ pub fn input(
         || c.hover_tick != Some(scene.sim.tick)
         || mouse.just_pressed(MouseButton::Left)
     {
-        let issue = if next == Context::Sandbox {
-            edit.validator.runtime(&scene.sim, kind, at, c.yaw).is_err()
-        } else {
-            !scene.sim.can_construct(kind, true, at)
-        };
-        c.hover = Some((at, issue));
+        let yaw = if next == Context::Sandbox { c.yaw } else { 0 };
+        if c.hover_issue.as_deref() == Some(scene.notice.as_str()) { scene.notice.clear(); }
+        c.hover_issue = placement_issue(&scene.sim, kind, at, yaw, next != Context::Sandbox);
+        c.hover = Some((at, c.hover_issue.is_some()));
         c.hover_tick = Some(scene.sim.tick);
     }
     if mouse.just_pressed(MouseButton::Left) {
-        let result = if c.hover.is_some_and(|(_, invalid)| invalid) {
-            Err("Здесь разместить нельзя: препятствие или край карты")
-        } else if next == Context::Sandbox {
+        if c.hover.is_some_and(|(_, invalid)| invalid) {
+            scene.notice = c.hover_issue.clone().unwrap_or_else(|| "Здесь разместить нельзя".into());
+            mouse.reset(MouseButton::Left);
+            return;
+        }
+        let result = if next == Context::Sandbox {
             scene
                 .sim
                 .place_sandbox_unit(kind, c.allied, at, c.yaw)
@@ -459,11 +548,11 @@ pub fn input(
                     }
                 })
         } else if engineer_selected(&scene.sim, &edit) {
-            scene
-                .sim
-                .create_construction_site(kind, true, at)
-                .map(|_| ())
-                .ok_or("Стройплощадка недоступна или место уже занято")
+            let queued=keys.pressed(KeyCode::ShiftLeft)||keys.pressed(KeyCode::ShiftRight);
+            match place_selected_building(&mut scene.sim,&edit,kind,at,queued) {
+                Some(_) => Ok(()),
+                None => Err("Стройплощадка недоступна или место уже занято"),
+            }
         } else {
             Err("Выберите живого союзного инженера")
         };
@@ -471,6 +560,10 @@ pub fn input(
             Ok(()) => {
                 scene.notice = if next == Context::Sandbox {
                     format!("Размещён {} · без сброса симуляции", name(kind))
+                } else if edit.controlled.is_some_and(|id| scene.sim.units[id].kind == RangeUnitKind::Commander) {
+                    "План принят · Shift: очередь · ПКМ строителем по площадке: продолжить".into()
+                } else if edit.controlled.is_some_and(|id| scene.sim.units[id].kind == RangeUnitKind::SkobaDrone) {
+                    "Выбранные дроны строят эту площадку".into()
                 } else {
                     "Стройплощадка создана. Дроны доставляют материал со склада".into()
                 };
@@ -483,6 +576,27 @@ pub fn input(
         }
         mouse.reset(MouseButton::Left);
     }
+}
+
+fn placement_issue(sim: &BlastRange, kind: RangeUnitKind, at: [i32; 3], yaw: u8,
+    engineer: bool) -> Option<String> {
+    use sim_core::blast::placement::{Rejection, Validator};
+    let validator = Validator::default();
+    if let Err(issue) = validator.runtime(sim, kind, at, yaw) {
+        return Some(match issue {
+            Rejection::Outside if validator.runtime_bounds(kind, at, yaw).1[1] >= sim.size()[1] as i32 - 1 => {
+                let top = validator.runtime_bounds(kind, at, yaw).1[1];
+                format!("Недостаточно высоты карты: верх здания {:.1} м, потолок {:.1} м",
+                    top as f32 / 10.0, sim.size()[1] as f32 / 10.0)
+            }
+            Rejection::Outside => "Часть здания выходит за край карты".into(),
+            Rejection::Terrain => "Корпус пересекается с грунтом или препятствием".into(),
+            Rejection::Units => "Место занято юнитом, зданием или планом стройки".into(),
+            Rejection::Layout(message) => message,
+        });
+    }
+    (engineer && !sim.can_construct(kind, true, at))
+        .then(|| "Стройплощадка недоступна: ограничение строительства".into())
 }
 
 fn label(p: &mut ChildSpawnerCommands, font: &TextFont, text: &str, size: f32) -> Entity {
@@ -560,18 +674,54 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 }
                 for (side, n) in [(true, "Свои"), (false, "Враги")] {
                     let id = button(p, font, n, Action::Side(side));
-                    p.commands().entity(id).insert(SandboxControl(true));
+                    p.commands().entity(id).insert(SandboxControl(0));
                 }
                 let id = button(p, font, "Повернуть · Q/E", Action::Rotate);
-                p.commands().entity(id).insert(SandboxControl(true));
+                p.commands().entity(id).insert(SandboxControl(0));
                 let id = button(p, font, "Улучшить завод", Action::Upgrade);
-                p.commands().entity(id).insert(SandboxControl(false));
+                p.commands().entity(id).insert(SandboxControl(1));
+                let id=button(p,font,"Стройка ↔ Техника",Action::GrebenMode);
+                p.commands().entity(id).insert(SandboxControl(2));
                 button(p, font, "Отмена", Action::Cancel);
                 button(p, font, "←", Action::Page(-1));
                 button(p, font, "→", Action::Page(1));
             });
             let id = label(p, font, "", 14.0);
             p.commands().entity(id).insert(Caption::Heading);
+            p.spawn((QueueWidget, QueueRow, Node {
+                display: Display::None, height: px(QUEUE_HEIGHT), flex_shrink: 0.0,
+                align_items: AlignItems::Center, column_gap: px(5), ..default()
+            })).with_children(|p| {
+                let id = label(p, font, "ОЧЕРЕДЬ", 13.0);
+                p.commands().entity(id).insert(QueueText(None));
+                button(p, font, "‹", Action::QueuePage(-1));
+                for slot in 0..QUEUE_SLOTS {
+                    p.spawn((QueueWidget, QueueCard(slot), Node {
+                        position_type: PositionType::Relative, width: px(54), height: px(58),
+                        flex_shrink: 0.0, border: UiRect::all(px(1)), ..default()
+                    }, BackgroundColor(theme::BUTTON), BorderColor::all(theme::FRAME)))
+                    .with_children(|p| {
+                        p.spawn((QueueImage(slot), ImageNode::default(), Node {
+                            position_type: PositionType::Absolute, left: px(1), top: px(0),
+                            width: px(50), height: px(46), ..default()
+                        }));
+                        let id = p.spawn((QueueText(Some(slot)), Text::new(""),
+                            TextFont { font_size: FontSize::Px(11.0), ..font.clone() },
+                            TextColor(theme::TEXT), Node { position_type: PositionType::Absolute,
+                                left: px(3), top: px(0), ..default() })).id();
+                        let _ = id;
+                        p.spawn(Node { position_type: PositionType::Absolute, bottom: px(2),
+                            left: px(2), column_gap: px(1), ..default() }).with_children(|p| {
+                            for segment in 0..10 {
+                                p.spawn((QueueWidget, QueuePip(slot, segment), Node {
+                                    width: px(4), height: px(5), ..default()
+                                }, BackgroundColor(theme::FRAME)));
+                            }
+                        });
+                    });
+                }
+                button(p, font, "›", Action::QueuePage(1));
+            });
             p.spawn(Node {
                 column_gap: px(10),
                 width: percent(100),
@@ -625,7 +775,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
 
 pub fn refresh(
     mut c: ResMut<Catalog>,
-    scene: Res<Scene>,
+    (scene, publication): (Res<Scene>, Option<Res<super::ui_snapshot::UiSnapshot>>),
     panel: Res<panel::Panel>,
     edit: Res<Workshop>,
     lab: Res<laboratory::Laboratory>,
@@ -653,6 +803,7 @@ pub fn refresh(
                 Without<Root>,
                 Without<Slot>,
                 Without<SandboxControl>,
+                Without<QueueWidget>,
             ),
         >,
     ),
@@ -664,26 +815,40 @@ pub fn refresh(
         &mut BorderColor,
         &Interaction,
     )>,
-    mut controls: Query<(&Action, &Interaction, &mut BackgroundColor), Without<Slot>>,
+    mut controls: Query<(&Action, &Interaction, &mut BackgroundColor), (Without<Slot>, Without<QueueWidget>)>,
     mut sides: Query<(&SandboxControl, &mut Node), (Without<Slot>, Without<Root>)>,
-    mut text: Query<(&Caption, &mut Text)>,
-    mut pictures: Query<(&Picture, &mut ImageNode)>,
+    (mut text, mut pictures): (
+        Query<(&Caption, &mut Text), Without<QueueText>>,
+        Query<(&Picture, &mut ImageNode), Without<QueueImage>>,
+    ),
+    (mut queue_nodes, mut queue_text, mut queue_images): (
+        Query<(&mut Node, Option<&QueueRow>, Option<&QueueCard>, Option<&QueuePip>, Option<&mut BackgroundColor>, Option<&mut BorderColor>),
+            (With<QueueWidget>, Without<Root>, Without<Slot>, Without<SandboxControl>)>,
+        Query<(&QueueText, &mut Text), Without<Caption>>,
+        Query<(&QueueImage, &mut ImageNode), Without<Picture>>,
+    ),
 ) {
     let context = if lab.active() || pilot.active() || menu.shown() {
         Context::Hidden
     } else {
-        context(&scene.sim, &panel, &edit)
+        view_context(&c,&scene.sim, &panel, &edit)
     };
     let compact = windows.single().is_ok_and(|w| w.width() < 1280.0);
+    let plans:Vec<_>=if let Context::Engineer(actor)=context {scene.sim.order_queue(actor).into_iter().filter_map(|p|match p.order {
+        sim_core::blast::battle::Order::Build(site)=>scene.sim.construction_site_state(site).filter(|s|!s.cancelled&&!s.destroyed&&!s.complete),_=>None}).collect()}else{Vec::new()};
+    let planning=!plans.is_empty();
+    let producer=if planning {None}else{queue_actor(context,&scene.sim)};
+    let queue_visible=producer.is_some() || planning;
+    let queue_height = if queue_visible { QUEUE_HEIGHT + 8.0 } else { 0.0 };
     for mut root in &mut root {
         root.display = if context == Context::Hidden {
             Display::None
         } else {
             Display::Flex
         };
-        root.height = px(if compact { HEIGHT + 52.0 } else { HEIGHT });
+        root.height = px((if compact { HEIGHT + 52.0 } else { HEIGHT }) + queue_height);
     }
-    let height = if compact { HEIGHT + 52.0 } else { HEIGHT };
+    let height = (if compact { HEIGHT + 52.0 } else { HEIGHT }) + queue_height;
     for (mut node, deck, strip, map, briefing) in &mut legacy {
         if deck.is_some() {
             node.display = if context == Context::Hidden && !lab.active() && !pilot.active() {
@@ -734,7 +899,39 @@ pub fn refresh(
         .skip(c.page * c.per_page)
         .take(c.per_page)
         .collect();
-    if page.iter().all(|k| c.icons.contains_key(&k.index())) {
+    let queue = if planning {plans.iter().map(|s|s.kind).collect()}else if let Some(actor) = producer {
+        scene.sim.production_queue(actor).unwrap_or_default()
+    } else { Vec::new() };
+    let queue_per_page = windows.single().map_or(8, |w| ((w.width() - 250.0).max(54.0) / 59.0) as usize).clamp(1, QUEUE_SLOTS);
+    let queue_pages = queue.len().div_ceil(queue_per_page).max(1);
+    c.queue_page = c.queue_page.min(queue_pages - 1);
+    let queue_start = c.queue_page * queue_per_page;
+    let queue_page = &queue[queue_start.min(queue.len())..(queue_start + queue_per_page).min(queue.len())];
+    let progress = if planning {(plans[0].delivered.saturating_mul(100)/plans[0].required.max(1)).min(100)}else if let Some(actor) = producer {
+        scene.sim.production_progress(actor).map_or(0, |(ticks, build, paid, cost)| {
+            (u64::from(ticks) * 100 / u64::from(build.max(1))).min(paid.saturating_mul(100) / cost.max(1)).min(100)
+        })
+    } else { 0 };
+    for (mut node, row, card, pip, background, border) in &mut queue_nodes {
+        if row.is_some() { node.display = if queue_visible { Display::Flex } else { Display::None }; }
+        if let Some(QueueCard(slot)) = card {
+            node.display = if *slot < queue_page.len() { Display::Flex } else { Display::None };
+            if let Some(mut b) = border { *b = BorderColor::all(if queue_start + *slot == 0 { theme::ACCENT } else { theme::FRAME }); }
+        }
+        if let (Some(QueuePip(slot, segment)), Some(mut bg)) = (pip, background) {
+            node.display = if queue_start + *slot == 0 { Display::Flex } else { Display::None };
+            bg.0 = if (*segment as u64 + 1) * 10 <= progress { theme::ACCENT } else { theme::FRAME };
+        }
+    }
+    for (QueueText(slot), mut text) in &mut queue_text {
+        text.0 = match slot {
+            None if queue.is_empty() => "ОЧЕРЕДЬ · пусто".into(),
+            None => format!("{} · {} / {}",if planning {"ПЛАН СТРОЙКИ"}else{"ОЧЕРЕДЬ"}, c.queue_page + 1, queue_pages),
+            Some(slot) if *slot < queue_page.len() => format!("{}", queue_start + slot + 1),
+            _ => String::new(),
+        };
+    }
+    if page.iter().chain(queue_page.iter()).all(|k| c.icons.contains_key(&k.index())) {
         c.image_ready_frames = c.image_ready_frames.saturating_add(1);
     } else {
         c.image_ready_frames = 0;
@@ -742,7 +939,7 @@ pub fn refresh(
     // Share the laboratory's actual template thumbnail renderer. One new image
     // per frame, cached by kind; no extra world or offscreen simulation.
     if let Some(kind) = page
-        .iter()
+        .iter().chain(queue_page.iter())
         .find(|k| !c.icons.contains_key(&k.index()))
         .copied()
     {
@@ -778,20 +975,18 @@ pub fn refresh(
             Action::Tier(t) => t == c.tier,
             Action::Category(t) => t == c.category,
             Action::Side(s) => s == c.allied,
+            Action::GrebenMode => c.production_mode,
             _ => false,
         };
         background.0 = theme::button_background(*interaction, active);
     }
     for (scope, mut node) in &mut sides {
-        node.display = if (scope.0 && context == Context::Sandbox)
-            || (!scope.0
-                && matches!(context, Context::Factory(id) if matches!(scene.sim.units[id].kind,
-                RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3)))
-        {
-            Display::Flex
-        } else {
-            Display::None
+        let shown=match scope.0 {
+            0=>context==Context::Sandbox,
+            1=>matches!(context,Context::Factory(id) if matches!(scene.sim.units[id].kind,RangeUnitKind::KilFactoryT1|RangeUnitKind::KilFactoryT2|RangeUnitKind::KilFactoryT3)),
+            _=>producer.is_some_and(|id|scene.sim.units[id].kind==RangeUnitKind::GrebenStorage),
         };
+        node.display=if shown {Display::Flex}else{Display::None};
     }
     for (Picture(slot), mut image) in &mut pictures {
         image.image = page
@@ -799,6 +994,9 @@ pub fn refresh(
             .and_then(|k| c.icons.get(&k.index()))
             .cloned()
             .unwrap_or_default();
+    }
+    for (QueueImage(slot), mut image) in &mut queue_images {
+        image.image = queue_page.get(*slot).and_then(|k| c.icons.get(&k.index())).cloned().unwrap_or_default();
     }
     if matches!(context, Context::Engineer(_)) {
         for &kind in &page {
@@ -815,57 +1013,57 @@ pub fn refresh(
                     c.page + 1,
                     pages
                 ),
-                Context::Engineer(_) => {
+                Context::Engineer(actor) => {
                     let sites = scene.sim.construction_sites();
-                    let active = sites.iter().filter(|s| !s.complete).count();
+                    let active = sites.iter().filter(|s| !s.complete&&!s.cancelled&&!s.destroyed).count();
+                    let title = match scene.sim.units[actor].kind {
+                        RangeUnitKind::GrebenStorage => "ГРЕБЕНЬ · автоматическое строительство",
+                        RangeUnitKind::SkobaDrone => "ВЫБРАННЫЕ ДРОНЫ · строительство",
+                        _ => "КОМАНДИР · строительство",
+                    };
                     format!(
-                        "ИНЖЕНЕР · здания · стройки: {active} · страница {}/{}",
+                        "{title} · стройки: {active} · страница {}/{}",
                         c.page + 1,
                         pages
                     )
                 }
                 Context::Factory(actor) => {
-                    let queue = scene.sim.production_queue(actor).unwrap_or_default();
-                    format!(
-                        "ПРОИЗВОДСТВО · {} T{} · очередь: {} · {}{}",
-                        name(scene.sim.units[actor].kind),
-                        tier(scene.sim.units[actor].kind),
-                        queue.len(),
-                        queue.first().map_or("нет заказов", |k| name(*k)),
-                        queue
-                            .first()
-                            .and_then(|k| scene.sim.production_cost(*k))
-                            .map_or_else(String::new, |cost| format!(
-                                " · оплачено {}%",
-                                scene
-                                    .sim
-                                    .production_paid(actor)
-                                    .unwrap_or(0)
-                                    .saturating_mul(100)
-                                    / cost.max(1)
-                            ))
-                    )
+                    let waiting = if progress >= 100 && !queue.is_empty() {
+                        if scene.sim.factory_upgrading(actor) {" · ожидает места для нового корпуса"} else {" · ожидает свободного выезда"}
+                    } else { "" };
+                    format!("ПРОИЗВОДСТВО · {} T{} · заказов: {}{} · ПКМ по карте — точка сбора",
+                        name(scene.sim.units[actor].kind), tier(scene.sim.units[actor].kind), queue.len(), waiting)
                 }
                 Context::Hidden => String::new(),
             },
             Caption::Item(slot) => page.get(slot).map_or(String::new(), |k| {
-                let cost = if matches!(context, Context::Factory(_)) {
+                let cost = if let Context::Factory(actor) = context {
                     scene
                         .sim
-                        .production_cost(*k)
-                        .map(|v| format!(" · {v} мат."))
+                        .production_quote(actor,*k)
+                        .map(|(v,ticks,power)| format!(" · {} мат. · {} энерг. · {} мощн.", economy_display::mass(v), economy_display::energy_work(power.saturating_mul(u64::from(ticks))), economy_display::energy(power)))
                         .unwrap_or_default()
-                } else if matches!(context, Context::Engineer(_)) {
-                    c.costs
-                        .get(&k.index())
-                        .map_or_else(String::new, |v| format!(" · {v} мат."))
+                } else if let Context::Engineer(actor) = context {
+                    c.costs.get(&k.index()).map_or_else(String::new, |v| {
+                        let mut label = format!(" · {} мат.", economy_display::mass(*v));
+                        if scene.sim.units[actor].kind == RangeUnitKind::Commander {
+                            let demand = scene.sim.economic_rules().print_power;
+                            let work = scene.sim.construction_energy_estimate(*v);
+                            label.push_str(&format!(" · ~{} энерг. · мощн. {}", economy_display::energy_work(work), economy_display::energy(demand)));
+                        } else { label.push_str(&format!(" · {} мощн./дрон", economy_display::energy(scene.sim.economic_rules().drone_power))); }
+                        label
+                    })
                 } else {
                     String::new()
                 };
-                format!("{} · T{}{cost}", name(*k), tier(*k))
+                let generation = scene.sim.economic_rules().generation(*k);
+                let output = if generation > 0 { format!(" · +{} мощн.", economy_display::energy(generation)) } else { String::new() };
+                format!("{} · T{}{cost}{output}", name(*k), tier(*k))
             }),
             Caption::Hint => {
-                if !scene.notice.is_empty() {
+                if c.pending.is_some() && c.hover.is_some_and(|(_, invalid)| invalid) {
+                    c.hover_issue.clone().unwrap_or_else(|| "Здесь разместить нельзя".into())
+                } else if !scene.notice.is_empty() {
                     // The compact catalogue hides the briefing card. Keep
                     // confirmations and errors visible here instead.
                     let mut chars = scene.notice.chars();
@@ -880,18 +1078,72 @@ pub fn refresh(
                     message
                 } else if page.is_empty() {
                     "В этом тире и категории доступных объектов нет".into()
+                } else if c.pending == Some(RangeUnitKind::GrebenStorage)
+                    && matches!(context, Context::Engineer(_)) {
+                    let rules=scene.sim.economic_rules();
+                    let count=if rules.queued_crews {u64::from(rules.greben_crew_drones)}else{8};
+                    let crew=scene.sim.production_cost(RangeUnitKind::SkobaDrone).unwrap_or(0).saturating_mul(count)
+                        .saturating_add(scene.sim.production_cost(RangeUnitKind::Crawler).unwrap_or(0));
+                    if rules.queued_crews {
+                        format!("ЛКМ — разместить · Команда встанет в очередь: до {} массы, время и питание · Снабжение: {} м", economy_display::mass(crew), scene.sim.supply_radius() / 10)
+                    } else {
+                        format!("ЛКМ — разместить · Комплектование по запасу: до {} массы · Снабжение: {} м", economy_display::mass(crew), scene.sim.supply_radius() / 10)
+                    }
+                } else if c.pending.is_some_and(|k| matches!(k, RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4))
+                    && matches!(context, Context::Engineer(_)) && scene.sim.supply_radius() > 0 {
+                    c.hover.map_or_else(|| "Укажите место: покажем стоимость подключения к складу".into(), |(at, _)| {
+                        scene.sim.supply_quote_at(at, true).map_or_else(
+                            || format!("Склада в радиусе {} м нет: завод можно построить, но снабжение недоступно", scene.sim.supply_radius() / 10),
+                            |(_, distance, cost)| format!("ЛКМ — разместить · Труба к складу: {:.1} м · стоимость {} массы", distance as f32 / 10.0, economy_display::mass(cost)),
+                        )
+                    })
                 } else if c.pending.is_some() {
-                    "ЛКМ — разместить · Shift — несколько · ПКМ / Esc — отменить · зелёный: можно, красный: препятствие".into()
-                } else if matches!(context, Context::Factory(_)) {
-                    "Нажмите на юнит, чтобы добавить заказ. «Отмена» убирает последний заказ и возвращает материал.".into()
+                    "ЛКМ — разместить · Shift — очередь построек · ПКМ / Esc — закрыть размещение · зелёный: можно, красный: препятствие".into()
+                } else if let Context::Factory(actor) = context {
+                    if scene.sim.units[actor].kind==RangeUnitKind::GrebenStorage {
+                        "Сборка техники: нужны масса склада и местное питание. «Отмена» снимает последний заказ; «Стройка ↔ Техника» меняет каталог.".into()
+                    } else if scene.sim.supply_radius() == 0 {
+                        "Нажмите на юнит, чтобы добавить заказ. «Отмена» возвращает материал.".into()
+                    } else if let Some((_, distance, cost)) = scene.sim.factory_supply_quote(actor) {
+                        format!("{} · склад {:.1} м · труба: {} массы · «Отмена» убирает заказ", if scene.sim.factory_supply_connected(actor) { "Снабжение подключено" } else { "Ожидает оплаты подключения" }, distance as f32 / 10.0, economy_display::mass(cost))
+                    } else {
+                        format!("Нет склада в радиусе {} м — завод не получает массу. Приблизьте склад или доставьте массу командиром.", scene.sim.supply_radius() / 10)
+                    }
+                } else if let Context::Engineer(actor) = context {
+                    if scene.sim.units[actor].kind == RangeUnitKind::Commander {
+                        let reach = sim_core::blast::economy::construction::COMMANDER_SUPPLY_REACH / 10;
+                        format!("Shift: очередь · ПКМ по плану: продолжить · Снабжение командира: {reach} м")
+                    } else {
+                        "Shift + размещение / ПКМ: очередь · ПКМ строителем по плану: продолжить · «Отмена»: последний приказ".into()
+                    }
                 } else {
-                    "Выберите карточку. Полигон добавляет объект сразу; инженер строит за материал, доставляемый дронами.".into()
+                    "Выберите карточку: выделенные дроны строят сами; «Гребень» распределяет задания автоматически.".into()
                 }
             }
         };
         if matches!(caption, Caption::Heading) && context != Context::Sandbox {
             if let Some((held, cap)) = scene.sim.side_store(true) {
-                text.0.push_str(&format!(" · материал: {held}/{cap}"));
+                text.0.push_str(&format!(" · склад: {}/{}", economy_display::mass(held), economy_display::mass(cap)));
+            }
+            if let Context::Engineer(actor) = context {
+                if scene.sim.units[actor].kind == RangeUnitKind::Commander {
+                    if let Some((held, cap)) = scene.sim.tank_fill(actor) {
+                        let income = scene.sim.economic_rules().commander_matter_per_second;
+                        let actual = if held >= cap { 0 } else { income };
+                        text.0.push_str(&format!(" · командир: {}/{} (+{}/с)", economy_display::mass(held), economy_display::mass(cap), economy_display::mass(actual)));
+                    }
+                }
+            }
+            let (generation, demand) = publication.as_ref().map_or_else(|| scene.sim.construction_energy(true), |p| p.energy_total);
+            text.0.push_str(&format!(" · все сети: +{} / −{} мощн.", economy_display::energy(generation), economy_display::energy(demand)));
+            if let Context::Engineer(actor) | Context::Factory(actor) = context {
+                let local = publication.as_ref().map_or_else(
+                    || scene.sim.construction_power_networks().get(actor).copied().flatten(),
+                    |p| p.energy_local.get(actor).copied().flatten());
+                if let Some((generation, demand)) = local {
+                    text.0.push_str(&format!(" · рядом: +{} / −{}", economy_display::energy(generation), economy_display::energy(demand)));
+                    if demand > generation { text.0.push_str(" (дефицит)"); }
+                } else { text.0.push_str(" · нет подключения к энергии"); }
             }
         }
     }

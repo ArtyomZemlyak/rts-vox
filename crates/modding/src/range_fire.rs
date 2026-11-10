@@ -50,6 +50,7 @@ impl Tuning {
             | crate::range::RangeUnitKind::ArtilleryT2 => &self.tank,
             crate::range::RangeUnitKind::Strider
             | crate::range::RangeUnitKind::Walker04
+            | crate::range::RangeUnitKind::Commander
             | crate::range::RangeUnitKind::SkobaDrone => &self.walker,
             crate::range::RangeUnitKind::Spider => &self.spider,
             crate::range::RangeUnitKind::TurretT1
@@ -64,6 +65,7 @@ impl Tuning {
             | crate::range::RangeUnitKind::NuclearSilo
             | crate::range::RangeUnitKind::TurretT2
             | crate::range::RangeUnitKind::Base => &self.tank,
+            crate::range::RangeUnitKind::PowerPlantT1 | crate::range::RangeUnitKind::PowerPlantT2 | crate::range::RangeUnitKind::PowerPlantT3 => &self.tank,
         }
     }
     /// Whole economic quantities: no fractional matter disappears on burning.

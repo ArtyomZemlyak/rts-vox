@@ -250,7 +250,7 @@ impl MissionRun {
             _ => None,
         };
         self.complete = self.step == self.definition.steps.len()
-            && view.phase == sim_core::blast::battle::Phase::Victory;
+            && matches!(view.phase, sim_core::blast::battle::Phase::Victory | sim_core::blast::battle::Phase::Fighting);
     }
     pub(super) fn waypoint(&self) -> Option<([i32; 2], i32)> {
         if self.failure.is_some() {
@@ -341,6 +341,7 @@ mod mission_tests;
 #[derive(Resource)]
 pub struct Panel {
     pub sandbox: bool,
+    pub free_placement: bool,
     pub drive: bool,
     pub demo: bool,
     pub ground_fire: bool,
@@ -378,6 +379,7 @@ impl Panel {
     pub fn new(drive: bool, demo: bool) -> Self {
         Self {
             sandbox: true,
+            free_placement: false,
             drive,
             demo,
             ground_fire: false,
@@ -428,6 +430,8 @@ pub enum Action {
     BattlePreset,
     BattleWorld,
     BattleWorldAuto,
+    BattleCommanders,
+    BattleCommandersAuto,
     RangeMode,
     BattleStart,
     FreeControl,
@@ -437,11 +441,13 @@ pub enum Action {
     Side(bool),
     NextOwn,
     Edit,
+    FreePlacement,
     Pause,
     Fire,
     NuclearLaunch,
     AutoAttack,
     CrawlerMode(CrawlerMode),
+    CrawlerUnload,
     ElectricSupport,
     UpgradeKil,
     #[allow(dead_code)] // Existing headless callers retain the guarded compatibility command.
@@ -642,6 +648,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 false,
                 vec![("Гребень: хранилище и снабжение", Action::Skirmish(26))],
             ),
+            (false, vec![("Краулер: разрушение и груз", Action::Skirmish(27))]),
             (false, vec![("Киль: готовый завод", Action::Skirmish(24))]),
             (
                 false,
@@ -982,12 +989,14 @@ pub fn actions(
                 | Action::Settings
                 | Action::SelectUnit(_)
                 | Action::CrawlerMode(_)
+                | Action::CrawlerUnload
                 | Action::SelectAllOwn
                 | Action::RosterPage(_)
                 | Action::NextOwn
                 | Action::Scenario(_)
                 | Action::ScenarioMenu
                 | Action::Pause
+                | Action::FreePlacement
                 | Action::Orbit(_)
                 | Action::Pitch(_)
                 | Action::Zoom(_)
@@ -1007,6 +1016,8 @@ pub fn actions(
             action,
             Action::BattleWorld
                 | Action::BattleWorldAuto
+                | Action::BattleCommanders
+                | Action::BattleCommandersAuto
                 | Action::BattlePreset
                 | Action::FreeRange
                 | Action::Skirmish(_)
@@ -1026,17 +1037,22 @@ pub fn actions(
                 | Action::BattleReplay
                 | Action::BattleWorld
                 | Action::BattleWorldAuto
+                | Action::BattleCommanders
+                | Action::BattleCommandersAuto
                 | Action::BattlePreset
                 | Action::RangeMode
                 | Action::Skirmish(_)
                 | Action::Scenario(_)
         ) {
             panel.free_launch = false;
+            panel.free_placement = false;
             panel.crawler_charges = None;
         }
         match action {
             Action::BattleWorld
             | Action::BattleWorldAuto
+            | Action::BattleCommanders
+            | Action::BattleCommandersAuto
             | Action::BattlePreset
             | Action::Skirmish(_) => panel.sandbox = false,
             Action::RangeMode | Action::FreeRange | Action::FreeControl | Action::Scenario(_) => {
@@ -1149,15 +1165,30 @@ pub fn actions(
                 }
                 Err(e) => scene.notice = e,
             },
-            Action::BattleWorld | Action::BattleWorldAuto => {
-                match edit.battle_world(scene.sim.config.clone()) {
+            Action::BattleWorld | Action::BattleWorldAuto | Action::BattleCommanders | Action::BattleCommandersAuto => {
+                let commanders = matches!(action, Action::BattleCommanders | Action::BattleCommandersAuto);
+                let automatic = matches!(action, Action::BattleWorldAuto | Action::BattleCommandersAuto);
+                let result = if commanders {
+                    if navigation == Some(action) {
+                        edit.commander_battle_with_setup(scene.sim.config.clone(), menu.as_ref().map_or_else(Default::default, |m| m.battle_setup()), true)
+                    } else { edit.commander_battle(scene.sim.config.clone()) }
+                } else { edit.battle_world(scene.sim.config.clone()) };
+                match result {
                     Ok(briefing) => {
-                        panel.battle_name = if action == Action::BattleWorldAuto {
+                        if !commanders && navigation != Some(action) {
+                            if let Some((_, layout)) = &mut edit.pending { layout.endless_battle = true; }
+                            if let Some(layout) = &mut edit.layout { layout.endless_battle = true; }
+                        }
+                        panel.battle_name = if commanders && automatic {
+                            "Командиры · ИИ × ИИ".into()
+                        } else if commanders {
+                            "Бой командиров".into()
+                        } else if automatic {
                             "Война за базы · ИИ × ИИ".into()
                         } else {
                             "Война за базы".into()
                         };
-                        panel.battle_auto = action == Action::BattleWorldAuto;
+                        panel.battle_auto = automatic;
                         panel.briefing = briefing;
                         panel.battle_launch = true;
                         panel.drawer = 0;
@@ -1174,6 +1205,8 @@ pub fn actions(
             Action::BattlePreset | Action::FreeRange => {
                 match edit.battle_preset(scene.sim.config.clone()) {
                     Ok(()) => {
+                        if let Some((_, layout)) = &mut edit.pending { layout.endless_battle = true; }
+                        if let Some(layout) = &mut edit.layout { layout.endless_battle = true; }
                         panel.free_launch = action == Action::FreeRange;
                         panel.battle_name = if panel.free_launch {
                             "Свободный полигон"
@@ -1342,6 +1375,22 @@ pub fn actions(
                     key(KeyCode::KeyE, &mut panel);
                 }
             }
+            Action::FreePlacement => {
+                if scene.sim.layout.is_some() {
+                    if edit.layout.is_none() {
+                        edit.layout = scene.sim.layout.clone();
+                    }
+                    panel.free_placement = !panel.free_placement;
+                    panel.construction_kind = None;
+                    scene.notice = if panel.free_placement {
+                        "Свободная расстановка включена: выберите объект внизу и место на карте.".into()
+                    } else {
+                        "Свободная расстановка выключена: доступны обычные строительство и производство.".into()
+                    };
+                } else {
+                    scene.notice = "В этой сцене нет карты для расстановки.".into();
+                }
+            }
             Action::Pause => {
                 if !edit.editing {
                     scene.paused = !scene.paused;
@@ -1395,7 +1444,9 @@ pub fn actions(
             }
             Action::AutoAttack => {
                 if scene.sim.battle_mode() {
-                    for id in edit.battle_selected_ids(&scene.sim) {
+                    let selected = edit.battle_selected_ids(&scene.sim);
+                    panel.script.retain(|order| !selected.contains(&order.actor));
+                    for id in selected {
                         scene
                             .sim
                             .battle_order(id, sim_core::blast::battle::Order::Auto, None);
@@ -1410,13 +1461,27 @@ pub fn actions(
                 edit.editing = false;
                 scene.paused = false;
             }
+            Action::CrawlerUnload => {
+                let selected = edit.battle_selected_ids(&scene.sim);
+                let mut sent = 0;
+                for id in selected {
+                    if scene.sim.execute_command(sim_core::blast::battle::commands::Command::UnloadCrawler { actor: id, dock: None }).accepted() {
+                        sent += 1;
+                    }
+                }
+                scene.notice = if sent > 0 {
+                    format!("На разгрузку отправлено краулеров: {sent}. Площадки отмечены у гребня")
+                } else {
+                    "Разгрузка невозможна: проверьте груз, живой союзный склад и свободное место".into()
+                };
+            }
             Action::CrawlerMode(mode) => {
                 panel.crawler_mode = mode;
                 panel.ground_fire = false;
                 scene.notice = match mode {
                     CrawlerMode::Move => "Движение краулера: укажите точку ПКМ",
                     CrawlerMode::Reclaim => {
-                        "Сбор краулером: укажите обломок ПКМ; затем сбор в радиусе 16 м"
+                        "Сбор краулером: укажите обломок ПКМ; затем соседние кучи и выгрузка"
                     }
                     CrawlerMode::Drill => "Бурение краулером: укажите точку ПКМ",
                 }
@@ -1475,7 +1540,9 @@ pub fn actions(
             }
             Action::Stop => {
                 if scene.sim.battle_mode() {
-                    for id in edit.battle_selected_ids(&scene.sim) {
+                    let selected = edit.battle_selected_ids(&scene.sim);
+                    panel.script.retain(|order| !selected.contains(&order.actor));
+                    for id in selected {
                         scene
                             .sim
                             .battle_order(id, sim_core::blast::battle::Order::Hold, None);
@@ -1507,7 +1574,11 @@ pub fn actions(
                         | RangeUnitKind::NuclearSilo => 0,
                         RangeUnitKind::TurretT1 => 5,
                         RangeUnitKind::TurretT2 => 1,
+                        RangeUnitKind::Commander => 1,
                         RangeUnitKind::Base
+                        | RangeUnitKind::PowerPlantT1
+                        | RangeUnitKind::PowerPlantT2
+                        | RangeUnitKind::PowerPlantT3
                         | RangeUnitKind::GrebenStorage
                         | RangeUnitKind::KilFactoryT1
                         | RangeUnitKind::KilFactoryT2
@@ -1894,6 +1965,9 @@ fn enter_free_control(panel: &mut Panel, scene: &mut Scene, edit: &mut Workshop)
 
 /// Resume an authored series only after the previous physical impact has
 /// finished. Manual control cancels automation without discarding damage.
+fn script_ready(order: &modding::range_skirmish::ScriptOrder, tick: u32, unloaded: u64, hauling: bool) -> bool {
+    order.tick <= tick && (!order.after_unload || (unloaded > 0 && !hauling))
+}
 pub fn scenario_progress(
     mut panel: ResMut<Panel>,
     mut scene: ResMut<Scene>,
@@ -1948,7 +2022,7 @@ pub fn scenario_progress(
         while panel
             .script
             .first()
-            .is_some_and(|next| next.tick <= scene.sim.tick)
+            .is_some_and(|next| script_ready(next, scene.sim.tick, scene.sim.hauled_mass(), scene.sim.hauling(next.actor)))
         {
             let next = panel.script.remove(0);
             let order = match next.order {
@@ -2099,6 +2173,7 @@ pub fn refresh(
             }
             Action::Play => !edit.editing,
             Action::Edit => edit.editing,
+            Action::FreePlacement => panel.free_placement,
             Action::Pause => scene.paused,
             Action::Fire | Action::NuclearLaunch => panel.ground_fire,
             Action::CrawlerMode(mode) => panel.crawler_mode == mode,
@@ -2391,6 +2466,15 @@ pub fn scroll(
 mod scenario_tests {
 
     #[test]
+    fn drilling_demo_waits_for_delivery_not_just_the_timer() {
+        let scenario = modding::range_skirmish::Skirmish::from_ron(include_str!("../../../../../data/skirmish-kil.ron")).unwrap();
+        let order = scenario.script.iter().find(|order| order.after_unload).unwrap();
+        assert!(!super::script_ready(order, 240, 0, false));
+        assert!(!super::script_ready(order, 240, 1, true));
+        assert!(super::script_ready(order, 240, 1, false));
+    }
+
+    #[test]
     fn mission_progress_uses_physical_positions_protection_and_generation() {
         let cfg = super::super::scaled_config(true, false, 1000);
         let preset = modding::range_skirmish::stock(6).unwrap();
@@ -2424,10 +2508,7 @@ mod scenario_tests {
         }
         run.update(&view);
         assert_eq!(run.step, 3);
-        assert!(!run.complete);
-        assert!(run.readout().contains("дождитесь завершения боя"));
-        view.phase = sim_core::blast::battle::Phase::Victory;
-        run.update(&view);
+        assert!(run.complete, "scenario goals complete without stopping the sandbox");
         assert!(run.readout().contains("ВЫПОЛНЕНА"));
         run.begin(&mut sim, 44);
         assert_eq!(run.step, 0);

@@ -287,3 +287,17 @@ fn pilot_workers_match_through_turning_reversing_and_fresh_wall_contact() {
     }
     assert!(a.units[0].motion.destination.is_none());
 }
+
+#[test]
+fn compact_skoba_is_faster_in_manual_flight() {
+    let mut open = arena(RangeUnitKind::SkobaDrone);
+    let mut compact = arena(RangeUnitKind::SkobaDrone);
+    open.start_free_control().unwrap();
+    compact.start_free_control().unwrap();
+    compact.units[0].restore_skoba_form(1);
+    compact.units[0].update_pose(0);
+    assert!(open.battle_order(0, pilot(1, 0, false), None));
+    assert!(compact.battle_order(0, pilot(1, 0, false), None));
+    for _ in 0..30 { open.step(); compact.step(); }
+    assert!(compact.units[0].motion.pos[0] > open.units[0].motion.pos[0], "open {:?} {:?}, compact {:?} {:?}", open.units[0].motion.pos, open.units[0].motion.drive.vel, compact.units[0].motion.pos, compact.units[0].motion.drive.vel);
+}

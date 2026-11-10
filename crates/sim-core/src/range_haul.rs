@@ -81,11 +81,37 @@ fn caps(data: &RangeEconomy, base: Amount, units: &[RangeUnit], sides: &[bool]) 
 fn dock_position(u: &RangeUnit) -> [i32; 2] {
     let at = u.motion.pos.map(|v| v.to_int_trunc());
     if u.kind == modding::range::RangeUnitKind::GrebenStorage {
-        let front = i32::from(u.body.vol.nx) * i32::from(u.body.mm) / 200;
-        [at[0] - front, at[2] - 16]
+        // The mouth is authored in local coordinates. Transform it with the
+        // building so that its smaller model and every facing share a dock.
+        let mouth = u.world_pos([0, 8, voxel::unit::GREBEN_CRAWLER_SOCKET_Z[0]]);
+        [mouth[0], mouth[2]]
     } else {
         [at[0], at[2]]
     }
+}
+
+/// Parking positions outside the two intake openings.  The crawler is almost
+/// 20 m long, so its centre must stay outside the building, not at the mouth.
+const CRAWLER_DOCK_REACH: i64 = 12;
+const CRAWLER_DOCK_ANGLE: i32 = fx::angle::FULL * 10 / 360;
+
+fn greben_bays(dock: &RangeUnit) -> [[i32; 2]; 2] {
+    voxel::unit::GREBEN_CRAWLER_SOCKET_Z.map(|z| {
+        let mouth = dock.world_pos([0, 8, z]);
+        let offset = fx::Fx::from_int(108);
+        [mouth[0] - dock.pose.x.x.mul(offset).to_int_trunc(),
+         mouth[2] - dock.pose.x.z.mul(offset).to_int_trunc()]
+    })
+}
+
+fn crawler_bay(dock: &RangeUnit, face: [i32; 3]) -> [i32; 2] {
+    let bays = greben_bays(dock);
+    let distance = |p: [i32; 2]| {
+        let dx = i64::from(p[0]) - i64::from(face[0]);
+        let dz = i64::from(p[1]) - i64::from(face[2]);
+        dx * dx + dz * dz
+    };
+    if distance(bays[1]) < distance(bays[0]) { bays[1] } else { bays[0] }
 }
 
 /// Squared horizontal distance between two units.
@@ -144,7 +170,12 @@ impl Haul {
     fn dock_ok(&self, data: &RangeEconomy, units: &[RangeUnit], id: usize, dock: usize) -> bool {
         units
             .get(dock)
-            .is_some_and(|d| d.status.alive && data.store(d.kind) > 0)
+            .is_some_and(|d| d.status.alive && data.store(d.kind) > 0
+                && !matches!(d.kind,
+                    modding::range::RangeUnitKind::KilFactoryT1
+                    | modding::range::RangeUnitKind::KilFactoryT2
+                    | modding::range::RangeUnitKind::KilFactoryT3
+                    | modding::range::RangeUnitKind::KilFactoryT4))
             && self.sides[dock] == self.sides[id]
     }
     /// The nearest living dock of `id`'s side by squared distance; ties go
@@ -219,6 +250,71 @@ struct Trip {
 }
 
 impl BlastRange {
+    /// Send a loaded crawler to a friendly dock, preserving its work order.
+    pub(crate) fn order_crawler_unload(&mut self, id: usize, requested_dock: Option<usize>) -> battle::commands::Outcome {
+        use battle::commands::Outcome;
+        use modding::range::RangeUnitKind;
+        let Some(unit) = self.units.get(id) else { return Outcome::Rejected; };
+        if !unit.status.alive || !unit.status.engine || unit.kind != RangeUnitKind::Crawler
+            || !self.allied(id) || !matches!(self.battle.phase, battle::Phase::Setup | battle::Phase::Fighting)
+            || self.tank_fill(id).is_none_or(|(held, _)| held == 0) {
+            return Outcome::Rejected;
+        }
+        let Some(m) = self.mining.as_ref() else { return Outcome::Rejected; };
+        let Some(h) = m.haul.as_ref() else { return Outcome::Rejected; };
+        if self.matter.economy.ledger.room(h.store_of(id)) == 0 { return Outcome::Rejected; }
+        if requested_dock.is_some_and(|d| !h.dock_ok(&m.data, &self.units, id, d)) { return Outcome::Rejected; }
+        let dock = requested_dock.or_else(|| (0..self.units.len())
+            .filter(|&d| self.units[d].kind == RangeUnitKind::GrebenStorage && h.dock_ok(&m.data, &self.units, id, d))
+            .min_by_key(|&d| (distance2(&self.units[id], &self.units[d]), d))
+            .or_else(|| h.nearest_dock(&m.data, &self.units, id)));
+        let Some(dock) = dock.and_then(|d| u16::try_from(d).ok()) else { return Outcome::Rejected; };
+        if !matches!(self.battle.actors[id].order, battle::Order::Dig(_) | battle::Order::Reclaim(_)) {
+            self.battle.actors[id].order = battle::Order::Hold;
+        }
+        self.units[id].motion.pilot = None;
+        self.units[id].motion.stop();
+        self.mining.as_mut().unwrap().haul.as_mut().unwrap().legs[id] = Leg::Hauling(Some(dock));
+        if self.battle.autonomous { self.battle.autonomous = false; }
+        Outcome::Applied
+    }
+
+    /// The two crawler unloading positions, in world coordinates.
+    pub fn greben_crawler_bays(&self, id: usize) -> Option<[[i32; 2]; 2]> {
+        let dock = self.units.get(id)?;
+        (dock.status.alive && dock.kind == modding::range::RangeUnitKind::GrebenStorage)
+            .then(|| greben_bays(dock))
+    }
+
+    /// The assigned unloading position, if this crawler is travelling to Greben.
+    pub fn crawler_unloading_bay(&self, id: usize) -> Option<(usize, [i32; 2])> {
+        let unit = self.units.get(id)?;
+        if unit.kind != modding::range::RangeUnitKind::Crawler { return None; }
+        let h = self.mining.as_ref()?.haul.as_ref()?;
+        let Leg::Hauling(Some(dock)) = *h.legs.get(id)? else { return None; };
+        let dock = usize::from(dock);
+        self.greben_crawler_bays(dock)?;
+        let bay = match self.battle.actors.get(id)?.order {
+            battle::Order::Dig(face) | battle::Order::Reclaim(face) => crawler_bay(&self.units[dock], face),
+            battle::Order::Hold => greben_bays(&self.units[dock])[id % 2],
+            _ => return None,
+        };
+        Some((dock, bay))
+    }
+
+    /// A docking turn is derived from the hauling leg, so save/load and
+    /// replay need no second, independently persisted animation state.
+    pub(crate) fn crawler_docking_pilot(&self, id: usize) -> Option<[i8; 2]> {
+        let (dock, bay) = self.crawler_unloading_bay(id)?;
+        let unit = self.units.get(id)?;
+        if !unit.status.alive || !unit.status.engine { return None; }
+        let pos = unit.motion.pos;
+        let dx = i64::from(pos[0].to_int_trunc() - bay[0]);
+        let dz = i64::from(pos[2].to_int_trunc() - bay[1]);
+        if dx * dx + dz * dz > CRAWLER_DOCK_REACH * CRAWLER_DOCK_REACH { return None; }
+        let turn = fx::angle::diff(self.units[dock].motion.drive.head, unit.motion.drive.head);
+        (turn.abs() > CRAWLER_DOCK_ANGLE).then_some([0, turn.signum() as i8])
+    }
     /// Whether the range has stores and hauling: the snapshot is then
     /// version 63 (ADR-673).
     pub(crate) fn has_banks(&self) -> bool {
@@ -239,6 +335,9 @@ impl BlastRange {
     /// Whether this digger is away hauling to a dock.
     pub fn hauling(&self, id: usize) -> bool {
         self.mining.as_ref().is_some_and(|m| m.hauling(id))
+    }
+    pub fn hauled_mass(&self) -> Amount {
+        self.mining.as_ref().and_then(|m| m.haul.as_ref()).map_or(0, |h| h.unloaded)
     }
 
     /// Recount the caps, turn full diggers to haul, search docks under the
@@ -283,6 +382,12 @@ impl BlastRange {
         let mut need = Vec::new();
         let mut trips = Vec::new();
         for id in 0..units.len() {
+            // The commander's tank is its construction stock, not a
+            // crawler delivery load. Reclaim must never send it to a dock.
+            if units[id].kind == modding::range::RangeUnitKind::Commander {
+                h.legs[id] = Leg::Digging;
+                continue;
+            }
             let Some(tank) = tanks[id] else {
                 continue;
             };
@@ -292,6 +397,9 @@ impl BlastRange {
                 {
                     face
                 }
+                Some(battle::Order::Hold) if units[id].status.alive
+                    && units[id].kind == modding::range::RangeUnitKind::Crawler
+                    && matches!(h.legs[id], Leg::Hauling(_)) => units[id].motion.pos.map(|v| v.to_int_trunc()),
                 _ => {
                     h.legs[id] = Leg::Digging;
                     continue;
@@ -363,9 +471,19 @@ impl BlastRange {
         // linear index, not by who searched first.
         trips.sort_unstable_by_key(|t| t.id);
         let (num, den) = (h.bank.refine_num, h.bank.refine_den);
-        let reach = i64::from(h.bank.unload_reach);
         for t in trips {
-            let target = dock_position(&units[t.dock]);
+            let is_greben_crawler = units[t.id].kind == modding::range::RangeUnitKind::Crawler
+                && units[t.dock].kind == modding::range::RangeUnitKind::GrebenStorage;
+            let manual = battle.actors[t.id].order == battle::Order::Hold;
+            let target = if is_greben_crawler && manual {
+                greben_bays(&units[t.dock])[t.id % 2]
+            } else if is_greben_crawler {
+                crawler_bay(&units[t.dock], t.face)
+            } else {
+                dock_position(&units[t.dock])
+            };
+            let reach = if is_greben_crawler { CRAWLER_DOCK_REACH } else { i64::from(h.bank.unload_reach) };
+            let dock_heading = units[t.dock].motion.drive.head;
             let u = &mut units[t.id];
             let dx = i64::from(u.motion.pos[0].to_int_trunc() - target[0]);
             let dz = i64::from(u.motion.pos[2].to_int_trunc() - target[1]);
@@ -380,6 +498,13 @@ impl BlastRange {
             if u.motion.destination.is_some() {
                 u.motion.stop();
             }
+            if is_greben_crawler
+                && (fx::angle::diff(dock_heading, u.motion.drive.head).abs() > CRAWLER_DOCK_ANGLE
+                    || u.motion.drive.vel.abs() > fx::Fx::from_int(2)) {
+                // Wait for collision-checked pivot and braking at the socket;
+                // proximity alone must not unload a sideways moving crawler.
+                continue;
+            }
             // No more is taken than the store has room for: refining
             // books everything taken and not delivered as RefiningLoss,
             // so a full tank into a full store would vanish into the sink.
@@ -387,7 +512,13 @@ impl BlastRange {
             let room = u128::from(ledger.room(store));
             let fits = (room * u128::from(den) / u128::from(num)).min(u128::from(u64::MAX));
             let cargo = ledger.held(t.tank);
-            let want = cargo.min(fits as u64);
+            // Greben receives a load over time, keeping the physical docking
+            // connection visible while preserving exact ledger accounting.
+            let limit = if is_greben_crawler || (u.kind == modding::range::RangeUnitKind::Crawler && data.balance.is_some()) {
+                let ticks=data.balance.as_ref().unwrap_or_else(|| modding::range_economy::Balance::legacy()).crawler_unload_ticks;
+                (ledger.get(t.tank).cap / u64::from(ticks)).max(1)
+            } else { u64::MAX };
+            let want = cargo.min(fits as u64).min(limit);
             // Room that refines into nothing takes nothing: the cargo would
             // trickle into the sink a unit a tick. The last of a load
             // refines whole, losses and all, and empties the tank.
@@ -402,7 +533,7 @@ impl BlastRange {
             }
             h.legs[t.id] = Leg::Digging;
             let back = [t.face[0], t.face[2]];
-            if !u.kind.emplacement() && !super::within(u, t.face, t.dig_reach) {
+            if !manual && !u.kind.emplacement() && !super::within(u, t.face, t.dig_reach) {
                 u.motion.queue_move(world, back);
             }
         }
@@ -443,7 +574,8 @@ impl BlastRange {
                 let dig = matches!(
                     self.battle.actors.get(id).map(|a| a.order),
                     Some(battle::Order::Dig(_) | battle::Order::Reclaim(_))
-                );
+                ) || (self.units[id].kind == modding::range::RangeUnitKind::Crawler
+                    && self.battle.actors.get(id).is_some_and(|a| a.order == battle::Order::Hold));
                 if m.tanks[id].is_none()
                     || !dig
                     || dock.is_some_and(|d| {

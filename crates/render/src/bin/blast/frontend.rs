@@ -31,6 +31,7 @@ pub fn setup_menu_target(commands: &mut Commands, images: &mut Assets<Image>) {
 pub(super) enum Page {
     Session,
     Home,
+    BattleRoom,
     Settings,
     Help,
 }
@@ -38,6 +39,8 @@ pub(super) enum Page {
 pub enum Destination {
     Range,
     Battle,
+    CommanderBattle,
+    CommanderSpectate,
     Laboratory,
     Spectate,
 }
@@ -46,10 +49,27 @@ impl Destination {
         match self {
             Self::Range => panel::Action::RangeMode,
             Self::Battle => panel::Action::BattleWorld,
+            Self::CommanderBattle => panel::Action::BattleCommanders,
+            Self::CommanderSpectate => panel::Action::BattleCommandersAuto,
             Self::Laboratory => panel::Action::Laboratory,
             Self::Spectate => panel::Action::BattleWorldAuto,
         }
     }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BattleSetup {
+    pub player_southeast: bool,
+    pub player_stock: u64,
+    pub enemy_stock: u64,
+    pub spectator: bool,
+}
+impl Default for BattleSetup {
+    fn default() -> Self {
+        Self { player_southeast: false, player_stock: modding::range_economy::Balance::stock().initial_matter, enemy_stock: modding::range_economy::Balance::stock().initial_matter, spectator: false }
+    }
+}
+fn next_stock(value: u64) -> u64 {
+    match value { 25_000_000 => 50_000_000, 50_000_000 => 75_000_000, 75_000_000 => 100_000_000, _ => 25_000_000 }
 }
 #[derive(Resource)]
 pub struct Menu {
@@ -62,6 +82,7 @@ pub struct Menu {
     panel_command: Option<panel::Action>,
     lab_command: Option<laboratory::LabAction>,
     notice: String,
+    battle_setup: BattleSetup,
 }
 impl Menu {
     pub fn new(open: bool) -> Self {
@@ -75,6 +96,7 @@ impl Menu {
             panel_command: None,
             lab_command: None,
             notice: String::new(),
+            battle_setup: BattleSetup::default(),
         }
     }
     pub fn shown(&self) -> bool {
@@ -86,6 +108,7 @@ impl Menu {
     pub fn panel_command(&self) -> Option<panel::Action> {
         self.panel_command
     }
+    pub fn battle_setup(&self) -> BattleSetup { self.battle_setup }
     pub fn lab_command(&self) -> Option<laboratory::LabAction> {
         self.lab_command
     }
@@ -130,6 +153,7 @@ pub fn requested(args: &[String]) -> bool {
                 | "--battle"
                 | "--battle-eight"
                 | "--world-battle"
+                | "--commander-battle"
                 | "--skirmish"
                 | "--drive-demo"
                 | "--move"
@@ -149,6 +173,11 @@ pub enum Action {
     Menu,
     Resume,
     Start(Destination),
+    StartPreparedBattle,
+    RoomPosition,
+    RoomPlayerStock,
+    RoomEnemyStock,
+    RoomSpectator,
     Settings,
     Help,
     Back,
@@ -162,6 +191,8 @@ pub(super) struct Part(Page);
 pub(super) struct Resume;
 #[derive(Component)]
 pub(super) struct Notice;
+#[derive(Component)]
+pub(super) struct RoomValue(u8);
 
 /// Runs before any game input. Commands remain readable by all existing mode
 /// handlers for this frame, then clear before the next frame's dispatch.
@@ -203,7 +234,7 @@ pub fn input(
     if keys.just_pressed(KeyCode::F10) {
         action = match menu.page {
             Page::Session => Some(Action::Menu),
-            Page::Settings | Page::Help => Some(Action::Back),
+            Page::Settings | Page::Help | Page::BattleRoom => Some(Action::Back),
             Page::Home => menu.has_session.then_some(Action::Resume),
         };
     }
@@ -211,7 +242,7 @@ pub fn input(
         action = match menu.page {
             Page::Home => menu.has_session.then_some(Action::Resume),
             Page::Settings if knobs.editing.is_some() => None,
-            Page::Settings | Page::Help => Some(Action::Back),
+            Page::Settings | Page::Help | Page::BattleRoom => Some(Action::Back),
             Page::Session if knobs.open => {
                 knobs.open = false;
                 keys.reset(KeyCode::Escape);
@@ -235,9 +266,21 @@ pub fn input(
                 menu.resume(&mut scene, &mut scale);
             }
             Action::Start(destination) => {
-                menu.pending = Some(destination);
+                if destination == Destination::Battle {
+                    menu.page = Page::BattleRoom;
+                } else {
+                    menu.pending = Some(destination);
+                }
                 menu.notice.clear();
             }
+            Action::StartPreparedBattle => {
+                menu.pending = Some(if menu.battle_setup.spectator { Destination::CommanderSpectate } else { Destination::CommanderBattle });
+                menu.notice.clear();
+            }
+            Action::RoomPosition => menu.battle_setup.player_southeast = !menu.battle_setup.player_southeast,
+            Action::RoomPlayerStock => menu.battle_setup.player_stock = next_stock(menu.battle_setup.player_stock),
+            Action::RoomEnemyStock => menu.battle_setup.enemy_stock = next_stock(menu.battle_setup.enemy_stock),
+            Action::RoomSpectator => menu.battle_setup.spectator = !menu.battle_setup.spectator,
             Action::Settings => {
                 menu.page = Page::Settings;
                 knobs.open = false;
@@ -322,7 +365,14 @@ fn button(p: &mut ChildSpawnerCommands, font: &TextFont, label: &str, action: Ac
         BackgroundColor(theme::BUTTON),
         BorderColor::all(theme::FRAME),
     ));
-    node.with_children(|p| text(p, font, label, 16.0, theme::TEXT));
+    node.with_children(|p| {
+        let mut text = p.spawn((Text::new(label), TextFont { font_size: FontSize::Px(16.0), ..font.clone() }, TextColor(theme::TEXT)));
+        let field = match action {
+            Action::RoomPosition => Some(0), Action::RoomPlayerStock => Some(1),
+            Action::RoomEnemyStock => Some(2), Action::RoomSpectator => Some(3), _ => None,
+        };
+        if let Some(field) = field { text.insert(RoomValue(field)); }
+    });
     node.id()
 }
 pub fn entry(p: &mut ChildSpawnerCommands, font: &TextFont) {
@@ -389,6 +439,25 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 p.spawn((Notice, Text::new(""), TextFont {font_size: FontSize::Px(15.0), ..font.clone()}, TextColor(theme::ACCENT)));
                 text(p, font, "Карта боя: лесной полигон     •     F10 — главное меню", 14.0, theme::MUTED);
             });
+            root.spawn((Part(Page::BattleRoom), content())).with_children(|p| {
+                text(p, font, "НАСТРОЙКА СРАЖЕНИЯ", 40.0, theme::TEXT);
+                text(p, font, "КАРТА   Лесной полигон · 1 карта доступна", 21.0, theme::TEXT);
+                text(p, font, "СТОРОНА 1  /  ИГРОК", 18.0, theme::ACCENT);
+                p.spawn(Node { column_gap: px(12), row_gap: px(8), flex_wrap: FlexWrap::Wrap, ..default() }).with_children(|p| {
+                    button(p, font, "Позиция: северо-запад", Action::RoomPosition);
+                    button(p, font, "Масса: 500", Action::RoomPlayerStock);
+                    button(p, font, "Управление: игрок", Action::RoomSpectator);
+                });
+                text(p, font, "СТОРОНА 2  /  ПРОТИВНИК: ИИ", 18.0, theme::ACCENT);
+                p.spawn(Node { column_gap: px(12), row_gap: px(8), flex_wrap: FlexWrap::Wrap, ..default() }).with_children(|p| {
+                    button(p, font, "Масса ИИ: 500", Action::RoomEnemyStock);
+                });
+                text(p, font, "На старте у каждой стороны один командир. ИИ строит базу и добывает ресурсы.\nПока доступны один противник, две враждующие стороны и единая фракция; отдельные команды и фракции появятся позже.", 16.0, theme::MUTED);
+                p.spawn(Node { column_gap: px(12), row_gap: px(8), flex_wrap: FlexWrap::Wrap, ..default() }).with_children(|p| {
+                    button(p, font, "НАЧАТЬ БОЙ", Action::StartPreparedBattle);
+                    button(p, font, "← Главное меню", Action::Back);
+                });
+            });
             root.spawn((Part(Page::Help), content())).with_children(|p| {
                 text(p, font, "КАК ИГРАТЬ", 40.0, theme::TEXT);
                 text(p, font, "Полигон — выберите испытание, технику или оружие в верхней панели.\n\nБой — ЛКМ выбирает юнитов, рамка выделяет отряд. ПКМ отдаёт приказ двигаться или атаковать.\n\nЛаборатория — выберите объект в библиотеке снизу и разместите в сцене. «Живые» включает инструменты во время симуляции.\n\nКолесо мыши — приближение. В лаборатории средняя кнопка вращает вид, Shift + средняя кнопка перемещает его.\n\nF10 открывает главное меню и приостанавливает текущую сессию. Esc сначала отменяет активный инструмент или вид от первого лица.", 20.0, theme::TEXT);
@@ -441,6 +510,7 @@ pub fn sync(
     >,
     mut buttons: Query<(&Action, &Interaction, &mut BackgroundColor)>,
     mut notice: Query<&mut Text, With<Notice>>,
+    mut room_values: Query<(&RoomValue, &mut Text), Without<Notice>>,
     mut cameras: Query<(&mut Camera, Option<&GasCamera>, &mut RenderTarget), With<Camera3d>>,
     mut cursors: Query<&mut CursorOptions>,
     mut menu_target: ResMut<MenuTarget>,
@@ -517,6 +587,14 @@ pub fn sync(
     }
     for mut t in &mut notice {
         t.0 = menu.notice.clone();
+    }
+    for (field, mut text) in &mut room_values {
+        text.0 = match field.0 {
+            0 => format!("Позиция: {}", if menu.battle_setup.player_southeast { "юго-восток" } else { "северо-запад" }),
+            1 => format!("Масса: {}", economy_display::mass(menu.battle_setup.player_stock)),
+            2 => format!("Масса ИИ: {}", economy_display::mass(menu.battle_setup.enemy_stock)),
+            _ => format!("Управление: {}", if menu.battle_setup.spectator { "ИИ × ИИ" } else { "игрок" }),
+        };
     }
 }
 
@@ -659,6 +737,73 @@ mod tests {
         assert!(app.world().resource::<Scene>().paused);
     }
     #[test]
+    fn battle_room_launches_both_commander_modes() {
+        let mut app = app(true);
+        let layout = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
+        app.insert_resource(Workshop::new(Some(layout), false));
+        for destination in [Destination::CommanderBattle, Destination::CommanderSpectate] {
+            click(&mut app, Action::Start(Destination::Battle));
+            assert_eq!(app.world().resource::<Menu>().page, Page::BattleRoom);
+            click(&mut app, Action::Start(destination));
+            assert!(app.world().resource::<Workshop>().pending.is_some());
+            rebuild(&mut app);
+            let sim = &app.world().resource::<Scene>().sim;
+            assert_eq!(sim.battle.phase, sim_core::blast::battle::Phase::Fighting);
+            assert_eq!(sim.battle.autonomous, destination == Destination::CommanderSpectate);
+            assert_eq!(sim.units.len(), 2);
+            assert!(sim.units.iter().all(|u| u.kind == RangeUnitKind::Commander));
+            assert_eq!(sim.tank_held(0), Some(modding::range_economy::Balance::stock().initial_matter));
+            assert_eq!(sim.tank_held(1), Some(modding::range_economy::Balance::stock().initial_matter));
+            click(&mut app, Action::Menu);
+        }
+    }
+
+    #[test]
+    fn battle_room_settings_reach_the_commander_battle_without_starting_early() {
+        let mut app = app(true);
+        click(&mut app, Action::Start(Destination::Battle));
+        assert_eq!(app.world().resource::<Menu>().page, Page::BattleRoom);
+        assert!(app.world().resource::<Workshop>().pending.is_none());
+        click(&mut app, Action::RoomPosition);
+        click(&mut app, Action::RoomPlayerStock);
+        click(&mut app, Action::RoomEnemyStock);
+        click(&mut app, Action::RoomEnemyStock);
+        click(&mut app, Action::StartPreparedBattle);
+        let edit = app.world().resource::<Workshop>();
+        let (_, layout) = edit.pending.as_ref().expect("battle is prepared only after Start");
+        assert_eq!(layout.units.len(), 2);
+        assert!(layout.units.iter().all(|u| u.kind == RangeUnitKind::Commander));
+        assert!(layout.units[0].allied && !layout.units[1].allied);
+        assert!(layout.units[0].at[0] > layout.units[1].at[0]);
+        assert_eq!(layout.economy.as_ref().unwrap().kind(RangeUnitKind::Commander).unwrap().dig_edits_per_tick, 512);
+        let ready = layout.ready.as_ref().unwrap();
+        assert_eq!(ready.commander_stock, 75_000_000);
+        assert_eq!(ready.enemy_commander_stock, Some(100_000_000));
+    }
+
+    #[test]
+    fn battle_button_displays_room_instead_of_starting_the_match() {
+        let mut app = app(true);
+        app.add_systems(PostUpdate, sync);
+        let home = app.world_mut().spawn((Part(Page::Home), Node::default())).id();
+        let room = app.world_mut().spawn((Part(Page::BattleRoom), Node::default())).id();
+        app.update();
+        click(&mut app, Action::Start(Destination::Battle));
+        assert_eq!(app.world().get::<Node>(home).unwrap().display, Display::None);
+        assert_eq!(app.world().get::<Node>(room).unwrap().display, Display::Flex);
+        assert!(app.world().resource::<Workshop>().pending.is_none());
+    }
+    #[test]
+    fn room_spectator_setting_starts_ai_against_ai() {
+        let mut app = app(true);
+        click(&mut app, Action::Start(Destination::Battle));
+        click(&mut app, Action::RoomSpectator);
+        click(&mut app, Action::StartPreparedBattle);
+        assert!(app.world().resource::<panel::Panel>().battle_auto);
+        assert!(app.world().resource::<Workshop>().pending.is_some());
+    }
+
+    #[test]
     fn main_menu_launches_real_battle_spectator_and_range_paths() {
         let mut app = app(true);
         let layout =
@@ -670,6 +815,11 @@ mod tests {
             Destination::Range,
         ] {
             click(&mut app, Action::Start(destination));
+            if destination == Destination::Battle {
+                assert_eq!(app.world().resource::<Menu>().page, Page::BattleRoom);
+                assert!(app.world().resource::<Workshop>().pending.is_none());
+                click(&mut app, Action::StartPreparedBattle);
+            }
             assert!(!app.world().resource::<Menu>().shown());
             assert!(app.world().resource::<Workshop>().pending.is_some());
             rebuild(&mut app);

@@ -5,6 +5,9 @@ use serde::Deserialize;
 pub struct ScriptOrder {
     pub actor: usize,
     pub tick: u32,
+    /// Demonstration follows the first completed delivery, not a fixed timer.
+    #[serde(default)]
+    pub after_unload: bool,
     pub order: ScriptedOrder,
 }
 #[derive(Clone, Debug, Deserialize)]
@@ -76,6 +79,7 @@ impl Skirmish {
             });
         }
         layout.battle = true;
+        layout.endless_battle = true;
         if self.script.iter().any(|order| {
             matches!(
                 order.order,
@@ -235,6 +239,7 @@ pub const STOCK: &[&str] = &[
     include_str!("../../../data/skirmish-kil.ron"),
     include_str!("../../../data/skirmish-skoba.ron"),
     include_str!("../../../data/skirmish-greben.ron"),
+    include_str!("../../../data/skirmish-crawler-destruction.ron"),
 ];
 pub fn stock(id: usize) -> Result<Skirmish, String> {
     Skirmish::from_ron(STOCK.get(id).ok_or("Unknown encounter")?)
@@ -284,6 +289,37 @@ mod tests {
     use crate::range::{RangeLayout, RangeLoadout};
 
     #[test]
+    fn industrial_demos_are_endless_and_switch_to_drilling_after_delivery() {
+        let base = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        for text in [include_str!("../../../data/skirmish-staratel.ron"), include_str!("../../../data/skirmish-greben.ron"), include_str!("../../../data/skirmish-kil.ron"), include_str!("../../../data/skirmish-skoba.ron")] {
+            let scenario = Skirmish::from_ron(text).unwrap();
+            assert!(scenario.script.iter().any(|order| matches!(order.order, ScriptedOrder::Reclaim(_)) && !order.after_unload));
+            assert!(scenario.script.iter().any(|order| matches!(order.order, ScriptedOrder::Dig(_)) && order.after_unload));
+            let layout = scenario.apply_to(base.clone()).unwrap();
+            assert!(layout.endless_battle);
+            let saved = layout.to_ron().unwrap();
+            assert!(RangeLayout::from_ron(&saved).unwrap().endless_battle);
+            if let Some(ready) = &scenario.ready {
+                for order in &ready.production {
+                    let factory = &scenario.units[order.actor];
+                    let radius = layout.economy.as_ref().unwrap().production.as_ref().unwrap().supply_radius;
+                    assert!(scenario.units.iter().any(|storage| {
+                        if !storage.allied || storage.kind != RangeUnitKind::GrebenStorage { return false; }
+                        let dx = i64::from(storage.at[0] - factory.at[0]);
+                        let dz = i64::from(storage.at[2] - factory.at[2]);
+                        dx * dx + dz * dz <= i64::from(radius).pow(2)
+                    }), "factory demo needs a storage within supply range");
+                    assert!(ready.store >= 25_000_000, "demo must have enough starting material");
+                }
+                if scenario.title.contains("Скоба") {
+                    assert_eq!(ready.construction.len(), 2);
+                    assert_eq!((ready.construction[0].quota, ready.construction[1].quota), (6, 2));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn tactical_catalog_covers_every_kind_and_builds_real_bounded_layouts() {
         let stock_layout =
             RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
@@ -304,6 +340,9 @@ mod tests {
                         let ranges = crate::attack_ranges::stock();
                         let reach = |u: &RangeUnitDef| match u.kind {
                             RangeUnitKind::Base
+                            | RangeUnitKind::PowerPlantT1
+                            | RangeUnitKind::PowerPlantT2
+                            | RangeUnitKind::PowerPlantT3
                             | RangeUnitKind::Crawler
                             | RangeUnitKind::GrebenStorage
                             | RangeUnitKind::KilFactoryT1
@@ -315,7 +354,8 @@ mod tests {
                             | RangeUnitKind::LightningTank
                             | RangeUnitKind::EidolonTank
                             | RangeUnitKind::TurretT1
-                            | RangeUnitKind::TurretT2 => ranges.energy,
+                            | RangeUnitKind::TurretT2
+                            | RangeUnitKind::Commander => ranges.energy,
                             RangeUnitKind::Strider => ranges.machine_gun,
                             RangeUnitKind::Spider
                             | RangeUnitKind::Walker04
@@ -342,7 +382,8 @@ mod tests {
             .iter()
             .filter(|kind| !matches!(
                 kind,
-                RangeUnitKind::Crawler
+                RangeUnitKind::Commander
+                    | RangeUnitKind::Crawler
                     | RangeUnitKind::Walker04
                     | RangeUnitKind::RazlomT3
                     | RangeUnitKind::GrebenStorage
@@ -350,6 +391,9 @@ mod tests {
                     | RangeUnitKind::KilFactoryT2
                     | RangeUnitKind::KilFactoryT3
                     | RangeUnitKind::KilFactoryT4
+                    | RangeUnitKind::PowerPlantT1
+                    | RangeUnitKind::PowerPlantT2
+                    | RangeUnitKind::PowerPlantT3
             ))
             .all(|kind| focus.contains(kind)));
         assert!(stock(STOCK.len()).is_err());
@@ -401,7 +445,8 @@ mod tests {
             for kind in RangeUnitKind::ALL.into_iter().filter(|k| {
                 !matches!(
                     k,
-                    RangeUnitKind::NuclearSilo
+                    RangeUnitKind::Commander
+                        | RangeUnitKind::NuclearSilo
                         | RangeUnitKind::Crawler
                         | RangeUnitKind::LightningTank
                         | RangeUnitKind::EidolonTank
@@ -413,6 +458,9 @@ mod tests {
                         | RangeUnitKind::KilFactoryT3
                         | RangeUnitKind::KilFactoryT4
                         | RangeUnitKind::SkobaDrone
+                        | RangeUnitKind::PowerPlantT1
+                        | RangeUnitKind::PowerPlantT2
+                        | RangeUnitKind::PowerPlantT3
                 )
             }) {
                 assert!(

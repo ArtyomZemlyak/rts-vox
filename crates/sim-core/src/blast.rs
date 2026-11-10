@@ -14,6 +14,8 @@ mod crowd_tests;
 mod debris_tuning;
 #[path = "range_economy.rs"]
 pub mod economy;
+#[path = "range_economic_ai.rs"]
+mod economic_ai;
 #[path = "range_formation.rs"]
 mod formation;
 #[path = "range_granular.rs"]
@@ -112,6 +114,8 @@ pub const WITNESS: [i32; 3] = [377, FLOOR, 305];
 
 #[path = "range_walker.rs"]
 mod walker;
+#[path = "range_commander.rs"]
+mod commander;
 #[path = "range_walker_save.rs"]
 mod walker_save;
 
@@ -430,7 +434,7 @@ impl<'a> UnitVoxels<'a> {
     /// it moved this tick from `was`, and these voxels.
     fn hull(&self, was: Option<&[Fx; 3]>) -> crate::burst::Hull<'_> {
         let u = self.unit;
-        let o = motion::Obstacle::of(&u.motion, &u.body);
+        let o = motion::Obstacle::of_unit(u);
         crate::burst::Hull {
             pos: o.pos,
             head: o.head,
@@ -531,6 +535,10 @@ impl RangeUnit {
             0
         } else if self.kind == RangeUnitKind::Spider {
             motion::spider_tuning().speed
+        } else if self.kind == RangeUnitKind::Commander {
+            ((c.walker_speed * 9 / 10).max(1) / 3).max(1)
+        } else if self.kind == RangeUnitKind::Walker04 {
+            (c.walker_speed * 9 / 10).max(1)
         } else if tracked {
             c.tank_speed
         } else {
@@ -569,6 +577,10 @@ impl RangeUnit {
         static SPIDER: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static STRIDER: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static WALKER04: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static COMMANDER: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static POWER_PLANT_T1: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static POWER_PLANT_T2: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static POWER_PLANT_T3: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static RAZLOM: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static GREBEN: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static KIL_T1: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
@@ -617,6 +629,10 @@ impl RangeUnit {
                 KIL_T4.get_or_init(|| voxel::unit::kil_factory(4)).clone()
             }
             RangeUnitKind::SkobaDrone => SKOBA.get_or_init(voxel::unit::skoba).clone(),
+            RangeUnitKind::Commander => COMMANDER.get_or_init(voxel::unit::commander).clone(),
+            RangeUnitKind::PowerPlantT1 => POWER_PLANT_T1.get_or_init(voxel::unit::power_plant_t1).clone(),
+            RangeUnitKind::PowerPlantT2 => POWER_PLANT_T2.get_or_init(voxel::unit::power_plant_t2).clone(),
+            RangeUnitKind::PowerPlantT3 => POWER_PLANT_T3.get_or_init(voxel::unit::power_plant_t3).clone(),
         };
         static ARMOUR: OnceLock<modding::unit_armour::Armour> = OnceLock::new();
         let grade = ARMOUR
@@ -644,7 +660,7 @@ impl RangeUnit {
         let seg_mounts = mounts_of(&body);
         let seg_gone = vec![false; body.segments.len()];
         let seg_sections = (0..body.segments.len()).map(|_| None).collect();
-        Self {
+        let mut unit = Self {
             motion,
             pose,
             turret_delta: 0,
@@ -676,7 +692,9 @@ impl RangeUnit {
             seg_shed: Vec::new(),
             seg_sections,
             seg_mounts,
-        }
+        };
+        if matches!(kind, RangeUnitKind::Walker04 | RangeUnitKind::Commander) { unit.aim_walker_arms(0); }
+        unit
     }
     fn refresh_damage(&mut self, id: usize) {
         self.update_response();
@@ -764,6 +782,9 @@ impl RangeUnit {
             }
             self.seg_gone[i] = true;
             self.seg_shed.push(i as u8);
+            if self.kind == RangeUnitKind::Walker04 && (26..30).contains(&i) {
+                stack.push(10 + (i - 26) * 4);
+            }
             for (j, other) in self.body.segments.iter().enumerate() {
                 if other.attach.parent as usize == i + 1 && !self.seg_gone[j] {
                     stack.push(j);
@@ -810,9 +831,88 @@ impl RangeUnit {
         }
         self.aim_walker_arms(turret_yaw);
     }
-    pub fn set_arm_targets(&mut self, targets: [[i32; 3]; 4], turret_yaw: i32) {
+    pub fn set_arm_targets(&mut self, mut targets: [[i32; 3]; 4], turret_yaw: i32) {
+        if self.kind == RangeUnitKind::Commander {
+            let active = targets[2][0].clamp(0, 1) as usize;
+            let rest = self.commander_rest_targets(turret_yaw);
+            for arm in 0..2 {
+                if arm != active { targets[arm] = rest[arm]; }
+                let prior = self.arm_targets.map_or(rest[arm], |old| old[arm]);
+                for axis in 0..3 {
+                    let delta = i64::from(targets[arm][axis]) - i64::from(prior[axis]);
+                    let rig = commander::tuning();
+                    let step = (delta / i64::from(rig.settle_ticks))
+                        .clamp(-i64::from(rig.target_step_cm), i64::from(rig.target_step_cm));
+                    targets[arm][axis] = (i64::from(prior[axis]) + if step == 0 { delta.signum() } else { step }) as i32;
+                }
+                targets[arm] = self.commander_limit_slew(arm, prior, targets[arm], turret_yaw);
+            }
+        } else if self.kind == RangeUnitKind::Walker04 {
+            for arm in 0..4 {
+                let prior = self.arm_targets.map(|old| old[arm]).unwrap_or_else(|| {
+                    let tip = &self.seg_frames[13 + arm * 4];
+                    let p = tip.world([Fx::from_int(i32::from(self.body.segments[13 + arm * 4].body.vol.nx)), tip.centre[1], tip.centre[2]])
+                        .add(tip.x.scale(Fx::from_int(300)));
+                    [p.x.to_int_trunc(), p.y.to_int_trunc(), p.z.to_int_trunc()]
+                });
+                let origin = self.pose.base;
+                let px = Fx::from_int(prior[0]).sub(origin.x);
+                let pz = Fx::from_int(prior[2]).sub(origin.z);
+                let dx = Fx::from_int(targets[arm][0]).sub(origin.x);
+                let dz = Fx::from_int(targets[arm][2]).sub(origin.z);
+                let before = fx::angle::atan2(pz.raw(), px.raw());
+                let desired = fx::angle::atan2(dz.raw(), dx.raw());
+                let limit = walker::tuning().arm_turn_deg_s * fx::angle::FULL / (360 * crate::TICKS_PER_SECOND);
+                let delta = fx::angle::diff(desired, before);
+                // The drive's 1024-entry trig table is too coarse to converge
+                // a distant laser point. Finish exactly once within one servo
+                // step; outside it advance by at least one table sample.
+                let step = (delta / 6).abs().max(fx::angle::FULL / 1024).min(limit) * delta.signum();
+                let yaw = fx::angle::norm(before + if step == 0 { delta.signum() } else { step });
+                let radius = dx.mul(dx).add(dz.mul(dz)).sqrt().max(Fx::ONE);
+                for axis in 1..2 {
+                    let delta = i64::from(targets[arm][axis]) - i64::from(prior[axis]);
+                    let step = (delta / 10).clamp(-40, 40);
+                    targets[arm][axis] = (i64::from(prior[axis]) + if step == 0 { delta.signum() } else { step }) as i32;
+                }
+                if delta.abs() > limit {
+                    targets[arm][0] = origin.x.add(fx::angle::cos(yaw).mul(radius)).to_int_trunc();
+                    targets[arm][2] = origin.z.add(fx::angle::sin(yaw).mul(radius)).to_int_trunc();
+                }
+            }
+        }
         self.arm_targets = Some(targets);
         self.update_pose(turret_yaw);
+    }
+    /// Turn the planted chassis toward a working target with normal angular
+    /// acceleration. A moving unit keeps its navigation heading.
+    pub(super) fn commander_face(&mut self, target: [i32; 3]) -> bool {
+        if self.kind != RangeUnitKind::Commander { return true; }
+        let pos = self.motion.pos.map(Fx::to_int_trunc);
+        let dx = target[0] - pos[0];
+        let dz = target[2] - pos[2];
+        if dx == 0 && dz == 0 { return true; }
+        let desired = fx::angle::atan2(Fx::from_int(dz).raw(), Fx::from_int(dx).raw());
+        // Leave room for the lateral offset between the shoulder and the
+        // chassis centre when working on a nearby target.
+        let limit = fx::angle::FULL * 20 / 360;
+        if fx::angle::diff(desired, self.motion.drive.head).abs() > limit
+            && self.motion.destination.is_none() && self.motion.drive.vel.abs() < Fx::from_ratio(1, 10)
+        {
+            let mut limits = crate::drive::Limits::of(&self.motion.chassis, crate::TICKS_PER_SECOND);
+            // The ordinary idle motion phase damps yaw between work ticks;
+            // compensate for it while retaining bounded angular acceleration.
+            limits.turn_acc = limits.turn_acc.mul(Fx::from_int(8));
+            let (next, _) = crate::drive::advance(self.motion.drive, desired, Fx::ZERO, &limits, Fx::ONE, Fx::from_ratio(1, crate::TICKS_PER_SECOND));
+            self.motion.drive = next;
+        }
+        fx::angle::diff(desired, self.motion.drive.head).abs() <= limit
+    }
+    pub(super) fn relax_commander_arms(&mut self, turret_yaw: i32) {
+        if self.kind != RangeUnitKind::Commander || self.arm_targets.is_none() { return; }
+        let rest = self.commander_rest_targets(turret_yaw);
+        let active = self.arm_targets.unwrap()[2];
+        self.set_arm_targets([rest[0], rest[1], active, [0, 0, 0]], turret_yaw);
     }
     /// Where a world point lands on this body: `0` the root, `i + 1` the
     /// segment `i`, with the cell there. Segments are tested in the given
@@ -4726,6 +4826,8 @@ pub mod weapons;
 pub mod ai;
 #[path = "range_battle.rs"]
 pub mod battle;
+#[path = "range_build_plans.rs"]
+pub mod build_plans;
 
 /// Per-tick diagnostics only; never serialized or included in the state hash.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -4865,6 +4967,8 @@ pub struct BlastRange {
     /// Dig economy, on a layout with an economy section (ADR-672). In the
     /// snapshot from version 62.
     mining: Option<economy::Mining>,
+    economic_power: Option<(u32, Vec<Option<(u64, u64)>>)>,
+    build_plans: build_plans::Plans,
     /// Units produced during the run, appended after the layout's (ADR-675):
     /// with the authored layout they are the roster. In the snapshot from
     /// version 65, right after the layout.
@@ -4976,13 +5080,9 @@ impl BlastRange {
                         .div(Fx::from_int(self.config.shell_speed))
                         .max(Fx::from_ratio(1, 1000))
                 };
-                let travel = u.motion.drive.vel.mul(time);
-                p[0] += travel
-                    .mul(fx::angle::cos(u.motion.drive.head))
-                    .to_int_trunc();
-                p[2] += travel
-                    .mul(fx::angle::sin(u.motion.drive.head))
-                    .to_int_trunc();
+                let velocity = u.motion.velocity();
+                p[0] += velocity.x.mul(time).to_int_trunc();
+                p[2] += velocity.z.mul(time).to_int_trunc();
                 return p;
             }
         }
@@ -5066,10 +5166,16 @@ impl BlastRange {
         Self::build(config, None)
     }
     pub fn with_layout(
-        mut config: ExplosionConfig,
+        config: ExplosionConfig,
         mut layout: RangeLayout,
     ) -> Result<Self, String> {
         economy::produce::starting_crews(&mut layout);
+        Self::with_saved_layout(config, layout)
+    }
+
+    /// A snapshot already records its complete starting roster. Reapplying
+    /// today's scenario defaults here would silently change older saves.
+    fn with_saved_layout(mut config: ExplosionConfig, layout: RangeLayout) -> Result<Self, String> {
         placement::Validator::default()
             .validate(&layout)
             .map_err(|e| e.to_string())?;
@@ -5288,7 +5394,7 @@ impl BlastRange {
                 }
             }
         }
-        let mut matter = matter::Matter::new(&units);
+        let mut matter = matter::Matter::with_economy(&units, layout.as_ref().and_then(|l| l.economy.as_ref()));
         let combustion = fire::Combustion::new(&units, &mut matter);
         let mut mining = layout.as_ref().and_then(|l| {
             let data = l.economy.clone()?;
@@ -5416,7 +5522,9 @@ impl BlastRange {
             coarse_work: 0,
             fine_start_left: 0,
             mining,
+            economic_power: None,
             spawned: Vec::new(),
+            build_plans: build_plans::Plans::default(),
         };
         result.turret = crate::turret::Traverse::new(result.aim_angle());
         result.gun.update_pose(result.turret.angle);
@@ -5499,6 +5607,36 @@ impl BlastRange {
                 || economy.ledger.transfer(economy.ground, store, ready.store) != ready.store
             {
                 return Err("ready stock exceeds its capacity".into());
+            }
+        }
+        if ready.commander_stock > 0 || ready.enemy_commander_stock.unwrap_or(0) > 0 {
+            let tanks: Vec<_> = self.units.iter().enumerate().filter_map(|(id, u)| {
+                (u.kind == RangeUnitKind::Commander).then(|| self.mining.as_ref()?.tank(id).map(|tank| (tank, self.allied(id)))).flatten()
+            }).collect();
+            if tanks.len() != self.units.iter().filter(|u| u.kind == RangeUnitKind::Commander).count()
+                || tanks.is_empty()
+            {
+                return Err("commander starting stock requires a tank".into());
+            }
+            let economy = &mut self.matter.economy;
+            for (tank, allied) in tanks {
+                let stock = if allied { ready.commander_stock } else { ready.enemy_commander_stock.unwrap_or(ready.commander_stock) };
+                if economy.ledger.room(tank) < stock
+                    || economy.ledger.reveal(economy.ground, stock) != stock
+                    || economy.ledger.transfer(economy.ground, tank, stock) != stock
+                {
+                    return Err("commander starting stock exceeds its capacity".into());
+                }
+            }
+        }
+        for stock in ready.tank_stock {
+            let tank = self.mining.as_ref().and_then(|m| m.tank(stock.actor))
+                .ok_or("ready cargo needs a unit tank")?;
+            let ledger = &mut self.matter.economy.ledger;
+            let ground = self.matter.economy.ground;
+            if ledger.room(tank) < stock.amount || ledger.reveal(ground, stock.amount) != stock.amount
+                || ledger.transfer(ground, tank, stock.amount) != stock.amount {
+                return Err("ready cargo exceeds its capacity".into());
             }
         }
         for order in ready.construction {
@@ -5623,6 +5761,11 @@ impl BlastRange {
         // also identifies the clock used by velocities and deadlines.
         b.u32(67);
         b.u32(crate::TICKS_PER_SECOND as u32);
+        if self.build_plans.active() || self.construction_history_count()>32 {b.u32(79);self.build_plans.save(&mut b);}
+        if self.has_pipes() {
+            b.u32(78);
+            self.save_pipes(&mut b);
+        }
         let forms: Vec<_> = self
             .units
             .iter()
@@ -6122,6 +6265,18 @@ impl BlastRange {
         } else if crate::TICKS_PER_SECOND != modding::clock::STREAM_HZ as i32 {
             return None;
         }
+        let plans=if version==79 {let plans=build_plans::Plans::load(&mut s)?;version=s.u32();plans}else{build_plans::Plans::default()};
+        let mut pipes = Vec::new();
+        if version == 78 {
+            let n = s.u32() as usize;
+            if n == 0 || n > modding::range::MAX_RANGE_UNITS || n > s.left() / 8 { return None; }
+            for _ in 0..n {
+                let entry = (s.u16(), s.u16(), s.u32());
+                if pipes.last().is_some_and(|last: &(u16, u16, u32)| last.0 >= entry.0) { return None; }
+                pipes.push(entry);
+            }
+            version = s.u32();
+        }
         let mut skoba_forms = Vec::new();
         let explicit_skoba_forms = version == 77;
         if explicit_skoba_forms {
@@ -6214,7 +6369,7 @@ impl BlastRange {
             if data.len() > 256 * 1024 {
                 return None;
             }
-            Self::with_layout(
+            Self::with_saved_layout(
                 config,
                 RangeLayout::from_ron(std::str::from_utf8(&data).ok()?).ok()?,
             )
@@ -6795,6 +6950,7 @@ impl BlastRange {
             observe("reclaim", bytes.len() - s.left(), None);
             r.load_reclaim(&mut s)?;
         }
+        if !pipes.is_empty() { r.load_pipes(&pipes)?; }
         if version >= 65 {
             observe("production", bytes.len() - s.left(), None);
             r.load_production(&mut s, version >= 75)?;
@@ -6803,6 +6959,12 @@ impl BlastRange {
             observe("construction", bytes.len() - s.left(), None);
             r.load_construction(&mut s, !explicit_skoba_forms)?;
         }
+        if r.battle.actors.iter().enumerate().any(|(id, actor)| {
+            matches!(actor.order, battle::Order::Build(site) if !r.valid_commander_site(id, site))
+        }) {
+            return None;
+        }
+        r.build_plans=plans;r.validate_build_plans()?;
         r.check_blank_work()?;
         if coarse {
             observe("coarse", bytes.len() - s.left(), None);
@@ -6950,7 +7112,7 @@ impl BlastRange {
             &self
                 .units
                 .iter()
-                .map(|u| motion::Obstacle::of(&u.motion, &u.body))
+                .map(|u| motion::Obstacle::of_unit(u))
                 .collect::<Vec<_>>(),
             &rubble,
         );
@@ -7129,7 +7291,7 @@ impl BlastRange {
             let others: Vec<_> = self
                 .units
                 .iter()
-                .map(|u| motion::Obstacle::of(&u.motion, &u.body))
+                .map(|u| motion::Obstacle::of_unit(u))
                 .collect();
             self.gun
                 .motion
@@ -7443,7 +7605,7 @@ impl BlastRange {
         let mut positions: Vec<_> = self
             .units
             .iter()
-            .map(|u| motion::Obstacle::of(&u.motion, &u.body))
+            .map(|u| motion::Obstacle::of_unit(u))
             .collect();
         // Contact capture and physical admission are separate: even a full
         // claim queue must retain plants touched before the hull departs.
@@ -7455,11 +7617,15 @@ impl BlastRange {
         // Bound concurrent starts as well as each search's work (ADR-312,
         // ADR-326). Hulls over this ceiling retain their orders and ask
         // again next tick, in the same stable spatial order as motion below.
+        self.finish_factory_launches();
+        let launch_owners: Vec<_> = (0..self.units.len()).map(|id| self.factory_launch_owner(id)).collect();
         let battle_mode = self.battle_mode();
         let physical_gun = self.physical_gun();
         let mut starts = self.navigation.searches_started_per_tick;
         self.gun.motion.clear_contact();
-        for (id, u) in self.units.iter_mut().enumerate() {
+        for id in 0..self.units.len() {
+            let docking_pilot = self.crawler_docking_pilot(id);
+            let u = &mut self.units[id];
             u.motion.clear_contact();
             u.motion.pilot = self.battle.actors.get(id).and_then(|a| match a.order {
                 battle::Order::Pilot { throttle, turn, .. }
@@ -7468,7 +7634,7 @@ impl BlastRange {
                     Some([throttle, turn])
                 }
                 _ => None,
-            });
+            }).or(docking_pilot);
         }
         let manual_flight = self.units.iter().any(|u| {
             u.status.alive
@@ -7526,7 +7692,7 @@ impl BlastRange {
         {
             let gun_id = self.units.len();
             let gun_obstacle =
-                physical_gun.then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body));
+                physical_gun.then(|| motion::Obstacle::of_unit(&self.gun));
             let mut queue: Vec<(std::cmp::Reverse<u32>, usize)> = self
                 .units
                 .iter()
@@ -7664,7 +7830,7 @@ impl BlastRange {
                 let rubble = &self.rubble;
                 let tick = self.tick;
                 let gun_obstacle =
-                    physical_gun.then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body));
+                    physical_gun.then(|| motion::Obstacle::of_unit(&self.gun));
                 (local_hunts, prepared_ground) = pool.install(|| {
                     self.units
                         .par_chunks_mut(1)
@@ -7679,6 +7845,8 @@ impl BlastRange {
                                     rubble,
                                     tick,
                                     &changed,
+                                    positions.iter().enumerate().filter(|(other, _)| *other != id)
+                                        .map(|(_, p)| *p).chain(gun_obstacle),
                                     |stage| task_detail(id, stage),
                                 );
                                 if !driven || !u.motion.needs_local_hunt() {
@@ -7751,11 +7919,11 @@ impl BlastRange {
                     positions
                         .iter()
                         .enumerate()
-                        .filter(|(i, _)| *i != id)
+                        .filter(|(i, _)| *i != id && Some(*i) != launch_owners[id])
                         .map(|(_, p)| *p)
                         .chain(
                             physical_gun
-                                .then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body)),
+                                .then(|| motion::Obstacle::of_unit(&self.gun)),
                         ),
                 );
                 if u.kind == RangeUnitKind::SkobaDrone && u.status.alive {
@@ -7775,6 +7943,7 @@ impl BlastRange {
                             &self.world,
                             &u.body,
                             u.status.engine,
+                            u.skoba_form == 1,
                             u.mobility,
                             blockers,
                         );
@@ -7829,7 +7998,7 @@ impl BlastRange {
                 if let Some(bounds) = &mut flight_bounds {
                     bounds[id] = u.bounds();
                 }
-                positions[id] = motion::Obstacle::of(&u.motion, &u.body);
+                positions[id] = motion::Obstacle::of_unit(u);
                 if let Some((other, velocity)) = u.motion.take_contact() {
                     let target = if other < id { other } else { other + 1 };
                     contacts.push((id, target, velocity));
@@ -7913,12 +8082,7 @@ impl BlastRange {
                     } else {
                         &self.units[id].motion
                     };
-                    let velocity = phys::V3::new(
-                        fx::angle::cos(motion.drive.head).mul(motion.drive.vel),
-                        Fx::ZERO,
-                        fx::angle::sin(motion.drive.head).mul(motion.drive.vel),
-                    )
-                    .add(motion.shove);
+                    let velocity = motion.velocity().add(motion.shove);
                     (
                         motion.pos,
                         if refused[id] {
@@ -8019,15 +8183,21 @@ impl BlastRange {
                 .artillery()
                 .then(|| artillery::solve(&self.gun, self.target(), gun_weapon, &self.config, 1000))
                 .flatten();
-            let target_angle = artillery_aim
+            let travel_aim = self.player && !self.point_gun() && self.attack.is_none()
+                && (self.manual_route || self.aim.is_none()) && self.streams.left == 0
+                && (self.fire_tick == u32::MAX || self.fire_tick < self.tick);
+            let target_angle = if travel_aim { self.gun.motion.travel_heading() } else { artillery_aim
                 .as_ref()
-                .map_or_else(|| self.aim_angle(), |a| a.yaw);
+                .map_or_else(|| self.aim_angle(), |a| a.yaw) };
             self.turret.step(target_angle, self.turret_limits);
-            if let Some(a) = &artillery_aim {
+            if travel_aim {
+                self.gun.turret_pitch += fx::angle::diff(0, self.gun.turret_pitch)
+                    .clamp(-self.turret_limits.speed, self.turret_limits.speed);
+            } else if let Some(a) = &artillery_aim {
                 self.gun.turret_pitch += fx::angle::diff(a.pitch, self.gun.turret_pitch)
                     .clamp(-self.turret_limits.speed, self.turret_limits.speed);
-                self.gun.update_pose(self.turret.angle);
             }
+            self.gun.update_pose(self.turret.angle);
             if let Some(id) = self.attack {
                 if !self.units[id].status.alive {
                     self.cancel_target_stream();
@@ -8245,7 +8415,7 @@ impl BlastRange {
                     if u.removed.len() != n || u.seg_removed.len() != m {
                         if self.config.material_energy_j == 0 {
                             self.matter
-                                .annihilate_body(id, u.removed.len() - n + u.seg_removed.len() - m);
+                                .annihilate_removed(id, u, n, m);
                         }
                         u.refresh_damage(id);
                     }
@@ -8924,6 +9094,9 @@ impl BlastRange {
         // Every death of the tick is in: a dead digger's tank breaches
         // (ADR-674).
         self.breach_dead_tanks();
+        self.commander_matter_phase();
+        self.economic_ai_phase();
+        self.order_plan_phase();
         self.construction_phase();
         // Production pays, and finished units join the roster last of all:
         // no phase of the tick sees a half-grown roster (ADR-675).
@@ -13091,7 +13264,7 @@ mod tests {
             .iter()
             .enumerate()
             .filter(|(i, _)| *i != id)
-            .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
+            .map(|(_, u)| motion::Obstacle::of_unit(u))
             .collect();
         a.units[id].motion.route.clear();
         a.units[id]
@@ -13828,7 +14001,8 @@ mod tests {
     fn failed_move_retries_after_obstacle_leaves_and_stop_cancels_it() {
         let mut a = BlastRange::new(config());
         let goal = [180, 336];
-        let obstacle = motion::Obstacle {
+        let obstacle = motion::Obstacle { height: Fx::ZERO,
+            moving: false,
             pos: [
                 Fx::from_int(goal[0]),
                 Fx::from_int(FLOOR),

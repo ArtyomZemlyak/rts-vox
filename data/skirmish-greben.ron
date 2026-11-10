@@ -3,7 +3,7 @@
  briefing: "Станция уже построена: у неё 8 дронов, краулер и запас материалов. Краулер собирает обломки, бурит породу и выгружается в «Гребень». «Киль» уже получил заказ на танк; готовой машиной уничтожьте вражеский танк.",
  world_height: Some(1024),
  world_side: Some(5008),
- ready: Some((store: 30000000, production: [(actor: 1, kind: Tank)])),
+ ready: Some((store: 300000000, production: [(actor: 1, kind: Tank)])),
  zone: (name: "Гребень: хранилище и снабжение", min: (800,1600), max: (4000,3200), spawn: (1000,16,2400), target: (3900,16,2400)),
  idle_enemies: true,
  units: [
@@ -28,6 +28,6 @@
  ],
  script: [
   (actor: 2, tick: 0, order: Reclaim((1102,18,2362))),
-  (actor: 2, tick: 240, order: Dig((1100,20,2680))),
+  (actor: 2, tick: 240, after_unload: true, order: Dig((1100,20,2680))),
  ],
 )

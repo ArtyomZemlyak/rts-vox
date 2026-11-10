@@ -45,7 +45,8 @@ fn wide_local_sweeps_preserve_clearance_order_state_and_resume_across_workers() 
         for obstacle_x in [90, 240, 380, 520] {
             let mut w = World::new(640, 96, 640, 4096, Box::new(Ground));
             w.prepare_navigation([4, 5]);
-            let blocker = Obstacle {
+            let blocker = Obstacle { height: Fx::ZERO,
+                moving: false,
                 pos: [
                     Fx::from_int(obstacle_x),
                     Fx::from_int(16),

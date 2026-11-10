@@ -127,6 +127,93 @@ mod support_tests {
     }
 
     #[test]
+    fn rules_guard_the_commander_and_keep_builder_out_of_the_guard_slot() {
+        let tuning = Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
+        let radii = modding::battle_ai::Radii::stock();
+        let unit = |id, allied, kind, position| UnitObservation {
+            id, allied, alive: true, armed: true, mobile: true, can_reposition: true,
+            kind, position, ordered_target: None, attack_ranges: [1000; RangeUnitKind::COUNT],
+        };
+        let observation = Observation {
+            version: OBSERVATION_VERSION, observed_tick: 0, decision_tick: 0,
+            size: [10000, 192, 10000],
+            units: vec![
+                unit(0, true, RangeUnitKind::Commander, [1000, 1000]),
+                unit(1, true, RangeUnitKind::Tank, [1100, 1000]),
+                unit(2, false, RangeUnitKind::Tank, [8500, 8500]),
+                unit(3, false, RangeUnitKind::Tank, [8700, 8500]),
+                unit(4, false, RangeUnitKind::Tank, [8900, 8500]),
+            ],
+        };
+        let decisions = Rules { tuning: &tuning, radii: &radii, controlled_allied: true }.decide(&observation);
+        assert!(matches!(decisions.iter().find(|d| d.actor == 1).unwrap().order, AiOrder::Move(_)));
+        assert!(!matches!(decisions.iter().find(|d| d.actor == 0).unwrap().order, AiOrder::Move(_)));
+    }
+
+    #[test]
+    fn a_local_raid_gets_a_defender_even_when_armies_are_equal() {
+        let tuning = Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
+        let radii = modding::battle_ai::Radii::stock();
+        let unit = |id, allied, kind, position| UnitObservation {
+            id, allied, alive: true, armed: true, mobile: true, can_reposition: true,
+            kind, position, ordered_target: None, attack_ranges: [1000; RangeUnitKind::COUNT],
+        };
+        for side in [true, false] {
+            let observation = Observation { version: OBSERVATION_VERSION, observed_tick: 0,
+                decision_tick: 0, size: [10000, 192, 10000], units: vec![
+                    unit(0, side, RangeUnitKind::Commander, [1000, 1000]),
+                    unit(1, side, RangeUnitKind::Tank, [1200, 1000]),
+                    unit(2, !side, RangeUnitKind::Tank, [1800, 1000]),
+                    unit(3, !side, RangeUnitKind::Commander, [8500, 8500]),
+                ] };
+            let decisions = Rules { tuning: &tuning, radii: &radii, controlled_allied: side }.decide(&observation);
+            assert_eq!(decisions.iter().find(|d| d.actor == 1).map(|d| d.order), Some(AiOrder::Attack(2)));
+        }
+    }
+
+    #[test]
+    fn defender_keeps_engaging_a_raider_just_outside_the_entry_radius() {
+        let tuning = Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
+        let radii = modding::battle_ai::Radii::stock();
+        let unit = |id, allied, kind, position, armed, ordered_target| UnitObservation {
+            id, allied, alive: true, armed, mobile: true, can_reposition: true,
+            kind, position, ordered_target, attack_ranges: [1000; RangeUnitKind::COUNT],
+        };
+        let observation = Observation { version: OBSERVATION_VERSION, observed_tick: 0,
+            decision_tick: 0, size: [10000, 192, 10000], units: vec![
+                unit(0, true, RangeUnitKind::Commander, [1000, 1000], true, None),
+                unit(1, true, RangeUnitKind::Tank, [1200, 1000], true, Some(2)),
+                unit(2, false, RangeUnitKind::Tank, [3000, 1000], true, None),
+                unit(3, false, RangeUnitKind::KilFactoryT1, [1300, 1000], false, None),
+            ] };
+        let decisions = Rules { tuning: &tuning, radii: &radii, controlled_allied: true }.decide(&observation);
+        assert_eq!(decisions.iter().find(|d| d.actor == 1).map(|d| d.order), Some(AiOrder::Attack(2)));
+    }
+
+    #[test]
+    fn combat_policy_leaves_unarmed_workers_and_disabled_guns_to_other_managers() {
+        let tuning = Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
+        let radii = modding::battle_ai::Radii::stock();
+        let unit = |id, allied, kind, armed| UnitObservation {
+            id, allied, alive: true, armed, mobile: true, can_reposition: true,
+            kind, position: [1000 + id as i32 * 100, 1000], ordered_target: None,
+            attack_ranges: [if armed { 1000 } else { 0 }; RangeUnitKind::COUNT],
+        };
+        let observation = Observation { version: OBSERVATION_VERSION, observed_tick: 0,
+            decision_tick: 0, size: [10000, 192, 10000], units: vec![
+                unit(0, true, RangeUnitKind::Crawler, false),
+                unit(1, true, RangeUnitKind::Tank, false),
+                unit(2, true, RangeUnitKind::Tank, true),
+                unit(3, false, RangeUnitKind::Tank, true),
+            ] };
+        for side in [true, false] {
+            let decisions = Rules { tuning: &tuning, radii: &radii, controlled_allied: side }.decide(&observation);
+            assert!(decisions.iter().all(|d| d.actor != 0 && d.actor != 1));
+            assert!(decisions.iter().any(|d| d.actor == if side { 2 } else { 3 }));
+        }
+    }
+
+    #[test]
     fn focus_fire_scores_match_scalar_with_sparse_ids_and_radius_boundaries() {
         let mut tuning = Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
         let units: Vec<_> = (0..24)
@@ -380,7 +467,10 @@ impl Policy for Rules<'_> {
         let allies: Vec<_> = observation
             .units
             .iter()
-            .filter(|u| u.allied == self.controlled_allied && u.alive && (u.armed || u.mobile))
+            // The combat policy must not send collectors, engineers or
+            // weapon-disabled vehicles into attack; economic controllers can
+            // continue to own those actors in every battle mode.
+            .filter(|u| u.allied == self.controlled_allied && u.alive && u.armed)
             .collect();
         let targets: Vec<_> = observation
             .units
@@ -396,6 +486,9 @@ impl Policy for Rules<'_> {
             .find(|u| {
                 u.allied == self.controlled_allied && u.alive && u.kind == RangeUnitKind::Base
             })
+            .or_else(|| observation.units.iter().find(|u| {
+                u.allied == self.controlled_allied && u.alive && u.kind == RangeUnitKind::Commander
+            }))
             .map(|u| u.position);
         let field_strength =
             |units: &[&UnitObservation]| units.iter().filter(|u| u.mobile && u.armed).count();
@@ -426,12 +519,28 @@ impl Policy for Rules<'_> {
         // A smaller field army keeps one nearby mobile defender at its base.
         // Forward units remain committed to the fight; an absent rear guard
         // does not pull a distant unit away from contact.
-        let guard = own_base.filter(|_| outnumbered).and_then(|base| {
+        let guard = own_base.filter(|base| {
+            outnumbered || targets.iter().any(|enemy| {
+                if !enemy.armed || enemy.kind == RangeUnitKind::Base { return false; }
+                let distance = (i64::from(enemy.position[0]) - i64::from(base[0])).abs()
+                    + (i64::from(enemy.position[1]) - i64::from(base[1])).abs();
+                distance <= i64::from(self.radii.defend)
+                    || (distance <= i64::from(self.radii.defend_keep)
+                        && allies.iter().any(|ally| {
+                            ally.mobile && !ally.kind.artillery() && ally.kind != RangeUnitKind::Commander
+                                && ally.ordered_target == Some(enemy.id)
+                                && (i64::from(ally.position[0]) - i64::from(base[0])).abs()
+                                    + (i64::from(ally.position[1]) - i64::from(base[1])).abs()
+                                    <= i64::from(self.radii.guard_pick)
+                        }))
+            })
+        }).and_then(|base| {
             allies
                 .iter()
                 .filter(|u| {
                     u.mobile
                         && u.armed
+                        && u.kind != RangeUnitKind::Commander
                         && !u.kind.artillery()
                         && (i64::from(u.position[0] - base[0]).abs()
                             + i64::from(u.position[1] - base[1]).abs())
@@ -517,7 +626,8 @@ impl Policy for Rules<'_> {
                             // pursuing harmless disabled hulls across rough ground.
                             let siege = (u.armed
                                 && (u.kind.artillery() || (u.mobile && enemy_field == 0)))
-                                .then(|| targets.iter().find(|v| v.kind == RangeUnitKind::Base))
+                                .then(|| targets.iter().find(|v| v.kind == RangeUnitKind::Base)
+                                    .or_else(|| targets.iter().find(|v| v.kind == RangeUnitKind::Commander)))
                                 .flatten();
                             if let Some(base) = siege {
                                 let threat_radius = self.radii.siege_threat

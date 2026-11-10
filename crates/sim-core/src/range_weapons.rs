@@ -1013,6 +1013,15 @@ pub(super) fn flight_velocity(delta: [Fx; 3], speed: i32) -> [Fx; 3] {
 }
 
 pub(super) fn muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
+    if u.kind == RangeUnitKind::Commander {
+        // The prototype uses the articulated walker body. Its barrel is a
+        // moving arm segment, not a muzzle in the root body's aim frame.
+        return walker_muzzles(u)
+            .into_iter()
+            .take(1)
+            .map(|(_, point)| point)
+            .collect();
+    }
     if u.kind == RangeUnitKind::Walker04 {
         return walker_muzzles(u)
             .into_iter()
@@ -1054,7 +1063,12 @@ pub(super) fn walker_muzzles(u: &RangeUnit) -> Vec<(usize, [Fx; 3])> {
             {
                 return None;
             }
-            let p = u.seg_frames[gun].world([Fx::from_int(4), Fx::from_int(2), Fx::from_int(2)]);
+            let body = &u.body.segments[gun].body;
+            let p = u.seg_frames[gun].world([
+                Fx::from_int(i32::from(body.vol.nx)),
+                Fx::from_ratio(i32::from(body.vol.ny), 2),
+                Fx::from_ratio(i32::from(body.vol.nz), 2),
+            ]);
             Some((arm, [p.x, p.y, p.z]))
         })
         .collect()

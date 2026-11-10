@@ -7,6 +7,17 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use modding::range::{RangeBlock, RangeShieldDef, RangeUnitDef};
 
+/// Crawler tool buttons never turn another unit's ordinary RMB into mining.
+/// Mixed groups retain the normal move/attack context; explicit Ctrl orders
+/// still address every compatible miner in the selection.
+fn selected_crawler_mode(sim: &BlastRange, ids: &[usize], mode: panel::CrawlerMode) -> panel::CrawlerMode {
+    if !ids.is_empty() && ids.iter().all(|&id| sim.units[id].kind == RangeUnitKind::Crawler) {
+        mode
+    } else {
+        panel::CrawlerMode::Move
+    }
+}
+
 fn world_battle_blocks(level: i32) -> Result<Vec<RangeBlock>, String> {
     let blocks = modding::range_skirmish::WorldBattle::from_ron(include_str!(
         "../../../../../data/battle-world.ron"
@@ -137,6 +148,7 @@ pub struct Workshop {
     pub selected: Option<Selection>,
     pub pan: Vec2,
     pan_frame: Option<PanFrame>,
+    pub(super) initial_commander_focus: Option<[i32; 3]>,
     pub zoom: f32,
     pub zone: usize,
     pub orbit: f32,
@@ -189,6 +201,7 @@ impl Workshop {
             selected,
             pan: Vec2::ZERO,
             pan_frame: None,
+            initial_commander_focus: None,
             zoom: 1.0,
             rotate: false,
             history: Vec::new(),
@@ -299,8 +312,9 @@ impl Workshop {
     }
     #[cfg(test)]
     pub fn crawler_field(&mut self, _config: ExplosionConfig) -> Result<(), String> {
-        let layout =
+        let mut layout =
             RangeLayout::from_ron(include_str!("../../../../../data/range-crawler-field.ron"))?;
+        layout.endless_battle = true;
         let config = ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron"))?;
         self.commit(layout, config)?;
         self.zone = 0;
@@ -453,6 +467,56 @@ impl Workshop {
         self.orbit = 0.0;
         self.pitch = 0.0;
         Ok(preset.briefing)
+    }
+    /// Experimental standard start: one commander per side on the current map.
+    pub fn commander_battle(&mut self, config: ExplosionConfig) -> Result<String, String> {
+        self.commander_battle_with_setup(config, super::frontend::BattleSetup::default(), false)
+    }
+    pub fn commander_battle_with_setup(&mut self, config: ExplosionConfig, setup: super::frontend::BattleSetup, stock_map: bool) -> Result<String, String> {
+        let mut layout = if stock_map {
+            RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"))?
+        } else { self.layout.clone().ok_or("Нет карты полигона")? };
+        let width = layout.size[0] as i32;
+        let depth = layout.size[2] as i32;
+        if width < 3600 || depth < 3600 { return Err("Карта слишком мала для боя командиров".into()); }
+        layout.battle = true;
+        layout.endless_battle = false;
+        layout.idle_enemies = false;
+        layout.units.clear();
+        layout.unit_yaws.clear();
+        if let Some(course) = &mut layout.course { course.patrols.clear(); }
+        let y = layout.ground_level;
+        layout.size[1] = layout.size[1].max(sim_core::blast::placement::catalogue_height(y));
+        let mut starts = [[width / 6, y, depth / 6], [width * 5 / 6, y, depth * 5 / 6]];
+        if setup.player_southeast { starts.swap(0, 1); }
+        for (side, at) in starts.into_iter().enumerate() {
+            // The T1 factory is 64 m wide: both its footprint and a
+            // commander standing beside it must fit in the initial clearing.
+            let radius = 850;
+            layout.blocks.push(modding::range::RangeBlock {
+                min: [(at[0] - radius).max(1), y, (at[2] - radius).max(1)],
+                max: [(at[0] + radius).min(width - 1), (y + 220).min(layout.size[1] as i32), (at[2] + radius).min(depth - 1)],
+                material: 0,
+            });
+            layout.units.push(modding::range::RangeUnitDef {
+                kind: RangeUnitKind::Commander, allied: side == 0, at, weapon: None,
+            });
+        }
+        let economy = modding::range_economy::RangeEconomy::stock();
+        layout.economy = Some(economy);
+        layout.ready = Some(modding::range::RangeReady { commander_stock: setup.player_stock, enemy_commander_stock: Some(setup.enemy_stock), ..default() });
+        self.commit(layout, config)?;
+        self.initial_commander_focus = Some(starts[0]);
+        self.editing = false;
+        self.allied = true;
+        self.controlled = Some(0);
+        self.selected = Some(Selection::Unit(0));
+        self.selected_units = vec![0];
+        self.pan = Vec2::ZERO;
+        self.zoom = 1.0;
+        self.orbit = 0.0;
+        self.pitch = 0.0;
+        Ok("По одному командиру на сторону. Стройте заводы и добывайте массу; поражение командира завершает бой.".into())
     }
     /// Rebuild the current authored battle without changing its placements or
     /// adding a no-op entry to the editor undo stack.
@@ -631,6 +695,7 @@ impl Workshop {
             self.range_before_battle = self.layout.clone();
         }
         self.preview = None;
+        self.initial_commander_focus = None;
         if let Some(old) = self.layout.replace(next) {
             if self.history.len() == 32 {
                 self.history.remove(0);
@@ -1034,8 +1099,15 @@ pub(super) fn visit_pick_ray<T>(
 }
 
 pub(super) fn pick(sim: &BlastRange, ray: Ray3d) -> Option<([i32; 3], Option<Selection>)> {
+    pick_ignoring(sim, ray, &[])
+}
+
+/// Trace through selected hulls when they obscure a movement destination.
+/// Other actors and terrain retain their normal hit priority.
+fn pick_ignoring(sim: &BlastRange, ray: Ray3d, ignored: &[usize]) -> Option<([i32; 3], Option<Selection>)> {
     visit_pick_ray(sim.size(), ray, |p| {
-        if let Some(i) = sim.units.iter().position(|u| u.solid(p)) {
+        if let Some(i) = sim.units.iter().enumerate().find_map(|(i, u)|
+            (!ignored.contains(&i) && u.solid(p)).then_some(i)) {
             return Some((p, Some(Selection::Unit(i))));
         }
         if sim_core::blast::material(&sim.world, p) != 0 {
@@ -1133,6 +1205,14 @@ pub fn issue_battle_group_order(
     let Some(centre) = destination else { return 0 };
     let destinations = sim.battle_formation_destinations(ids, centre);
     sim.battle_group_move(&destinations, centre)
+}
+fn queue_battle_group_order(sim:&mut BlastRange,ids:&[usize],order:sim_core::blast::battle::Order,destination:Option<[i32;2]>)->usize {
+    use sim_core::blast::battle::{Order,commands::Command};
+    let destinations=if order==Order::Move {sim.battle_formation_destinations(ids,destination.unwrap_or([0,0]))}else{Vec::new()};
+    ids.iter().filter(|&&actor| {
+        let destination=if order==Order::Move {destinations.iter().find(|(id,_)|*id==actor).map(|(_,at)|*at)}else{None};
+        sim.execute_command(Command::QueueOrder{actor,order,destination}).accepted()
+    }).count()
 }
 
 fn battle_units_in_screen_rect(
@@ -1244,6 +1324,7 @@ pub fn input(
         scene.view = 1;
     }
     let editor = laboratory.as_ref().is_some_and(|l| l.editor_camera());
+    let battle_camera = !lab_active && scene.sim.battle_mode();
     let blocked = panel.as_ref().is_some_and(|p| p.blocked)
         || laboratory
             .as_ref()
@@ -1268,21 +1349,25 @@ pub fn input(
                 1.0
             };
         let before = edit.zoom;
-        let next = (before * (-y * if editor { 0.16 } else { 0.08 }).exp())
-            .clamp(if editor { 0.0001 } else { 0.3 }, 32.0);
-        if editor && before > 0.0 && next != before {
-            if let (Some(cursor), Ok((camera, gt)), Some(lab)) =
-                (cursor, cameras.single(), laboratory.as_ref())
-            {
-                let viewport = camera
-                    .logical_viewport_size()
+        let close_zoom = editor || battle_camera;
+        let next = (before * (-y * if close_zoom { 0.16 } else { 0.08 }).exp())
+            .clamp(if close_zoom { 0.0001 } else { 0.3 }, 32.0);
+        // Close battle framing is linear in zoom. The far-map transition is
+        // deliberately non-linear, so retain its existing centre when crossing it.
+        if (editor || battle_camera && matches!(scene.view, 1 | 6) && before <= 1.0 && next <= 1.0)
+            && before > 0.0 && next != before {
+            if let (Some(cursor), Ok((camera, gt))) = (cursor, cameras.single()) {
+                let viewport = camera.logical_viewport_size()
                     .unwrap_or(Vec2::new(window.width(), window.height()));
-                if let Some(margins) = lab.viewport_margins(viewport) {
-                    if let Some((anchor, centre)) =
-                        editor_zoom_focus(&scene.sim, camera, gt, cursor, viewport, margins)
-                    {
-                        edit.pan_by(editor_zoom_pan(anchor, centre, next / before));
-                    }
+                let margins = if editor {
+                    laboratory.as_ref().and_then(|lab| lab.viewport_margins(viewport))
+                } else {
+                    let ui = panel::hud::scale(viewport);
+                    Some([72.0 * ui, 238.0 * ui, 0.0, 0.0])
+                };
+                if let Some((anchor, centre)) = margins.and_then(|m|
+                    editor_zoom_focus(&scene.sim, camera, gt, cursor, viewport, m)) {
+                    edit.pan_by(editor_zoom_pan(anchor, centre, next / before));
                 }
             }
         }
@@ -1302,7 +1387,7 @@ pub fn input(
             let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
             if shift != editor {
                 edit.orbit = (edit.orbit + (b.x - a.x) * 0.006).rem_euclid(std::f32::consts::TAU);
-                let range = if editor { 1.5 } else { 0.6 };
+                let range = if editor || battle_camera { 1.5 } else { 0.6 };
                 edit.pitch = (edit.pitch + (a.y - b.y) * 0.006).clamp(-range, range);
             } else if let (Ok(ra), Ok(rb)) = (
                 camera.viewport_to_world(gt, a),
@@ -1397,7 +1482,20 @@ pub fn input(
         if !blocked {
             if let Some(c) = cursor {
                 if let Ok(ray) = camera.viewport_to_world(gt, c) {
-                    if let Some((hit, selection)) = pick(&scene.sim, ray) {
+                    let initial = pick(&scene.sim, ray);
+                    let selected_ids = edit.battle_selected_ids(&scene.sim);
+                    let mode = selected_crawler_mode(&scene.sim, &selected_ids,
+                        panel.as_ref().map_or(panel::CrawlerMode::Move, |p| p.crawler_mode));
+                    let normal_move = battle && mouse.just_pressed(MouseButton::Right) && !fire
+                        && !keys.pressed(KeyCode::ControlLeft) && !keys.pressed(KeyCode::ControlRight)
+                        && mode == panel::CrawlerMode::Move
+                        && panel.as_ref().is_none_or(|p| p.construction_kind.is_none()
+                            && !p.electric_support_target);
+                    let picked = if normal_move && matches!(initial, Some((_, Some(Selection::Unit(i))))
+                        if selected_ids.contains(&i)) {
+                        pick_ignoring(&scene.sim, ray, &selected_ids).or(initial)
+                    } else { initial };
+                    if let Some((hit, selection)) = picked {
                         if !battle && mouse.just_pressed(MouseButton::Left) {
                             edit.selected = selection;
                             if let Some(Selection::Unit(i)) = selection {
@@ -1423,14 +1521,10 @@ pub fn input(
                                         return;
                                     }
                                     let kind = building.expect("construction kind");
-                                    scene.notice = if scene
-                                        .sim
-                                        .create_construction_site(kind, true, hit)
-                                        .is_some()
-                                    {
-                                        "Площадка создана: дроны резервируют и везут сталь. Квоты — в панели приказов.".into()
-                                    } else {
-                                        "Здесь строить нельзя: место занято, вне карты или исчерпан лимит юнитов".into()
+                                    let queued=keys.pressed(KeyCode::ShiftLeft)||keys.pressed(KeyCode::ShiftRight);
+                                    scene.notice = match construction::place_selected_building(&mut scene.sim,&edit,kind,hit,queued) {
+                                        Some(_) => "Площадка добавлена в план строительства".into(),
+                                        None => "Здесь строить нельзя: место занято, вне карты или исчерпан лимит юнитов".into(),
                                     };
                                     return;
                                 }
@@ -1475,9 +1569,68 @@ pub fn input(
                                         || keys.pressed(KeyCode::ControlRight);
                                     let shift = keys.pressed(KeyCode::ShiftLeft)
                                         || keys.pressed(KeyCode::ShiftRight);
-                                    let mode = panel
-                                        .as_ref()
-                                        .map_or(panel::CrawlerMode::Move, |p| p.crawler_mode);
+                                    if !fire && !ctrl && mode==panel::CrawlerMode::Move {
+                                        if let Some(site)=scene.sim.construction_site_at(hit) {
+                                            if let Some(n)=construction::assign_selected_builders_queued(&mut scene.sim,&edit,site,shift).filter(|n|*n>0) {
+                                                scene.notice=format!("Продолжить строительство · строителей: {n}");return;
+                                            }
+                                        }
+                                    }
+                                    if !fire && !ctrl {
+                                        let factories: Vec<_> = ids.iter().copied().filter(|&id| matches!(
+                                            scene.sim.units[id].kind,
+                                            RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2
+                                                | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4
+                                        )).collect();
+                                        if !shift && !factories.is_empty() {
+                                            let accepted = factories.iter().filter(|&&id|
+                                                scene.sim.set_factory_rally(id, [hit[0], hit[2]])).count();
+                                            scene.notice = if accepted > 0 {
+                                                format!("Точка сбора установлена для заводов: {accepted}")
+                                            } else {
+                                                "Точку сбора нельзя установить здесь".into()
+                                            };
+                                            if factories.len() == ids.len() { return; }
+                                        }
+                                        if let Some(Selection::Unit(target)) = selection {
+                                            if !shift && scene.sim.allied(target) && scene.sim.units[target].kind == RangeUnitKind::GrebenStorage
+                                                && ids.iter().any(|&id| scene.sim.units[id].kind == RangeUnitKind::Crawler) {
+                                                let sent = ids.iter().copied().filter(|&id| scene.sim.execute_command(
+                                                    sim_core::blast::battle::commands::Command::UnloadCrawler { actor: id, dock: Some(target) }).accepted()).count();
+                                                scene.notice = if sent > 0 { format!("На разгрузку в выбранный гребень: {sent}") }
+                                                    else { "Разгрузка невозможна: проверьте груз и свободное место на складе".into() };
+                                                return;
+                                            }
+                                            if scene.sim.allied(target) && scene.sim.units[target].status.alive {
+                                                let site = scene.sim.unit_construction_site(target);
+                                                if let Some(site) = site {
+                                                    if ids.iter().any(|&id| scene.sim.can_drone_build(id, site)) {
+                                                        scene.sim.set_construction_quota(site, 0);
+                                                    }
+                                                }
+                                                let mut accepted = 0;
+                                                for &id in &ids {
+                                                    let order = if site.is_some_and(|s| scene.sim.can_commander_build(id, s) || scene.sim.can_drone_build(id, s) || scene.sim.greben_build_admitted(id,s)) {
+                                                        site.map(Order::Build)
+                                                    } else if scene.sim.can_commander_repair(id, target) {
+                                                        Some(Order::Repair(target))
+                                                    } else { None };
+                                                    if let Some(order) = order {
+                                                        let accepted_order=if shift {scene.sim.execute_command(sim_core::blast::battle::commands::Command::QueueOrder{actor:id,order,destination:None}).accepted()}else{scene.sim.battle_order(id,order,None)};
+                                                        if accepted_order { accepted += 1; }
+                                                    }
+                                                }
+                                                if accepted > 0 {
+                                                    scene.notice = if site.is_some() {
+                                                        format!("Строителей направлено на площадку: {accepted}")
+                                                    } else {
+                                                        format!("Командиров ремонтируют цель: {accepted}")
+                                                    };
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
                                     let salvage = if ctrl {
                                         shift
                                     } else {
@@ -1489,10 +1642,7 @@ pub fn input(
                                             || !ctrl
                                             || !matches!(selection, Some(Selection::Unit(_))))
                                         && ids.iter().any(|&id| {
-                                            matches!(
-                                                scene.sim.units[id].kind,
-                                                RangeUnitKind::Crawler
-                                            )
+                                            matches!(scene.sim.units[id].kind, RangeUnitKind::Crawler | RangeUnitKind::Commander)
                                         });
                                     // Pick the actual rendered fragment on the click,
                                     // rather than the ground behind it.
@@ -1570,10 +1720,7 @@ pub fn input(
                                         if matches!(order, Order::Dig(_) | Order::Reclaim(_)) {
                                             ids.iter()
                                                 .filter(|&&id| {
-                                                    matches!(
-                                                        scene.sim.units[id].kind,
-                                                        RangeUnitKind::Crawler
-                                                    )
+                                                    matches!(scene.sim.units[id].kind, RangeUnitKind::Crawler | RangeUnitKind::Commander)
                                                 })
                                                 .count()
                                         } else if order == Order::Move {
@@ -1594,16 +1741,14 @@ pub fn input(
                                         ids.iter()
                                             .copied()
                                             .filter(|&id| {
-                                                matches!(
-                                                    scene.sim.units[id].kind,
-                                                    RangeUnitKind::Crawler
-                                                )
+                                                matches!(scene.sim.units[id].kind, RangeUnitKind::Crawler | RangeUnitKind::Commander)
                                             })
                                             .collect()
                                     } else {
                                         Vec::new()
                                     };
-                                    let accepted = issue_battle_group_order(
+                                    let issue=if shift && !ctrl {queue_battle_group_order}else{issue_battle_group_order};
+                                    let accepted = issue(
                                         &mut scene.sim,
                                         if dig { &diggers } else { &ids },
                                         order,
@@ -1628,7 +1773,7 @@ pub fn input(
                                         scene.notice = "В выделении нет подвижных юнитов".into();
                                     } else if accepted == eligible && accepted > 0 && dig {
                                         scene.notice = if salvage {
-                                            "Краулер: выбранный обломок, затем сбор в радиусе 16 м"
+                                            "Краулер: выбранный обломок, затем соседние кучи и выгрузка"
                                         } else {
                                             "Краулер: бурение"
                                         }
@@ -1936,6 +2081,34 @@ pub fn overlay(
         );
     }
     if scene.sim.battle_mode() {
+        // Show the exact parking positions used by hauling, rather than an
+        // approximate marker at the building centre. Only selected crawlers
+        // expose them, keeping large battles uncluttered.
+        let selected_crawlers: Vec<_> = edit.battle_selected_ids(&scene.sim).into_iter()
+            .filter(|&id| scene.sim.units.get(id).is_some_and(|u| u.status.alive && u.kind == RangeUnitKind::Crawler))
+            .collect();
+        if !selected_crawlers.is_empty() {
+            for (dock_id, dock) in scene.sim.units.iter().enumerate() {
+                if !scene.sim.allied(dock_id) { continue; }
+                let Some(bays) = scene.sim.greben_crawler_bays(dock_id) else { continue; };
+                let forward = Vec3::new(dock.pose.x.x.to_f64_lossy() as f32, 0.0, dock.pose.x.z.to_f64_lossy() as f32);
+                let side = Vec3::new(-forward.z, 0.0, forward.x);
+                for bay in bays {
+                    let assigned = selected_crawlers.iter().any(|&id| scene.sim.crawler_unloading_bay(id) == Some((dock_id, bay)));
+                    let color = if assigned { Color::srgb(1.0, 0.78, 0.2) } else { Color::srgb(0.15, 0.95, 1.0) };
+                    let y = sim_core::blast::motion::floor(&scene.sim.world, bay[0], bay[1]) as f32 + 1.5;
+                    let p = Vec3::new(bay[0] as f32, y, bay[1] as f32);
+                    let corners = [p - forward * 72.0 - side * 38.0, p + forward * 72.0 - side * 38.0,
+                        p + forward * 72.0 + side * 38.0, p - forward * 72.0 + side * 38.0];
+                    for n in 0..4 { giz.line(corners[n], corners[(n + 1) % 4], color); }
+                    giz.line(p - forward * 35.0, p + forward * 35.0, color);
+                    giz.line(p + forward * 35.0, p + forward * 16.0 + side * 14.0, color);
+                    giz.line(p + forward * 35.0, p + forward * 16.0 - side * 14.0, color);
+                    giz.line(p, p + Vec3::Y * 30.0, color);
+                    giz.circle(Isometry3d::new(p + Vec3::Y * 30.0, flat), 5.0, color);
+                }
+            }
+        }
         let mut selected_ranges = Vec::new();
         for (i, u) in scene.sim.units.iter().enumerate() {
             if !u.status.alive {
@@ -1972,6 +2145,23 @@ pub fn overlay(
                 }
             }
             if selected {
+                if let Some([x, z]) = scene.sim.factory_rally(i) {
+                    let goal = Vec3::new(x as f32,
+                        sim_core::blast::motion::floor(&scene.sim.world, x, z) as f32 + 1.0,
+                        z as f32);
+                    let rally_color = Color::srgb(0.25, 1.0, 0.65);
+                    ground_dash(&mut giz, &scene.sim, [u.at[0], u.at[2]], [x, z], 1.0, rally_color);
+                    giz.circle(Isometry3d::new(goal, flat), 12.0, rally_color);
+                    giz.line(goal, goal + Vec3::Y * 28.0, rally_color);
+                    giz.line(goal + Vec3::Y * 28.0, goal + Vec3::new(12.0, 23.0, 0.0), rally_color);
+                    giz.line(goal + Vec3::new(12.0, 23.0, 0.0), goal + Vec3::Y * 18.0, rally_color);
+                }
+                if panel.ranges && scene.sim.allied(i)
+                    && matches!(u.kind, RangeUnitKind::GrebenStorage | RangeUnitKind::Base)
+                    && scene.sim.supply_radius() > 0 {
+                    ground_range(&mut giz, &scene.sim, [u.at[0], u.at[2]],
+                        scene.sim.supply_radius() as i32, Color::srgba(0.3, 1.0, 0.45, 0.55));
+                }
                 giz.circle(
                     Isometry3d::new(p + Vec3::Y, flat),
                     radius + 3.0,
@@ -2577,22 +2767,24 @@ mod tests {
         let layout =
             RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
         let blocks = layout.blocks.clone();
+        let size = layout.size;
         let before_battle = layout.clone();
         let mut edit = Workshop::new(Some(layout), false);
         edit.battle_preset(config(false, false)).unwrap();
         let layout = edit.layout.as_ref().unwrap();
         assert_eq!(layout.blocks, blocks);
-        assert_eq!(layout.size, [10000, 192, 10000]);
+        assert_eq!(layout.size, size);
         assert_eq!(layout.units.iter().filter(|u| u.allied).count(), 2);
         assert_eq!(layout.units.iter().filter(|u| !u.allied).count(), 2);
         assert_eq!(
             RangeLayout::from_ron(&layout.to_ron().unwrap()).unwrap(),
             *layout
         );
-        let (pending_config, layout) = edit.pending.take().unwrap();
-        let mut sim = BlastRange::with_layout(pending_config, layout).unwrap();
-        assert_eq!(sim.battle.phase, sim_core::blast::battle::Phase::Setup);
-        sim.start_battle().unwrap();
+        // This test checks the editor's map/side round trip. Full engine
+        // startup is exercised by the commander opening simulation; do not
+        // allocate two kilometre worlds just to validate editor metadata.
+        let (_, pending) = edit.pending.take().unwrap();
+        edit.validator.validate(&pending).unwrap();
         edit.selected = Some(Selection::Unit(2));
         edit.side(true, config(false, false)).unwrap();
         assert!(edit.layout.as_ref().unwrap().units[2].allied);
@@ -2605,10 +2797,43 @@ mod tests {
             before_battle.units.len()
         );
         assert_eq!(edit.layout.as_ref(), Some(&before_battle));
-        let (c, restored) = edit.pending.take().unwrap();
-        BlastRange::with_layout(c, restored).unwrap();
+        let (_, restored) = edit.pending.take().unwrap();
+        edit.validator.validate(&restored).unwrap();
         assert!(edit.controlled.is_none());
     }
+    #[test]
+    fn commander_battle_has_headroom_for_buildings_on_the_default_map() {
+        let stock = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
+        for ground in [16, 80] { for height in [128, 192, 768] {
+            let mut layout = stock.clone().with_ground_level(ground).unwrap();
+            layout.size[1] = height;
+            let mut edit = Workshop::new(Some(layout), false);
+            edit.commander_battle(config(false, false)).unwrap();
+            let (_, layout) = edit.pending.take().unwrap();
+            assert!(layout.size[1] >= height);
+            assert_eq!(layout.ground_level, ground);
+            for kind in RangeUnitKind::ALL {
+                let unit = sim_core::blast::RangeUnit::of_kind(kind, [500, ground, 500]);
+                assert!(unit.bounds().1[1] + 1 < layout.size[1] as i32,
+                    "{kind:?} top {}, world ceiling {}", unit.bounds().1[1], layout.size[1]);
+            }
+        } }
+    }
+
+    #[test]
+    fn commander_battle_creates_a_playable_two_commander_start() {
+        let layout = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
+        let mut edit = Workshop::new(Some(layout), false);
+        edit.commander_battle(config(false, false)).unwrap();
+        let (config, layout) = edit.pending.take().unwrap();
+        assert_eq!(layout.units.len(), 2);
+        assert!(layout.units.iter().all(|u| u.kind == RangeUnitKind::Commander));
+        assert_ne!(layout.units[0].allied, layout.units[1].allied);
+        let r = BlastRange::with_layout(config, layout).unwrap();
+        assert_eq!(r.tank_held(0), Some(modding::range_economy::Balance::stock().initial_matter));
+        assert_eq!(r.tank_held(1), Some(modding::range_economy::Balance::stock().initial_matter));
+    }
+
     #[test]
     fn world_battle_places_both_sides_beyond_prepared_sectors() {
         let layout =
@@ -3234,6 +3459,91 @@ mod tests {
             visit_pick_ray([0, 4, 4], Ray3d::new(Vec3::ZERO, Dir3::Y), |_| Some(())),
             None
         );
+    }
+
+    #[test]
+    fn right_click_through_selected_commander_targets_ground_beyond_its_body() {
+        use bevy::camera::{CameraProjection, RenderTargetInfo};
+        use sim_core::blast::battle::Order;
+        let (workshop, config) = fixture();
+        let mut layout = workshop.layout.unwrap();
+        layout.size = [1024, 256, 1024];
+        layout.clear_min = [1, 1]; layout.clear_max = [1023, 1023];
+        layout.battle = true; layout.gun_point = true; layout.course = None;
+        layout.blocks.clear(); layout.shields.clear();
+        layout.economy = Some(modding::range_economy::RangeEconomy::stock());
+        layout.units = vec![RangeUnitDef { kind: RangeUnitKind::Commander, allied: true,
+            at: [512, 16, 512], weapon: None }];
+        let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
+        sim.set_physics_workers(1); sim.set_navigation_workers(1); sim.start_free_control().unwrap();
+        let projection = OrthographicProjection {
+            area: Rect::from_corners(Vec2::new(-320.0, -240.0), Vec2::new(320.0, 240.0)),
+            near: 1.0, far: 2000.0, ..OrthographicProjection::default_3d()
+        };
+        let mut camera = Camera::default();
+        camera.computed.clip_from_view = projection.get_clip_from_view();
+        camera.computed.target_info = Some(RenderTargetInfo { physical_size: UVec2::new(1600, 900), scale_factor: 1.0 });
+        let gt = GlobalTransform::from(Transform::from_xyz(850.0, 420.0, 850.0)
+            .looking_at(Vec3::new(512.0, 16.0, 512.0), Vec3::Y));
+        let mut picked = None;
+        for y in [40.0, 60.0, 80.0, 100.0, 120.0] {
+            for dx in [-24.0, -12.0, 0.0, 12.0, 24.0] {
+                for dz in [-24.0, -12.0, 0.0, 12.0, 24.0] {
+                    let Some(screen) = camera.world_to_viewport(&gt, Vec3::new(512.0 + dx, y, 512.0 + dz)).ok() else { continue; };
+                    let Ok(ray) = camera.viewport_to_world(&gt, screen) else { continue; };
+                    let original = pick(&sim, ray);
+                    let ground = pick_ignoring(&sim, ray, &[0]);
+                    if let (Some((a, Some(Selection::Unit(0)))), Some((b, selection))) = (original, ground) {
+                        if !matches!(selection, Some(Selection::Unit(_))) && (a[0] != b[0] || a[2] != b[2])
+                            && (b[0] - 512).abs().max((b[2] - 512).abs()) > 5 {
+                            picked = Some((screen, b)); break;
+                        }
+                    }
+                }
+                if picked.is_some() { break; }
+            }
+            if picked.is_some() { break; }
+        }
+        let (screen, ground) = picked.expect("camera must see the selected commander over ground");
+        let far_screen = camera.world_to_viewport(&gt, Vec3::new(740.0, 16.0, 512.0)).unwrap();
+        let far_ground = pick_ignoring(&sim, camera.viewport_to_world(&gt, far_screen).unwrap(), &[0]).unwrap().0;
+        // A remembered crawler mode must be ignored for a commander and for
+        // mixed selections; it still applies to a crawler-only selection.
+        sim.units.push(sim_core::blast::RangeUnit::of_kind(RangeUnitKind::Crawler, [800, 16, 800]));
+        for mode in [panel::CrawlerMode::Move, panel::CrawlerMode::Reclaim, panel::CrawlerMode::Drill] {
+            assert_eq!(selected_crawler_mode(&sim, &[0], mode), panel::CrawlerMode::Move);
+            assert_eq!(selected_crawler_mode(&sim, &[0, 1], mode), panel::CrawlerMode::Move);
+            assert_eq!(selected_crawler_mode(&sim, &[1], mode), mode);
+        }
+        sim.units.pop();
+        let mut workshop = Workshop::new(Some(layout), false);
+        workshop.editing = false; workshop.controlled = Some(0); workshop.selected_units = vec![0];
+        let mut app = panel::hud::tests::app_with_scene(sim, workshop);
+        app.init_resource::<ButtonInput<MouseButton>>().add_message::<MouseWheel>().add_systems(Update, input);
+        let mut window = Window { resolution: bevy::window::WindowResolution::new(1600, 900)
+            .with_scale_factor_override(1.0), focused: true, ..default() };
+        window.set_cursor_position(Some(screen));
+        app.world_mut().spawn(window); app.world_mut().spawn((camera, gt, GasCamera));
+        for mode in [panel::CrawlerMode::Move, panel::CrawlerMode::Reclaim, panel::CrawlerMode::Drill] {
+            app.world_mut().resource_mut::<panel::Panel>().crawler_mode = mode;
+            for (cursor, at) in [(screen, ground), (far_screen, far_ground)] {
+                app.world_mut().resource_mut::<Scene>().sim.battle_order(0, Order::Hold, None);
+                app.world_mut().query::<&mut Window>().single_mut(app.world_mut()).unwrap()
+                    .set_cursor_position(Some(cursor));
+                let mut mouse = app.world_mut().resource_mut::<ButtonInput<MouseButton>>();
+                mouse.reset_all(); mouse.press(MouseButton::Right);
+                app.update();
+                let sim = &app.world().resource::<Scene>().sim;
+                assert_eq!(sim.battle.actors[0].order, Order::Move, "crawler mode leaked: {mode:?}");
+                assert_eq!(sim.units[0].motion.destination, Some([at[0], at[2]]));
+            }
+        }
+        // Mining remains an explicit Ctrl+RMB command.
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::ControlLeft);
+        let mut mouse = app.world_mut().resource_mut::<ButtonInput<MouseButton>>();
+        mouse.reset_all(); mouse.press(MouseButton::Right);
+        app.update();
+        assert!(matches!(app.world().resource::<Scene>().sim.battle.actors[0].order, Order::Dig(_)));
     }
 
     #[test]

@@ -15,6 +15,60 @@ const BUILD: u32 = crate::TICKS_PER_SECOND as u32;
 /// A buried slab of rock beside the fixture's tanks, as in the dig tests.
 const FACE: [i32; 3] = [280, 8, 330];
 
+#[test]
+fn scenario_starting_crews_are_symmetric_and_not_duplicated() {
+    let mut l = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+    l.battle = true;
+    l.size = [5000, 1024, 5000];
+    l.economy = Some(RangeEconomy::stock());
+    l.units = [true, false].into_iter().map(|allied| RangeUnitDef {
+        kind: RangeUnitKind::GrebenStorage, allied,
+        at: if allied { [1000, 16, 1000] } else { [4800, 16, 4800] }, weapon: None,
+    }).collect();
+    super::starting_crews(&mut l);
+    for side in [true, false] {
+        assert_eq!(l.units.iter().filter(|u| u.allied == side && u.kind == RangeUnitKind::SkobaDrone).count(), 8);
+        assert_eq!(l.units.iter().filter(|u| u.allied == side && u.kind == RangeUnitKind::Crawler).count(), 1);
+    }
+    assert!(l.units.iter().all(|u| (0..3).all(|axis| u.at[axis] >= 0 && u.at[axis] < l.size[axis] as i32)));
+    let mut bounds = Vec::new();
+    for u in l.units.iter().skip(2) {
+        let unit = super::RangeUnit::placed(u.kind, u.allied, u.at, true);
+        let (lo, hi) = unit.bounds();
+        assert!((0..3).all(|axis| lo[axis] >= 0 && hi[axis] <= l.size[axis] as i32), "{:?} {:?}: {lo:?}..{hi:?}", u.kind, u.at);
+        assert!(bounds.iter().all(|(a, b): &([i32; 3], [i32; 3])| (0..3).any(|axis| hi[axis] <= a[axis] || b[axis] <= lo[axis])), "overlapping starting crew {:?} {:?}", u.kind, u.at);
+        bounds.push((lo, hi));
+    }
+    let count = l.units.len();
+    super::starting_crews(&mut l);
+    assert_eq!(l.units.len(), count);
+}
+
+#[test]
+fn saved_enemy_storage_without_crew_restores_its_original_roster() {
+    let mut l = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+    l.battle = true;
+    l.idle_enemies = true;
+    l.size = [1024, 256, 1024];
+    l.clear_min = [64, 64];
+    l.clear_max = [960, 960];
+    l.blocks = vec![
+        RangeBlock { min: [0, 0, 0], max: [1024, 256, 1024], material: 0 },
+        RangeBlock { min: [0, 0, 0], max: [1024, 16, 1024], material: 1 },
+    ];
+    l.shields.clear();
+    l.course = None;
+    l.economy = Some(RangeEconomy::stock());
+    l.units = vec![RangeUnitDef { kind: RangeUnitKind::GrebenStorage, allied: false,
+        at: [500, 16, 500], weapon: None }];
+    // This was a valid roster before enemy crews became symmetrical.
+    let r = BlastRange::with_saved_layout(config(), l).unwrap();
+    assert_eq!(r.units.len(), 1);
+    let restored = BlastRange::restore(r.config, &r.snapshot()).expect("legacy roster restores");
+    assert_eq!(restored.units.len(), 1);
+    assert_eq!(restored.state_hash(), r.state_hash());
+}
+
 fn config() -> ExplosionConfig {
     ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap()
 }
@@ -32,6 +86,8 @@ fn base(allied: bool, at: [i32; 3]) -> RangeUnitDef {
 /// second each, tanks dig, stores are wide enough for any test.
 fn economy() -> RangeEconomy {
     let mut e = RangeEconomy::stock();
+    e.balance=None; e.dig_periods.clear();
+    for k in &mut e.kinds { k.body_density=0; }
     e.reclaim = None;
     let k = e.kind_mut(RangeUnitKind::Tank).unwrap();
     k.tank = 40 * 260;
@@ -143,12 +199,12 @@ fn a_producer_turns_stock_and_time_into_a_unit() {
         Outcome::Applied
     );
     assert_eq!(r.production_queue(BASE), Some(vec![RangeUnitKind::Tank]));
-    // A share a tick, rounded up: paid in full on the last tick it stands.
+    // Round the accumulated share: no repeated rounding surcharge per tick.
     for tick in 1..BUILD {
         r.step();
         assert_books(&r, seeded);
-        let share = cost.div_ceil(u64::from(BUILD));
-        assert_eq!(r.production_paid(BASE), Some(share * u64::from(tick)));
+        let cumulative = (cost * u64::from(tick)).div_ceil(u64::from(BUILD));
+        assert_eq!(r.production_paid(BASE), Some(cumulative));
         assert_eq!(r.units.len(), before, "tick {tick}");
     }
     r.step();
@@ -189,6 +245,214 @@ fn a_producer_turns_stock_and_time_into_a_unit() {
     assert_eq!(view.counts[0], 5);
     // The snapshot is production's.
     assert_eq!(version(&r.snapshot()), 65);
+}
+
+#[test]
+fn kil_production_progress_and_exit_use_its_front_gate() {
+    let mut l = modding::laboratory::Definition::stock().layout;
+    l.size = [1536, 256, 1536];
+    l.clear_max = [1535, 1535];
+    l.battle = true;
+    l.units = vec![RangeUnitDef { kind: RangeUnitKind::KilFactoryT1, allied: true, at: [800, 16, 800], weapon: None }];
+    let mut economy = economy();
+    // This test isolates gate movement, without a storage network.
+    economy.production.as_mut().unwrap().supply_radius = 0;
+    economy.production.as_mut().unwrap().pipeline_cost_per_cell = 0;
+    economy.production.as_mut().unwrap().producers = vec![Producer {
+        kind: RangeUnitKind::KilFactoryT1,
+        produces: vec![RangeUnitKind::Tank],
+    }];
+    l.economy = Some(economy);
+    let mut r = range(l);
+    for yaw in 0..4 {
+        let head = yaw * (fx::angle::FULL / 4);
+        r.units[0].motion.drive.head = head;
+        r.units[0].update_pose(head);
+        let at = r.free_spot(0, RangeUnitKind::Tank, true).expect("clear gate");
+        let offset = [at[0] - 800, at[2] - 800];
+        match yaw {
+            0 => assert!(offset[0] < 0 && offset[1] == 0),
+            1 => assert!(offset[1] < 0 && offset[0] == 0),
+            2 => assert!(offset[0] > 0 && offset[1] == 0),
+            _ => assert!(offset[1] > 0 && offset[0] == 0),
+        }
+    }
+    r.units[0].motion.drive.head = 0;
+    r.units[0].update_pose(0);
+    let cost = r.production_cost(RangeUnitKind::Tank).unwrap();
+    seed(&mut r, true, cost * 2);
+    assert_eq!(r.enqueue_product(0, RangeUnitKind::Tank, true), Outcome::Applied);
+    assert_eq!(r.production_progress(0), Some((0, BUILD, 0, cost)));
+    for tick in 1..=BUILD {
+        r.tick = tick;
+        r.production_phase();
+        if tick < BUILD {
+            let (elapsed, total, paid, expected) = r.production_progress(0).unwrap();
+            assert_eq!((elapsed, total, expected), (tick, BUILD, cost));
+            assert!(paid > 0 && paid <= cost);
+        }
+    }
+    let (product, born) = r.production_exit(0).expect("exit cue");
+    assert_eq!(born, BUILD);
+    assert_eq!(r.production_queue(0), None);
+    let at = r.units[product].at;
+    assert_eq!(at, [640, 16, 800], "new unit must start inside the actual gate");
+    assert_eq!(r.units[product].motion.drive.head, fx::angle::FULL / 2);
+    assert_eq!(r.battle.actors[product].turret.angle, fx::angle::FULL / 2);
+    assert_eq!(r.factory_exiting_unit(0), Some(product));
+    assert!(matches!(r.battle.actors[product].order, Order::Pilot { throttle: 1, turn: 0, fire: false, .. }));
+    assert!(r.free_spot(0, RangeUnitKind::Tank, true).is_none(), "a tank standing in the corridor must block later production");
+    let launch = r.battle.actors[product].order;
+    r.battle.actors[product].order = Order::Hold;
+    assert!(r.free_spot(0, RangeUnitKind::Tank, true).is_none(), "manual stop inside the gate must still block the next product");
+    r.battle.actors[product].order = launch;
+    assert_eq!(r.enqueue_product(0, RangeUnitKind::Tank, true), Outcome::Applied);
+    for _ in 0..BUILD + 2 { r.tick += 1; r.production_phase(); }
+    assert_eq!(r.units.len(), 2, "second tank waits behind the blocked gate");
+    assert_eq!(r.production_progress(0), Some((BUILD, BUILD, cost, cost)));
+    r.units[product].motion.pos[2] = fx::Fx::from_int(1200);
+    r.units[product].update_pose(fx::angle::FULL / 2);
+    r.finish_factory_launches();
+    r.tick += 1;
+    r.production_phase();
+    assert_eq!(r.units.len(), 3, "production resumes after the corridor clears");
+    let bytes = r.snapshot();
+    let restored = BlastRange::restore(config(), &bytes).expect("production snapshot restores");
+    assert_eq!(restored.state_hash(), r.state_hash());
+}
+
+#[test]
+fn kil_tank_drives_out_front_first_at_every_factory_rotation() {
+    for yaw in 0..4 {
+        let mut l = modding::laboratory::Definition::stock().layout;
+        l.size = [1536, 256, 1536]; l.clear_max = [1535, 1535]; l.battle = true;
+        l.units = vec![RangeUnitDef { kind: RangeUnitKind::KilFactoryT1, allied: true, at: [800, 16, 800], weapon: None }];
+        l.unit_yaws = vec![yaw];
+        let mut e = economy();
+        e.production.as_mut().unwrap().supply_radius = 0;
+        e.production.as_mut().unwrap().pipeline_cost_per_cell = 0;
+        e.production.as_mut().unwrap().producers = vec![Producer { kind: RangeUnitKind::KilFactoryT1, produces: vec![RangeUnitKind::Tank] }];
+        l.economy = Some(e);
+        let mut r = range(l);
+        r.set_physics_workers(1); r.set_navigation_workers(1);
+        let cost = r.production_cost(RangeUnitKind::Tank).unwrap();
+        seed(&mut r, true, cost);
+        assert_eq!(r.enqueue_product(0, RangeUnitKind::Tank, true), Outcome::Applied);
+        for _ in 0..BUILD { r.production_phase(); }
+        let (id, _) = r.production_exit(0).unwrap();
+        let head = (i32::from(yaw) * fx::angle::FULL / 4 + fx::angle::HALF) % fx::angle::FULL;
+        assert_eq!(r.units[id].motion.drive.head, head);
+        assert_eq!(r.battle.actors[id].turret.angle, head);
+        let before = r.units[id].motion.pos;
+        for _ in 0..25 { r.step(); }
+        let p = r.units[id].motion.pos;
+        let along = p[0].sub(before[0]).mul(fx::angle::cos(head))
+            .add(p[2].sub(before[2]).mul(fx::angle::sin(head)));
+        assert!(along > fx::Fx::ZERO, "yaw {yaw}: no forward motion: {:?}", r.units[id].at);
+        assert!(fx::angle::diff(r.battle.actors[id].turret.angle, r.units[id].motion.drive.head).abs() < fx::angle::FULL / 180);
+    }
+}
+
+#[test]
+fn kil_product_exits_under_its_own_power_and_restores_in_gate() {
+    let mut l = modding::laboratory::Definition::stock().layout;
+    l.size = [1536, 256, 1536]; l.clear_max = [1535, 1535]; l.battle = true;
+    l.units = vec![RangeUnitDef { kind: RangeUnitKind::KilFactoryT1, allied: true, at: [800, 16, 800], weapon: None }];
+    let mut e = economy();
+    e.production.as_mut().unwrap().supply_radius = 0;
+    e.production.as_mut().unwrap().pipeline_cost_per_cell = 0;
+    e.production.as_mut().unwrap().producers = vec![Producer { kind: RangeUnitKind::KilFactoryT1, produces: vec![RangeUnitKind::Tank] }];
+    l.economy = Some(e);
+    let mut r = range(l);
+    r.set_physics_workers(1); r.set_navigation_workers(1);
+    assert!(r.set_factory_rally(0, [1100, 1100]));
+    assert!(!r.set_factory_rally(0, [0, 0]));
+    assert_eq!(r.factory_rally(0), Some([1100, 1100]));
+    let cost = r.production_cost(RangeUnitKind::Tank).unwrap();
+    seed(&mut r, true, cost);
+    assert_eq!(r.enqueue_product(0, RangeUnitKind::Tank, true), Outcome::Applied);
+    for _ in 0..BUILD { r.production_phase(); }
+    let (id, _) = r.production_exit(0).unwrap();
+    let initial = r.units[id].motion.pos;
+    let speed = r.units[id].motion.speed;
+    let mut moved = false;
+    for _ in 0..15 {
+        let before = r.units[id].motion.pos;
+        r.step();
+        let after = r.units[id].motion.pos;
+        let dx = after[0].sub(before[0]);
+        let dz = after[2].sub(before[2]);
+        assert!(dx.mul(dx).add(dz.mul(dz)).sqrt() <= fx::Fx::from_ratio(speed + 2, crate::TICKS_PER_SECOND), "product exceeded its speed");
+        assert!(after[0] <= before[0], "product moved backwards");
+        assert!(fx::angle::diff(r.battle.actors[id].turret.angle, r.units[id].motion.drive.head).abs() < fx::angle::FULL / 180);
+        moved |= after[0] < initial[0];
+    }
+    assert!(moved, "product never moved inside gate: pos={:?}, blocked={}, pilot={:?}", r.units[id].at, r.units[id].motion.blocked, r.units[id].motion.pilot);
+    assert!(r.set_factory_rally(0, [1200, 1100]));
+    let mut saved = BlastRange::restore(r.config, &r.snapshot()).expect("factory exit restores");
+    assert_eq!(saved.factory_rally(0), Some([1200, 1100]));
+    for _ in 0..400 {
+        r.step(); saved.step();
+        assert_eq!(r.state_hash(), saved.state_hash());
+        if r.factory_exiting_unit(0).is_none() { break; }
+    }
+    assert!(r.factory_exiting_unit(0).is_none(), "product remained in gate: pos {:?}, blocked {}", r.units[id].at, r.units[id].motion.blocked);
+    assert!(r.units[id].at[0] < initial[0].to_int_trunc() - 100);
+    assert_eq!(r.units[id].motion.destination, Some([1200, 1100]), "latest rally must be assigned only after clearing the gate");
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn factory_pipeline_cost_radius_damage_and_snapshot_are_accounted_for() {
+    let mut l = modding::laboratory::Definition::stock().layout;
+    l.size = [1536, 256, 1536];
+    l.clear_max = [1535, 1535];
+    l.battle = true;
+    l.units = vec![
+        RangeUnitDef { kind: RangeUnitKind::KilFactoryT1, allied: true, at: [1000, 16, 800], weapon: None },
+        RangeUnitDef { kind: RangeUnitKind::Base, allied: true, at: [200, 16, 800], weapon: None },
+    ];
+    let mut e = economy();
+    let p = e.production.as_mut().unwrap();
+    p.supply_radius = 1000;
+    p.pipeline_cost_per_cell = 1000;
+    p.producers = vec![Producer { kind: RangeUnitKind::KilFactoryT1, produces: vec![RangeUnitKind::Tank] }];
+    l.economy = Some(e);
+    let mut r = range(l);
+    let cost = r.production_cost(RangeUnitKind::Tank).unwrap();
+    let quote = r.factory_supply_quote(0).unwrap();
+    assert_eq!(quote, (1, 800, 800_000));
+    assert_eq!(r.supply_quote_at([700, 16, 800], true).unwrap().2, 500_000);
+    assert!(r.supply_quote_at([1000, 16, 800], false).is_none(), "enemy cannot use this storage");
+    r.production_phase();
+    assert!(!r.factory_supply_connected(0), "a connection must not be free");
+    r.units[1].motion.pos[2] = fx::Fx::from_int(1520);
+    r.units[1].update_pose(0);
+    assert!(r.factory_supply_quote(0).is_none(), "storage outside the radius cannot supply");
+    r.units[1].motion.pos[2] = fx::Fx::from_int(800);
+    r.units[1].update_pose(0);
+    seed(&mut r, true, cost * 2 + quote.2);
+    let before = r.side_store(true).unwrap().0;
+    r.production_phase();
+    assert!(r.factory_supply_connected(0));
+    assert_eq!(r.side_store(true).unwrap().0, before - quote.2);
+    r.production_phase();
+    assert_eq!(r.side_store(true).unwrap().0, before - quote.2, "the same connection is paid only once");
+    assert!(r.matter.economy.ledger.balanced());
+    let bytes = r.snapshot();
+    let restored = BlastRange::restore(config(), &bytes).expect("pipeline must survive saving");
+    assert!(restored.factory_supply_connected(0));
+    assert_eq!(restored.snapshot(), bytes);
+    assert_eq!(restored.state_hash(), r.state_hash());
+    assert_eq!(r.enqueue_product(0, RangeUnitKind::Tank, true), Outcome::Applied);
+    r.production_phase();
+    let paid = r.production_paid(0).unwrap();
+    assert!(paid > 0);
+    r.units[1].status.alive = false;
+    assert!(!r.factory_supply_connected(0));
+    r.production_phase();
+    assert_eq!(r.production_paid(0), Some(paid), "a destroyed storage cannot supply the factory");
+    assert!(r.matter.economy.ledger.balanced());
 }
 
 #[test]

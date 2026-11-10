@@ -12,6 +12,54 @@ const FACE: [i32; 3] = [280, 8, 330];
 const FAR_FACE: [i32; 3] = [280, 8, 440];
 
 #[test]
+fn balance_pacing_crawler_excavates_faster_without_raising_the_shared_edit_ceiling() {
+    let mut l = RangeLayout::from_ron(include_str!("../../../data/fixture-drive.ron")).unwrap();
+    l.size = [1600,512,1600]; l.ground_level = 208;
+    l.clear_min = [1,1]; l.clear_max = [1599,1599];
+    l.units = vec![RangeUnitDef { kind: RangeUnitKind::Crawler, allied: true, at: [500,208,500], weapon: None }];
+    l.blocks = vec![RangeBlock {min:[0;3],max:[1600,512,1600],material:0},
+        RangeBlock {min:[0;3],max:[1600,208,1600],material:1}];
+    let mut stock = RangeEconomy::stock();
+    stock.production = None; // no factory exit masks in an excavation check
+    l.economy = Some(stock.clone());
+    let mut r = range(l);
+    let mut measured = Vec::new();
+    // Isolate excavation + confirmed ledger credits. The drill is already
+    // deployed; travel, deployment and hauling are not included in this rate.
+    for old in [true, false] {
+        let mut data = stock.clone();
+        if old {
+            data.kind_mut(RangeUnitKind::Crawler).unwrap().dig_edits_per_tick = 512;
+            for d in &mut data.dig_periods {
+                if [1,7,10].contains(&d.material) { d.period = 2; }
+            }
+        }
+        r.mining.as_mut().unwrap().data = data;
+        let at = if old {[500,208,500]} else {[1100,208,1100]};
+        r.units[0].motion.pos = at.map(fx::Fx::from_int);
+        r.units[0].motion.drive.head = 0; r.units[0].update_pose(0);
+        let tip = r.units[0].world_pos(voxel::unit::CRAWLER_BORE_TIP);
+        let face = [tip[0],207,tip[2]];
+        assert!(r.battle_order(0,Order::Dig(face),None));
+        r.battle.actors[0].pursuit = 1;
+        let before = r.mining().unwrap().mined;
+        for _ in 0..48 {
+            r.tick += 1; r.dig_phase();
+            assert!(r.mining().unwrap().reserved.len() <= stock.dig_edits_in_flight as usize);
+            r.world.flush(); r.credit_digs();
+            assert!(r.matter.economy.ledger.balanced());
+        }
+        let paid = r.mining().unwrap().mined - before;
+        assert!(paid > 0, "old={old}, order={:?}, tip={tip:?}, face={face:?}",r.battle.actors[0].order);
+        measured.push(paid);
+        eprintln!("PACING excavation old={old}: {paid} IU / 48 ticks");
+    }
+    assert!(measured[1] >= measured[0]*2, "{measured:?}");
+    let back = BlastRange::restore(r.config,&r.snapshot()).expect("mining balance restores");
+    assert_eq!(r.state_hash(),back.state_hash());
+}
+
+#[test]
 fn crawler_drill_finds_the_first_obstruction_and_never_cuts_through_it() {
     struct Empty;
     impl voxel::Generator for Empty {
@@ -51,6 +99,7 @@ fn crawler_drill_finds_the_first_obstruction_and_never_cuts_through_it() {
         Some([12, 10, 10])
     );
 }
+
 
 fn config() -> ExplosionConfig {
     ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap()

@@ -3,47 +3,50 @@
 // Tank and store in matter units: one cell of a material carries its
 // density (range-materials.ron). Radius and reach in world units.
 //
-// No kind digs: who digs is the owner's choice (plan 245, section 4,
-// item 7). A kind with an empty tank carries no dig parameters; a layout
-// that wants a digger names one in its own `economy` section. The base is
-// the dock: a living one adds its store to its side's.
+// Commander and Crawler are the stock diggers. A layout can define its own
+// table; a kind with an empty tank carries no dig parameters. Living finished
+// bases/stations add capacity to their side's store.
 //
 // The range's base is a command base, not a factory. Kil T1–T4 builds tanks;
 // Greben replaces Skoba drones. A producer lists products in `producers` of
 // the production
 // section, and a produced kind takes `build_secs` game seconds. A unit costs
-// its template cells times the density of its body material, never a number here.
+// its template volume times effective structural density, not a separate price.
 (
     // Dig edits of all diggers waiting in the edit queue at once: the dig
     // sub-pool inside the edit ceiling (8192 for the stock weapons).
-    dig_edits_in_flight: 512,
+    dig_edits_in_flight: 4096,
     kinds: [
-        (kind: Tank, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 10),
-        (kind: Strider, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 20),
-        (kind: Spider, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 50),
-        (kind: Artillery, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 12),
-        (kind: TurretT1, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
-        (kind: TurretT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
-        (kind: Base, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 1000000),
-        (kind: ArtilleryT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 24),
-        (kind: ArtilleryTurretT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
-        (kind: NuclearSilo, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
-        (kind: ArtilleryTurretT3, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
-        (kind: Crawler, tank: 100000000, dig_radius: 4, dig_reach: 110, dig_edits_per_tick: 16, build_secs: 30),
-        (kind: LightningTank, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 24),
-        (kind: EidolonTank, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 10),
-        (kind: Walker04, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 45),
-        (kind: RazlomT3, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
-        (kind: GrebenStorage, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 1000000),
-        (kind: KilFactoryT1, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 250000),
-        (kind: KilFactoryT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 250000),
-        (kind: KilFactoryT3, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 250000),
-        (kind: KilFactoryT4, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 250000),
-        (kind: SkobaDrone, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 2),
+        (kind: Tank, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 10, body_density: 778),
+        (kind: Strider, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 30, body_density: 4343),
+        (kind: Spider, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 90, body_density: 1268),
+        (kind: Artillery, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 16, body_density: 1340),
+        (kind: TurretT1, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, body_density: 912),
+        (kind: TurretT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, body_density: 1343),
+        (kind: Base, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 150000000, body_density: 381),
+        (kind: ArtilleryT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 36, body_density: 1283),
+        (kind: ArtilleryTurretT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, body_density: 839),
+        (kind: NuclearSilo, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, body_density: 3251),
+        (kind: ArtilleryTurretT3, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, body_density: 4399),
+        (kind: Crawler, tank: 160000000, dig_radius: 28, dig_reach: 110, dig_edits_per_tick: 2048, build_secs: 24, body_density: 218),
+        (kind: LightningTank, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 36, body_density: 1441),
+        (kind: EidolonTank, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 14, body_density: 1669),
+        (kind: Walker04, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 75, body_density: 146),
+        (kind: RazlomT3, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, body_density: 966),
+        (kind: GrebenStorage, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 150000000, body_density: 27),
+        (kind: KilFactoryT1, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 5000000, body_density: 7, build_secs: 32),
+        (kind: KilFactoryT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 5000000, body_density: 24, build_secs: 120),
+        (kind: KilFactoryT3, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 5000000, body_density: 65, build_secs: 400),
+        (kind: KilFactoryT4, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 5000000, body_density: 119, build_secs: 1000),
+        (kind: SkobaDrone, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, build_secs: 3, body_density: 10093),
+        (kind: Commander, tank: 100000000, dig_radius: 12, dig_reach: 400, dig_edits_per_tick: 512, body_density: 3126),
+        (kind: PowerPlantT1, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, body_density: 157),
+        (kind: PowerPlantT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, body_density: 187),
+        (kind: PowerPlantT3, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, body_density: 366),
     ],
     bank: Some((
         // Each side's store with no dock standing.
-        base_store: 100000,
+        base_store: 10000000,
         // Unloading refines 7 of every 10 units; 3 go to RefiningLoss.
         refine_num: 7,
         refine_den: 10,
@@ -69,13 +72,44 @@
     )),
     production: Some((
         // Orders one producer holds, as `max_build_queue` of `data/sim.ron`.
-        queue: 8,
+        queue: 16,
+        // 200 m radius; one connection costs 1,000 mass per 10 cm.
+        supply_radius: 2000,
+        pipeline_cost_per_cell: 1000,
         producers: [
-            (kind: KilFactoryT1, produces: [Tank, EidolonTank, Artillery, Crawler]),
-            (kind: KilFactoryT2, produces: [Tank, EidolonTank, Artillery, Crawler, Strider, ArtilleryT2, LightningTank]),
-            (kind: KilFactoryT3, produces: [Tank, EidolonTank, Artillery, Crawler, Strider, ArtilleryT2, LightningTank, Spider, Walker04]),
+            (kind: KilFactoryT1, produces: [Tank, EidolonTank, Artillery, Crawler, KilFactoryT2]),
+            (kind: KilFactoryT2, produces: [Tank, EidolonTank, Artillery, Crawler, Strider, ArtilleryT2, LightningTank, KilFactoryT3]),
+            (kind: KilFactoryT3, produces: [Tank, EidolonTank, Artillery, Crawler, Strider, ArtilleryT2, LightningTank, Spider, Walker04, KilFactoryT4]),
             (kind: KilFactoryT4, produces: [Tank, EidolonTank, Artillery, Crawler, Strider, ArtilleryT2, LightningTank, Spider, Walker04]),
-            (kind: GrebenStorage, produces: [SkobaDrone]),
+            (kind: GrebenStorage, produces: [SkobaDrone, Crawler]),
         ],
     )),
+    // Snapshot captures these rules. Old authored economies omit them and
+    // retain economy-legacy.ron. 1 M = 100000 IU; 1 P = 10 power/tick.
+    balance: Some((
+        initial_matter: 100000000,
+        // Faster bootstrap, while mining remains the main scalable income.
+        commander_matter_per_second: 300000,
+        print_per_second: 3000000, repair_per_second: 502400,
+        print_power: 1000, repair_power: 500, drone_power: 20,
+        // 40.82 M / 2 s preserves a useful single-drone T1 build time.
+        drone_batch: 4082000, drone_service_ticks: 40,
+        crawler_unload_ticks: 40,
+        power_link_reach: 1000,
+        // T1 supports a printer plus a factory; higher tiers improve power
+        // per invested matter while concentrating risk in one building.
+        generation: (600, 2000, 1000, 6000, 24000),
+        factory_power: (200, 500, 1000, 2500),
+        // A higher-tier factory also has a throughput advantage. Every
+        // accelerated working tick still requires its full material payment.
+        factory_speed_percent: (100, 150, 200, 400),
+        unique_base: true, timed_upgrades: true,
+        queued_crews: true, greben_crew_drones: 8,
+        ai: Some((decision_ticks: 60, defence_radius: 1500, mining_crawlers: 2,
+            max_combat_units: 12, max_factories: 2, expansion_combat_units: 2, min_power_percent: 90)),
+    )),
+    // Excavation throughput, not fracture resistance or granular friction.
+    // Soft-ground excavation needs no alternate-tick delay. Fracture and
+    // granular physics are unchanged; the shared dig pool stays at 4096.
+    dig_periods: [(material: 1, period: 1), (material: 7, period: 1), (material: 10, period: 1)],
 )

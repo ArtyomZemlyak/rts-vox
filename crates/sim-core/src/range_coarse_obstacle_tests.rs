@@ -99,7 +99,8 @@ fn fine_fallback_requests_obstacles_once_and_matches_the_direct_fine_search() {
             actual.coarse = Some(Box::new(CoarsePending { search, waited: 0 }));
         }
         actual.blocked_ticks = 1; // Fine fallback must actually use local blockers.
-        let obstacle = Obstacle {
+        let obstacle = Obstacle { height: Fx::ZERO,
+            moving: false,
             pos: [Fx::from_int(315), Fx::ZERO, Fx::from_int(315)],
             head: 0,
             half: [Fx::from_int(8); 2],

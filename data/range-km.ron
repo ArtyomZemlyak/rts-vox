@@ -1,7 +1,8 @@
 // One 1 km world; prepared sectors share the same destruction and motion rules.
 // Coordinates are world units (0.1 m). Later blocks cut holes in earlier solids.
 (
-    size: (10000, 192, 10000),
+    // Airspace for the full construction catalogue, including Greben and Walker.
+    size: (10000, 512, 10000),
     gun: (128,16,336),
     zones: [
         (name: "Укрытие и броня", min: (80,260), max: (640,650), spawn: (128,16,336), target: (392,24,336),

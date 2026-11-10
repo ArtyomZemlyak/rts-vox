@@ -10,6 +10,14 @@ pub struct SkinBindings {
     cells: Vec<Vec<Option<Cell>>>,
 }
 impl SkinBindings {
+    /// Structural segments are authoritative on their own and must not be
+    /// clipped when an unrelated nearby root cell is removed.
+    pub fn structural(body: &UnitBody) -> Self {
+        Self { cells: body.segments.iter().map(|segment| {
+            let v = &segment.body.vol;
+            vec![None; usize::from(v.nx) * usize::from(v.ny) * usize::from(v.nz)]
+        }).collect() }
+    }
     pub fn new(body: &UnitBody) -> Self {
         let centre = Vec3::from(render::model::root_centre(body));
         let frames = render::model::segment_frames(body, 0.01);
@@ -96,6 +104,19 @@ fn index(b: &UnitBody, p: Cell) -> usize {
 mod tests {
     use super::*;
     #[test]
+    fn structural_greben_portal_uses_its_own_damage() {
+        let pristine = voxel::unit::greben_storage();
+        let bindings = SkinBindings::structural(&pristine);
+        let mut damaged = pristine.clone();
+        assert!(damaged.remove(0, 0, 20));
+        let count = damaged.segments[0].body.solid_count();
+        assert_eq!(bindings.clipped(&pristine, &damaged, 0).solid_count(), count);
+        let cell = (0..damaged.segments[0].body.vol.nx as usize)
+            .find(|&x| damaged.segments[0].body.vol.get(x, 0, 0)).unwrap();
+        damaged.segments[0].body.remove(cell, 0, 0);
+        assert_eq!(bindings.clipped(&pristine, &damaged, 0).solid_count(), count - 1);
+    }
+    #[test]
     fn actual_range_cuts_exposed_panels_and_keeps_sheltered_panels() {
         let c = modding::explosion::ExplosionConfig::from_ron(include_str!(
             "../../../../../data/energy-cannon.ron"
@@ -109,7 +130,7 @@ mod tests {
         for _ in 0..250 {
             range.step();
         }
-        let templates = [
+        let templates: [voxel::unit::UnitBody; modding::range::RangeUnitKind::COUNT] = [
             voxel::unit::tank(),
             voxel::unit::strider(),
             voxel::unit::spider(),
@@ -132,6 +153,10 @@ mod tests {
             voxel::unit::kil_factory(3),
             voxel::unit::kil_factory(4),
             voxel::unit::skoba(),
+            voxel::unit::commander(),
+            voxel::unit::power_plant_t1(),
+            voxel::unit::power_plant_t2(),
+            voxel::unit::power_plant_t3(),
         ];
         let bindings = templates.each_ref().map(SkinBindings::new);
         let lost: Vec<u32> = range
@@ -161,6 +186,10 @@ mod tests {
                     modding::range::RangeUnitKind::KilFactoryT3 => 19,
                     modding::range::RangeUnitKind::KilFactoryT4 => 20,
                     modding::range::RangeUnitKind::SkobaDrone => 21,
+                    modding::range::RangeUnitKind::Commander => 22,
+                    modding::range::RangeUnitKind::PowerPlantT1 => 23,
+                    modding::range::RangeUnitKind::PowerPlantT2 => 24,
+                    modding::range::RangeUnitKind::PowerPlantT3 => 25,
                 };
                 let pristine = &templates[kind];
                 pristine

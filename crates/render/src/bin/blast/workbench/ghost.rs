@@ -15,8 +15,10 @@ pub struct Colours([Handle<StandardMaterial>; 2]);
 pub struct Templates(
     pub Vec<(RangeUnitKind, std::sync::Arc<MeshBuf>)>,
     Vec<(RangeUnitKind, Vec3, Vec3)>,
+    Vec<(RangeUnitKind,Handle<Mesh>)>,
 );
 impl Templates {
+    pub fn mesh(&self,kind:RangeUnitKind)->Option<Handle<Mesh>> {self.2.iter().find(|(k,_)|*k==kind).map(|(_,mesh)|mesh.clone())}
     pub fn bounds(&self, kind: RangeUnitKind) -> (Vec3, Vec3) {
         self.1
             .iter()
@@ -93,6 +95,7 @@ pub fn setup(
         let body = sim_core::blast::RangeUnit::of_kind(kind, [0; 3]).body;
         let geometry = std::sync::Arc::new(template(&body));
         let handle = meshes.add(mesh(&geometry));
+        templates.2.push((kind,handle.clone()));
         let mut lo = Vec3::splat(f32::INFINITY);
         let mut hi = Vec3::splat(f32::NEG_INFINITY);
         for p in &geometry.pos {

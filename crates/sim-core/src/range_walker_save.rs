@@ -53,10 +53,14 @@ impl BlastRange {
             } else {
                 (&mut self.units[id], self.battle.actors[id].turret.angle)
             };
-            if unit.kind != RangeUnitKind::Walker04 {
+            if !matches!(unit.kind, RangeUnitKind::Walker04 | RangeUnitKind::Commander)
+                || unit.kind == RangeUnitKind::Commander && !matches!(targets[2], [0 | 1, 0, 0])
+            {
                 return None;
             }
-            unit.set_arm_targets(targets, yaw);
+            // The saved point already is the interpolated physical pose.
+            unit.arm_targets = Some(targets);
+            unit.update_pose(yaw);
         }
         s.ok().then_some(())
     }

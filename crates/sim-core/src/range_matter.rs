@@ -59,6 +59,10 @@ mod section_tests;
 #[path = "range_ground_price_tests.rs"]
 mod ground_price_tests;
 
+#[cfg(test)]
+#[path = "range_physical_economy_tests.rs"]
+mod physical_economy_tests;
+
 type FracturePrice = ([u32; 3], (u64, u64));
 type BodyFracturePrice = ([u32; 5], (u64, u64));
 
@@ -116,6 +120,11 @@ pub struct Matter {
     pub supplied_mj: u64,
     pub spent_mj: u64,
     bodies: Vec<u32>,
+    /// Physical construction grades are captured in the layout's economy.
+    /// These derived tables are reconstructed, never additional saved state.
+    body_densities: [u32; modding::range::RangeUnitKind::COUNT],
+    body_quanta: Vec<Vec<u64>>,
+    body_masses: Vec<Vec<u64>>,
     /// Fixed pack used to create initial bodies and fuel, reconstructed on load.
     source_densities: Vec<(modding::Mat, u32)>,
     /// Snapshot57: fragment quantities are intrinsic, possibly mixed-density.
@@ -204,6 +213,18 @@ fn body_cells(u: &RangeUnit) -> u64 {
 }
 
 impl Matter {
+    /// Immutable template volumes, shared between scenes. Pricing does not
+    /// need a fresh integrity/connectivity evaluation of every possible unit.
+    pub(super) fn kind_matter(&self, kind: modding::range::RangeUnitKind) -> u64 {
+        static VOLUMES: [std::sync::OnceLock<Vec<(u16,u64)>>; modding::range::RangeUnitKind::COUNT] =
+            [const { std::sync::OnceLock::new() }; modding::range::RangeUnitKind::COUNT];
+        let volumes=VOLUMES[kind.index()].get_or_init(|| {
+            let u=RangeUnit::of_kind(kind,[0;3]);
+            std::iter::once(&u.body).chain(u.body.segments.iter().map(|s|&s.body))
+                .map(|b|(b.mm,u64::from(b.solid_count()))).collect()
+        });
+        volumes.iter().map(|&(mm,count)|count*self.quantum(self.body_densities[kind.index()],mm)).sum()
+    }
     #[cfg(test)]
     pub(super) fn legacy_melt_for_test(&mut self) {
         self.melt_flow = [None; 3];
@@ -212,17 +233,54 @@ impl Matter {
     /// the fixed pack's density of body material — what a produced unit
     /// costs (ADR-675) and what a placed unit's body holds.
     pub(super) fn template_matter(&self, u: &RangeUnit) -> crate::matter::Amount {
-        body_cells(u) * u64::from(self.source_density(3))
+        let density = self.body_densities[u.kind.index()];
+        std::iter::once(&u.body).chain(u.body.segments.iter().map(|s| &s.body))
+            .map(|b| u64::from(b.solid_count()) * self.quantum(density, b.mm)).sum()
+    }
+    fn quantum(&self, density: u32, mm: u16) -> u64 {
+        if density == 0 { return u64::from(self.source_density(3)); }
+        (u64::from(density) * u64::from(mm).pow(3))
+            .div_ceil(u64::from(voxel::unit::WORLD_MM).pow(3))
+    }
+    fn body_tables(&self, u: &RangeUnit) -> (Vec<u64>, Vec<u64>) {
+        let density = self.body_densities[u.kind.index()];
+        let quanta: Vec<_> = std::iter::once(&u.body).chain(u.body.segments.iter().map(|s| &s.body))
+            .map(|b| self.quantum(density, b.mm)).collect();
+        let masses = std::iter::once(&u.body).chain(u.body.segments.iter().map(|s| &s.body))
+            .zip(&quanta).map(|(b, &amount)| {
+                if density > 0 { amount * u64::from(self.tuning.density_kg_m3_per_density) }
+                else { u64::from(self.source_density(3)) * u64::from(self.tuning.density_kg_m3_per_density)
+                    * u64::from(b.mm).pow(3) / 1_000_000 }
+            }).collect();
+        (quanta, masses)
+    }
+    pub(super) fn body_quantum(&self, id: usize, part: usize) -> u64 { self.body_quanta[id][part] }
+    pub(super) fn body_min_quantum(&self, id: usize) -> u64 { self.body_quanta[id].iter().copied().min().unwrap_or(1) }
+    fn body_mass(&self, id: usize, part: usize) -> u64 { self.body_masses[id][part] }
+    fn remaining_body_matter(&self, id: usize, u: &RangeUnit) -> u64 {
+        let root = if u.kind == modding::range::RangeUnitKind::SkobaDrone {
+            (u.original_shape.count() as u64).saturating_sub(u.removed.len() as u64)
+        } else { u64::from(u.body.solid_count()) };
+        root * self.body_quantum(id, 0) + u.body.segments.iter().enumerate()
+            .map(|(p, s)| u64::from(s.body.solid_count()) * self.body_quantum(id, p + 1)).sum::<u64>()
     }
     /// The body container of a unit appended to the roster (ADR-675).
-    pub(super) fn push_body(&mut self, id: crate::matter::ContainerId) {
+    pub(super) fn push_body(&mut self, id: crate::matter::ContainerId, u: &RangeUnit) {
+        let (quanta, masses) = self.body_tables(u);
+        self.body_quanta.push(quanta); self.body_masses.push(masses);
         self.bodies.push(id);
+    }
+    pub(super) fn replace_body_tables(&mut self, id: usize, u: &RangeUnit) {
+        let (q, m)=self.body_tables(u); self.body_quanta[id]=q; self.body_masses[id]=m;
     }
     /// Body container of each unit slot.
     pub(super) fn body_of(&self, id: usize) -> Option<crate::matter::ContainerId> {
         self.bodies.get(id).copied()
     }
     pub fn new(units: &[RangeUnit]) -> Self {
+        Self::with_economy(units, None)
+    }
+    pub(super) fn with_economy(units: &[RangeUnit], data: Option<&modding::range_economy::RangeEconomy>) -> Self {
         let t =
             crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("stock tuning");
         let mats =
@@ -242,7 +300,7 @@ impl Matter {
             .definitions()
             .map(|d| (d.id, d.density))
             .collect();
-        Self {
+        let mut result = Self {
             prices: [None; 8],
             body_prices: [None; 16],
             source_densities,
@@ -272,11 +330,30 @@ impl Matter {
             supplied_mj: 0,
             spent_mj: 0,
             bodies,
+            body_densities: std::array::from_fn(|i| data.and_then(|d| d.kind(modding::range::RangeUnitKind::ALL[i]))
+                .map_or(0, |k| k.body_density)),
+            body_quanta: Vec::new(), body_masses: Vec::new(),
             section_work: t.impact.detach_work_per_tick,
             section_jobs: t.impact.detach_jobs_per_tick,
             section_cursor: 0,
             felling: felling_front::Front::default(),
+        };
+        for u in units {
+            let (quanta, masses) = result.body_tables(u);
+            result.body_quanta.push(quanta); result.body_masses.push(masses);
         }
+        // Initial containers are authored stock, not income. Construct them
+        // at their intrinsic physical value before any transaction exists.
+        if result.body_densities.iter().any(|&d| d > 0) {
+            let mats = modding::data::materials_from_ron(include_str!("../../../data/range-materials.ron")).expect("range materials");
+            result.economy = Economy::new(modding::Kinds::new(), mats, 1, &t);
+            result.bodies = units.iter().enumerate().map(|(id, u)| {
+                let amount = result.remaining_body_matter(id, u);
+                result.economy.ledger.create(Kind::Body, amount, amount)
+            }).collect();
+            result.density_history = true;
+        }
+        result
     }
     /// Density of initial stock, never a live registry price. The fixed world
     /// pack is reconstructed before restoring its existing bodies and fuel.
@@ -804,13 +881,12 @@ impl Matter {
         if !body.vol.get(x, y, z) {
             return false;
         }
-        let amount = u64::from(self.source_density(3));
+        let amount = self.body_quantum(id, part);
         let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
         assert_eq!(
             self.economy.ledger.transfer(self.bodies[id], held, amount),
             amount
         );
-        let density = self.source_density(3);
         let position = frame.world(cell.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))));
         let speed = u
             .motion
@@ -831,10 +907,7 @@ impl Matter {
                 paint: Some([1, body.finish_at(x, y, z), body.part_at(x, y, z) as u8]),
                 mm: body.mm,
                 basis: [frame.x, frame.y, frame.z],
-                mass_g: u64::from(density)
-                    * u64::from(self.tuning.density_kg_m3_per_density)
-                    * u64::from(body.mm).pow(3)
-                    / 1_000_000,
+                mass_g: self.body_mass(id, part),
                 count: 1,
                 shape: 1,
                 side: 2,
@@ -1148,16 +1221,13 @@ impl Matter {
             }
             None => frame.y,
         };
-        let amount = u64::from(self.source_density(3));
+        let amount = self.body_quantum(id, part);
         let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
         assert_eq!(
             self.economy.ledger.transfer(self.bodies[id], held, amount),
             amount
         );
-        let mass_g = u64::from(self.source_density(3))
-            * u64::from(self.tuning.density_kg_m3_per_density)
-            * u64::from(body.mm).pow(3)
-            / 1_000_000;
+        let mass_g = self.body_mass(id, part);
         let [x, y, z] = cell;
         self.debris.emit_body_fragment(
             Fragment {
@@ -1246,7 +1316,7 @@ impl Matter {
                         id as u16, 1, part.cells, [frame; 2], part.shape,
                     )
                     .in_segment(seg as u8);
-                    let amount = u64::from(count) * u64::from(self.source_density(3));
+                    let amount = u64::from(count) * self.body_quantum(id, seg + 1);
                     let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
                     assert_eq!(
                         self.economy.ledger.transfer(self.bodies[id], held, amount),
@@ -1269,7 +1339,6 @@ impl Matter {
                     if velocity.len_sq() > vmax.mul(vmax) {
                         velocity = velocity.scale(vmax.div(velocity.len_sq().sqrt()));
                     }
-                    let density = self.source_density(3);
                     for c in &chunk.cells {
                         u.seg_dents.remove(&(seg as u8, *c));
                         u.seg_removed.push((seg as u8, *c));
@@ -1285,11 +1354,7 @@ impl Matter {
                         // the basis is the turn since it left (ADR-468), and
                         // the frame's axes here turned it twice.
                         basis: crate::burst::IDENTITY,
-                        mass_g: u64::from(density)
-                            * u64::from(self.tuning.density_kg_m3_per_density)
-                            * u64::from(mm).pow(3)
-                            / 1_000_000
-                            * u64::from(count),
+                        mass_g: self.body_mass(id, seg + 1) * u64::from(count),
                         count,
                         shape: 1,
                         side: 2,
@@ -1318,13 +1383,18 @@ impl Matter {
         }
     }
     pub fn annihilate_body(&mut self, id: usize, count: usize) {
-        let amount = count as u64 * u64::from(self.source_density(3));
+        let amount = count as u64 * self.body_quantum(id, 0);
         assert_eq!(
             self.economy
                 .ledger
                 .sink(self.bodies[id], amount, Sink::Annihilation),
             amount
         );
+    }
+    pub(super) fn annihilate_removed(&mut self, id: usize, u: &RangeUnit, root_before: usize, segment_before: usize) {
+        let amount = (u.removed.len() - root_before) as u64 * self.body_quantum(id, 0)
+            + u.seg_removed[segment_before..].iter().map(|(part, _)| self.body_quantum(id, usize::from(*part) + 1)).sum::<u64>();
+        assert_eq!(self.economy.ledger.sink(self.bodies[id], amount, Sink::Annihilation), amount);
     }
     /// Same extractor and physical chunks as the game World. Disconnection
     /// was already paid for at the cut; the remaining section is transferred,
@@ -1373,7 +1443,7 @@ impl Matter {
                 committed = true;
                 let (body, part) = job.commit(&u.body);
                 let count = part.cells.len() as u32;
-                let amount = u64::from(count) * u64::from(self.source_density(3));
+                let amount = u64::from(count) * self.body_quantum(id, 0);
                 let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
                 assert_eq!(
                     self.economy.ledger.transfer(self.bodies[id], held, amount),
@@ -1411,7 +1481,6 @@ impl Matter {
                 if velocity.len_sq() > vmax.mul(vmax) {
                     velocity = velocity.scale(vmax.div(velocity.len_sq().sqrt()));
                 }
-                let density = self.source_density(3);
                 self.debris.emit_section(Fragment {
                     id: 0,
                     position: chunk.centre,
@@ -1424,11 +1493,7 @@ impl Matter {
                         V3::new(Fx::ZERO, Fx::ONE, Fx::ZERO),
                         V3::new(Fx::ZERO, Fx::ZERO, Fx::ONE),
                     ],
-                    mass_g: u64::from(density)
-                        * u64::from(self.tuning.density_kg_m3_per_density)
-                        * u64::from(u.body.mm).pow(3)
-                        / 1_000_000
-                        * u64::from(count),
+                    mass_g: self.body_mass(id, 0) * u64::from(count),
                     count,
                     shape: 1,
                     side: 2,
@@ -1649,6 +1714,10 @@ impl Matter {
                     }
                     modding::range::RangeUnitKind::NuclearSilo => voxel::unit::nuclear_silo(),
                     modding::range::RangeUnitKind::Walker04 => voxel::unit::walker04(),
+                    modding::range::RangeUnitKind::Commander => voxel::unit::commander(),
+                    modding::range::RangeUnitKind::PowerPlantT1 => voxel::unit::power_plant_t1(),
+                    modding::range::RangeUnitKind::PowerPlantT2 => voxel::unit::power_plant_t2(),
+                    modding::range::RangeUnitKind::PowerPlantT3 => voxel::unit::power_plant_t3(),
                     modding::range::RangeUnitKind::RazlomT3 => voxel::unit::razlom_t3(),
                     modding::range::RangeUnitKind::GrebenStorage => voxel::unit::greben_storage(),
                     modding::range::RangeUnitKind::KilFactoryT1 => voxel::unit::kil_factory(1),
@@ -1719,18 +1788,13 @@ impl Matter {
         }
         self.economy.ledger = Ledger::from_snapshot(containers, sunk, initial, head, free)?;
         let l = &self.economy.ledger;
-        for (u, id) in units.iter().zip(&self.bodies) {
+        for (slot, (u, id)) in units.iter().zip(&self.bodies).enumerate() {
             let c = l.try_get(*id)?;
             // The delivered material has its own container. Changing Skoba's
             // depiction must not create or revalue intrinsic hull stock.
-            let cells = if u.kind == modding::range::RangeUnitKind::SkobaDrone {
-                (u.original_shape.count() as u64).checked_sub(u.removed.len() as u64)?
-            } else {
-                body_cells(u)
-            };
             if !c.alive
                 || c.kind != Kind::Body
-                || c.held != cells * u64::from(self.source_density(3))
+                || c.held != self.remaining_body_matter(slot, u)
             {
                 return None;
             }
@@ -1746,7 +1810,11 @@ impl Matter {
                     .mats
                     .get(f.material)
                     .is_some_and(|d| d.density != 0)
-                    && if f.paint.is_some() {
+                    && if f.paint.is_some() && self.body_densities.iter().any(|&d| d > 0) {
+                        c.held >= u64::from(f.count)
+                            && c.held <= u64::from(f.count) * u64::from(modding::MAX_DENSITY) * 512
+                            && f.mass_g == c.held.saturating_mul(u64::from(self.tuning.density_kg_m3_per_density))
+                    } else if f.paint.is_some() {
                         c.held == u64::from(f.count) * u64::from(self.source_density(f.material))
                     } else {
                         c.held >= u64::from(f.count)

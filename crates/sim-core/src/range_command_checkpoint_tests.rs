@@ -691,6 +691,23 @@ fn portable_wire_v1_has_a_fixed_little_endian_conformance_vector() {
 }
 
 #[test]
+fn blueprint_commands_and_rejected_queued_axes_survive_portable_ingress() {
+    let mut r=owner(RangeUnitKind::Tank);
+    let due=r.world().tick+10;
+    let commands=[
+        Command::QueueOrder{actor:0,order:Order::Move,destination:Some([210,336])},
+        Command::PlaceConstruction{actor:0,kind:RangeUnitKind::TurretT1,at:[500,16,400],queued:true},
+        Command::CancelConstruction{site:31},Command::CancelLastOrder{actor:0},
+        Command::QueueOrder{actor:0,order:Order::Pilot{throttle:2,turn:-2,aim:[1,2,3],fire:true},destination:None},
+    ];
+    for (sequence,command) in commands.into_iter().enumerate() {r.submit(request(sequence as u64,due,command)).unwrap();}
+    let mut copy=restored(&r);
+    while r.world().tick<=due+4 {
+        r.step().unwrap();copy.step().unwrap();assert_eq!(r.state_hash(),copy.state_hash());
+    }
+}
+
+#[test]
 fn portable_results_preserve_queued_formation_and_failed_path_search() {
     let mut r = owner(RangeUnitKind::Tank);
     let queued = r

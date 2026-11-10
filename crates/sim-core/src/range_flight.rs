@@ -9,6 +9,7 @@ impl Motion {
         world: &World,
         body: &UnitBody,
         powered: bool,
+        compact: bool,
         response: crate::mobility::Mobility,
         blockers: impl Iterator<Item = Bounds>,
     ) {
@@ -24,6 +25,7 @@ impl Motion {
         };
         let limits = response.limits(&Limits::of(&self.chassis, TICKS), want == drive::NO_WAY);
         let speed = Fx::from_int(self.speed)
+            .mul(if compact { Fx::from_ratio(3, 2) } else { Fx::ONE })
             .mul(response.engine)
             .mul(Fx::from_int(i32::from(throttle)));
         let (next, delta) = drive::advance(

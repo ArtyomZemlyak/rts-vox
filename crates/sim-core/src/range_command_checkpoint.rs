@@ -308,11 +308,14 @@ impl Reader<'_> {
                     0 => Order::Auto,
                     1 => Order::Hold,
                     2 => Order::Move,
+                    11 => Order::Rally([self.0.i32(), self.0.i32()]),
                     3 => Order::Attack(self.size()?),
                     4 => Order::Ground([self.0.i32(), self.0.i32(), self.0.i32()]),
                     5 => Order::Dig([self.0.i32(), self.0.i32(), self.0.i32()]),
                     7 => Order::Reclaim([self.0.i32(), self.0.i32(), self.0.i32()]),
                     8 => Order::Support(self.size()?),
+                    9 => Order::Build(self.size()?),
+                    10 => Order::Repair(self.size()?),
                     6 => {
                         let throttle = self.0.u8();
                         let turn = self.0.u8();
@@ -354,6 +357,11 @@ impl Reader<'_> {
                 kind: *crate::blast::RangeUnitKind::ALL.get(usize::from(self.0.u8()))?,
             },
             12 => Command::Cancel { actor },
+            15=>{let p=crate::blast::build_plans::load_order(&mut self.0)?;Command::QueueOrder{actor,order:p.order,destination:p.destination}},
+            16=>Command::PlaceConstruction{actor,kind:*crate::blast::RangeUnitKind::ALL.get(usize::from(self.0.u8()))?,at:std::array::from_fn(|_|self.0.i32()),queued:self.boolean()?},
+            17=>Command::CancelConstruction{site:actor},
+            18=>Command::CancelLastOrder{actor},
+            14 => Command::UnloadCrawler { actor, dock: if self.boolean()? { Some(self.size()?) } else { None } },
             13 if actor == 0 => Command::Sculpt {
                 at: std::array::from_fn(|_| self.0.i32()),
                 edge: self.0.u32(),
@@ -998,6 +1006,14 @@ pub(super) fn save_recorded_command(b: &mut Blob, command: Command) {
             b.u8(field as u8);
             b.i32(value);
         }
+        Command::QueueOrder{actor,order,destination}=>{
+            b.u8(15);b.usize(actor);crate::blast::build_plans::save_order(b,crate::blast::build_plans::PlannedOrder{order,destination});
+        }
+        Command::PlaceConstruction{actor,kind,at,queued}=>{
+            b.u8(16);b.usize(actor);b.u8(kind.index() as u8);for v in at {b.i32(v);}b.bool(queued);
+        }
+        Command::CancelConstruction{site}=>{b.u8(17);b.usize(site);}
+        Command::CancelLastOrder{actor}=>{b.u8(18);b.usize(actor);}
         Command::Order {
             actor,
             order,
@@ -1010,6 +1026,7 @@ pub(super) fn save_recorded_command(b: &mut Blob, command: Command) {
                 Order::Auto => b.u8(0),
                 Order::Hold => b.u8(1),
                 Order::Move => b.u8(2),
+                Order::Rally(at) => { b.u8(11); for x in at { b.i32(x); } }
                 Order::Attack(target) => {
                     b.u8(3);
                     b.usize(target);
@@ -1034,6 +1051,14 @@ pub(super) fn save_recorded_command(b: &mut Blob, command: Command) {
                 }
                 Order::Support(target) => {
                     b.u8(8);
+                    b.usize(target);
+                }
+                Order::Build(site) => {
+                    b.u8(9);
+                    b.usize(site);
+                }
+                Order::Repair(target) => {
+                    b.u8(10);
                     b.usize(target);
                 }
                 Order::Pilot {
@@ -1088,6 +1113,12 @@ pub(super) fn save_recorded_command(b: &mut Blob, command: Command) {
             b.u32(edge);
             b.u16(material);
             b.bool(erase);
+        }
+        Command::UnloadCrawler { actor, dock } => {
+            b.u8(14);
+            b.usize(actor);
+            b.bool(dock.is_some());
+            if let Some(dock) = dock { b.usize(dock); }
         }
         Command::Cancel { actor } => {
             b.u8(12);

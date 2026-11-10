@@ -577,7 +577,13 @@ impl Foot {
             self.swing = false;
         }
         let anchor = self.anchor.unwrap_or(self.from);
-        if swing && (!self.swing || (self.cadence == ZERO && s.cycles > ZERO)) {
+        // A foot that already completed its swing while the hull was stopped
+        // must not restart halfway through the same frozen swing interval.
+        // Keep it planted until the phase returns to stance; the next swing
+        // can then start normally without a jump to mid-air.
+        let hold_resumed = swing && s.cycles > ZERO && self.cadence == ZERO
+            && (self.swing || self.progress >= ONE);
+        if swing && !hold_resumed && (!self.swing || (self.cadence == ZERO && s.cycles > ZERO)) {
             self.from = anchor;
             self.progress = ZERO;
             self.cadence = s.cycles;
@@ -622,7 +628,10 @@ impl Foot {
                 s.floor,
             );
         }
-        let target = if swing {
+        let target = if hold_resumed {
+            self.progress = ZERO;
+            anchor
+        } else if swing {
             let span = ONE.sub(g.duty).max(MILLI);
             let q = if s.cycles > ZERO {
                 self.progress
@@ -630,7 +639,13 @@ impl Foot {
             } else {
                 // A stopped hull finishes a lifted step at the pace it
                 // began with, neither frozen in the air nor dropped at once.
-                self.progress.add(self.cadence.div(span)).min(ONE)
+                let landing = if self.cadence > ZERO {
+                    // A step started during acceleration can have an almost
+                    // zero cadence. Once stopped, finish it in bounded time
+                    // rather than suspending the foot for several seconds.
+                    self.cadence.max(Fx::from_ratio(1, 80))
+                } else { ZERO };
+                self.progress.add(landing.div(span)).min(ONE)
             };
             self.progress = q;
             let eased = q.mul(q).mul(Fx::from_int(3).sub(q.mul(Fx::from_int(2))));
@@ -644,7 +659,16 @@ impl Foot {
             }
             self.anchor.unwrap_or(anchor)
         };
-        self.swing = swing;
+        // When motion stops mid-step the frozen phase remains in the swing
+        // interval. Once the foot has landed, commit that contact instead of
+        // leaving it permanently marked as airborne until movement resumes.
+        if swing && s.cycles == ZERO && self.progress >= ONE {
+            self.anchor = Some(self.goal);
+            self.swing = false;
+            self.cadence = ZERO;
+        } else {
+            self.swing = swing;
+        }
         self.base = root.base;
         self.local = Some((
             to_local(root, target.pos),
@@ -653,6 +677,54 @@ impl Foot {
         ));
         self.contact = Some(target);
         target
+    }
+
+    /// Keep a two-legged walker's contacts on their own side of its hull.
+    /// A planted foot may slide when the chassis pivots faster than its next
+    /// step; the saved anchors and swing endpoints must obey the same bound.
+    pub(crate) fn keep_walker_side(&mut self, rig: &LegRig, root: &Frame,
+        head: i32, spread: Fx, floor: &dyn Fn(Fx, Fx) -> Fx) {
+        let sign = if rig.ankle.z < ZERO { -1 } else { 1 };
+        // Scale with the authored body: Walker 04 is enlarged in-world, so
+        // a fixed world-unit gap would be much narrower than either foot.
+        let min_side = rig.ankle.z.abs().mul(spread);
+        let max_yaw = angle::FULL / 24;
+        let fix = |mut c: Contact| {
+            let mut local = to_local(root, c.pos);
+            let original = local;
+            let side = local.z.mul(Fx::from_int(sign));
+            let relative_head = angle::diff(c.head, head);
+            if side < min_side { local.z = min_side.mul(Fx::from_int(sign)); }
+            // A sideways step plus torso yaw can carry a planted contact
+            // beyond the two links' reach. Keep its height and side, sliding
+            // its horizontal target onto the same reach used by the IK solve.
+            let reach = rig.l1.add(rig.l2).mul(Fx::from_ratio(999, 1000));
+            let d = local.sub(rig.hip);
+            if d.len_sq() > reach.mul(reach) {
+                let flat_sq = reach.mul(reach).sub(d.y.mul(d.y)).max(ZERO);
+                let radius = flat_sq.sqrt();
+                let z = d.z.max(radius.neg()).min(radius);
+                let x = flat_sq.sub(z.mul(z)).max(ZERO).sqrt();
+                local.z = rig.hip.z.add(z);
+                local.x = rig.hip.x.add(d.x.max(x.neg()).min(x));
+            }
+            if local != original || relative_head.abs() > max_yaw {
+                let pos = to_world(root, local);
+                let limited = head.wrapping_add(relative_head.clamp(-max_yaw, max_yaw));
+                let grounded = rig.sole.contact(pos, limited, floor);
+                c.pos = V3::new(pos.x, pos.y.max(grounded.pos.y), pos.z);
+                c.head = limited;
+                c.normal = grounded.normal;
+            }
+            c
+        };
+        self.anchor = self.anchor.map(fix);
+        self.from = fix(self.from);
+        self.goal = fix(self.goal);
+        self.contact = self.contact.map(fix);
+        if let Some(c) = self.contact {
+            self.local = Some((to_local(root, c.pos), angle::diff(c.head, head), c.normal));
+        }
     }
 
     pub fn save(&self, b: &mut blob::Blob) {
@@ -1106,6 +1178,42 @@ mod tests {
             "{c:?}"
         );
         assert!(c.pos.x > root.base.x.add(r.ankle.x), "{c:?}");
+        assert!(foot.planted(), "the landed foot remained marked airborne after stopping");
+        let still = foot.contact.unwrap();
+        for _ in 0..10 {
+            let s = Stance { grounded: true, root: &root, head: 0,
+                phase: phase(f64::from(at) * 0.02), lift_scale: ONE, linear: V3::ZERO,
+                angular: 0, cycles: ZERO, gait: &g, floor: &flat };
+            assert!(near(foot.step(&r, &s).pos, still.pos, 1e-4));
+            assert!(foot.planted());
+        }
+        let mut bytes = blob::Blob::new();
+        foot.save(&mut bytes);
+        let mut restored = Foot::load(&mut blob::Scan::new(&bytes.v)).expect("stopped foot restores");
+        let resumed_root = hull(root.base.add(V3::new(step, ZERO, ZERO)), 0);
+        let resumed = Stance { grounded: true, root: &resumed_root, head: 0,
+            phase: phase((f64::from(at) + 1.0) * 0.02), lift_scale: ONE,
+            linear: V3::new(step, ZERO, ZERO), angular: 0, cycles: fx(0.02),
+            gait: &g, floor: &flat };
+        let next = foot.step(&r, &resumed);
+        assert_eq!(next, restored.step(&r, &resumed));
+        assert!(near(still.pos, next.pos, 0.035),
+            "foot jumps when motion resumes: {:?} -> {:?}", still.pos, next.pos);
+        let mut previous = next;
+        let mut moved_again = false;
+        for j in 2..80 {
+            let next_root = hull(root.base.add(V3::new(step.mul(Fx::from_int(j)), ZERO, ZERO)), 0);
+            let s = Stance { grounded: true, root: &next_root, head: 0,
+                phase: phase((f64::from(at) + f64::from(j)) * 0.02), lift_scale: ONE,
+                linear: V3::new(step, ZERO, ZERO), angular: 0, cycles: fx(0.02),
+                gait: &g, floor: &flat };
+            let contact = foot.step(&r, &s);
+            assert_eq!(contact, restored.step(&r, &s), "restored foot diverged at {j}");
+            assert!(near(previous.pos, contact.pos, 0.035), "foot jumped on resumed tick {j}");
+            moved_again |= !foot.planted();
+            previous = contact;
+        }
+        assert!(moved_again, "the foot did not resume its gait");
     }
 
     #[test]

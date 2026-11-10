@@ -2,6 +2,23 @@
 use super::*;
 use phys::V3;
 
+/// Grow with actual flight distance, independently of energy lost to cover.
+fn front_width(half_width: i32, progress: Fx) -> Fx {
+    Fx::from_int(half_width).mul(Fx::from_ratio(3, 4).add(progress.clamp(Fx::ZERO, Fx::ONE).div(Fx::from_int(4))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn front_expands_with_flight_without_exceeding_budgeted_width() {
+        let widths = [Fx::ZERO, Fx::from_ratio(1, 4), Fx::from_ratio(1, 2), Fx::ONE]
+            .map(|progress| front_width(42, progress));
+        assert!(widths.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(widths[3], Fx::from_int(42));
+    }
+}
+
 impl BlastRange {
     pub(super) fn step_razlom_wave(
         &mut self,
@@ -24,7 +41,11 @@ impl BlastRange {
             .min(r.distance);
         let start = V3::new(r.pos[0], r.pos[1], r.pos[2]);
         let end = start.add(forward.scale(distance));
-        let width = Fx::from_int(tuning.half_width).mul(strength).max(Fx::ONE);
+        // Razlom retains the launch point in `previous` throughout its flight.
+        let dx = r.pos[0].sub(r.previous[0]);
+        let dz = r.pos[2].sub(r.previous[2]);
+        let progress = dx.mul(dx).add(dz.mul(dz)).sqrt().div(Fx::from_int(range));
+        let width = front_width(tuning.half_width, progress).max(Fx::ONE);
         let height = tuning.half_height;
         let corners = [
             start.add(side.scale(width)),

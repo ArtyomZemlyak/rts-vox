@@ -608,3 +608,95 @@ fn with_banks_a_piece_that_does_not_fit_sends_the_tank_to_haul() {
     assert_eq!(b.tank_held(0), Some(8 * ROCK));
     assert!(b.side_store(true).unwrap().0 > 0);
 }
+
+#[test]
+fn crawler_destruction_scenario_fires_and_spills_recoverable_cargo() {
+    let preset = modding::range_skirmish::stock(27).unwrap();
+    let base = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+    let layout = preset.apply_to(base).unwrap();
+    let mut r = BlastRange::with_layout(config(), layout).unwrap();
+    r.set_physics_workers(1); r.set_navigation_workers(1);
+    assert_eq!(r.tank_held(1), Some(491_520));
+    r.start_battle().unwrap();
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    for _ in 0..480 {
+        r.step();
+        if !r.units[1].status.alive { break; }
+    }
+    assert!(!r.units[1].status.alive, "scenario weapon did not destroy crawler: fired={}, status={:?}, order={:?}, shells={}", r.battle.actors[0].fired, r.units[1].status, r.battle.actors[0].order, r.battle.rounds.len());
+    let cargo_in_fragments: u64 = r.matter.debris.fragments.iter().filter(|f| f.material == 2 && f.paint.is_none())
+        .map(|f| r.matter.economy.ledger.held(f.held)).sum();
+    assert_eq!(r.tank_held(1), Some(0), "scenario cargo must all spill as visible pieces");
+    assert!(cargo_in_fragments > 0, "destroyed cargo produced no recoverable pieces");
+    assert!(r.tank_held(1).unwrap() + cargo_in_fragments >= 491_520);
+    assert_eq!(r.matter.economy.ledger.sunk(Sink::ContainerBreach), 0);
+    assert!(r.matter.economy.ledger.balanced());
+    BlastRange::restore(r.config.clone(), &r.snapshot()).expect("spilled cargo must survive saving");
+}
+
+#[test]
+fn destroyed_crawler_spills_real_cargo_outside_both_sides_at_any_heading() {
+    use modding::range::RangeUnitDef;
+    for heading in [0, fx::angle::QUARTER, fx::angle::HALF, 3 * fx::angle::QUARTER] {
+        let mut l = layout(1_000_000, 16, 64);
+        l.units = vec![RangeUnitDef { kind: RangeUnitKind::Crawler, allied: true, at: [350, 16, 350], weapon: None }];
+        l.economy = Some(RangeEconomy::stock());
+        let mut r = range(l);
+        let tank = r.mining.as_ref().unwrap().tank(0).unwrap();
+        let ground = r.matter.economy.ground;
+        let cargo = 491_520;
+        r.matter.economy.ledger.reveal(ground, cargo);
+        assert_eq!(r.matter.economy.ledger.transfer(ground, tank, cargo), cargo);
+        r.units[0].motion.drive.head = heading;
+        r.units[0].update_pose(heading);
+        r.units[0].status.alive = false;
+        let origin = r.units[0].pose.base;
+        let side = r.units[0].pose.z;
+        r.breach_dead_tanks();
+        let pieces = &r.matter.debris.fragments;
+        assert_eq!(pieces.len(), 32);
+        let mut sides = [0usize; 2];
+        for f in pieces {
+            let signed = f.position.sub(origin).dot(side);
+            assert!(signed.abs() >= Fx::from_int(44), "cargo is hidden inside the hull: {signed:?}");
+            assert!(f.velocity.dot(side).mul(signed) > Fx::ZERO, "cargo should fly away from its side");
+            sides[usize::from(signed > Fx::ZERO)] += 1;
+        }
+        assert_eq!(sides, [16, 16]);
+        let spilled: u64 = pieces.iter().map(|f| r.matter.economy.ledger.held(f.held)).sum();
+        assert_eq!(spilled + r.tank_held(0).unwrap(), cargo);
+        assert_eq!(spilled, cargo);
+        assert!(r.matter.economy.ledger.balanced());
+        let copy = BlastRange::restore(r.config.clone(), &r.snapshot()).expect("spilled cargo restores");
+        assert_eq!(r.state_hash(), copy.state_hash());
+        r.breach_dead_tanks();
+        assert_eq!(r.matter.debris.fragments.len(), 32, "cargo must spill once");
+    }
+}
+
+#[test]
+fn spilled_crawler_cargo_falls_outside_wreck_and_remains_reclaimable() {
+    use modding::range::RangeUnitDef;
+    let mut l = layout(1_000_000, 16, 64);
+    l.units = vec![RangeUnitDef { kind: RangeUnitKind::Crawler, allied: true, at: [350, 16, 350], weapon: None }];
+    l.economy = Some(RangeEconomy::stock());
+    let mut r = range(l);
+    r.set_physics_workers(1); r.set_navigation_workers(1);
+    let tank = r.mining.as_ref().unwrap().tank(0).unwrap();
+    let ground = r.matter.economy.ground;
+    let cargo = 491_520;
+    r.matter.economy.ledger.reveal(ground, cargo);
+    assert_eq!(r.matter.economy.ledger.transfer(ground, tank, cargo), cargo);
+    r.units[0].status.alive = false;
+    r.breach_dead_tanks();
+    let origin = r.units[0].pose.base;
+    let side = r.units[0].pose.z;
+    for _ in 0..40 { r.step(); }
+    let pieces: Vec<_> = r.matter.debris.fragments.iter().filter(|f| f.material == 2 && f.paint.is_none()).collect();
+    let spilled: u64 = pieces.iter().map(|f| r.matter.economy.ledger.held(f.held)).sum();
+    assert_eq!(spilled + r.tank_held(0).unwrap(), cargo);
+    assert!(pieces.iter().any(|f| f.position.sub(origin).dot(side) < Fx::from_int(-40)));
+    assert!(pieces.iter().any(|f| f.position.sub(origin).dot(side) > Fx::from_int(40)));
+    assert!(pieces.iter().any(|f| f.resting), "debris should settle for collection");
+    assert!(r.matter.economy.ledger.balanced());
+}

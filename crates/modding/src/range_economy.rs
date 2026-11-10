@@ -37,6 +37,10 @@ fn is_zero(v: &u64) -> bool {
 fn is_zero32(v: &u32) -> bool {
     *v == 0
 }
+fn is_false(v: &bool) -> bool { !*v }
+fn is_zero8(v: &u8) -> bool { *v==0 }
+fn default_factory_speed_percent() -> [u32; 4] { [100; 4] }
+fn factory_speed_is_default(v: &[u32; 4]) -> bool { *v == default_factory_speed_percent() }
 
 /// What one kind does in the economy. A kind with an empty tank does not
 /// dig, and then carries no dig parameters at all.
@@ -63,6 +67,103 @@ pub struct KindEconomy {
     /// density of its body material.
     #[serde(default, skip_serializing_if = "is_zero32")]
     pub build_secs: u32,
+    /// Effective structural density per 100 mm world voxel. Zero retains
+    /// the legacy per-body-cell valuation for authored scenes and saves.
+    #[serde(default, skip_serializing_if = "is_zero32")]
+    pub body_density: u32,
+}
+
+/// Captured economic rules. Absent on historical layouts, which retain the
+/// legacy preset instead of being silently revalued on load.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Balance {
+    pub initial_matter: u64,
+    pub commander_matter_per_second: u64,
+    pub print_per_second: u64,
+    pub repair_per_second: u64,
+    pub print_power: u64,
+    pub repair_power: u64,
+    pub drone_power: u64,
+    pub drone_batch: u64,
+    pub drone_service_ticks: u32,
+    pub crawler_unload_ticks: u32,
+    pub power_link_reach: u32,
+    /// Commander, Base, PowerPlant T1, T2, T3.
+    pub generation: [u64; 5],
+    pub factory_power: [u64; 4],
+    /// Producer throughput; historical saves keep 100% for every tier.
+    #[serde(default = "default_factory_speed_percent", skip_serializing_if = "factory_speed_is_default")]
+    pub factory_speed_percent: [u32; 4],
+    pub unique_base: bool,
+    pub timed_upgrades: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub queued_crews: bool,
+    #[serde(default, skip_serializing_if = "is_zero8")]
+    pub greben_crew_drones: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<EconomicAi>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct EconomicAi {
+    pub decision_ticks: u32,
+    pub defence_radius: u32,
+    pub mining_crawlers: u8,
+    pub max_combat_units: u16,
+    pub max_factories: u8,
+    pub expansion_combat_units: u16,
+    pub min_power_percent: u8,
+}
+impl Balance {
+    pub fn legacy() -> &'static Self {
+        static VALUE: std::sync::OnceLock<Balance> = std::sync::OnceLock::new();
+        VALUE.get_or_init(|| ron::from_str(include_str!("../../../data/economy-legacy.ron")).expect("legacy economic rules"))
+    }
+    pub fn stock() -> &'static Self {
+        static VALUE: std::sync::OnceLock<Balance> = std::sync::OnceLock::new();
+        VALUE.get_or_init(|| RangeEconomy::stock().balance.expect("stock economic rules"))
+    }
+    fn validate(&self) -> bool {
+        self.initial_matter <= MAX_TANK && self.commander_matter_per_second <= MAX_TANK
+            && (1..=MAX_TANK).contains(&self.print_per_second)
+            && (1..=MAX_TANK).contains(&self.repair_per_second)
+            && (1..=1_000_000).contains(&self.print_power)
+            && self.repair_power <= 1_000_000 && self.drone_power <= 1_000_000
+            && (1..=MAX_TANK).contains(&self.drone_batch)
+            && (1..=252).contains(&self.drone_service_ticks)
+            && (1..=1200).contains(&self.crawler_unload_ticks)
+            && (1..=100_000).contains(&self.power_link_reach)
+            && self.generation.iter().chain(&self.factory_power).all(|&p| p <= 1_000_000)
+            && self.factory_speed_percent.iter().all(|p| (1..=1000).contains(p))
+            && self.greben_crew_drones <= 8
+            && self.ai.as_ref().is_none_or(|a| (1..=16).contains(&a.mining_crawlers)
+                && (1..=128).contains(&a.max_combat_units) && (1..=8).contains(&a.max_factories)
+                && (1..=1200).contains(&a.decision_ticks) && (1..=100_000).contains(&a.defence_radius)
+                && a.expansion_combat_units <= a.max_combat_units
+                && (1..=100).contains(&a.min_power_percent))
+    }
+    pub fn generation(&self, kind: RangeUnitKind) -> u64 {
+        match kind {
+            RangeUnitKind::Commander => self.generation[0], RangeUnitKind::Base => self.generation[1],
+            RangeUnitKind::PowerPlantT1 => self.generation[2], RangeUnitKind::PowerPlantT2 => self.generation[3],
+            RangeUnitKind::PowerPlantT3 => self.generation[4], _ => 0,
+        }
+    }
+    pub fn factory_speed(&self, kind: RangeUnitKind) -> u32 {
+        match kind {
+            RangeUnitKind::KilFactoryT1 => self.factory_speed_percent[0],
+            RangeUnitKind::KilFactoryT2 => self.factory_speed_percent[1],
+            RangeUnitKind::KilFactoryT3 => self.factory_speed_percent[2],
+            RangeUnitKind::KilFactoryT4 => self.factory_speed_percent[3],
+            _ => 100,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct DigPeriod {
+    pub material: u16,
+    pub period: u32,
 }
 
 /// The sides' stores and unloading (plan 245, slice 3; ADR-673). Without
@@ -118,6 +219,11 @@ pub struct Producer {
 pub struct RangeProduction {
     /// Orders one producer holds at once, the one being built included.
     pub queue: u32,
+    /// Zero keeps legacy economies without a local supply network.
+    #[serde(default, skip_serializing_if = "is_zero32")]
+    pub supply_radius: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pipeline_cost_per_cell: u64,
     /// At most one entry per kind; a kind without one produces nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub producers: Vec<Producer>,
@@ -140,6 +246,11 @@ pub struct RangeEconomy {
     /// Production; absent in the RON of a layout before slice 4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub production: Option<RangeProduction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance: Option<Balance>,
+    /// Excavation effort is independent of fracture strength and loose flow.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dig_periods: Vec<DigPeriod>,
 }
 
 impl RangeEconomy {
@@ -153,6 +264,16 @@ impl RangeEconomy {
         Self::from_ron(include_str!("../../../data/range-economy.ron")).expect("stock economy")
     }
     pub fn validate(&self) -> Result<(), String> {
+        if self.balance.as_ref().is_some_and(|b| b.queued_crews
+            && self.production.as_ref().is_some_and(|p|p.queue < u32::from(b.greben_crew_drones)+1)) {
+            return Err("crew commissioning requires enough production queue slots".into());
+        }
+        if self.balance.as_ref().is_some_and(|b| !b.validate())
+            || self.dig_periods.len() > 256
+            || self.dig_periods.iter().enumerate().any(|(i, d)| d.material == 0 || d.period == 0 || d.period > 8
+                || self.dig_periods[..i].iter().any(|p| p.material == d.material)) {
+            return Err("invalid economic balance or excavation periods".into());
+        }
         if !(1..=MAX_DIG_POOL).contains(&self.dig_edits_in_flight)
             || self.kinds.len() > RangeUnitKind::COUNT
         {
@@ -177,6 +298,9 @@ impl RangeEconomy {
             if k.build_secs > MAX_BUILD_SECS {
                 return Err("range economy production exceeds supported bounds".into());
             }
+            if k.body_density > crate::MAX_DENSITY {
+                return Err("range structural density or generation exceeds supported bounds".into());
+            }
         }
         if let Some(p) = &self.production {
             // A producer draws on its side's store: it needs the bank, and
@@ -192,6 +316,9 @@ impl RangeEconomy {
                     })
             };
             if !(1..=MAX_QUEUE).contains(&p.queue)
+                || p.supply_radius > 100_000
+                || p.pipeline_cost_per_cell > 1_000_000
+                || (p.supply_radius == 0) != (p.pipeline_cost_per_cell == 0)
                 || p.producers.len() > RangeUnitKind::COUNT
                 || (!p.producers.is_empty() && self.bank.is_none())
                 || p.producers.iter().enumerate().any(bad)
@@ -266,11 +393,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn commissioning_rules_are_optional_and_reject_invalid_budgets() {
+        let old=ron::ser::to_string(Balance::legacy()).unwrap();
+        assert!(!old.contains("queued_crews") && !old.contains("greben_crew_drones") && !old.contains("ai:"));
+        assert_eq!(ron::from_str::<Balance>(&old).unwrap(),*Balance::legacy());
+        let mut e=RangeEconomy::stock();
+        assert!(e.produces(RangeUnitKind::GrebenStorage,RangeUnitKind::Crawler));
+        assert_eq!(e.balance.as_ref().unwrap().greben_crew_drones,8);
+        e.production.as_mut().unwrap().queue=8;
+        assert!(e.validate().is_err(),"a complete crew must fit the queue");
+        e.production.as_mut().unwrap().queue=16;
+        e.balance.as_mut().unwrap().ai.as_mut().unwrap().decision_ticks=0;
+        assert!(e.validate().is_err());
+    }
+
+    #[test]
     fn stock_economy_lists_every_kind_and_the_crawler_digs() {
         let e = RangeEconomy::stock();
         for kind in RangeUnitKind::ALL {
             assert!(e.kind(kind).is_some(), "{kind:?}");
-            assert_eq!(e.digs(kind), matches!(kind, RangeUnitKind::Crawler));
+            assert_eq!(e.digs(kind), matches!(kind, RangeUnitKind::Crawler | RangeUnitKind::Commander));
         }
         // The base is the stock dock (ADR-673).
         assert!(e.bank.is_some());
@@ -280,18 +422,36 @@ mod tests {
         assert!(e.reclaim.is_some());
         // Kil builds tanks and Greben replaces construction drones.
         assert!(e.production.is_some());
+        assert_eq!(e.production.as_ref().unwrap().supply_radius, 2000);
+        assert_eq!(e.production.as_ref().unwrap().pipeline_cost_per_cell, 1000);
         assert!(e.produces(RangeUnitKind::KilFactoryT1, RangeUnitKind::Tank));
         assert!(e.produces(RangeUnitKind::GrebenStorage, RangeUnitKind::SkobaDrone));
         assert_eq!(
             e.products(RangeUnitKind::KilFactoryT1),
-            &[RangeUnitKind::Tank]
+            &[RangeUnitKind::Tank, RangeUnitKind::EidolonTank, RangeUnitKind::Artillery, RangeUnitKind::Crawler, RangeUnitKind::KilFactoryT2]
         );
-        assert!(e.kinds.iter().all(|k| k.build_secs
-            == match k.kind {
-                RangeUnitKind::Tank => 10,
-                RangeUnitKind::SkobaDrone => 2,
-                _ => 0,
-            }));
+        for producer in &e.production.as_ref().unwrap().producers {
+            for &kind in &producer.produces {
+                assert!(e.kind(kind).is_some_and(|k| k.build_secs > 0), "{kind:?} has no production time");
+            }
+        }
+    }
+
+    #[test]
+    fn factory_speed_is_bounded_captured_and_defaults_to_legacy_throughput() {
+        let e = RangeEconomy::stock();
+        let text = ron::ser::to_string(&e).unwrap();
+        assert_eq!(RangeEconomy::from_ron(&text).unwrap(), e);
+        assert_eq!(e.balance.as_ref().unwrap().factory_speed_percent,[100,150,200,400]);
+        let legacy_text = ron::ser::to_string(Balance::legacy()).unwrap();
+        assert!(!legacy_text.contains("factory_speed_percent"));
+        let old: Balance = ron::from_str(&legacy_text).unwrap();
+        assert_eq!(old.factory_speed_percent,[100;4]);
+        for value in [0,1001] {
+            let mut bad=e.clone();
+            bad.balance.as_mut().unwrap().factory_speed_percent[3]=value;
+            assert!(bad.validate().is_err());
+        }
     }
 
     #[test]

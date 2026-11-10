@@ -96,11 +96,15 @@ pub enum RangeUnitKind {
     KilFactoryT3,
     KilFactoryT4,
     SkobaDrone,
+    Commander,
+    PowerPlantT1,
+    PowerPlantT2,
+    PowerPlantT3,
 }
 
 impl RangeUnitKind {
     /// Canonical order for kind-indexed capability tables.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 26] = [
         Self::Tank,
         Self::Strider,
         Self::Spider,
@@ -123,6 +127,10 @@ impl RangeUnitKind {
         Self::KilFactoryT3,
         Self::KilFactoryT4,
         Self::SkobaDrone,
+        Self::Commander,
+        Self::PowerPlantT1,
+        Self::PowerPlantT2,
+        Self::PowerPlantT3,
     ];
     pub const COUNT: usize = Self::ALL.len();
     pub const fn index(self) -> usize {
@@ -149,6 +157,10 @@ impl RangeUnitKind {
             Self::KilFactoryT3 => 19,
             Self::KilFactoryT4 => 20,
             Self::SkobaDrone => 21,
+            Self::Commander => 22,
+            Self::PowerPlantT1 => 23,
+            Self::PowerPlantT2 => 24,
+            Self::PowerPlantT3 => 25,
         }
     }
 
@@ -167,6 +179,9 @@ impl RangeUnitKind {
                 | Self::KilFactoryT2
                 | Self::KilFactoryT3
                 | Self::KilFactoryT4
+                | Self::PowerPlantT1
+                | Self::PowerPlantT2
+                | Self::PowerPlantT3
         )
     }
     pub const fn canister(self) -> bool {
@@ -287,21 +302,40 @@ pub struct RangeProductionOrder {
     pub kind: RangeUnitKind,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeTankStock {
+    pub actor: usize,
+    pub amount: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RangeReady {
     #[serde(default)]
     pub store: u64,
+    /// Initial universal matter in each authored commander's own tank.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub commander_stock: u64,
+    /// Optional separate starting stock for the opposing side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enemy_commander_stock: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tank_stock: Vec<RangeTankStock>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub construction: Vec<RangeConstructionOrder>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub production: Vec<RangeProductionOrder>,
 }
 
+fn is_zero_u64(v: &u64) -> bool { *v == 0 }
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RangeLayout {
     /// Battle actors are the placed roster; the test gun is parked off-scene.
     #[serde(default)]
     pub battle: bool,
+    /// Range exercises remain playable after all targets are destroyed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub endless_battle: bool,
     /// Passive hostile targets keep their positions and never acquire orders.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub idle_enemies: bool,
@@ -651,7 +685,15 @@ impl RangeLayout {
                     })
             })
             || r.ready.as_ref().is_some_and(|ready| {
-                ready.construction.len() > 8
+                (ready.commander_stock.max(ready.enemy_commander_stock.unwrap_or(0)) > 0 && (r.units.iter().all(|u| u.kind != RangeUnitKind::Commander)
+                    || r.economy.as_ref().and_then(|e| e.kind(RangeUnitKind::Commander))
+                        .is_none_or(|k| k.tank < ready.commander_stock.max(ready.enemy_commander_stock.unwrap_or(0)))))
+                    || ready.tank_stock.iter().enumerate().any(|(i, stock)| {
+                        r.units.get(stock.actor).is_none_or(|u| r.economy.as_ref()
+                            .and_then(|e| e.kind(u.kind)).is_none_or(|k| k.tank < stock.amount))
+                            || ready.tank_stock[..i].iter().any(|s| s.actor == stock.actor)
+                    })
+                    || ready.construction.len() > 8
                     || ready.construction.iter().any(|order| {
                         !matches!(
                             order.kind,

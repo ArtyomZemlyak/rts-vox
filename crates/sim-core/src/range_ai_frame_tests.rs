@@ -31,6 +31,9 @@ fn manual_handoff_on_ai_deadline_records_and_replays_without_allied_rules() {
             order: Order::Hold,
             destination: None,
         },
+        Command::QueueOrder{actor:0,order:Order::Move,destination:Some([260,360])},
+        Command::QueueOrder{actor:0,order:Order::Pilot{throttle:0,turn:0,aim:[260,16,360],fire:false},destination:None},
+        Command::PlaceConstruction{actor:0,kind:RangeUnitKind::TurretT1,at:[260,16,360],queued:true},
     ] {
         let mut r = owner(RangeUnitKind::Tank, true);
         r.submit(Envelope {
@@ -44,7 +47,7 @@ fn manual_handoff_on_ai_deadline_records_and_replays_without_allied_rules() {
         let mut replay = replica(&r);
         let before = replay.checkpoint().to_bytes();
         let frame = r.step_record_ai().unwrap().unwrap();
-        let enemy_actor = matches!(command, Command::Order { actor: 1, .. });
+        let enemy_actor = matches!(command, Command::Order { actor: 1, .. }|Command::QueueOrder{order:Order::Pilot{..},..}|Command::PlaceConstruction{..});
         assert_eq!(frame.allied.is_some(), enemy_actor);
         let mut bad = frame.clone();
         bad.allied = if enemy_actor { None } else { Some(Vec::new()) };

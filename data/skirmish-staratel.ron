@@ -25,6 +25,6 @@
  ],
  script: [
   (actor: 0, tick: 0, order: Reclaim((1102,18,2362))),
-  (actor: 0, tick: 240, order: Dig((1100,20,2680))),
+  (actor: 0, tick: 240, after_unload: true, order: Dig((1100,20,2680))),
  ],
 )

@@ -15,6 +15,38 @@ const FAR_FACE: [i32; 3] = [280, 8, 440];
 /// Slot of the allied base, the dock, after the fixture's three tanks.
 const DOCK: usize = 3;
 
+#[test]
+fn compact_greben_dock_tracks_its_opening_and_rotation() {
+    let mut u = super::RangeUnit::of_kind(RangeUnitKind::GrebenStorage, [800, 16, 800]);
+    for heading in [0, fx::angle::QUARTER, fx::angle::HALF, 3 * fx::angle::QUARTER] {
+        u.motion.drive.head = heading;
+        u.update_pose(heading);
+        let mouth = u.world_pos([0, 8, 20]);
+        assert_eq!(super::dock_position(&u), [mouth[0], mouth[2]]);
+        assert_eq!(u.body.mm, 200);
+        let bays = super::greben_bays(&u);
+        assert_eq!(u.body.segments.len(), 2);
+        for (index, (bay, z)) in bays.into_iter().zip(voxel::unit::GREBEN_CRAWLER_SOCKET_Z).enumerate() {
+            let mouth = u.world_pos([0, 8, z]);
+            assert_eq!(bay, [
+                mouth[0] - u.pose.x.x.mul(fx::Fx::from_int(108)).to_int_trunc(),
+                mouth[2] - u.pose.x.z.mul(fx::Fx::from_int(108)).to_int_trunc(),
+            ]);
+            let portal = &u.body.segments[index].body;
+            let frame = u.seg_frames[index];
+            let entry = frame.world([fx::Fx::ZERO, fx::Fx::ZERO, fx::Fx::from_int(22)]);
+            let relative = fx::Fx::from_int(mouth[0]).sub(entry.x).mul(u.pose.x.x)
+                .add(fx::Fx::from_int(mouth[2]).sub(entry.z).mul(u.pose.x.z));
+            assert!(relative.sub(fx::Fx::from_int(64)).abs() <= fx::Fx::ONE,
+                "portal entrance did not rotate with the dock");
+            assert!(!portal.vol.get(4, 20, 22), "loading lane must remain open");
+            assert!(portal.vol.get(1, 34, 22), "portal must have an overhead frame");
+        }
+        assert_eq!(super::crawler_bay(&u, [bays[0][0], 16, bays[0][1]]), bays[0]);
+        assert_eq!(super::crawler_bay(&u, [bays[1][0], 16, bays[1][1]]), bays[1]);
+    }
+}
+
 fn config() -> ExplosionConfig {
     ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap()
 }
@@ -57,6 +89,138 @@ fn range(l: RangeLayout) -> BlastRange {
     let mut r = BlastRange::with_layout(config(), l).unwrap();
     r.start_free_control().unwrap();
     r
+}
+
+#[test]
+fn crawler_must_reach_greben_bay_before_unloading() {
+    let mut l = layout(100_000, 50_000, 1_000_000);
+    l.size[1] = 512;
+    l.units = vec![
+        RangeUnitDef { kind: RangeUnitKind::Crawler, allied: true, at: [200, 16, 400], weapon: None },
+        RangeUnitDef { kind: RangeUnitKind::GrebenStorage, allied: true, at: [500, 16, 400], weapon: None },
+    ];
+    l.economy = Some(RangeEconomy::stock());
+    let mut r = range(l);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    let face = [200, 16, 400];
+    assert!(r.battle_order(0, Order::Reclaim(face), None));
+    let tank = r.mining().unwrap().tank(0).unwrap();
+    let e = &mut r.matter.economy;
+    e.ledger.reveal(e.ground, 10_000);
+    assert_eq!(e.ledger.transfer(e.ground, tank, 10_000), 10_000);
+    r.mining.as_mut().unwrap().mark_full(0);
+    r.haul_phase();
+    let (dock, bay) = r.crawler_unloading_bay(0).expect("assigned Greben bay");
+    assert_eq!(dock, 1);
+    assert_eq!(r.tank_held(0), Some(10_000));
+    let before = r.side_store(true).unwrap().0;
+    for _ in 0..1600 {
+        r.step();
+        if r.side_store(true).unwrap().0 > before { break; }
+    }
+    assert!(r.side_store(true).unwrap().0 > before, "crawler must actually reach and unload at the bay; position {:?}, bay {:?}", r.units[0].motion.pos.map(|v| v.to_int_trunc()), bay);
+    let p = r.units[0].motion.pos.map(|v| v.to_int_trunc());
+    let dx = i64::from(p[0] - bay[0]);
+    let dz = i64::from(p[2] - bay[1]);
+    assert!(dx * dx + dz * dz <= super::CRAWLER_DOCK_REACH * super::CRAWLER_DOCK_REACH);
+    assert!(fx::angle::diff(r.units[dock].motion.drive.head, r.units[0].motion.drive.head).abs()
+        <= super::CRAWLER_DOCK_ANGLE, "crawler unloaded without facing its socket");
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn greben_unloads_large_load_over_multiple_ticks_without_losing_matter() {
+    let mut l = layout(100_000, 50_000, 1_000_000);
+    l.size[1] = 512;
+    l.units = vec![
+        RangeUnitDef { kind: RangeUnitKind::Crawler, allied: true, at: [200, 16, 400], weapon: None },
+        RangeUnitDef { kind: RangeUnitKind::GrebenStorage, allied: true, at: [500, 16, 400], weapon: None },
+    ];
+    l.economy = Some(RangeEconomy::stock());
+    let mut r = range(l);
+    assert!(r.battle_order(0, Order::Reclaim([200, 16, 400]), None));
+    let tank = r.mining().unwrap().tank(0).unwrap();
+    let cargo = r.matter.economy.ledger.get(tank).cap / 2;
+    let ground = r.matter.economy.ground;
+    r.matter.economy.ledger.reveal(ground, cargo);
+    assert_eq!(r.matter.economy.ledger.transfer(ground, tank, cargo), cargo);
+    r.mining.as_mut().unwrap().mark_full(0);
+    r.haul_phase();
+    let (dock, bay) = r.crawler_unloading_bay(0).unwrap();
+    r.units[0].motion.pos = [bay[0], 16, bay[1]].map(fx::Fx::from_int);
+    let heading = r.units[dock].motion.drive.head;
+    r.units[0].motion.drive.head = heading;
+    r.units[0].update_pose(heading);
+    r.haul_phase();
+    assert!(r.tank_held(0).unwrap() > 0 && r.tank_held(0).unwrap() < cargo);
+    for _ in 0..50 { r.haul_phase(); }
+    assert_eq!(r.tank_held(0), Some(0));
+    assert!(!r.hauling(0), "crawler stayed in its hauling leg");
+    assert_eq!(r.units[0].motion.destination, Some([200, 400]), "crawler did not resume the collection order");
+    assert!(matches!(r.battle.actors[0].order, Order::Reclaim([200, 16, 400])));
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn crawler_turns_at_the_socket_before_unloading_and_restores() {
+    let mut l = layout(100_000, 50_000, 1_000_000);
+    l.size[1] = 512;
+    l.units = vec![
+        RangeUnitDef { kind: RangeUnitKind::Crawler, allied: true, at: [200, 16, 400], weapon: None },
+        RangeUnitDef { kind: RangeUnitKind::GrebenStorage, allied: true, at: [500, 16, 400], weapon: None },
+    ];
+    l.economy = Some(RangeEconomy::stock());
+    let mut r = range(l);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    r.units[1].motion.drive.head = fx::angle::QUARTER;
+    r.units[1].update_pose(fx::angle::QUARTER);
+    assert!(r.battle_order(0, Order::Reclaim([200, 16, 400]), None));
+    let tank = r.mining().unwrap().tank(0).unwrap();
+    let ground = r.matter.economy.ground;
+    r.matter.economy.ledger.reveal(ground, 10_000);
+    assert_eq!(r.matter.economy.ledger.transfer(ground, tank, 10_000), 10_000);
+    r.mining.as_mut().unwrap().mark_full(0);
+    r.haul_phase();
+    let (dock, bay) = r.crawler_unloading_bay(0).unwrap();
+    r.units[0].motion.pos = [bay[0], 16, bay[1]].map(fx::Fx::from_int);
+    r.units[0].motion.drive.head = fx::angle::HALF;
+    r.units[0].update_pose(fx::angle::HALF);
+    let before = r.side_store(true).unwrap().0;
+    r.haul_phase();
+    assert_eq!(r.side_store(true).unwrap().0, before, "sideways crawler must not unload");
+    assert!(r.crawler_docking_pilot(0).is_some());
+    let restored = BlastRange::restore(r.config, &r.snapshot()).expect("dock approach restores");
+    assert_eq!(r.state_hash(), restored.state_hash());
+    assert_eq!(r.crawler_docking_pilot(0), restored.crawler_docking_pilot(0));
+    assert!(r.units[0].motion.can_drive(r.units[0].mobility), "dock chassis disabled: {:?}", r.units[0].mobility);
+    {
+        let mut probe = nav::vehicle::Probe::with_yield(&r.world, &[4, 5]);
+        let motion = &r.units[0].motion;
+        let at = [motion.pos[0], motion.pos[2]];
+        let pose = probe.pose(at, motion.drive.head - 1, motion.probe_shape(&r.units[0].body));
+        assert!(!pose.refused(), "dock terrain refuses a tiny turn: {pose:?}; gun {:?}", r.gun.motion.pos);
+    }
+    for turn_tick in 0..600 {
+        r.step();
+        if turn_tick == 0 {
+            assert!(r.units[0].motion.drive.head != fx::angle::HALF,
+                "dock turn did not start: pilot {:?}, chassis {:?}, status engine {}, enabled {}, patrols {}, phase {:?}",
+                r.units[0].motion.pilot, r.units[0].mobility, r.units[0].status.engine, r.units[0].motion.enabled,
+                r.patrols_running, r.battle.phase);
+        }
+        if r.side_store(true).unwrap().0 > before { break; }
+    }
+    assert!(r.side_store(true).unwrap().0 > before, "crawler failed to align: heading {}, target {}, pilot {:?}, pos {:?}, bay {:?}, enabled {}, blocked {}, penetration {:?}, own {:?}, dock {:?}",
+        r.units[0].motion.drive.head, r.units[dock].motion.drive.head,
+        r.crawler_docking_pilot(0), r.units[0].at, bay, r.units[0].motion.enabled, r.units[0].motion.blocked,
+        super::super::super::motion::Obstacle::of_unit(&r.units[0]).penetration(&super::super::super::motion::Obstacle::of_unit(&r.units[dock])),
+        (r.units[0].motion.pos, super::super::super::motion::Obstacle::of_unit(&r.units[0]).half),
+        (r.units[dock].motion.pos, super::super::super::motion::Obstacle::of_unit(&r.units[dock]).half));
+    assert!(fx::angle::diff(r.units[dock].motion.drive.head, r.units[0].motion.drive.head).abs()
+        <= super::CRAWLER_DOCK_ANGLE);
+    assert!(r.matter.economy.ledger.balanced());
 }
 
 fn stores(r: &BlastRange) -> u64 {
@@ -388,4 +552,71 @@ fn the_read_model_shows_stores_and_tanks() {
     let v = super::super::super::read_model::View::new(&p, 1);
     assert_eq!(v.stores, None);
     assert!(v.units.iter().all(|u| u.tank.is_none() && !u.hauling));
+}
+
+#[test]
+fn manual_unload_accepts_partial_load_and_selected_greben_then_resumes_work() {
+    use super::super::super::battle::commands::{Command, Outcome};
+    let mut l = layout(100_000, 50_000, 1_000_000);
+    l.size[1] = 512;
+    l.units = vec![
+        RangeUnitDef { kind: RangeUnitKind::Crawler, allied: true, at: [200, 16, 400], weapon: None },
+        RangeUnitDef { kind: RangeUnitKind::GrebenStorage, allied: true, at: [500, 16, 400], weapon: None },
+    ];
+    l.economy = Some(RangeEconomy::stock());
+    let mut r = range(l);
+    assert_eq!(r.execute_command(Command::UnloadCrawler { actor: 0, dock: None }), Outcome::Rejected);
+    assert!(r.battle_order(0, Order::Reclaim([200, 16, 400]), None));
+    let tank = r.mining().unwrap().tank(0).unwrap();
+    let ground = r.matter.economy.ground;
+    r.matter.economy.ledger.reveal(ground, 10_000);
+    assert_eq!(r.matter.economy.ledger.transfer(ground, tank, 10_000), 10_000);
+    assert_eq!(r.execute_command(Command::UnloadCrawler { actor: 0, dock: Some(usize::MAX) }), Outcome::Rejected);
+    assert_eq!(r.execute_command(Command::UnloadCrawler { actor: 0, dock: Some(1) }), Outcome::Applied);
+    let (dock, bay) = r.crawler_unloading_bay(0).unwrap();
+    assert_eq!(dock, 1);
+    let restored = BlastRange::restore(r.config, &r.snapshot()).expect("manual trip restores");
+    assert_eq!(restored.crawler_unloading_bay(0), Some((dock, bay)));
+    r.units[0].motion.pos = [bay[0], 16, bay[1]].map(fx::Fx::from_int);
+    let heading = r.units[dock].motion.drive.head;
+    r.units[0].motion.drive.head = heading;
+    r.units[0].update_pose(heading);
+    for _ in 0..50 { r.haul_phase(); }
+    assert_eq!(r.tank_held(0), Some(0));
+    assert!(!r.hauling(0));
+    assert_eq!(r.battle.actors[0].order, Order::Reclaim([200, 16, 400]));
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn one_off_unload_drives_to_dock_and_stays_there_without_starting_reclaim() {
+    use super::super::super::battle::commands::{Command, Outcome};
+    let mut l = layout(100_000, 50_000, 1_000_000);
+    l.size[1] = 512;
+    l.units = vec![
+        RangeUnitDef { kind: RangeUnitKind::Crawler, allied: true, at: [200, 16, 400], weapon: None },
+        RangeUnitDef { kind: RangeUnitKind::GrebenStorage, allied: true, at: [500, 16, 400], weapon: None },
+    ];
+    l.economy = Some(RangeEconomy::stock());
+    let mut r = range(l);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    let tank = r.mining().unwrap().tank(0).unwrap();
+    let ground = r.matter.economy.ground;
+    r.matter.economy.ledger.reveal(ground, 10_000);
+    assert_eq!(r.matter.economy.ledger.transfer(ground, tank, 10_000), 10_000);
+    assert_eq!(r.execute_command(Command::UnloadCrawler { actor: 0, dock: Some(1) }), Outcome::Applied);
+    assert_eq!(r.battle.actors[0].order, Order::Hold);
+    let (_, bay) = r.crawler_unloading_bay(0).expect("one-off trip has a stable bay");
+    let restored = BlastRange::restore(r.config, &r.snapshot()).expect("one-off trip restores");
+    assert_eq!(restored.crawler_unloading_bay(0), Some((1, bay)));
+    for _ in 0..1600 {
+        r.step();
+        if r.tank_held(0) == Some(0) { break; }
+    }
+    assert_eq!(r.tank_held(0), Some(0), "crawler failed to drive and unload at {bay:?}; pos {:?}", r.units[0].motion.pos);
+    assert_eq!(r.battle.actors[0].order, Order::Hold);
+    assert!(!r.hauling(0));
+    assert!(r.units[0].motion.destination.is_none());
+    assert!(r.matter.economy.ledger.balanced());
 }

@@ -9,7 +9,8 @@
 //! The drain credits what an edit actually removed: the ground reveals the
 //! cell's matter and transfers it into the digger's tank. Matter is never
 //! made: a reveal is the world's own volume × density, and a credit is a
-//! transfer between two containers.
+//! transfer between two containers. A commander's fabricator is a separate,
+//! explicitly accounted source; it never changes terrain voxels.
 //!
 //! **Room is reserved before the edit is queued.** A cell goes into the
 //! queue only while the tank's room, less what is already in flight for it,
@@ -49,8 +50,28 @@ const TAG: u32 = 0xffff_0000;
 
 // All crawlers share this per-tick budget for tracing their cutting faces.
 // The remaining work waits for a later tick, never bypassing solid cover.
-const DRILL_RAY_STEPS: usize = 8192;
+const DRILL_RAY_STEPS: usize = 32_768;
 
+/// Highest remaining ground under the entire circular cutting head. Using
+/// only the centre column lets a wide head descend through solid ground.
+fn bore_surface(world: &voxel::World, x: i32, z: i32, radius: i32, tip_y: i32) -> i32 {
+    let mut top = 1u32;
+    let r = radius.max(0);
+    for dz in -r..=r {
+        let row_z = z + dz;
+        if row_z < 0 || row_z >= world.nz as i32 { continue; }
+        let extent = ((r * r - dz * dz) as u32).isqrt() as i32;
+        let min_x = (x - extent).max(0) as u32;
+        let max_x = (x + extent + 1).clamp(0, world.nx as i32) as u32;
+        if min_x < max_x {
+            top = top.max(world.column_box_ceiling([min_x, row_z as u32], [max_x, row_z as u32 + 1]));
+        }
+        if top >= tip_y.max(1) as u32 { return tip_y.max(1); }
+    }
+    (top as i32).min(tip_y.max(1))
+}
+
+#[cfg(test)]
 fn drill_front(
     world: &voxel::World,
     from: [i32; 3],
@@ -153,8 +174,95 @@ pub struct ReclaimVisual {
     pub crawler: usize,
     pub material: u16,
 }
+
+/// The active setting of the crawler's shared cutting head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrawlerToolMode { Drill, Reclaim }
 const RECLAIM_VISUAL_LIMIT: usize = 32;
 const CRAWLER_RECLAIM_REACH: u32 = 160;
+/// Continue a salvage order across the nearby wreck field before unloading.
+// World cells are 10 cm: continue within 32 m rather than chasing debris
+// across the whole battlefield before ever delivering a partial load.
+const CRAWLER_RECLAIM_CHAIN_REACH: i64 = 320;
+
+/// Horizontal distance to a wreck's enclosing footprint, rather than its
+/// centre. This permits a large collector to work from a reachable edge.
+fn wreck_edge_distance2(point: [i32; 3], bounds: ([i32; 3], [i32; 3])) -> i64 {
+    [0usize, 2].into_iter().map(|a| {
+        let nearest = point[a].clamp(bounds.0[a], bounds.1[a]);
+        i64::from(point[a] - nearest).pow(2)
+    }).sum()
+}
+
+fn reclaim_hull_in_reach(units: &[RangeUnit], id: usize, face: [i32; 3], reach: u32) -> bool {
+    let pos = units[id].motion.pos.map(fx::Fx::to_int_trunc);
+    units.iter().enumerate().any(|(other, u)| {
+        if other == id || u.status.alive || !reclaimable_hull(u) { return false; }
+        let bounds = u.bounds();
+        wreck_edge_distance2(face, bounds) <= i64::from(CRAWLER_RECLAIM_REACH).pow(2)
+            && wreck_edge_distance2(pos, bounds) <= i64::from(reach).pow(2)
+    })
+}
+
+fn reclaimable_hull(u: &RangeUnit) -> bool {
+    u.body.solid_count() > 0 || u.body.segments.iter().any(|s| s.body.solid_count() > 0)
+}
+
+fn reclaim_piece_bounds(f: &crate::burst::Fragment) -> ([i32;3],[i32;3]) {
+    let (lo,hi)=f.bounds();
+    let at=[f.position.x,f.position.y,f.position.z];
+    // Conservative integer box of the actual rotated, shape-preserving piece.
+    (std::array::from_fn(|a|at[a].add(lo[a]).to_int_trunc()-1),
+     std::array::from_fn(|a|at[a].add(hi[a]).to_int_trunc()+1))
+}
+
+fn reclaim_edge_approach(unit:&RangeUnit,(lo,hi):([i32;3],[i32;3]),reach:u32)->[i32;2] {
+    let pos=unit.motion.pos.map(fx::Fx::to_int_trunc);
+    let edge=[pos[0].clamp(lo[0],hi[0]),pos[2].clamp(lo[2],hi[2])];
+    let dx=i64::from(edge[0])-i64::from(pos[0]);let dz=i64::from(edge[1])-i64::from(pos[2]);
+    let dist=((dx*dx+dz*dz) as u64).isqrt().max(1) as i64;
+    // Reach from the collector's centre leaves clearance for its long head.
+    let back=i64::from(reach).saturating_sub(4).max(i64::from(reach)*3/4).min(dist);
+    [edge[0]-(dx*back/dist) as i32,edge[1]-(dz*back/dist) as i32]
+}
+
+fn reclaim_piece_at_face(f: &crate::burst::Fragment,face:[i32;3])->bool {
+    let at=[f.position.x,f.position.y,f.position.z].map(fx::Fx::to_int_trunc);
+    f.resting && (0..3).map(|a|(i64::from(at[a])-i64::from(face[a])).pow(2)).sum::<i64>()
+        <= i64::from(CRAWLER_RECLAIM_REACH).pow(2)
+}
+
+fn reclaim_piece_in_reach(fragments:&[crate::burst::Fragment],u:&RangeUnit,face:[i32;3],reach:u32)->bool {
+    let pos=u.motion.pos.map(fx::Fx::to_int_trunc);
+    fragments.iter().any(|f|reclaim_piece_at_face(f,face)
+        && wreck_edge_distance2(pos,reclaim_piece_bounds(f))<=i64::from(reach).pow(2))
+}
+
+fn next_reclaim_target(
+    units: &[RangeUnit], matter: &super::matter::Matter, id: usize,
+    face: [i32; 3], room: Amount,
+) -> Option<[i32; 3]> {
+    let origin = units[id].motion.pos.map(fx::Fx::to_int_trunc);
+    let distance = |a: [i32; 3], b: [i32; 3]| -> i64 {
+        (0..3).map(|axis| (i64::from(a[axis]) - i64::from(b[axis])).pow(2)).sum()
+    };
+    let valid = |at| distance(face, at) > i64::from(CRAWLER_RECLAIM_REACH).pow(2)
+        && distance(origin, at) <= CRAWLER_RECLAIM_CHAIN_REACH.pow(2);
+    let pieces = matter.debris.fragments.iter().filter_map(|f| {
+        let at = [f.position.x, f.position.y, f.position.z].map(fx::Fx::to_int_trunc);
+        let held = matter.economy.ledger.held(f.held);
+        (f.resting && held > 0 && held <= room && valid(at))
+            .then_some(((distance(origin, at), 0u8, f.id), at))
+    });
+    let hulls = units.iter().enumerate().filter_map(|(other, u)| {
+        let at = u.motion.pos.map(fx::Fx::to_int_trunc);
+        (other != id && !u.status.alive && valid(at)
+            && matter.economy.ledger.held(matter.body_container(other)) > 0
+            && room >= matter.body_min_quantum(other) && reclaimable_hull(u))
+            .then_some(((distance(origin, at), 1u8, other as u64), at))
+    });
+    pieces.chain(hulls).min_by_key(|(key, _)| *key).map(|(_, at)| at)
+}
 
 // Disassemble a dead hull directly into the hold. Geometry and the body
 // ledger move together; no temporary fragment pool or loss of material.
@@ -168,10 +276,6 @@ fn reclaim_hulls(
         return;
     };
     let reach = i64::from(CRAWLER_RECLAIM_REACH.max(m.data.reclaim.as_ref().unwrap().reach));
-    let density = u64::from(matter.source_density(3));
-    if density == 0 {
-        return;
-    }
     let _ = rc;
     for d in diggers.iter_mut().filter(|d| d.reclaim_only) {
         let target = units
@@ -181,13 +285,14 @@ fn reclaim_hulls(
                 *id != d.id
                     && !u.status.alive
                     && matter.economy.ledger.held(matter.body_container(*id)) > 0
+                    && reclaimable_hull(u)
             })
             .filter_map(|(id, u)| {
-                let p = u.motion.pos.map(fx::Fx::to_int_trunc);
-                let dist = (0..3)
-                    .map(|a| i64::from(p[a] - d.face[a]).pow(2))
-                    .sum::<i64>();
-                (dist <= reach * reach).then_some((dist, id))
+                let bounds = u.bounds();
+                let dist = wreck_edge_distance2(d.face, bounds);
+                let collector = units[d.id].motion.pos.map(fx::Fx::to_int_trunc);
+                (dist <= reach * reach && wreck_edge_distance2(collector, bounds) <= reach * reach)
+                    .then_some((dist, id))
             })
             .min();
         let Some((hull_distance, id)) = target else {
@@ -195,7 +300,7 @@ fn reclaim_hulls(
         };
         // Respect the clicked point across both types, instead of always
         // consuming a nearby hull before a closer selected fragment.
-        let capacity = matter.economy.ledger.get(m.tank(d.id).unwrap()).cap;
+        let available = matter.economy.ledger.room(m.tank(d.id).unwrap()).saturating_sub(m.inflight[d.id]);
         let closer_piece = matter
             .debris
             .fragments
@@ -210,7 +315,7 @@ fn reclaim_hulls(
                     return false;
                 }
                 let held = matter.economy.ledger.held(f.held);
-                held > 0 && held <= capacity
+                held > 0 && held <= available
             });
         if closer_piece {
             continue;
@@ -223,12 +328,13 @@ fn reclaim_hulls(
             .ledger
             .room(tank)
             .saturating_sub(m.inflight[d.id]);
-        let limit = (room / density).min(1024) as usize;
+        let limit = (room / matter.body_min_quantum(id)).min(1024) as usize;
         if limit == 0 {
             d.full = true;
             m.mark_full(d.id);
             continue;
         }
+        let collector = units[d.id].motion.pos.map(fx::Fx::to_int_trunc);
         let u = &mut units[id];
         // Existing section/shed jobs own their cells until they complete.
         if u.section.is_some()
@@ -239,30 +345,42 @@ fn reclaim_hulls(
         }
         let mut cells = Vec::with_capacity(limit);
         for part in 0..=u.body.segments.len() {
-            let b = if part == 0 {
-                &u.body
+            let (b, frame) = if part == 0 {
+                (&u.body, u.pose)
             } else {
-                &u.body.segments[part - 1].body
+                (&u.body.segments[part - 1].body, u.seg_frames[part - 1])
             };
-            'outer: for z in 0..usize::from(b.vol.nz) {
-                for y in 0..usize::from(b.vol.ny) {
-                    for x in 0..usize::from(b.vol.nx) {
-                        if b.vol.get(x, y, z) {
-                            cells.push((part, [x, y, z]));
-                        }
-                        if cells.len() == limit {
-                            break 'outer;
-                        }
+            let local = frame.local(phys::V3::new(
+                fx::Fx::from_int(collector[0]), fx::Fx::from_int(collector[1]), fx::Fx::from_int(collector[2])));
+            let nx = usize::from(b.vol.nx);
+            let nz = usize::from(b.vol.nz);
+            let dx = local[0].sub(fx::Fx::from_ratio(nx as i32, 2));
+            let dz = local[2].sub(fx::Fx::from_ratio(nz as i32, 2));
+            let x_major = dx.abs().mul(fx::Fx::from_int(nz as i32)) >= dz.abs().mul(fx::Fx::from_int(nx as i32));
+            let (primary, secondary) = if x_major { (nx, nz) } else { (nz, nx) };
+            'outer: for first in 0..primary {
+                for second in 0..secondary {
+                    let (x, z) = if x_major { (first, second) } else { (second, first) };
+                    let x = if dx > fx::Fx::ZERO { nx - 1 - x } else { x };
+                    let z = if dz > fx::Fx::ZERO { nz - 1 - z } else { z };
+                    for y in 0..usize::from(b.vol.ny) {
+                        if b.vol.get(x, y, z) { cells.push((part, [x, y, z])); }
+                        if cells.len() == limit { break 'outer; }
                     }
                 }
             }
-            if cells.len() == limit {
-                break;
-            }
+            if cells.len() == limit { break; }
         }
         if cells.is_empty() {
+            d.reclaim_pending = false;
             continue;
         }
+        let mut amount = 0u64;
+        cells.retain(|(part, _)| {
+            let quantum = matter.body_quantum(id, *part);
+            if quantum <= room.saturating_sub(amount) { amount += quantum; true } else { false }
+        });
+        if cells.is_empty() { d.full = true; m.mark_full(d.id); continue; }
         let count = cells.len();
         let samples = count
             .min(8)
@@ -282,7 +400,6 @@ fn reclaim_hulls(
                 material: 3,
             });
         }
-        let amount = count as u64 * density;
         assert_eq!(
             matter
                 .economy
@@ -374,7 +491,7 @@ impl Mining {
         let construction = data
             .bank
             .is_some()
-            .then(|| construction::Construction::new(units, &sides));
+            .then(|| { let mut c = construction::Construction::new(units, &sides); c.set_rules(data.balance.clone()); c });
         let haul = data
             .bank
             .is_some()
@@ -512,7 +629,52 @@ fn occupied_row(
     })
 }
 
+
 impl BlastRange {
+    /// Read-only presentation of a head that can currently work. Movement,
+    /// unloading, a full tank and loss of the drive all stop the rotor.
+    pub fn crawler_tool_mode(&self, id: usize) -> Option<CrawlerToolMode> {
+        let u = self.units.get(id)?;
+        if u.kind != modding::range::RangeUnitKind::Crawler || !u.status.alive
+            || !u.status.engine || !u.status.weapon { return None; }
+        let mining = self.mining.as_ref()?;
+        if mining.hauling(id) { return None; }
+        let tank = mining.tank(id)?;
+        if self.matter.economy.ledger.room(tank) <= mining.inflight[id] { return None; }
+        let (face, mode) = match self.battle.actors.get(id)?.order {
+            battle::Order::Dig(face) => (face, CrawlerToolMode::Drill),
+            battle::Order::Reclaim(face) => (face, CrawlerToolMode::Reclaim),
+            _ => return None,
+        };
+        let reach = mining.data.kind(u.kind)?.dig_reach;
+        let reach = if mode==CrawlerToolMode::Reclaim {reach.max(CRAWLER_RECLAIM_REACH)}else{reach};
+        if !within(u, face, reach)
+            && !(mode == CrawlerToolMode::Reclaim && (reclaim_hull_in_reach(&self.units, id, face, reach)
+                || reclaim_piece_in_reach(&self.matter.debris.fragments,u,face,reach))) {
+            return None;
+        }
+        Some(mode)
+    }
+    /// Position of the extended vertical head, following the actual open
+    /// column. The selected X/Z remains stable for the whole bore.
+    pub fn crawler_bore_position(&self, id: usize) -> Option<[i32; 3]> {
+        if self.crawler_tool_mode(id) != Some(CrawlerToolMode::Drill) { return None; }
+        let battle::Order::Dig(face) = self.battle.actors.get(id)?.order else { return None; };
+        if face[0] < 1 || face[2] < 1 || face[0] >= self.world.nx as i32 - 1 || face[2] >= self.world.nz as i32 - 1 { return None; }
+        let tip = self.units.get(id)?.world_pos(voxel::unit::CRAWLER_BORE_TIP);
+        let floor = bore_surface(&self.world, face[0], face[2], voxel::unit::CRAWLER_BORE_RADIUS, tip[1]);
+        Some([face[0], floor, face[2]])
+    }
+    /// The physical head has reached the ordered column and may cut.
+    pub fn crawler_bore_cutting(&self, id: usize) -> bool {
+        self.crawler_tool_mode(id) == Some(CrawlerToolMode::Drill)
+            && self.battle.actors.get(id).is_some_and(|a| a.pursuit != 0 && self.tick >= a.pursuit)
+    }
+    pub fn crawler_bore_depth(&self, id: usize) -> Option<i32> {
+        let pos = self.crawler_bore_position(id)?;
+        let tip = self.units.get(id)?.world_pos(voxel::unit::CRAWLER_BORE_TIP);
+        Some((tip[1] - pos[1]).max(0))
+    }
     pub fn mining(&self) -> Option<&Mining> {
         self.mining.as_ref()
     }
@@ -549,6 +711,29 @@ impl BlastRange {
         }
         Some([face[0], face[2]])
     }
+    pub(super) fn reclaim_approach(&self, id: usize, face: [i32; 3]) -> Option<[i32; 2]> {
+        let unit = &self.units[id];
+        if unit.kind != modding::range::RangeUnitKind::Crawler { return self.dig_approach(id, face); }
+        let reach = self.mining.as_ref()?.data.kind(unit.kind)?.dig_reach.max(CRAWLER_RECLAIM_REACH);
+        if within(unit, face, reach) || reclaim_hull_in_reach(&self.units, id, face, reach)
+            || reclaim_piece_in_reach(&self.matter.debris.fragments,unit,face,reach) { return None; }
+        // A fragment directly selected at the click has priority over hulls.
+        if let Some(f)=self.matter.debris.fragments.iter().find(|f| f.resting && {
+            let p = [f.position.x, f.position.y, f.position.z].map(fx::Fx::to_int_trunc);
+            (0..3).map(|a| i64::from(p[a] - face[a]).pow(2)).sum::<i64>() <= 9
+        }) {
+            return Some(reclaim_edge_approach(unit,reclaim_piece_bounds(f),reach));
+        }
+        let pos = unit.motion.pos.map(fx::Fx::to_int_trunc);
+        let bounds = self.units.iter().enumerate().filter(|(other, u)| *other != id && !u.status.alive && reclaimable_hull(u))
+            .map(|(_, u)| u.bounds())
+            .filter(|&bounds| wreck_edge_distance2(face, bounds) <= i64::from(CRAWLER_RECLAIM_REACH).pow(2))
+            .min_by_key(|&bounds| (wreck_edge_distance2(face, bounds), wreck_edge_distance2(pos, bounds)));
+        let bounds=bounds.or_else(||self.matter.debris.fragments.iter().filter(|f|reclaim_piece_at_face(f,face))
+            .map(reclaim_piece_bounds).min_by_key(|&b|(wreck_edge_distance2(face,b),wreck_edge_distance2(pos,b))));
+        bounds.map(|b|reclaim_edge_approach(unit,b,reach)).or_else(||self.dig_approach(id, face))
+    }
+
     fn in_dig_reach(&self, u: &RangeUnit, face: [i32; 3]) -> bool {
         let Some(k) = self.mining.as_ref().and_then(|m| m.data.kind(u.kind)) else {
             return false;
@@ -561,6 +746,18 @@ impl BlastRange {
     /// the next cell; cells claimed by debris, already reserved, air and
     /// the world's frame are passed over.
     pub(super) fn dig_phase(&mut self) {
+        if !matches!(self.battle.phase,battle::Phase::Setup|battle::Phase::Fighting) {return;}
+        // A corpse can become a free chunk after accepting the order. The
+        // old edge may disappear or move; reacquire a stopped approach using
+        // the normal budgeted movement scheduler, without resetting live paths.
+        let approaches:Vec<_>=self.battle.actors.iter().enumerate().filter_map(|(id,a)| {
+            let battle::Order::Reclaim(face)=a.order else{return None;};
+            let u=&self.units[id];
+            (u.kind==modding::range::RangeUnitKind::Crawler && u.status.alive && u.status.engine
+                && (u.motion.destination.is_none() || u.motion.blocked) && !self.hauling(id))
+                .then(||self.reclaim_approach(id,face).map(|to|(id,to))).flatten()
+        }).collect();
+        for (id,to) in approaches {self.units[id].motion.queue_move(&self.world,to);}
         let Self {
             mining,
             units,
@@ -579,8 +776,16 @@ impl BlastRange {
         }
         let ledger = &matter.economy.ledger;
         let mut diggers = Vec::new();
+        let edge_reachable: Vec<bool> = units.iter().enumerate().map(|(id, u)| {
+            let Some(actor) = battle.actors.get(id) else { return false; };
+            let battle::Order::Reclaim(face) = actor.order else { return false; };
+            if u.kind != modding::range::RangeUnitKind::Crawler { return false; }
+            let reach = m.data.kind(u.kind).map_or(0, |k| k.dig_reach).max(CRAWLER_RECLAIM_REACH);
+            within(u,face,reach) || (reclaim_hull_in_reach(units, id, face, reach)
+                || reclaim_piece_in_reach(&matter.debris.fragments,u,face,reach))
+        }).collect();
         for (id, u) in units.iter_mut().enumerate() {
-            let (Some(tank), Some(actor)) = (m.tank(id), battle.actors.get(id)) else {
+            let (Some(tank), Some(actor)) = (m.tank(id), battle.actors.get_mut(id)) else {
                 continue;
             };
             let (face, reclaim_only) = match actor.order {
@@ -590,7 +795,10 @@ impl BlastRange {
             };
             let k = m.data.kind(u.kind).expect("a tank has its kind's entry");
             // A hauler is away from its face, even when it drives past it.
-            if !u.status.alive || m.hauling(id) || !within(u, face, k.dig_reach) {
+            if !u.status.alive || m.hauling(id) || (!within(u, face, k.dig_reach) && !edge_reachable[id])
+                || (u.kind == modding::range::RangeUnitKind::Crawler
+                    && (!u.status.weapon || !u.status.engine)) {
+                if u.kind == modding::range::RangeUnitKind::Crawler && !reclaim_only { actor.pursuit = 0; }
                 continue;
             }
             // At the face: a digger driving to it stops here.
@@ -598,6 +806,25 @@ impl BlastRange {
                 u.motion.stop();
             }
             if ledger.room(tank) > m.inflight[id] {
+                if u.kind == modding::range::RangeUnitKind::Crawler && !reclaim_only {
+                    // Reuse the saved, otherwise idle pursuit deadline while
+                    // Dig owns the actor: excavation cannot outrun the head's
+                    // deployment and travel to the selected column.
+                    if actor.pursuit == 0 {
+                        let tip = u.world_pos(voxel::unit::CRAWLER_BORE_TIP);
+                        let dx = i64::from(face[0] - tip[0]);
+                        let dz = i64::from(face[2] - tip[2]);
+                        let horizontal = ((dx * dx + dz * dz) as u64).isqrt();
+                        let ground = if face[0] >= 0 && face[2] >= 0
+                            && face[0] < world.nx as i32 && face[2] < world.nz as i32 {
+                            world.column_ceiling(face[0] as u32, face[2] as u32) as i32
+                        } else { tip[1] };
+                        let depth = (tip[1] - ground).max(0) as u64;
+                        let travel = (horizontal.max(depth) * crate::TICKS_PER_SECOND as u64).div_ceil(80) as u32;
+                        actor.pursuit = tick.saturating_add(14.max(travel).max(1));
+                    }
+                    if *tick < actor.pursuit { continue; }
+                }
                 diggers.push(Digger {
                     id,
                     face,
@@ -612,6 +839,7 @@ impl BlastRange {
                     reclaim_only,
                 });
             } else {
+                if u.kind == modding::range::RangeUnitKind::Crawler && !reclaim_only { actor.pursuit = 0; }
                 m.mark_full(id);
             }
         }
@@ -625,9 +853,7 @@ impl BlastRange {
             .iter()
             .copied()
             .filter(|d| {
-                d.reclaim_only
-                    || (d.k.kind != modding::range::RangeUnitKind::Crawler
-                        && d.k.kind != modding::range::RangeUnitKind::Crawler)
+                d.reclaim_only || d.k.kind != modding::range::RangeUnitKind::Crawler
             })
             .collect();
         reclaim_hulls(m, units, matter, &mut reclaimers);
@@ -664,6 +890,7 @@ impl BlastRange {
         let start = *tick as usize % n;
         let mut cursor = voxel::World::mat_cursor();
         let mut drill_steps = DRILL_RAY_STEPS;
+        let mut chain_searches = m.data.reclaim.as_ref().map_or(0, |r| r.searches_per_tick);
         'diggers: for step in 0..n {
             let Digger {
                 id,
@@ -675,8 +902,27 @@ impl BlastRange {
                 reclaim_only,
             } = diggers[(start + step) % n];
             if reclaim_only {
-                if !reclaim_pending && m.inflight[id] == 0 && ledger.held(m.tank(id).unwrap()) > 0 {
-                    m.mark_full(id);
+                if !reclaim_pending && m.inflight[id] == 0 {
+                    if k.kind == modding::range::RangeUnitKind::Crawler {
+                        if *tick % crate::TICKS_PER_SECOND as u32 != id as u32 % crate::TICKS_PER_SECOND as u32 || chain_searches == 0 {
+                            continue;
+                        }
+                        chain_searches -= 1;
+                        let tank = m.tank(id).unwrap();
+                        if let Some(next) = next_reclaim_target(units, matter, id, face, ledger.room(tank)) {
+                            battle.actors[id].order = battle::Order::Reclaim(next);
+                            let pos = units[id].motion.pos.map(fx::Fx::to_int_trunc);
+                            let dx = i64::from(next[0] - pos[0]);
+                            let dz = i64::from(next[2] - pos[2]);
+                            let dist = ((dx * dx + dz * dz) as u64).isqrt().max(1) as i64;
+                            let back = (i64::from(k.dig_reach) * 3 / 4).min(dist);
+                            units[id].motion.queue_move(world, [next[0] - (dx * back / dist) as i32, next[2] - (dz * back / dist) as i32]);
+                        } else if ledger.held(tank) > 0 {
+                            m.mark_full(id);
+                        }
+                    } else if ledger.held(m.tank(id).unwrap()) > 0 {
+                        m.mark_full(id);
+                    }
                 }
                 continue;
             }
@@ -699,25 +945,93 @@ impl BlastRange {
             let mut face_pending = false;
             let drill_origin = match k.kind {
                 modding::range::RangeUnitKind::Crawler => {
-                    Some(units[id].world_pos(voxel::unit::CRAWLER_DRILL_TIP))
+                    let mut tip = units[id].world_pos(voxel::unit::CRAWLER_BORE_TIP);
+                    tip[0] = face[0];
+                    tip[2] = face[2];
+                    if tip[0] >= 1 && tip[2] >= 1 && tip[0] < world.nx as i32 - 1 && tip[2] < world.nz as i32 - 1 {
+                        tip[1] = bore_surface(world, tip[0], tip[2], voxel::unit::CRAWLER_BORE_RADIUS, tip[1]);
+                    }
+                    Some(tip)
                 }
                 _ => None,
             };
             let cut_face = if let Some(origin) = drill_origin {
-                let Some(front) = drill_front(world, origin, face, &mut drill_steps) else {
-                    starved = true;
-                    continue;
-                };
-                front
+                // Bore vertically from the visible cutting head, following
+                // the excavated column all the way down to the world floor.
+                // Work across the highest remaining layer, not the deepest
+                // centre column: the whole head must have clearance first.
+                [origin[0], (origin[1] - 1).max(1), origin[2]]
             } else {
                 face
             };
+            if drill_origin.is_some() && cut_face[0] >= 0 && cut_face[1] >= 0 && cut_face[2] >= 0
+                && (cut_face[0] as u32) < world.nx && (cut_face[1] as u32) < world.ny && (cut_face[2] as u32) < world.nz {
+                let material = world.material(cut_face[0] as u32, cut_face[1] as u32, cut_face[2] as u32);
+                if material != AIR {
+                    let strength = matter.economy.mats.get(material).map_or(512, |m| m.strength);
+                    let period = m.data.dig_periods.iter().find(|d| d.material == material).map_or_else(|| strength.div_ceil(128).clamp(1, 8), |d| d.period);
+                    rate = rate.min(rate.saturating_mul(2) / period).max(1);
+                }
+            }
+            let initial_rate = rate;
+            if let Some(origin) = drill_origin {
+                // Clear exposed cells of the highest shaft layer across the
+                // real head footprint. Every candidate is the top of its
+                // column, so it has a clear vertical approach; bounded work
+                // and the normal edit, strength and ledger budgets still apply.
+                let radius = voxel::unit::CRAWLER_BORE_RADIUS;
+                let side = 2 * radius + 1;
+                let cells = (side * side) as usize;
+                let offset = (*tick as usize).wrapping_mul(271) % cells;
+                for step in 0..cells {
+                    let index = (step + offset) % cells;
+                    let dx = index as i32 % side - radius;
+                    let dz = index as i32 / side - radius;
+                    if dx * dx + dz * dz > radius * radius { continue; }
+                    let x = origin[0] + dx;
+                    let z = origin[2] + dz;
+                    if x <= 0 || z <= 0 || x >= world.nx as i32 - 1 || z >= world.nz as i32 - 1 { continue; }
+                    let top = world.column_ceiling(x as u32, z as u32) as i32;
+                    if top != origin[1] || top <= 1 { continue; }
+                    let (x, y, z) = (x as u32, (top - 1) as u32, z as u32);
+                    if m.reserved.contains_key(&[x, y, z]) || matter.debris.claimed([x, y, z]) {
+                        face_pending = true;
+                        continue;
+                    }
+                    let material = world.material_cached(&mut cursor, x, y, z);
+                    let amount = matter.economy.per_voxel(material);
+                    if material == AIR || amount == 0 { continue; }
+                    let strength = matter.economy.mats.get(material).map_or(512, |m| m.strength);
+                    let period = m.data.dig_periods.iter().find(|d| d.material == material).map_or_else(|| strength.div_ceil(128).clamp(1, 8), |d| d.period);
+                    let phase = x.wrapping_mul(17).wrapping_add(y.wrapping_mul(31)).wrapping_add(z.wrapping_mul(47));
+                    if tick.wrapping_add(phase) % period != 0 { face_pending = true; continue; }
+                    if amount > room { m.mark_full(id); continue 'diggers; }
+                    if left == 0 { starved = true; continue 'diggers; }
+                    world.queue_dig_by(x, y, z, DIG | id as u32);
+                    m.reserved.insert([x, y, z], Reservation { slot: id as u16, material, amount });
+                    m.inflight[id] += amount;
+                    room -= amount;
+                    left -= 1;
+                    rate -= 1;
+                    if rate == 0 { continue 'diggers; }
+                }
+                if !face_pending && m.inflight[id] == 0 && ledger.held(tank) > 0 && origin[1] <= 1 {
+                    m.mark_full(id);
+                }
+                continue;
+            }
             let spans = Arc::clone(m.balls.get(&k.dig_radius).expect("dig ball is prepared"));
             // Visit the first solid voxel on the drill axis before scanning
             // the surrounding ball. Otherwise long rays to peripheral cells
             // can exhaust the shared ray budget before the actual face.
             let first = drill_origin.map(|_| [0, 0, 0]);
-            for span in first.into_iter().chain(spans.iter().copied()) {
+            // A blocked early row used to consume the complete ray budget on
+            // every tick, starving reachable rows later in the ball forever.
+            let start = if drill_origin.is_some() && !spans.is_empty() {
+                (*tick as usize).wrapping_mul(31) % spans.len()
+            } else { 0 };
+            let rows = spans.iter().cycle().skip(start).take(spans.len()).copied();
+            for span in first.into_iter().chain(rows) {
                 for [x, y, z] in occupied_row(world, cut_face, span) {
                     if m.reserved.contains_key(&[x, y, z]) || matter.debris.claimed([x, y, z]) {
                         // Do not depart while another queued edit or debris
@@ -739,7 +1053,7 @@ impl BlastRange {
                             .mats
                             .get(material)
                             .map_or(512, |m| m.strength);
-                        let period = strength.div_ceil(16).clamp(1, 32);
+                        let period = m.data.dig_periods.iter().find(|d| d.material == material).map_or_else(|| strength.div_ceil(128).clamp(1, 8), |d| d.period);
                         let phase = x
                             .wrapping_mul(17)
                             .wrapping_add(y.wrapping_mul(31))
@@ -762,6 +1076,10 @@ impl BlastRange {
                                 }
                                 None => {
                                     starved = true;
+                                    // Occluded cells can exhaust every ray
+                                    // without producing a single edit. Move
+                                    // the boring point instead of retrying
+                                    // the same blocked surface indefinitely.
                                     break 'diggers;
                                 }
                             }
@@ -799,12 +1117,14 @@ impl BlastRange {
             // while a reclaim search, claimed cell or dig edit is pending.
             if matches!(k.kind, modding::range::RangeUnitKind::Crawler)
                 && !reclaim_pending
-                && !face_pending
                 && m.inflight[id] == 0
-                && rate == k.dig_edits_per_tick
-                && ledger.held(tank) > 0
+                && rate == initial_rate
             {
-                m.mark_full(id);
+                // The selected shaft remains authoritative; only return
+                // for unloading when there is no solid work left below it.
+                if !face_pending && ledger.held(tank) > 0 && cut_face[1] <= 1 {
+                    m.mark_full(id);
+                }
             }
         }
         if starved {

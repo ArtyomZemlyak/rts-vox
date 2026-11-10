@@ -186,6 +186,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                     ("Лаборатория", Action::Laboratory),
                     ("Редактор", Action::Drawer(4)),
                     ("Камера", Action::Drawer(3)),
+                    ("Расстановка +", Action::FreePlacement),
                     ("Настройки", Action::Settings),
                     ("Сброс", Action::Reset),
                     ("Пауза", Action::Pause),
@@ -258,6 +259,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                     }
                 });
                 p.spawn(row()).with_children(|p| {
+                    button(p, font, "Разгрузить", Action::CrawlerUnload);
                     for (name, mode) in [
                         ("Движение", CrawlerMode::Move),
                         ("Сбор", CrawlerMode::Reclaim),
@@ -276,7 +278,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 label(
                     p,
                     font,
-                    "Бак и склад показаны слева · разгрузка на базе автоматическая",
+                    "Разгрузить — ближайший склад · ПКМ по гребню — выбрать склад",
                     12.0,
                     theme::MUTED,
                 );
@@ -615,7 +617,7 @@ pub fn refresh(
                         })
                     }),
             )
-        } else if matches!(action, Some(Action::CrawlerMode(_))) {
+        } else if matches!(action, Some(Action::CrawlerMode(_) | Action::CrawlerUnload)) {
             Some(
                 battle
                     && !edit.editing
@@ -661,6 +663,8 @@ pub fn refresh(
                                     .is_some_and(|u| u.kind != RangeUnitKind::NuclearSilo)
                             }))),
             )
+        } else if matches!(action, Some(Action::FreePlacement)) {
+            Some(battle && !panel.sandbox)
         } else if matches!(action, Some(Action::BattleReplay)) {
             Some(battle && view.phase != sim_core::blast::battle::Phase::Setup)
         } else if matches!(action, Some(Action::BattleChoose)) {
@@ -757,6 +761,18 @@ pub fn refresh(
                             "Б"
                         } else if matches!(u.kind, RangeUnitKind::Crawler) {
                             "КР"
+                        } else if matches!(u.kind, RangeUnitKind::PowerPlantT1 | RangeUnitKind::PowerPlantT2 | RangeUnitKind::PowerPlantT3) {
+                            "ЭС"
+                        } else if u.kind == RangeUnitKind::Commander {
+                            "КМ"
+                        } else if u.kind == RangeUnitKind::Walker04 {
+                            "ВЛ"
+                        } else if u.kind == RangeUnitKind::SkobaDrone {
+                            "ДР"
+                        } else if u.kind == RangeUnitKind::GrebenStorage {
+                            "ГР"
+                        } else if matches!(u.kind, RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4) {
+                            "ЗВ"
                         } else {
                             "Ш"
                         },
@@ -807,10 +823,14 @@ pub fn refresh(
                                 "МИШЕНИ".into()
                             } else { "БОЙ".into() }
                         } else { phase.into() }
-                    } else if let Some([own, enemy]) = view.base_integrity {
-                        format!("{name} · БАЗЫ {own}% / {enemy}% · {phase}")
                     } else {
-                        format!("{name} · СВОИ {a} / ВРАГИ {b} · {phase}")
+                        let headline = if let Some([own, enemy]) = view.base_integrity {
+                            format!("{name} · БАЗЫ {own}% / {enemy}% · {phase}")
+                        } else {
+                            format!("{name} · СВОИ {a} / ВРАГИ {b} · {phase}")
+                        };
+                        let (generation, demand) = scene.energy_total;
+                        format!("{headline} · СЕТИ: +{} / −{}", super::super::economy_display::energy(generation), super::super::economy_display::energy(demand))
                     }
                 } else {
                     format!(
@@ -827,6 +847,13 @@ pub fn refresh(
             1 => selected.map_or_else(
                 || "Выберите свой юнит".into(),
                 |(id, u)| {
+                    if matches!(u.kind, RangeUnitKind::PowerPlantT1 | RangeUnitKind::PowerPlantT2 | RangeUnitKind::PowerPlantT3) {
+                        let tier = match u.kind { RangeUnitKind::PowerPlantT1 => 1, RangeUnitKind::PowerPlantT2 => 2, _ => 3 };
+                        let state = if !u.status.alive { "УНИЧТОЖЕНА" } else if scene.unfinished.get(id).copied().unwrap_or(false) { "СТРОИТСЯ" } else if !u.status.engine { "РЕАКТОР ПОВРЕЖДЁН" } else { "В СТРОЮ" };
+                        let generation = sim_core::blast::economy::construction::energy_generation(u.kind);
+                        let number = if id == usize::MAX { String::new() } else { format!(" {:02}", id + 1) };
+                        return format!("ЭЛЕКТРОСТАНЦИЯ T{tier}{number} · {state}\nНоминальная выработка: +{} мощн.", economy_display::energy(generation));
+                    }
                     if u.kind == RangeUnitKind::NuclearSilo {
                         let state = if !u.status.alive {
                             "УНИЧТОЖЕНА".into()
@@ -861,8 +888,8 @@ pub fn refresh(
                     }
                     if matches!(u.kind, RangeUnitKind::Base | RangeUnitKind::GrebenStorage | RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4) {
                         if let Some((stored, capacity)) = scene.base_cargo.get(id).copied().flatten() {
-                            return format!("БАЗА {:02} · {}\nЗапас стороны {stored} / {capacity}", id + 1,
-                                if u.status.alive { "В СТРОЮ" } else { "УНИЧТОЖЕНА" });
+                            return format!("БАЗА {:02} · {}\nЗапас стороны {} / {}", id + 1,
+                                if u.status.alive { "В СТРОЮ" } else { "УНИЧТОЖЕНА" }, economy_display::mass(stored), economy_display::mass(capacity));
                         }
                         return format!(
                             "БАЗА {:02}  ·  {}\nЯдро {}%   ·   ЦЕЛЬ БОЯ",
@@ -875,10 +902,17 @@ pub fn refresh(
                             u.integrity.core.mul(fx::Fx::from_int(100)).to_int_trunc()
                         );
                     }
+                    if u.kind == RangeUnitKind::Commander {
+                        let cargo = scene.crawler_cargo.get(id).copied().flatten();
+                        let detail = cargo.map_or_else(|| "Бак недоступен".to_string(), |(held, cap, _, _, _, _, mode)| {
+                            format!("Масса {} / {} · {mode}\nПостройка: выберите здание · ПКМ по союзнику: ремонт / помощь стройке\nДобыча: Ctrl+ПКМ · Сбор: Ctrl+Shift+ПКМ", economy_display::mass(held), economy_display::mass(cap))
+                        });
+                        return format!("КОМАНДИР · ПРОТОТИП {:02}\n{}", id + 1, detail);
+                    }
                     if matches!(u.kind, RangeUnitKind::Crawler) {
                         let cargo = scene.crawler_cargo.get(id).copied().flatten();
                         let detail = cargo.map_or_else(|| "Бак недоступен: экономика сцены выключена".to_string(), |(held, cap, hauling, drill, stored, capacity, mode)| {
-                            format!("Груз {held} / {cap} · база {stored} / {capacity}\n{} · бур: {}", if hauling { "ДОСТАВКА" } else { mode }, if drill { "ГОТОВ" } else { "ПОВРЕЖДЁН" })
+                            format!("Груз {} / {} · база {} / {}\n{} · бур: {}", economy_display::mass(held), economy_display::mass(cap), economy_display::mass(stored), economy_display::mass(capacity), if hauling { "ДОСТАВКА" } else { mode }, if drill { "ГОТОВ" } else { "ПОВРЕЖДЁН" })
                         });
                         let number = if id == usize::MAX { String::new() } else { format!(" {:02}", id + 1) };
                         return format!("КРАУЛЕР{number} · {}\n{}", if u.status.alive { "В СТРОЮ" } else { "УНИЧТОЖЕН" }, detail);
@@ -1061,6 +1095,15 @@ pub fn refresh(
                 )
             }
         };
+        let value = if id.0 == 1 && battle {
+            if let Some((unit_id, _)) = selected.filter(|(_, u)| u.allied && (u.kind.emplacement() || u.kind == RangeUnitKind::Commander)) {
+                let power = scene.energy_local.get(unit_id).copied().flatten();
+                match power {
+                    Some((generation, demand)) => format!("{value}\nСеть рядом: +{} / −{} · свободно {}", super::super::economy_display::energy(generation), super::super::economy_display::energy(demand), super::super::economy_display::energy(generation.saturating_sub(demand))),
+                    None => format!("{value}\nЭнергосеть: нет подключения"),
+                }
+            } else { value }
+        } else { value };
         let value = if id.0 == 1 {
             let count = selected_ids.len();
             if count > 1 {

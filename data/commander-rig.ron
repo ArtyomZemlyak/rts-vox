@@ -1,0 +1,14 @@
+// Independent shoulder/elbow/tool rig. Angles are relative to the hull.
+(
+    yaw_limit_degrees: 35,
+    pitch_down_degrees: 75,
+    pitch_up_degrees: 45,
+    rest_pitch_degrees: -55,
+    walk_swing_degrees: 6,
+    elbow_degrees: 50,
+    elbow_swing_degrees: 20,
+    slew_degrees_s: 60,
+    settle_ticks: 6,
+    target_step_cm: 80,
+    rest_lookahead_cm: 300,
+)

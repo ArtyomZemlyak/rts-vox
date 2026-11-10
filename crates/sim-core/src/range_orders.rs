@@ -88,6 +88,13 @@ pub(super) fn validate(
             return Admission::Rejected;
         }
     }
+    if let Order::Rally(p) = order {
+        if destination.is_some() || !matches!(range.units[id].kind,
+            RangeUnitKind::KilFactoryT1 | RangeUnitKind::KilFactoryT2 | RangeUnitKind::KilFactoryT3 | RangeUnitKind::KilFactoryT4)
+            || p[0] < 40 || p[1] < 40 || p[0] >= range.size[0] as i32 - 40 || p[1] >= range.size[2] as i32 - 40
+        { return Admission::Rejected; }
+        if actors[id].order == order { return Admission::Unchanged; }
+    }
     if let Order::Ground(p) = order {
         if (0..3).any(|a| p[a] < 0 || p[a] >= range.size[a] as i32) {
             return Admission::Rejected;
@@ -112,13 +119,29 @@ pub(super) fn validate(
             return Admission::Rejected;
         }
     }
+    if let Order::Build(site) = order {
+        if destination.is_some() || !(range.can_commander_build(id, site) || range.can_drone_build(id, site)) {
+            return Admission::Rejected;
+        }
+    }
+    if let Order::Repair(target) = order {
+        if destination.is_some() || !range.can_commander_repair(id, target) {
+            return Admission::Rejected;
+        }
+    }
     // The rules AI maintains orders; it never replaces a dig (ADR-672).
     if replacement == Replacement::Maintain
         && matches!(
             actors[id].order,
-            Order::Dig(_) | Order::Reclaim(_) | Order::Support(_) | Order::Pilot { .. }
+            Order::Dig(_) | Order::Reclaim(_) | Order::Build(_) | Order::Repair(_) | Order::Support(_) | Order::Rally(_) | Order::Pilot { .. }
         )
     {
+        return Admission::Unchanged;
+    }
+    // A commander clearing a factory exit (or following a player's move)
+    // must finish that route before autonomous combat retargets it.
+    if replacement == Replacement::Maintain && range.units[id].kind == RangeUnitKind::Commander
+        && actors[id].order == Order::Move && range.units[id].motion.destination.is_some() {
         return Admission::Unchanged;
     }
     if replacement == Replacement::Maintain && actors[id].order == order && order != Order::Move {
@@ -180,7 +203,7 @@ impl Executor<'_> {
                 .iter()
                 .enumerate()
                 .filter(|(other, _)| *other != id)
-                .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
+                .map(|(_, u)| motion::Obstacle::of_unit(u))
                 .collect();
             let u = &mut self.units[id];
             if replacement == Replacement::Explicit {
@@ -200,8 +223,11 @@ impl Executor<'_> {
             if !accepted {
                 return commands::Outcome::PathFailed;
             }
-        } else if order == Order::Hold || digging || matches!(order, Order::Support(_)) {
+        } else if order == Order::Hold || digging || matches!(order, Order::Support(_) | Order::Build(_) | Order::Repair(_)) {
             self.units[id].motion.stop();
+        }
+        if self.units[id].kind == RangeUnitKind::Commander {
+            self.units[id].update_pose(self.actors[id].turret.angle);
         }
         commit(&mut self.actors[id], self.units[id].kind, order, self.tick);
         commands::Outcome::Applied
@@ -216,6 +242,9 @@ impl Executor<'_> {
             || unit.motion.queue_move(self.world, fallback))
         {
             return commands::Outcome::PathFailed;
+        }
+        if unit.kind == RangeUnitKind::Commander {
+            unit.update_pose(self.actors[request.actor].turret.angle);
         }
         commit(
             &mut self.actors[request.actor],

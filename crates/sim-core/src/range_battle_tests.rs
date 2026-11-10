@@ -5,8 +5,320 @@ use super::*;
 use modding::explosion::Delivery;
 use modding::range::RangeUnitDef;
 
+#[test]
+fn range_scenario_continues_after_last_enemy_but_standard_battle_ends() {
+    let mut ordinary = arena_of([RangeUnitKind::Tank, RangeUnitKind::Tank]);
+    ordinary.start_battle().unwrap();
+    ordinary.units[1].status.alive = false;
+    ordinary.battle_tick();
+    assert_eq!(ordinary.battle.phase, Phase::Victory);
+
+    let mut sandbox = arena_of([RangeUnitKind::Tank, RangeUnitKind::Tank]);
+    sandbox.layout.as_mut().unwrap().endless_battle = true;
+    sandbox.start_battle().unwrap();
+    let restored = BlastRange::restore(sandbox.config.clone(), &sandbox.snapshot()).expect("scenario save restores");
+    assert!(restored.layout.as_ref().unwrap().endless_battle);
+    sandbox.units[1].status.alive = false;
+    sandbox.battle_tick();
+    assert_eq!(sandbox.battle.phase, Phase::Fighting);
+    assert!(sandbox.battle_order(0, Order::Move, Some([200, 336])));
+}
+
 #[path = "range_nuclear_tests.rs"]
 mod nuclear_tests;
+
+#[test]
+fn commander_turns_before_firing_at_a_sideways_target() {
+    let mut r = arena_of([RangeUnitKind::Commander, RangeUnitKind::Tank]);
+    let p = r.units[0].motion.pos.map(Fx::to_int_trunc);
+    r.units[1].motion.pos = [p[0], p[1], p[2] + 300].map(Fx::from_int);
+    let head = r.units[1].motion.drive.head;
+    r.units[1].update_pose(head);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    r.start_battle().unwrap();
+    r.battle.actors[1].order = Order::Hold;
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    for _ in 0..300 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        if r.battle.actors[0].fired > 0 { break; }
+    }
+    assert!(r.battle.actors[0].fired > 0, "commander did not turn and fire: head {}, yaw rate {}, turret {}, order {:?}, arm {:?}, target {:?}, alive {}", r.units[0].motion.drive.head, r.units[0].motion.drive.yaw_rate, r.battle.actors[0].turret.angle, r.battle.actors[0].order, r.units[0].arm_targets, aim_point(&r.units[1]), r.units[0].status.alive);
+    assert!(fx::angle::diff(fx::angle::QUARTER, r.units[0].motion.drive.head).abs() <= fx::angle::FULL * 21 / 360);
+}
+
+#[test]
+fn commander_rotates_hull_before_pointing_tools_sideways() {
+    let mut u = RangeUnit::of_kind(RangeUnitKind::Commander, [400, 16, 400]);
+    let target = [400, 80, 800];
+    assert!(!u.commander_face(target));
+    let mut previous = u.motion.drive.head;
+    for _ in 0..600 {
+        u.set_arm_targets([target, target, [0, 0, 0], [0, 0, 0]], u.motion.drive.head);
+        let gun = &u.seg_frames[13];
+        let yaw = fx::angle::atan2(gun.x.z.raw(), gun.x.x.raw());
+        assert!(fx::angle::diff(yaw, u.motion.drive.head).abs() <= fx::angle::FULL * 36 / 360);
+        if u.commander_face(target) { break; }
+        previous = u.motion.drive.head;
+    }
+    assert_ne!(previous, 0, "the hull must turn towards a sideways target");
+    assert!(u.commander_face(target), "the hull must reach the working sector");
+}
+
+#[test]
+fn walker_long_stride_slows_cadence_without_changing_speed() {
+    let walker = RangeUnit::of_kind(RangeUnitKind::Walker04, [400, 16, 400]);
+    let gait = walker.motion.chassis.gait.unwrap();
+    let mut original = walker.motion.chassis;
+    original.gait.as_mut().unwrap().stride_cm = gait.stride_cm / 3;
+    let long = crate::drive::StepCycle::of(&walker.motion.chassis).unwrap();
+    let short = crate::drive::StepCycle::of(&original).unwrap();
+    let travelled = Fx::from_int(10);
+    let now = long.advance(travelled, 0);
+    let before = short.advance(travelled, 0);
+    assert!(now > 0 && (before - 3 * now).abs() <= 3);
+    let strider = RangeUnit::of_kind(RangeUnitKind::Strider, [400, 16, 400]);
+    assert_eq!(walker.motion.speed, (strider.motion.speed * 9 / 10).max(1));
+}
+
+#[test]
+fn commander_moves_slower_and_tools_aim_gradually() {
+    let mut commander = RangeUnit::of_kind(RangeUnitKind::Commander, [400, 16, 400]);
+    let walker = RangeUnit::of_kind(RangeUnitKind::Walker04, [400, 16, 400]);
+    assert!(commander.motion.speed * 3 <= walker.motion.speed);
+    let target = [600, 80, 700];
+    commander.set_arm_targets([target, target, [0, 0, 0], [0, 0, 0]], 0);
+    let first = commander.arm_targets.unwrap()[0];
+    assert_ne!(first, target);
+    commander.set_arm_targets([target, target, [0, 0, 0], [0, 0, 0]], 0);
+    let second = commander.arm_targets.unwrap()[0];
+    let distance = |p: [i32; 3]| (0..3).map(|i| i64::from(p[i] - target[i]).pow(2)).sum::<i64>();
+    assert!(distance(second) < distance(first));
+    let construction_target = [200, 16, 200];
+    commander.set_arm_targets([construction_target, construction_target, [1, 0, 0], [0, 0, 0]], 0);
+    let changed = commander.arm_targets.unwrap();
+    assert_ne!(changed[1], construction_target, "tool switch must retain inertia");
+    assert_ne!(changed[0], second, "cannon must gradually relax after switching tools");
+    assert!((0..3).all(|axis| (changed[0][axis] - second[axis]).abs() <= 80));
+}
+
+#[test]
+fn commander_keeps_its_gun_forward_until_the_enemy_enters_range() {
+    let mut r = arena_of([RangeUnitKind::Commander, RangeUnitKind::Tank]);
+    r.start_battle().unwrap();
+    std::sync::Arc::make_mut(&mut r.battle.tuning).energy_range = 100;
+    let p = r.units[0].motion.pos.map(Fx::to_int_trunc);
+    r.units[1].motion.pos = [p[0], p[1], p[2] + 300].map(Fx::from_int);
+    let head = r.units[1].motion.drive.head;
+    r.units[1].update_pose(head);
+    r.battle.actors[1].order = Order::Hold;
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    for _ in 0..5 { r.battle_tick(); }
+    assert_eq!(r.battle.actors[0].turret.angle, r.units[0].motion.drive.head);
+    assert_ne!(r.units[0].arm_targets.unwrap()[0], aim_point(&r.units[1]));
+    assert_eq!(r.battle.actors[0].fired, 0);
+    let restored = BlastRange::restore(r.config, &r.snapshot()).expect("commander pose restores");
+    assert_eq!(r.units[0].arm_targets, restored.units[0].arm_targets);
+    assert_eq!(r.state_hash(), restored.state_hash());
+}
+
+#[test]
+fn commander_fires_energy_at_an_enemy() {
+    let mut r = arena_of([RangeUnitKind::Commander, RangeUnitKind::Tank]);
+    let origin = r.units[0].motion.pos.map(Fx::to_int_trunc);
+    r.units[1].motion.pos = [origin[0] + 300, origin[1], origin[2]].map(Fx::from_int);
+    let head = r.units[1].motion.drive.head;
+    r.units[1].update_pose(head);
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    r.start_battle().unwrap();
+    r.battle.trace_fire(true);
+    r.battle.actors[1].order = Order::Hold;
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    for _ in 0..180 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        if r.battle.actors[0].fired > 0 { break; }
+    }
+    assert!(r.battle.actors[0].fired > 0, "commander never fired: gate {:?}, phase {:?}, status {:?}", r.battle.fire_gate(0), r.battle.phase, r.units[0].status);
+    assert_eq!(r.units[0].arm_targets.unwrap()[2], [0, 0, 0]);
+    let gun = r.units[0].seg_frames[13];
+    let muzzle = r.battle_muzzles(0)[0];
+    let target = aim_point(&r.units[1]);
+    let delta = phys::V3::new(
+        Fx::from_int(target[0]).sub(muzzle[0]),
+        Fx::from_int(target[1]).sub(muzzle[1]),
+        Fx::from_int(target[2]).sub(muzzle[2]),
+    );
+    assert!(gun.x.dot(delta) > delta.len_sq().sqrt().mul(Fx::from_ratio(95, 100)), "cannon points away from target");
+}
+
+#[test]
+fn commander_battle_energy_hits_apply_real_damage_in_both_directions() {
+    for kinds in [[RangeUnitKind::Commander, RangeUnitKind::Tank],
+        [RangeUnitKind::Tank, RangeUnitKind::Commander],
+        [RangeUnitKind::Commander, RangeUnitKind::Commander]] {
+        let mut r = arena_of(kinds);
+        r.set_physics_workers(1); r.set_navigation_workers(1);
+        r.start_battle().unwrap(); r.battle.trace_fire(true);
+        r.battle.actors[1].order = Order::Hold;
+        if kinds[0] == RangeUnitKind::Tank {
+            assert!(r.set_battle_weapon(0, Some(Weapon::Energy)));
+        }
+        assert!(r.battle_order(0, Order::Attack(1), None));
+        let mut impacts = 0;
+        let mut waves = 0;
+        for _ in 0..240 {
+            r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+            r.step();
+            impacts += r.battle.impacts.iter().filter(|i| i.weapon == Weapon::Energy).count();
+            waves = waves.max(r.battle.waves.len());
+            if r.units[1].annihilated_mm3() > 0 { break; }
+        }
+        assert!(r.units[1].annihilated_mm3() > 0,
+            "no damage for {kinds:?}: fired {}, gate {:?}, impacts {impacts}, waves {waves}, target {:?}, muzzle {:?}, dents {}/{}, status {:?}",
+            r.battle.actors[0].fired, r.battle.fire_gate(0), aim_point(&r.units[1]), r.battle_muzzles(0),
+            r.units[1].dents.len(), r.units[1].segment_dents().len(), r.units[1].status);
+        assert!(r.matter.economy.ledger.balanced());
+    }
+}
+
+#[test]
+fn repeated_same_move_does_not_keep_resetting_the_commanders_energy_charge() {
+    let mut r = arena_of([RangeUnitKind::Commander, RangeUnitKind::Tank]);
+    r.set_physics_workers(1); r.set_navigation_workers(1);
+    r.start_battle().unwrap(); r.battle.trace_fire(true);
+    r.battle.actors[1].order = Order::Hold;
+    let destination = [340, 336];
+    for _ in 0..180 {
+        assert_eq!(r.battle_group_move(&[(0, destination)], destination), 1);
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        if r.battle.actors[0].fired > 0 { break; }
+    }
+    assert!(r.battle.actors[0].fired > 0,
+        "repeated move starved firing: gate {:?}, pos {:?}, charge {:?}",
+        r.battle.fire_gate(0), r.units[0].motion.pos, r.battle.actors[0].charge);
+}
+
+#[test]
+fn commander_battle_damage_still_applies_after_three_minutes_of_ground_fire() {
+    let mut r = arena_of([RangeUnitKind::Commander, RangeUnitKind::Tank]);
+    r.set_physics_workers(1); r.set_navigation_workers(1);
+    r.start_battle().unwrap(); r.battle.trace_fire(true);
+    r.battle.actors[1].order = Order::Hold;
+    r.battle.actors[1].weapon = Some(Weapon::Energy);
+    assert!(r.battle_order(0, Order::Ground([320, 15, 470]), None));
+    for _ in 0..(crate::TICKS_PER_SECOND as u32 * 180) {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+    }
+    assert!(r.battle.actors[0].fired > 5, "aging scene never fired");
+    // Test each direction from the same aged state: the commander's first
+    // successful shot can destroy the tank before it could return fire.
+    let mut reversed = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+    reversed.set_physics_workers(1); reversed.set_navigation_workers(1);
+    reversed.battle.trace_fire(true);
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    let before = r.units[1].annihilated_mm3();
+    for _ in 0..300 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        if r.units[1].annihilated_mm3() > before { break; }
+    }
+    assert!(r.units[1].annihilated_mm3() > before,
+        "aged battle lost commander damage: tick {}, gate {:?}, shots {}, rounds {}, waves {}, held {:?}",
+        r.tick, r.battle.fire_gate(0), r.battle.actors[0].fired, r.battle.rounds.len(), r.battle.waves.len(), r.battle.wave_held);
+    r = reversed;
+    assert!(r.battle_order(0, Order::Hold, None));
+    assert!(r.economy_ai_order(1, Order::Attack(0), false));
+    let before = r.units[0].annihilated_mm3();
+    for _ in 0..300 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        if r.units[0].annihilated_mm3() > before { break; }
+    }
+    assert!(r.units[0].annihilated_mm3() > before,
+        "aged battle lost enemy damage: gate {:?}, shots {}, waves {}, held {:?}",
+        r.battle.fire_gate(1), r.battle.actors[1].fired, r.battle.waves.len(), r.battle.wave_held);
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn commander_mining_does_not_make_it_immune_to_an_enemy_energy_tank() {
+    let base = arena_of([RangeUnitKind::Commander, RangeUnitKind::Tank]);
+    let mut layout = base.layout.clone().unwrap();
+    layout.size = [3200, 256, 3200];
+    layout.clear_min = [1, 1]; layout.clear_max = [3199, 3199];
+    layout.units[0].at = [1666, 16, 1666];
+    layout.units[1].at = [2166, 16, 1666];
+    layout.units[1].weapon = Some(modding::range::RangeLoadout::Energy);
+    let mut economy = modding::range_economy::RangeEconomy::stock();
+    economy.production = None;
+    let commander = economy.kind_mut(RangeUnitKind::Commander).unwrap();
+    commander.dig_radius = 12; commander.dig_edits_per_tick = 512;
+    layout.economy = Some(economy);
+    let mut r = BlastRange::with_layout(base.config, layout).unwrap();
+    r.set_physics_workers(1); r.set_navigation_workers(1);
+    r.start_battle().unwrap(); r.battle.trace_fire(true);
+    assert!(r.economy_ai_order(1, Order::Attack(0), false));
+    assert!(r.battle_order(0, Order::Dig([1620, 15, 1666]), None));
+    let mut impacts = 0;
+    for _ in 0..240 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        impacts += r.battle.impacts.iter().filter(|i| i.weapon == Weapon::Energy).count();
+        if r.units[0].annihilated_mm3() > 0 { break; }
+    }
+    assert!(r.units[0].annihilated_mm3() > 0,
+        "mining commander immune: shots {}, impacts {impacts}, waves {}, dents {}/{}, gate {:?}, target {:?}",
+        r.battle.actors[1].fired, r.battle.waves.len(), r.units[0].dents.len(), r.units[0].segment_dents().len(),
+        r.battle.fire_gate(1), aim_point(&r.units[0]));
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn energy_tank_attacking_a_commander_seeks_a_clear_firing_line() {
+    let base = arena_of([RangeUnitKind::Tank, RangeUnitKind::Commander]);
+    let mut layout = base.layout.clone().unwrap();
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [305, 16, 280], max: [325, 150, 392], material: 3,
+    });
+    let mut r = BlastRange::with_layout(base.config, layout).unwrap();
+    r.set_physics_workers(1); r.set_navigation_workers(1);
+    r.start_battle().unwrap(); r.battle.trace_fire(true);
+    r.battle.actors[1].order = Order::Hold;
+    assert!(r.set_battle_weapon(0, Some(Weapon::Energy)));
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+    r.battle_tick();
+    assert_eq!(r.battle.fire_gate(0), Some(FireGate::Approach),
+        "energy weapon aims through unbreakable cover instead of finding a firing position");
+    assert!(r.units[0].motion.destination.is_some() || r.units[0].motion.searching());
+    assert!(r.battle.rounds.is_empty());
+    for _ in 0..360 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        if r.units[1].annihilated_mm3() > 0 { break; }
+    }
+    assert!(r.units[1].annihilated_mm3() > 0,
+        "detour never damaged commander: gate {:?}, pos {:?}, destination {:?}, shots {}",
+        r.battle.fire_gate(0), r.units[0].at, r.units[0].motion.destination, r.battle.actors[0].fired);
+    // Deliberately attacking terrain retains its physical impact behaviour.
+    let destination = r.units[0].motion.destination;
+    let fired = r.battle.actors[0].fired;
+    assert!(r.battle_order(0, Order::Ground([310, 30, 336]), None));
+    r.battle.actors[0].next = r.tick;
+    for _ in 0..100 {
+        r.tick += 1;
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.battle_tick();
+        if r.battle.actors[0].fired > fired { break; }
+    }
+    assert!(r.battle.actors[0].fired > fired, "explicit ground fire was blocked");
+    assert_eq!(r.units[0].motion.destination, destination);
+}
 
 #[test]
 fn projectile_impact_events_keep_the_incident_side_of_a_tall_wall() {
@@ -452,6 +764,146 @@ fn step_until_walker_beams(r: &mut BlastRange) {
 }
 
 #[test]
+fn walker_aims_during_reload_instead_of_waiting_to_start() {
+    let mut r = walker_arena(Order::Attack(1));
+    r.battle.actors[0].next = r.tick + 100;
+    r.battle.ai.next_tick = r.tick + 200;
+    r.step();
+    assert!(r.units[0].arm_targets.is_some(), "arms did not begin tracking during reload");
+    assert!(r.battle.walker_lasers.is_empty(), "fired during reload");
+}
+
+#[test]
+fn walker_does_not_fire_at_a_ground_point() {
+    let mut r = walker_arena(Order::Ground([1500, 0, 800]));
+    for _ in 0..100 {
+        r.battle.ai.next_tick = r.tick + 200;
+        r.step();
+        assert!(r.battle.walker_lasers.is_empty(), "fired at ground");
+    }
+    assert_eq!(r.battle.actors[0].fired, 0);
+}
+
+#[test]
+fn walker04_forearms_do_not_intersect_in_forward_working_sectors() {
+    let mut u = RangeUnit::of_kind(RangeUnitKind::Walker04, [600, 16, 600]);
+    for target in [[1400, 100, 600], [1400, 80, 300], [1400, 200, 900]] {
+        for _ in 0..80 { u.set_arm_targets([target; 4], 0); }
+        for a in 0..4 {
+            for ai in [12 + a * 4, 13 + a * 4] {
+                let body = &u.body.segments[ai].body;
+                for z in 0..usize::from(body.vol.nz) { for y in 0..usize::from(body.vol.ny) { for x in 0..usize::from(body.vol.nx) {
+                    if !body.vol.get(x, y, z) { continue; }
+                    let world = u.seg_frames[ai].world([Fx::from_ratio(x as i32 * 2 + 1, 2), Fx::from_ratio(y as i32 * 2 + 1, 2), Fx::from_ratio(z as i32 * 2 + 1, 2)]);
+                    let root = u.pose.local(world).map(Fx::to_int_trunc);
+                    if root[0] >= 0 && root[1] >= 0 && root[2] >= 0 && root[0] < i32::from(u.body.vol.nx) && root[1] < i32::from(u.body.vol.ny) && root[2] < i32::from(u.body.vol.nz) {
+                        assert!(!u.body.vol.get(root[0] as usize, root[1] as usize, root[2] as usize), "arm {a} intersects the torso while aiming at {target:?}");
+                    }
+                    for b in (a + 1)..4 { for bi in [12 + b * 4, 13 + b * 4] {
+                        let p = u.seg_frames[bi].local(world).map(Fx::to_int_trunc);
+                        let other = &u.body.segments[bi].body;
+                        if p[0] >= 0 && p[1] >= 0 && p[2] >= 0 && p[0] < i32::from(other.vol.nx) && p[1] < i32::from(other.vol.ny) && p[2] < i32::from(other.vol.nz) {
+                            assert!(!other.vol.get(p[0] as usize, p[1] as usize, p[2] as usize), "arms {a} and {b} overlap while aiming at {target:?}");
+                        }
+                    }}
+                }}}
+            }
+        }
+    }
+}
+
+#[test]
+fn walker04_has_four_separate_matching_bearing_modules() {
+    let u = RangeUnit::of_kind(RangeUnitKind::Walker04, [600, 16, 600]);
+    let mounts: Vec<_> = (0..4).map(|arm| u.body.segments[10 + arm * 4].attach.at).collect();
+    assert_eq!(u.body.segments.len(), 30);
+    for arm in 0..4 {
+        assert_eq!(mounts[arm].1, u.body.segments[26 + arm].attach.at.1);
+        if arm > 0 { assert!(mounts[arm].1 > mounts[arm - 1].1); }
+        assert!(!u.body.segments[26 + arm].attach.turret);
+    }
+    for part in 0..4 {
+        let reference = &u.body.segments[10 + part].body.vol;
+        for arm in 1..4 {
+            let other = &u.body.segments[10 + arm * 4 + part].body.vol;
+            assert_eq!((reference.nx, reference.ny, reference.nz), (other.nx, other.ny, other.nz));
+            for z in 0..usize::from(reference.nz) { for y in 0..usize::from(reference.ny) { for x in 0..usize::from(reference.nx) {
+                assert_eq!(reference.get(x, y, z), other.get(x, y, z), "arm {arm}, part {part}");
+            }}}
+        }
+    }
+}
+
+#[test]
+fn walker04_independent_bearings_aim_in_every_direction() {
+    let mut u = RangeUnit::of_kind(RangeUnitKind::Walker04, [600, 16, 600]);
+    for yaw in [0, fx::angle::FULL / 4, fx::angle::FULL / 2, fx::angle::FULL * 3 / 4] {
+        let target = [600 + fx::angle::cos(yaw).mul(Fx::from_int(800)).to_int_trunc(),
+            70, 600 + fx::angle::sin(yaw).mul(Fx::from_int(800)).to_int_trunc()];
+        for _ in 0..100 { u.set_arm_targets([target; 4], yaw); }
+        for arm in 0..4 {
+            let frame = u.seg_frames[13 + arm * 4];
+            let muzzle = frame.world(frame.centre);
+            let dx = Fx::from_int(target[0]).sub(muzzle.x);
+            let dz = Fx::from_int(target[2]).sub(muzzle.z);
+            let bearing = fx::angle::atan2(dz.raw(), dx.raw());
+            let actual = fx::angle::atan2(frame.x.z.raw(), frame.x.x.raw());
+            assert!(fx::angle::diff(bearing, actual).abs() < fx::angle::FULL * 4 / 360,
+                "arm {arm} failed to aim at yaw {yaw}");
+        }
+    }
+}
+
+#[test]
+fn walker04_focus_pitch_keeps_feet_planted_and_shoulders_attached() {
+    let mut u = RangeUnit::of_kind(RangeUnitKind::Walker04, [600, 16, 600]);
+    let rest = u.seg_frames.clone();
+    let feet = [rest[4].world(rest[4].centre), rest[9].world(rest[9].centre)];
+    u.turret_pitch = -fx::angle::FULL * 8 / 360;
+    for _ in 0..80 { u.set_arm_targets([[1400, 50, 600]; 4], 0); }
+    for (i, foot) in [4, 9].into_iter().enumerate() {
+        assert_eq!(u.seg_frames[foot].world(u.seg_frames[foot].centre), feet[i]);
+    }
+    for arm in 0..4 {
+        let index = 10 + arm * 4;
+        let attach = u.body.segments[index].attach;
+        let offset = [attach.at.0 - 40, 0, attach.at.2 - 40].map(|v| Fx::from_int(i32::from(v)));
+        let mount = u.seg_frames[26 + arm];
+        let expected = mount.base.add(mount.x.scale(offset[0].div(mount.scale)))
+            .add(mount.z.scale(offset[2].div(mount.scale)));
+        assert!(u.seg_frames[index].world(u.seg_frames[index].centre)
+            .sub(expected).len_sq() < Fx::from_ratio(1, 1000),
+            "arm {arm} separated from its socket");
+    }
+    for (arm, muzzle) in weapons::walker_muzzles(&u) {
+        let delta = phys::V3::new(Fx::from_int(1400).sub(muzzle[0]),
+            Fx::from_int(50).sub(muzzle[1]), Fx::from_int(600).sub(muzzle[2]));
+        assert!(u.seg_frames[13 + arm * 4].x.dot(delta).div(delta.len_sq().sqrt())
+            > Fx::from_ratio(998, 1000), "arm {arm} misses its focused target");
+    }
+}
+
+#[test]
+fn walker04_one_bearing_can_turn_without_dragging_the_other_three() {
+    let mut u = RangeUnit::of_kind(RangeUnitKind::Walker04, [600, 16, 600]);
+    let original = [[1400, 170, 600]; 4];
+    for _ in 0..160 { u.set_arm_targets(original, 0); }
+    let before = u.seg_frames.clone();
+    let mut targets = original;
+    targets[2] = [600, 170, 1400];
+    for _ in 0..160 { u.set_arm_targets(targets, 0); }
+    for arm in [0, 1, 3] {
+        let before = before[26 + arm]; let after = u.seg_frames[26 + arm];
+        assert!(before.x.dot(after.x) > Fx::from_ratio(999, 1000), "uncommanded bearing {arm} moved");
+    }
+    assert!(before[28].x.dot(u.seg_frames[28].x).abs() < Fx::from_ratio(1, 3), "bearing did not orbit the body's axis");
+    assert_eq!(u.motion.drive.head, 0, "aim dragged the chassis");
+    u.shed(28);
+    assert!(u.seg_gone[18..22].iter().all(|gone| *gone), "destroyed bearing retained its arm");
+    assert!(u.seg_gone[10..18].iter().all(|gone| !*gone), "other bearings lost their arms");
+}
+
+#[test]
 fn walker04_lost_arm_does_not_renumber_the_remaining_guns() {
     let mut u = RangeUnit::of_kind(RangeUnitKind::Walker04, [300, 16, 300]);
     u.set_arm_targets(
@@ -472,14 +924,9 @@ fn walker04_lost_arm_does_not_renumber_the_remaining_guns() {
 }
 
 #[test]
-fn walker04_aiming_keeps_the_shoulders_and_arm_joints_together() {
+fn walker04_aiming_keeps_each_arm_attached_to_its_own_bearing() {
     let mut u = RangeUnit::of_kind(RangeUnitKind::Walker04, [300, 16, 300]);
     let rest = u.seg_frames.clone();
-    assert!(
-        (0..4).all(|arm| i32::from(u.body.turret_y)
-            <= i32::from(u.body.segments[10 + arm * 4].attach.at.1) - 3),
-        "the crown hinge cuts a shoulder socket in half"
-    );
     let shoulder = |u: &RangeUnit, arm: usize| {
         let f = u.seg_frames[10 + arm * 4];
         f.world(f.centre)
@@ -495,12 +942,11 @@ fn walker04_aiming_keeps_the_shoulders_and_arm_joints_together() {
         0,
     );
     for arm in 0..4 {
-        assert!(
-            shoulder(&u, arm).sub(shoulders[arm]).len_sq() < Fx::from_ratio(1, 1000),
-            "arm {arm} left its shoulder: {:?} -> {:?}",
-            shoulders[arm],
-            shoulder(&u, arm)
-        );
+        let mount = u.seg_frames[26 + arm];
+        let old_mount = rest[26 + arm];
+        let local = old_mount.local(shoulders[arm]);
+        assert!(mount.world(local).sub(shoulder(&u, arm)).len_sq() < Fx::from_ratio(1, 1000),
+            "arm {arm} left its rotating bearing");
         let start = 10 + arm * 4;
         for (parent, child) in [(start, start + 1), (start + 2, start + 3)] {
             let joint = rest[child].world(rest[child].centre);
@@ -523,21 +969,22 @@ fn walker04_aims_four_independent_arms_at_four_enemies_without_moving_their_moun
         .map(|arm| r.units[0].body.segments[10 + arm * 4].attach.at)
         .collect();
     step_until_walker_beams(&mut r);
-    assert_eq!(r.battle.walker_lasers.len(), 4);
+    assert!(!r.battle.walker_lasers.is_empty());
     assert_eq!(r.units[0].turret_pitch, 0);
     let targets = r.units[0].arm_targets.expect("four independent targets");
     let unique: std::collections::BTreeSet<_> = targets.into_iter().collect();
     assert_eq!(unique.len(), 4);
-    for target in targets {
-        assert!((1..r.units.len()).any(|id| aim_point(&r.units[id]) == target));
-    }
+    // Slower arms can still be in transit when the first arm fires.
+    assert!(targets.iter().any(|target| (1..r.units.len()).any(|id|
+        (0..3).all(|axis| (aim_point(&r.units[id])[axis] - target[axis]).abs() <= 20))));
+    assert!(r.battle.walker_lasers.iter().all(|trace| trace.hit), "ready arms should not fire into empty space");
     let origins: std::collections::BTreeSet<_> = r
         .battle
         .walker_lasers
         .iter()
         .map(|trace| trace.from.map(|v| v.raw()))
         .collect();
-    assert_eq!(origins.len(), 4);
+    assert_eq!(origins.len(), r.battle.walker_lasers.len());
     assert_eq!(r.battle_muzzles(0).len(), 4);
     for (arm, mount) in mounts.into_iter().enumerate() {
         assert_eq!(r.units[0].body.segments[10 + arm * 4].attach.at, mount);
@@ -546,13 +993,21 @@ fn walker04_aims_four_independent_arms_at_four_enemies_without_moving_their_moun
 }
 
 #[test]
-fn walker04_focus_tilts_ninety_degrees_and_uses_the_spider_power_on_all_four_arms() {
+fn walker04_focus_aims_separate_mounts_and_preserves_aim_on_restore() {
     let mut r = walker_arena(Order::Attack(1));
-    step_until_walker_beams(&mut r);
-    assert_eq!(r.battle.walker_lasers.len(), 4);
-    assert_eq!(r.units[0].turret_pitch, fx::angle::QUARTER);
+    for _ in 0..180 {
+        let old = r.battle.actors[0].elevation;
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        let new = r.battle.actors[0].elevation;
+        assert!((new.rate - old.rate).abs() <= r.turret_limits.accel);
+        assert!(new.rate.abs() <= r.turret_limits.speed);
+        if !r.battle.walker_lasers.is_empty() { break; }
+    }
+    assert!(!r.battle.walker_lasers.is_empty(), "pitch {} goals {:?} muzzles {:?} axes {:?}", r.units[0].turret_pitch, r.units[0].arm_targets, weapons::walker_muzzles(&r.units[0]), (0..4).map(|arm| r.units[0].seg_frames[13 + arm * 4].x).collect::<Vec<_>>());
+    assert_eq!(r.units[0].turret_pitch, 0, "independent bearings must not pitch the central spine");
     let target = aim_point(&r.units[1]);
-    assert_eq!(r.units[0].arm_targets, Some([target; 4]));
+    assert!(r.units[0].arm_targets.unwrap().iter().any(|p| (0..3).all(|axis| (p[axis] - target[axis]).abs() <= 20)));
     assert_eq!(r.battle_weapon(0), Some(Weapon::Laser));
     assert_eq!(
         r.battle_attack_range(0),
@@ -560,15 +1015,9 @@ fn walker04_focus_tilts_ninety_degrees_and_uses_the_spider_power_on_all_four_arm
     );
     assert!(
         r.units[1].revision > 0,
-        "focused beams did no physical work"
+        "focused beams did no physical work: traces {:?}, target {:?}, turret {}, axes {:?}", r.battle.walker_lasers, target, r.battle.actors[0].turret.angle, (0..4).map(|arm| r.units[0].seg_frames[13 + arm * 4].x).collect::<Vec<_>>()
     );
     let before = r.battle_muzzles(0);
-    r.units[0].set_arm_targets([target; 4], r.battle.actors[0].turret.angle);
-    assert_eq!(
-        r.battle_muzzles(0),
-        before,
-        "repeated aiming moved the mounts"
-    );
     let bytes = r.snapshot();
     let mut stage = String::new();
     let mut copy = BlastRange::restore_observed(r.config, &bytes, |section, offset, unit| {
@@ -589,6 +1038,13 @@ fn walker04_focus_tilts_ninety_degrees_and_uses_the_spider_power_on_all_four_arm
         copy.step();
         assert_eq!(r.state_hash(), copy.state_hash());
     }
+    r.battle.actors[0].order = Order::Hold;
+    for _ in 0..30 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+    }
+    assert!(r.units[0].turret_pitch.abs() < fx::angle::FULL / 360,
+        "crown did not return to rest: {}", r.units[0].turret_pitch);
 }
 
 #[test]
@@ -937,6 +1393,14 @@ fn razlom_stock_scenario_reaches_tanks_without_crossing_cell_bounds() {
         layout,
     )
     .unwrap();
+    r.set_physics_workers(1);
+    r.set_navigation_workers(1);
+    assert_eq!(r.units[1..4].iter().map(|u| (u.kind, u.at[2])).collect::<Vec<_>>(),
+        vec![(RangeUnitKind::Tank, 2400); 3]);
+    assert!(r.units[1..4].windows(2).all(|w| w[0].at[0] < w[1].at[0]));
+    assert_eq!(r.units[4].kind, RangeUnitKind::Strider);
+    assert_eq!(r.units[5].kind, RangeUnitKind::Strider);
+    let initial: Vec<_> = r.units.iter().map(|u| u.body.solid_count()).collect();
     r.start_battle().unwrap();
     for _ in 0..360 {
         r.step();
@@ -945,6 +1409,10 @@ fn razlom_stock_scenario_reaches_tanks_without_crossing_cell_bounds() {
         r.units.iter().skip(1).any(|u| !u.status.alive),
         "the stock wave killed no T1 tank"
     );
+    let hit: Vec<_> = r.units.iter().enumerate().filter(|(i, u)| *i > 0 &&
+        (!u.status.alive || u.body.solid_count() < initial[*i])).map(|(i, _)| i).collect();
+    assert!([1, 2, 3].iter().filter(|i| hit.contains(i)).count() >= 2,
+        "the wave must reach multiple tanks in the row: damaged={hit:?}");
     assert!(
         BlastRange::restore(r.config, &r.snapshot()).is_some(),
         "wave damage must debit body material and leave a restorable scene"
@@ -957,8 +1425,14 @@ fn kil_produces_a_tank_and_upgrades_to_t4_without_losing_its_queue() {
         .layout
         .unwrap();
     layout.size[1] = 512;
+    // Leave room for a physical tank to clear the gate and free the lane.
+    layout.units[0].at = [800, 16, 800];
     let mut economy = modding::range_economy::RangeEconomy::stock();
     economy.bank.as_mut().unwrap().base_store = 1 << 40;
+    // This queue/upgrade test has no warehouse; use the same isolated
+    // supply configuration as the factory production fixture.
+    economy.production.as_mut().unwrap().supply_radius = 0;
+    economy.production.as_mut().unwrap().pipeline_cost_per_cell = 0;
     layout.economy = Some(economy);
     let mut r = BlastRange::with_layout(
         ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
@@ -994,13 +1468,13 @@ fn kil_produces_a_tank_and_upgrades_to_t4_without_losing_its_queue() {
         };
         assert_eq!(r.units[0].kind, next);
         assert_eq!(r.production_queue(0), queue);
-        assert_eq!(r.units[0].at, [500, 16, 800]);
+        assert_eq!(r.units[0].at, [800, 16, 800]);
     }
     assert!(!r.upgrade_kil(0));
     for _ in 0..240 {
         r.step();
     }
-    assert_eq!(r.units.len(), 3);
+    assert_eq!(r.units.len(), 3, "phase {:?} factory {:?} queue {:?} progress {:?} store {:?}", r.battle.phase, r.units[0].status, r.production_queue(0), r.production_progress(0), r.side_store(true));
     assert_eq!(r.units[2].kind, RangeUnitKind::Tank);
     assert_eq!(
         r.execute_battle_command(battle::commands::Command::Produce {
@@ -1012,7 +1486,7 @@ fn kil_produces_a_tank_and_upgrades_to_t4_without_losing_its_queue() {
     for _ in 0..300 {
         r.step();
     }
-    assert_eq!(r.units.len(), 4);
+    assert_eq!(r.units.len(), 4, "first pos {:?}, blocked {}, order {:?}, phase {:?}, queue {:?}, progress {:?}", r.units[2].at, r.units[2].motion.blocked, r.battle.actors[2].order, r.battle.phase, r.production_queue(0), r.production_progress(0));
     assert_eq!(r.units[3].kind, RangeUnitKind::Tank);
     assert!(r.matter.economy.ledger.balanced());
 }
@@ -6134,3 +6608,17 @@ fn t2_canister_finishes_a_stock_tank_with_at_most_three_salvos() {
 
 #[path = "range_siege_tests.rs"]
 mod siege_tests;
+
+#[test]
+fn player_commander_defends_without_automatically_pursuing_distant_enemy() {
+    let mut r = arena_of([RangeUnitKind::Commander, RangeUnitKind::Tank]);
+    std::sync::Arc::make_mut(&mut r.battle.tuning).energy_range = 100;
+    r.start_battle().unwrap();
+    r.battle.actors[1].order = Order::Hold;
+    assert_eq!(r.battle.actors[0].order, Order::Auto);
+    for _ in 0..3 { r.battle_tick(); }
+    assert!(r.units[0].motion.destination.is_none(), "idle player commander pursued a distant target");
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    r.battle_tick();
+    assert!(r.units[0].motion.destination.is_some(), "explicit attack must still allow pursuit");
+}

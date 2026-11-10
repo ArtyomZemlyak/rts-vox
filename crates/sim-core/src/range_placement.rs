@@ -45,6 +45,8 @@ impl Footprint {
                 | RangeUnitKind::KilFactoryT3
                 | RangeUnitKind::KilFactoryT4
         ) {
+            let cell = (i32::from(unit.body.mm) / i32::from(voxel::unit::WORLD_MM)).max(1);
+            let half = (cell / 2).max(1);
             for x in 0..usize::from(unit.body.vol.nx) {
                 for y in 0..usize::from(unit.body.vol.ny) {
                     for z in 0..usize::from(unit.body.vol.nz) {
@@ -54,8 +56,8 @@ impl Footprint {
                         let p = unit.world_pos([x, y, z]);
                         let p = [p[0] - GUN[0], p[1] - GUN[1], p[2] - GUN[2]];
                         for a in 0..3 {
-                            min[a] = min[a].min(p[a] - 4);
-                            max[a] = max[a].max(p[a] + 4);
+                            min[a] = min[a].min(p[a] - half);
+                            max[a] = max[a].max(p[a] + half);
                         }
                         columns
                             .entry([p[0], p[2]])
@@ -65,7 +67,7 @@ impl Footprint {
                 }
             }
             return Self {
-                cell: 8,
+                cell,
                 columns,
                 min,
                 max,
@@ -226,6 +228,18 @@ fn footprints() -> &'static [std::sync::OnceLock<Footprint>; RangeUnitKind::COUN
 
 #[derive(Default)]
 pub struct Validator;
+/// Startup-only headroom for a complete RTS roster. Uses body bounds rather
+/// than building detailed placement masks, and leaves the ground unchanged.
+pub fn catalogue_height(ground: i32) -> u32 {
+    static TOP: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    let top = ground.saturating_add(*TOP.get_or_init(|| {
+        RangeUnitKind::ALL.into_iter().map(|kind| {
+            RangeUnit::of_kind(kind, [0; 3]).bounds().1[1]
+        }).max().unwrap_or(0)
+    }));
+    // Match runtime's upper-edge guard and the world's 16-cell chunk grid.
+    ((top.max(0) as u32 + 2).max(128) + 15) / 16 * 16
+}
 impl Validator {
     pub fn runtime_bounds(
         &self,
@@ -319,11 +333,11 @@ impl Validator {
             .get_or_init(|| Footprint::of(kind, i32::from(yaw) * fx::angle::FULL / 4))
     }
 
-    /// Prepare both spawn orientations outside the simulation tick. Only
+    /// Prepare spawn orientations outside the simulation tick. Only
     /// kinds named by a producer need these derived, unsaved masks.
     pub(super) fn prepare_product(&self, kind: RangeUnitKind) {
-        for reverse in [false, true] {
-            self.footprint(kind, reverse);
+        for yaw in 0..4 {
+            self.footprint_yaw(kind, yaw);
         }
     }
 
@@ -334,12 +348,12 @@ impl Validator {
     pub(super) fn product_intersects(
         &self,
         kind: RangeUnitKind,
-        reverse: bool,
+        yaw: u8,
         world: &voxel::World,
         at: [i32; 3],
         bounds: ([i32; 3], [i32; 3]),
     ) -> bool {
-        let shape = footprints()[kind.index() + usize::from(reverse) * 2 * RangeUnitKind::COUNT]
+        let shape = footprints()[kind.index() + usize::from(yaw % 4) * RangeUnitKind::COUNT]
             .get()
             .expect("product geometry is prepared at scene construction");
         let (lo, hi) = bounds;
@@ -528,7 +542,8 @@ mod tests {
                 let mut unit = RangeUnit::of_kind(kind, GUN);
                 unit.motion.drive.head = yaw * fx::angle::QUARTER;
                 unit.update_pose(unit.motion.drive.head);
-                for offset in [[-4, -4, -4], [3, 3, 3], [1, 0, 0]] {
+                let half = f.cell / 2;
+                for offset in [[-half, -half, -half], [half - 1, half - 1, half - 1], [0, 0, 0]] {
                     let q = std::array::from_fn(|a| centre[a] + offset[a]);
                     assert!(unit.solid(std::array::from_fn(|a| q[a] + GUN[a])));
                     assert!(f.contains(q), "yaw={yaw} cell={q:?}");

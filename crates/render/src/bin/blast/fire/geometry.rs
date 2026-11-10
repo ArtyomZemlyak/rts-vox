@@ -156,6 +156,7 @@ pub(super) fn prepare(input: Input<'_>, pool: Option<&bevy::tasks::TaskPool>) ->
         + input.effects.reclaim_flights.len()
         + input.effects.tracers.len() * 2
         + input.sim.battle.lasers.len() * 4
+        + input.sim.construction_print_traces().len() * 19
         + input.sim.battle.rounds.len()
         + input.effects.heat_spots.len();
     // A strategic cloud costs far more than a single particle. Include its
@@ -229,6 +230,36 @@ fn laser_emission(buf: &mut MeshBuf, from: Vec3, to: Vec3, hit: bool, scale: f32
             0.35 * scale,
             [7.5, 1.5, 0.2, 0.65],
         );
+    }
+}
+
+/// One bounded, batched printer effect, driven by material actually placed.
+/// Cubic light and travelling voxels suit the voxel world without dynamic
+/// point lights, persistent particle entities or a screen-space pass.
+fn construction_emission(buf: &mut MeshBuf, from: Vec3, to: Vec3, now: f32, seed: u32) {
+    let delta = to - from;
+    if delta.length_squared() < 0.01 { return; }
+    let axis = delta.normalize();
+    let side = axis.any_orthonormal_vector();
+    let up = axis.cross(side).normalize_or_zero();
+    let pulse = 0.88 + 0.12 * (now * 8.0 + seed as f32).sin();
+    beam(buf, from, to, 5.0, [2.0, 0.38, 0.025, 0.07]);
+    beam(buf, from, to, 1.6, [5.0, 1.6, 0.16, 0.28]);
+    beam(buf, from, to, 0.45, [10.0, 5.8, 1.9, 0.92]);
+    cube(buf, from, 3.2 * pulse, [8.0, 2.4, 0.20, 0.8]);
+    cube(buf, from, 6.0, [2.0, 0.40, 0.035, 0.12]);
+    cube(buf, to, 3.0 * pulse, [10.0, 5.0, 1.2, 0.9]);
+    cube(buf, to, 6.0, [2.5, 0.65, 0.07, 0.13]);
+    for i in 0..6u32 {
+        let t = (now * 0.8 + i as f32 / 6.0 + noise(seed) * 0.15).fract();
+        let at = from.lerp(to, t);
+        cube(buf, at, 0.7 + 0.5 * t, [8.0, 3.3, 0.5, 0.75]);
+        let phase = (now * 1.4 + noise(seed.wrapping_add(i * 19 + 1))).fract();
+        let angle = i as f32 * std::f32::consts::TAU / 6.0;
+        let spread = 1.5 + phase * 5.0;
+        let spark = to + (side * angle.cos() + up * angle.sin()) * spread
+            - axis * phase * 2.5;
+        cube(buf, spark, 1.0 - phase * 0.55, [7.0, 2.5, 0.25, (1.0 - phase) * 0.7]);
     }
 }
 
@@ -312,6 +343,24 @@ fn hot(input: Input<'_>) -> MeshBuf {
         first_person_origin,
     } = input;
     let mut hot = MeshBuf::default();
+    for trace in sim.construction_print_traces() {
+        if let Some(from) = sim.commander_tool_tip(trace.actor) {
+            construction_emission(&mut hot, point(from), point(trace.impact), now, trace.actor as u32);
+        }
+    }
+    // A paid batch rises out of the dock during the real loading phase.
+    for (id, unit) in sim.units.iter().enumerate() {
+        let Some(sim_core::blast::economy::construction::Leg::Loading(left)) = sim.drone_leg(id) else { continue; };
+        let p = Vec3::from(unit.motion.pos.map(|v| v.to_f64_lossy() as f32));
+        let progress = (8.0 - left as f32 + fraction).clamp(0.0, 8.0) / 8.0;
+        let load = p + Vec3::Y * (1.0 + progress * 7.0);
+        cube(&mut hot, load, 3.0, [2.0, 0.9, 0.12, 0.9]);
+        for i in 0..4 {
+            let angle = now * 4.0 + i as f32 * std::f32::consts::FRAC_PI_2;
+            let spark = load + Vec3::new(angle.cos() * 4.0, (i as f32 - 1.5) * 1.2, angle.sin() * 4.0);
+            cube(&mut hot, spark, 0.8, [3.0, 1.2, 0.12, 0.65]);
+        }
+    }
     for flight in &fx.reclaim_flights {
         let t = ((now - flight.born) / RECLAIM_FLIGHT_LIFE).clamp(0.0, 1.0);
         let Some(unit) = sim.units.get(flight.crawler) else {
@@ -329,7 +378,14 @@ fn hot(input: Input<'_>) -> MeshBuf {
             0.0,
             noise(flight.seed.wrapping_add(17)) - 0.5,
         );
-        let at = flight.from.lerp(end, smooth01(t)) + Vec3::Y * arc * 6.0 + jitter * arc * 3.0;
+        let mouth = if unit.kind == RangeUnitKind::Crawler {
+            Vec3::from(unit.world_pos(voxel::unit::CRAWLER_DRILL_TIP).map(|v| v as f32))
+        } else { end };
+        let at = if t < 0.7 {
+            flight.from.lerp(mouth, smooth01(t / 0.7))
+        } else {
+            mouth.lerp(end, smooth01((t - 0.7) / 0.3))
+        } + Vec3::Y * arc * 6.0 + jitter * arc * 3.0;
         let mut colour = fragments::material_colour(flight.material);
         colour[3] = (1.0 - smooth01((t - 0.80) / 0.20)).max(0.0);
         cube(
@@ -396,21 +452,21 @@ fn hot(input: Input<'_>) -> MeshBuf {
                 &mut hot,
                 from,
                 to,
-                30.0 * fade,
+                30.0,
                 color([0.01, 0.65, 0.75, 0.12]),
             );
             beam(
                 &mut hot,
                 from,
                 to,
-                12.0 * fade,
+                12.0,
                 color([0.02, 2.4, 2.8, 0.36]),
             );
             beam(
                 &mut hot,
                 from,
                 to,
-                4.0 * fade,
+                4.0,
                 color([0.55, 9.0, 10.0, 0.96]),
             );
             razlom_wave_emission(&mut hot, from, to, trace.hit, 2.0 * fade, trace.serial, now);
@@ -428,14 +484,14 @@ fn hot(input: Input<'_>) -> MeshBuf {
             &mut hot,
             left,
             right,
-            12.0 * fade,
+            12.0,
             color([0.08, 3.0, 3.6, 0.42]),
         );
         beam(
             &mut hot,
             left,
             right,
-            3.0 * fade,
+            3.0,
             color([0.65, 10.0, 12.0, 0.96]),
         );
         beam(
@@ -839,6 +895,23 @@ fn puff(buf: &mut MeshBuf, at: Vec3, edge: f32, col: [f32; 4], p: &Particle, t: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn construction_light_is_animated_bounded_and_handles_empty_ray() {
+        let from = Vec3::new(10.0, 20.0, 30.0);
+        let to = Vec3::new(100.0, 40.0, 50.0);
+        let mut first = MeshBuf::default();
+        let mut next = MeshBuf::default();
+        construction_emission(&mut first, from, to, 0.1, 7);
+        construction_emission(&mut next, from, to, 0.5, 7);
+        assert!(!first.is_empty());
+        assert!(first.pos.len() <= 512, "one builder must remain a bounded effect");
+        assert_eq!(first.pos.len(), next.pos.len());
+        assert_ne!(first.pos, next.pos, "the printer's cubic pulses must move");
+        assert!(first.pos.iter().flatten().all(|v| v.is_finite()));
+        let mut empty = MeshBuf::default();
+        construction_emission(&mut empty, from, from, 0.1, 7);
+        assert!(empty.is_empty());
+    }
     #[test]
     fn razlom_fronts_fade_without_joining_separate_shots() {
         let (mut sim, _, _) = fixture(0);

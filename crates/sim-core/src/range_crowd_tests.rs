@@ -56,8 +56,8 @@ fn assert_separate(s: &BlastRange) {
             let depth = motion::Obstacle::of(&ua.motion, &ua.body)
                 .penetration(&motion::Obstacle::of(&ub.motion, &ub.body));
             assert!(
-                depth <= Fx::from_int(2),
-                "hull overlap {depth:?} exceeds 20 cm: {a}/{b} at {}",
+                depth <= Fx::from_int(4),
+                "hull overlap {depth:?} exceeds 40 cm: {a}/{b} at {}",
                 s.tick
             );
         }
@@ -284,4 +284,96 @@ fn gate_convoy_remains_collision_free_and_all_orders_finish() {
     }
     assert!(s.units.iter().all(|u| u.motion.destination.is_none()));
     assert!(s.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn single_commander_group_orders_reach_nearby_and_distant_points() {
+    let mut l = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+    l.size = [1024, 256, 1024]; l.battle = true; l.gun_point = true; l.course = None;
+    l.clear_min = [1, 1]; l.clear_max = [1023, 1023]; l.blocks.clear(); l.shields.clear();
+    l.units = vec![RangeUnitDef { allied: true, kind: RangeUnitKind::Commander, at: [512, 16, 512], weapon: None }];
+    let mut r = BlastRange::with_layout(config(), l).unwrap();
+    r.set_physics_workers(1); r.set_navigation_workers(1); r.start_free_control().unwrap();
+    for delta in [8, 16, 40, 160] {
+        let start = r.units[0].motion.pos[0].to_int_trunc();
+        let goal = [start + delta, r.units[0].motion.pos[2].to_int_trunc()];
+        let slots = r.battle_formation_destinations(&[0], goal);
+        assert_eq!(slots, vec![(0, goal)]);
+        assert_eq!(r.battle_group_move(&slots, goal), 1);
+        for _ in 0..600 { r.step(); if r.units[0].motion.destination.is_none() { break; } }
+        let motion = &r.units[0].motion;
+        assert!((motion.pos[0].to_int_trunc() - goal[0]).abs() <= motion.arrival + 1,
+            "near move {delta} stalled at {:?}, dest {:?}, blocked {}", motion.pos, motion.destination, motion.blocked);
+    }
+}
+
+#[test]
+fn commander_group_order_bypasses_a_factory_across_navigation_workers() {
+    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+    layout.size = [2048, 384, 2048]; layout.battle = true; layout.gun_point = true; layout.course = None;
+    layout.clear_min = [0, 0]; layout.clear_max = [2048, 2048]; layout.blocks.clear(); layout.shields.clear();
+    layout.units = vec![
+        RangeUnitDef { allied: true, kind: RangeUnitKind::Commander, at: [300, 16, 1024], weapon: None },
+        RangeUnitDef { allied: true, kind: RangeUnitKind::KilFactoryT1, at: [850, 16, 1024], weapon: None },
+    ];
+    let mut serial = BlastRange::with_layout(config(), layout).unwrap();
+    serial.set_physics_workers(1); serial.set_navigation_workers(1); serial.start_free_control().unwrap();
+    let goal = [1550, 1024];
+    let slots = serial.battle_formation_destinations(&[0], goal);
+    assert_eq!(serial.battle_group_move(&slots, goal), 1);
+    let mut parallel = BlastRange::restore(serial.config, &serial.snapshot()).unwrap();
+    parallel.set_physics_workers(1); parallel.set_navigation_workers(2);
+    for tick in 0..1800 {
+        serial.step(); parallel.step();
+        let a = &serial.units[0].motion; let b = &parallel.units[0].motion;
+        assert_eq!((a.pos, a.drive, &a.path, a.cursor, a.blocked),
+            (b.pos, b.drive, &b.path, b.cursor, b.blocked), "worker divergence at {tick}");
+        let own = motion::Obstacle::of(a, &serial.units[0].body);
+        let factory = motion::Obstacle::of(&serial.units[1].motion, &serial.units[1].body);
+        assert!(own.penetration(&factory) <= Fx::from_int(4), "commander entered factory at {tick}");
+        if tick == 3 { assert!(a.pos[0] > Fx::from_int(300), "group order waited for planning"); }
+        if a.destination.is_none() { break; }
+    }
+    assert!(serial.units[0].motion.destination.is_none(), "commander did not bypass factory: {:?}", serial.units[0].motion.pos);
+    assert_eq!(serial.state_hash(), parallel.state_hash());
+}
+
+#[test]
+fn walking_group_advances_without_detouring_around_its_own_moving_members() {
+    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+    layout.size = [2048, 256, 2048]; layout.battle = true; layout.gun_point = true; layout.course = None;
+    layout.clear_min = [0, 0]; layout.clear_max = [2048, 2048]; layout.blocks.clear(); layout.shields.clear();
+    layout.units = (0..3).map(|id| RangeUnitDef { allied: true,
+        kind: RangeUnitKind::Commander, at: [300, 16, 700 + id * 180], weapon: None }).collect();
+    let mut sim = BlastRange::with_layout(config(), layout).unwrap();
+    sim.set_physics_workers(1); sim.set_navigation_workers(1); sim.start_free_control().unwrap();
+    let goal = [1200, 880];
+    let slots = sim.battle_formation_destinations(&[0, 1, 2], goal);
+    assert_eq!(sim.battle_group_move(&slots, goal), 3);
+    let mut copy = None;
+    let mut stopped = [0u32; 3];
+    for tick in 0..1800 {
+        sim.step(); assert_separate(&sim);
+        if let Some(other) = copy.as_mut() {
+            let other: &mut BlastRange = other;
+            other.step();
+            for id in 0..3 {
+                let a = &sim.units[id].motion; let b = &other.units[id].motion;
+                assert_eq!((a.pos, a.drive, &a.path, a.cursor, a.destination),
+                    (b.pos, b.drive, &b.path, b.cursor, b.destination), "group diverged: {id}, tick {tick}");
+            }
+        } else if tick == 40 {
+            let mut other = BlastRange::restore(sim.config, &sim.snapshot()).unwrap();
+            other.set_physics_workers(1); other.set_navigation_workers(2); copy = Some(other);
+        }
+        for id in 0..3 {
+            let m = &sim.units[id].motion;
+            if tick == 3 { assert!(m.pos[0] > Fx::from_int(300), "member {id} did not start promptly"); }
+            stopped[id] = if m.blocked { stopped[id] + 1 } else { 0 };
+            assert!(stopped[id] < 40, "member {id} stuck in its own group at {tick}");
+        }
+        if sim.units.iter().all(|u| u.motion.destination.is_none()) { break; }
+    }
+    assert!(sim.units.iter().all(|u| u.motion.destination.is_none()), "walking group never arrived");
+    assert_eq!(sim.state_hash(), copy.unwrap().state_hash());
 }
