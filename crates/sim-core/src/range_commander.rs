@@ -18,6 +18,22 @@ fn coords(p: V3) -> [i32; 3] {
 }
 
 impl RangeUnit {
+    /// Read the actual articulated emitter, not its requested aim point.
+    pub(crate) fn commander_arm_ready(&self, arm: usize, target: [i32; 3]) -> bool {
+        if self.kind != RangeUnitKind::Commander || !self.status.alive || arm >= 2 { return false; }
+        let first = 10 + arm * 4;
+        if self.seg_gone.get(first..first+4).is_none_or(|parts|parts.iter().any(|gone|*gone)) { return false; }
+        let Some(frame) = self.seg_frames.get(first+3) else { return false; };
+        let tip = &self.body.segments[first+3].body;
+        if tip.solid_count()==0 { return false; }
+        let from = frame.world([Fx::from_int(i32::from(tip.vol.nx)),
+            Fx::from_ratio(i32::from(tip.vol.ny),2),Fx::from_ratio(i32::from(tip.vol.nz),2)]);
+        let delta = point(target).sub(from);
+        let forward = frame.x.dot(delta);
+        let cosine = fx::angle::cos(degrees(tuning().work_ready_degrees));
+        forward > Fx::ZERO && forward.mul(forward) >= delta.len_sq().mul(cosine.mul(cosine))
+    }
+
     pub(super) fn commander_rest_targets(&self, turret_yaw: i32) -> [[i32; 3]; 2] {
         let crown = self.aimed_frame(&self.pose, fx::angle::diff(turret_yaw, self.motion.drive.head), self.turret_pitch);
         let speed = self.motion.drive.vel.abs().div(Fx::from_int(self.motion.speed.max(1))).min(Fx::ONE);
@@ -132,3 +148,6 @@ impl RangeUnit {
 #[cfg(test)]
 #[path = "range_commander_arm_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "range_commander_work_tests.rs"]
+mod work_tests;

@@ -1102,6 +1102,9 @@ impl BlastRange {
     /// nearest source. A mobile commander is also its own small generator.
     /// The graph is derived and bounded by the roster (at most 128 units).
     pub fn construction_power_networks(&self) -> Vec<Option<(u64, u64)>> {
+        self.construction_power_with_requests(&self.economic_requests())
+    }
+    fn construction_power_with_requests(&self, requests: &[u64]) -> Vec<Option<(u64, u64)>> {
         let n = self.units.len();
         let mut roots: Vec<usize> = (0..n).collect();
         let active = |id: usize| self.units[id].status.alive && !self.unit_under_construction(id);
@@ -1157,7 +1160,6 @@ impl BlastRange {
                 totals[root].0 = totals[root].0.saturating_add(active_generation(&self.units[id], self.economic_rules()));
             }
         }
-        let requests = self.economic_requests();
         for (id, &demand) in requests.iter().enumerate() {
             if let Some(root) = assigned[id] { totals[root].1 = totals[root].1.saturating_add(demand); }
         }
@@ -1190,6 +1192,7 @@ impl BlastRange {
             if distance > reach * reach { continue; }
             let facing = fx::angle::atan2(Fx::from_int(s.at[2] - pos[2]).raw(), Fx::from_int(s.at[0] - pos[0]).raw());
             if fx::angle::diff(facing, u.motion.drive.head).abs() > fx::angle::FULL * 20 / 360 { continue; }
+            if !u.commander_arm_ready(1,s.at) { continue; }
             let reclaimable: Amount = self.mining.as_ref().and_then(|m| m.construction.as_ref())
                 .map_or(0, |c| c.drones.values().filter(|d| d.site == Some(site as u16) && d.cargo.is_none()).map(|d| d.want).sum());
             let free = s.required.saturating_sub(s.delivered).saturating_sub(s.reserved).saturating_add(reclaimable);
@@ -1225,6 +1228,7 @@ impl BlastRange {
         let distance: i64 = (0..3).map(|axis| { let d=i64::from(at[axis])-i64::from(pos[axis]); d*d }).sum();
         let angle = fx::angle::atan2(Fx::from_int(at[2]-pos[2]).raw(), Fx::from_int(at[0]-pos[0]).raw());
         distance <= reach*reach && fx::angle::diff(angle, self.units[id].motion.drive.head).abs() <= fx::angle::FULL*20/360
+            && self.units[id].commander_arm_ready(1,at)
     }
     pub(crate) fn economic_power_tick(&self, id: usize) -> bool {
         let nominal = if self.units.get(id).is_some_and(|u|u.kind==RangeUnitKind::SkobaDrone) {
@@ -1735,7 +1739,8 @@ impl BlastRange {
 
     pub(crate) fn construction_phase(&mut self) {
         self.commander_supply_phase();
-        self.economic_power = Some((self.tick, self.construction_power_networks()));
+        let work_requests = self.economic_requests();
+        self.economic_power = Some((self.tick, self.construction_power_with_requests(&work_requests)));
         let Some(mut c) = self.mining.as_mut().and_then(|m| m.construction.take()) else {
             return;
         };
@@ -1783,6 +1788,8 @@ impl BlastRange {
                 let facing = self.units[id].commander_face(target);
                 let yaw = self.units[id].motion.drive.head;
                 self.battle.actors[id].turret = crate::turret::Traverse::new(yaw);
+                // The power budget was frozen before moving the arm. A tool
+                // becoming ready now starts paid work on the following tick.
                 self.units[id].set_arm_targets([target, target, [1, 0, 0], [0, 0, 0]], yaw);
                 let (generation, demand) = power.get(id).copied().flatten().unwrap_or((0, 0));
                 let s = &self.mining.as_ref().unwrap().construction.as_ref().unwrap().sites[site];
@@ -1790,7 +1797,9 @@ impl BlastRange {
                 let work = per_second_rate(self.economic_rules().print_per_second, self.tick).min(self.tank_held(id).unwrap_or(0))
                     .min(s.required.saturating_sub(s.delivered).saturating_sub(s.reserved));
                 let rate = powered_work(work, generation, demand, density, self.tick);
-                if facing && self.commander_print_step(id, site, reach, rate) > 0 {
+                if facing && work_requests.get(id).is_some_and(|demand|*demand>0)
+                    && self.units[id].commander_arm_ready(1,target)
+                    && self.commander_print_step(id, site, reach, rate) > 0 {
                     if let Some(impact) = self.construction_print_impact(site) {
                         if let Some(c) = self.mining.as_mut().and_then(|m| m.construction.as_mut()) {
                             c.print_traces.push(PrintTrace { actor: id, impact });
@@ -1829,7 +1838,10 @@ impl BlastRange {
                 let yaw = self.units[id].motion.drive.head;
                 self.battle.actors[id].turret = crate::turret::Traverse::new(yaw);
                 self.units[id].set_arm_targets([at, at, [1, 0, 0], [0, 0, 0]], yaw);
-                if facing { self.commander_repair_step(id, target); }
+                if facing && work_requests.get(id).is_some_and(|demand|*demand>0)
+                    && self.units[id].commander_arm_ready(1,at) {
+                    self.commander_repair_step(id, target);
+                }
             }
         }
     }

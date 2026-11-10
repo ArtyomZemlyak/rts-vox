@@ -315,6 +315,8 @@ fn balance_construction_and_factory_share_one_frozen_power_budget() {
     r.set_construction_quota(site,0);
     assert!(r.battle_order(1,Order::Build(site),None));
     assert_eq!(r.enqueue_product(0,RangeUnitKind::Tank,true),Outcome::Applied);
+    for _ in 0..200 { r.units[1].set_arm_targets([[1000,16,1500],[1000,16,1500],[1,0,0],[0;3]],fx::angle::FULL/4); }
+    assert!(r.units[1].commander_arm_ready(1,[1000,16,1500]));
     let networks=r.construction_power_networks();
     assert_eq!(networks[0],Some((600,1200)));
     assert_eq!(networks[1],Some((600,1200)));

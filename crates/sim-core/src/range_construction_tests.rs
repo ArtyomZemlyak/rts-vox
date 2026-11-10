@@ -13,6 +13,17 @@ fn legacy_economy() -> modding::range_economy::RangeEconomy {
 use crate::blast::ExplosionConfig;
 use modding::range::{RangeBlock, RangeLayout};
 
+// Rate/accounting fixtures start with the tool aimed. The acceptance tests in
+// range_commander_work_tests exercise the actual idle-to-work delay separately.
+fn aim_tool(r: &mut BlastRange, id: usize, target: [i32; 3]) {
+    for _ in 0..200 {
+        let yaw=r.units[id].motion.drive.head;
+        r.units[id].set_arm_targets([target,target,[1,0,0],[0;3]],yaw);
+    }
+    assert!(r.units[id].commander_arm_ready(1,target));
+}
+
+
 /// Keep authored unit distances, wrecks and orders, but discard the remote
 /// empty part of the kilometre range during a headless scenario check.
 fn compact_industrial_scenario(id: usize) -> (BlastRange, modding::range_skirmish::Skirmish, [i32; 2]) {
@@ -424,6 +435,8 @@ fn commander_repairs_with_real_matter_and_preserves_active_order_on_restore() {
     assert_eq!(r.matter.economy.ledger.reveal(ground, density * 2), density * 2);
     assert_eq!(r.matter.economy.ledger.transfer(ground, tank, density * 2), density * 2);
     assert!(r.battle_order(commander, battle::Order::Repair(target), None));
+    let at=r.units[target].motion.pos.map(Fx::to_int_trunc);
+    aim_tool(&mut r,commander,at);
     let mut section = ("", 0, None);
     let mut restored = BlastRange::restore_observed(r.config, &r.snapshot(), |a,b,c| section = (a,b,c))
         .unwrap_or_else(|| panic!("repair order restores: {section:?}"));
@@ -519,6 +532,7 @@ fn commander_building_consumes_power_and_slows_when_supply_is_short() {
     assert_eq!(r.mining.as_ref().unwrap().construction.as_ref().unwrap().commander_allowance(&r, site), 0,
         "a distant commander must not hold back drone deliveries");
     r.units[id].motion.pos = at;
+    aim_tool(&mut r,id,[1250,16,1100]);
     assert_eq!(r.construction_energy(true), (COMMANDER_GENERATION, wanted));
     let before = r.tank_held(id).unwrap();
     r.construction_phase();
@@ -568,6 +582,7 @@ fn commander_builds_from_nearby_allied_storage_without_losing_matter() {
     assert_eq!(r.matter.economy.ledger.reveal(ground, BATCH), BATCH);
     assert_eq!(r.matter.economy.ledger.transfer(ground, store, BATCH), BATCH);
     assert_eq!(r.tank_held(id), Some(0));
+    aim_tool(&mut r,id,[1150,16,800]);
     r.construction_phase();
     let built = r.construction_sites()[site].delivered;
     let held = r.tank_held(id).unwrap();
@@ -688,10 +703,24 @@ fn commander_energy_weapon_uses_a_connected_arm_muzzle() {
 
 #[test]
 fn commander_build_order_prints_and_resumes_after_save() {
-    let mut r = range_with_commander(true);
+    // Full ticks are needed for aiming and save validity. A compact two-unit
+    // scene avoids simulating an unrelated eight-drone industrial battle.
+    let mut l=RangeLayout::from_ron(include_str!("../../../data/fixture-drive.ron")).unwrap();
+    l.size=[1280,384,1024];l.battle=true;l.idle_enemies=true;
+    l.course=None;l.ready=None;l.shields.clear();l.clear_min=[1,1];l.clear_max=[1279,1023];
+    l.blocks=vec![RangeBlock{min:[0;3],max:[1280,384,1024],material:0},
+        RangeBlock{min:[0;3],max:[1280,16,1024],material:1}];
+    l.units=vec![RangeUnitDef{kind:RangeUnitKind::Commander,allied:true,at:[500,16,150],weapon:None},
+        RangeUnitDef{kind:RangeUnitKind::Tank,allied:false,at:[1150,16,850],weapon:None}];
+    let mut e=legacy_economy();
+    e.production.as_mut().unwrap().producers.retain(|p|p.kind==RangeUnitKind::GrebenStorage);
+    l.economy=Some(e);
+    let cfg=ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut r=BlastRange::with_saved_layout(cfg,l).unwrap();
+    r.set_physics_workers(1);r.set_navigation_workers(1);r.start_battle().unwrap();
     let id = r.units.iter().position(|u| u.kind == RangeUnitKind::Commander).unwrap();
-    let site = r.create_construction_site(RangeUnitKind::TurretT1, true, [2450, 16, 1800]).unwrap();
-    r.units[id].motion.pos = [2250, 16, 1550].map(Fx::from_int);
+    let site = r.create_construction_site(RangeUnitKind::TurretT1, true, [750, 16, 400]).unwrap();
+    r.units[id].motion.pos = [500, 16, 150].map(Fx::from_int);
     let head = r.units[id].motion.drive.head;
     r.units[id].update_pose(head);
     let tank = r.mining().unwrap().tank(id).unwrap();
@@ -700,6 +729,11 @@ fn commander_build_order_prints_and_resumes_after_save() {
     assert_eq!(r.matter.economy.ledger.transfer(ground, tank, BATCH * 3), BATCH * 3);
     assert!(r.battle_order(id, battle::Order::Build(site), None));
     r.construction_phase();
+    assert_eq!(r.construction_sites()[site].delivered, 0, "lowered tool must first aim");
+    for _ in 0..150 {
+        r.step();
+        if r.construction_sites()[site].delivered>0 {break;}
+    }
     assert!(r.construction_sites()[site].delivered > 0);
     assert_eq!(r.units[id].arm_targets.unwrap()[2], [1, 0, 0]);
     let mut section = ("", 0, None);
@@ -832,6 +866,9 @@ fn range_with_commander(commander: bool) -> BlastRange {
         });
     }
     let mut economy = legacy_economy();
+    // These scenes exercise a storage crew, printing and reclaim, not factory
+    // exits. Keep a real producer for dynamic-unit snapshot validation.
+    economy.production.as_mut().unwrap().producers.retain(|p|p.kind==RangeUnitKind::GrebenStorage);
     economy.bank.as_mut().unwrap().base_store = 1 << 40;
     layout.economy = Some(economy);
     let mut r = BlastRange::with_layout(
@@ -1473,4 +1510,58 @@ fn drone_approaches_greben_above_the_pad_before_descending() {
         if approach_home(&mut drone, target, size, true) { break; }
     }
     assert_eq!(drone.motion.pos.map(Fx::to_int_trunc), target);
+}
+
+#[test]
+fn commander_work_turning_cannot_spend_a_neighbours_power_allocation() {
+    let mut l=RangeLayout::from_ron(include_str!("../../../data/fixture-drive.ron")).unwrap();
+    l.size=[1280,192,1024];l.battle=true;l.idle_enemies=true;
+    l.course=None;l.ready=None;l.shields.clear();l.clear_min=[1,1];l.clear_max=[1279,1023];
+    l.blocks=vec![RangeBlock{min:[0;3],max:[1280,192,1024],material:0},
+        RangeBlock{min:[0;3],max:[1280,16,1024],material:1}];
+    l.units=vec![RangeUnitDef{kind:RangeUnitKind::Commander,allied:true,at:[400,16,400],weapon:None},
+        RangeUnitDef{kind:RangeUnitKind::Tank,allied:false,at:[1150,16,850],weapon:None}];
+    let mut e=legacy_economy();
+    e.production.as_mut().unwrap().producers.retain(|p|p.kind==RangeUnitKind::GrebenStorage);
+    l.economy=Some(e);
+    let cfg=ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut r=BlastRange::with_saved_layout(cfg,l).unwrap();
+    r.start_battle().unwrap();
+    let tank=r.mining().unwrap().tank(0).unwrap();
+    r.matter.economy.ledger.generate(tank,100_000_000);
+    let other=r.place_sandbox_unit(RangeUnitKind::Commander,true,[900,16,400],0).unwrap();
+    let tank=r.mining().unwrap().tank(other).unwrap();
+    r.matter.economy.ledger.generate(tank,100_000_000);
+    let target=[750,16,400];
+    let adjacent=[1150,16,400];
+    let first=r.create_construction_site(RangeUnitKind::TurretT1,true,target).unwrap();
+    let second=r.create_construction_site(RangeUnitKind::TurretT1,true,adjacent).unwrap();
+    for (id,site,at) in [(0,first,target),(other,second,adjacent)] {
+        r.set_construction_quota(site,0);
+        assert!(r.battle_order(id,battle::Order::Build(site),None));
+        let yaw=if id==0 {fx::angle::FULL*23/360}else{0};
+        r.units[id].motion.drive.head=yaw;r.units[id].update_pose(yaw);
+        for _ in 0..200 {r.units[id].set_arm_targets([at,at,[1,0,0],[0;3]],yaw);}
+    }
+    assert!(r.economic_requests()[other]>0,"the adjacent powered printer must be working");
+    assert_eq!(r.economic_requests()[0],0,"hull must first turn into the working sector");
+    let mut turned=false;
+    let mut crossed_budget_boundary=false;
+    for _ in 0..120 {
+        let requested=r.economic_requests()[0];
+        let before=r.construction_sites()[first].delivered;
+        r.construction_phase();
+        let after=r.construction_sites()[first].delivered;
+        if requested==0 {
+            assert_eq!(after,before,"work without its own frozen power request");
+            crossed_budget_boundary |= r.units[0].commander_arm_ready(1,target)
+                && fx::angle::diff(r.units[0].motion.drive.head,0).abs()<=fx::angle::FULL*20/360;
+        }
+        if after>0 {turned=true;break;}
+        r.tick+=1;
+    }
+    assert!(turned,"waiting for a real power allocation must not stall the printer");
+    assert!(crossed_budget_boundary,"fixture must cross the working sector after the budget is frozen");
+    assert!(r.construction_sites()[second].delivered>0);
+    assert!(r.matter.economy.ledger.balanced());
 }

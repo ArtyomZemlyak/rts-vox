@@ -46,6 +46,8 @@ fn economy_followup_commander_repairs_from_a_nearby_store_but_cannot_spend_remot
     r.construction_phase();
     assert_eq!(r.tank_held(0),Some(0));
     assert!(!r.units[target].body.vol.get(cell[0],cell[1],cell[2]));
+    for _ in 0..200 { r.units[0].set_arm_targets([[750,16,700],[750,16,700],[1,0,0],[0;3]],0); }
+    assert!(r.units[0].commander_arm_ready(1,[750,16,700]));
     r.units[1].motion.pos=[500,16,1000].map(Fx::from_int);
     r.units[1].update_pose(0);
     assert_eq!(r.commander_accessible_matter(0),10_000);

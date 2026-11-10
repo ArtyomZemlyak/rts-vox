@@ -8,6 +8,7 @@
     elbow_degrees: 50,
     elbow_swing_degrees: 20,
     slew_degrees_s: 60,
+    work_ready_degrees: 6,
     settle_ticks: 6,
     target_step_cm: 80,
     rest_lookahead_cm: 300,
