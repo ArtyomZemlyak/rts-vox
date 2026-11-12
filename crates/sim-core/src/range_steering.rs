@@ -134,7 +134,8 @@ mod tests {
         let mut m = motion(RangeUnitKind::Tank, &body, vec![[300, 180], [300, 460]]);
         m.pos[0] = Fx::from_int(280);
         m.drive.vel = Fx::from_int(20);
-        let neighbour = Obstacle { height: Fx::ZERO,
+        let neighbour = Obstacle {
+            height: Fx::ZERO,
             moving: false,
             pos: [Fx::from_int(245), Fx::from_int(16), Fx::from_int(230)],
             head: 0,
@@ -151,6 +152,121 @@ mod tests {
             )
             .is_some(),
             "a neighbour away from the actual turn should not force a pivot"
+        );
+    }
+
+    #[test]
+    fn thin_neighbour_outside_actual_turn_does_not_force_a_pivot() {
+        let w = world();
+        let b = voxel::unit::tank();
+        let mut m = motion(RangeUnitKind::Tank, &b, vec![[300, 180], [300, 460]]);
+        m.pos[0] = Fx::from_int(280);
+        m.drive.vel = Fx::from_int(20);
+        let own = Obstacle::of(&m, &b);
+        let radius = own.half[0]
+            .mul(own.half[0])
+            .add(own.half[1].mul(own.half[1]))
+            .sqrt()
+            .add(Fx::from_int(m.navigation.plan_margin));
+        let neighbour = Obstacle {
+            moving: false,
+            height: Fx::ZERO,
+            head: 0,
+            pos: [
+                Fx::from_int(220),
+                Fx::from_int(16),
+                Fx::from_int(224).add(radius),
+            ],
+            half: [Fx::from_int(100), Fx::from_int(5)],
+        };
+        assert!(
+            m.moving_steering(
+                &w,
+                &b,
+                &[neighbour],
+                &nav::vehicle::Rubble::new(),
+                0,
+                Fx::ONE
+            )
+            .is_some(),
+            "a long thin hull's bounding circle cancelled a clear turn"
+        );
+    }
+
+    #[test]
+    fn oriented_preview_keeps_every_sampled_circle_contact() {
+        let radius = Fx::from_int(13);
+        for head in [
+            0,
+            1234,
+            angle::FULL / 8,
+            angle::QUARTER,
+            angle::HALF,
+            angle::FULL - 1234,
+        ] {
+            let basis = [angle::cos(head), angle::sin(head)];
+            let o = Obstacle {
+                moving: false,
+                height: Fx::ZERO,
+                head,
+                pos: [100, 16, 100].map(Fx::from_int),
+                half: [50, 4].map(Fx::from_int),
+            };
+            for ax in [-60, -20, 0, 20, 60] {
+                for az in [-60, -10, 0, 10, 60] {
+                    let a = [100 + ax, 100 + az].map(Fx::from_int);
+                    for bx in [-60, 0, 60] {
+                        for bz in [-60, 0, 60] {
+                            let b = [100 + bx, 100 + bz].map(Fx::from_int);
+                            if near_preview_box(&o, basis, a, b, radius) {
+                                continue;
+                            }
+                            for k in 0..=16 {
+                                let t = Fx::from_ratio(k, 16);
+                                let d = [0, 1]
+                                    .map(|i| a[i].add(b[i].sub(a[i]).mul(t)).sub(o.pos[i * 2]));
+                                let local = [
+                                    d[0].mul(basis[0]).add(d[1].mul(basis[1])),
+                                    d[1].mul(basis[0]).sub(d[0].mul(basis[1])),
+                                ];
+                                let gap =
+                                    [0, 1].map(|i| local[i].abs().sub(o.half[i]).max(Fx::ZERO));
+                                assert!(
+                                    gap[0].mul(gap[0]).add(gap[1].mul(gap[1])) > radius.mul(radius),
+                                    "missed contact {head} {ax} {az} {bx} {bz} {k}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_elevated_drone_does_not_cancel_a_ground_turn() {
+        let w = world();
+        let body = voxel::unit::tank();
+        let mut m = motion(RangeUnitKind::Tank, &body, vec![[300, 180], [300, 460]]);
+        m.pos[0] = Fx::from_int(280);
+        m.drive.vel = Fx::from_int(20);
+        let mut neighbour = Obstacle {
+            height: Fx::from_int(10),
+            moving: false,
+            head: 0,
+            pos: [Fx::from_int(300), Fx::from_int(16), Fx::from_int(200)],
+            half: [Fx::from_int(8); 2],
+        };
+        let preview =
+            |o| m.moving_steering(&w, &body, &[o], &nav::vehicle::Rubble::new(), 0, Fx::ONE);
+        assert!(
+            preview(neighbour).is_none(),
+            "a hull in the turn must remain solid"
+        );
+        neighbour.pos[1] = Fx::from_int(500);
+        assert!(
+            preview(neighbour).is_some(),
+            "the shadow of a drone stopped a ground turn"
         );
     }
 
@@ -282,7 +398,8 @@ mod tests {
         assert!(m
             .moving_steering(&w, &body, &[], &debris, 0, Fx::ONE)
             .is_some());
-        let parked = Obstacle { height: Fx::ZERO,
+        let parked = Obstacle {
+            height: Fx::ZERO,
             moving: false,
             pos: [Fx::from_int(300), Fx::from_int(16), Fx::from_int(210)],
             head: 0,
@@ -469,6 +586,48 @@ fn near_preview_leg(p: [Fx; 2], a: [Fx; 2], b: [Fx; 2], radius: Fx) -> bool {
     dx.mul(dx).add(dz.mul(dz)) <= radius.mul(radius)
 }
 
+/// The swept circle of our hull versus the neighbour's oriented rectangle.
+/// Its rectangle expanded by that circle is a conservative superset. A
+/// separating axis proves clearance even when two bounding circles overlap.
+pub(super) fn near_preview_box(o: &Obstacle, basis: [Fx; 2], a: [Fx; 2], b: [Fx; 2], radius: Fx) -> bool {
+    let local = |p: [Fx; 2]| {
+        let d = [p[0].sub(o.pos[0]), p[1].sub(o.pos[2])];
+        [
+            d[0].mul(basis[0]).add(d[1].mul(basis[1])),
+            d[1].mul(basis[0]).sub(d[0].mul(basis[1])),
+        ]
+    };
+    let a = local(a);
+    let b = local(b);
+    // Guard the fixed-point basis/projection rounding with one world unit.
+    let half = o.half.map(|h| h.add(radius).add(Fx::ONE));
+    if (0..2).any(|k| a[k].min(b[k]) > half[k] || a[k].max(b[k]) < half[k].neg()) {
+        return false;
+    }
+    let dx = i128::from(b[0].raw()) - i128::from(a[0].raw());
+    let dz = i128::from(b[1].raw()) - i128::from(a[1].raw());
+    let side = dx
+        .checked_mul(i128::from(a[1].raw()))
+        .and_then(|v| {
+            dz.checked_mul(i128::from(a[0].raw()))
+                .and_then(|r| v.checked_sub(r))
+        })
+        .and_then(i128::checked_abs);
+    let reach = dx
+        .abs()
+        .checked_mul(i128::from(half[1].raw()))
+        .and_then(|v| {
+            dz.abs()
+                .checked_mul(i128::from(half[0].raw()))
+                .and_then(|r| v.checked_add(r))
+        });
+    // Overflow means no proof; keep the previous conservative circle test.
+    match (side, reach) {
+        (Some(s), Some(r)) => s <= r,
+        _ => true,
+    }
+}
+
 impl Motion {
     pub(super) fn moving_steering(
         &self,
@@ -596,6 +755,9 @@ impl Motion {
         let radius = |half: [Fx; 2]| half[0].mul(half[0]).add(half[1].mul(half[1])).sqrt();
         let own_radius = radius(own.half).add(Fx::from_int(self.navigation.plan_margin));
         if others.iter().any(|o| {
+            if !o.overlaps_height(own.pos[1], own.height) {
+                return false;
+            }
             let broad_radius = o.half[0].add(o.half[1]);
             if !(0..2).all(|a| {
                 let center = o.pos[a * 2];
@@ -605,12 +767,20 @@ impl Motion {
                 return false;
             }
             let center = [o.pos[0], o.pos[2]];
-            let clearance = own_radius.add(radius(o.half));
-            near_preview_leg(center, p, end, clearance)
-                || near_preview_leg(center, p, coast, clearance)
-                || ((rounded || passed)
-                    && (near_preview_leg(center, p, corner, clearance)
-                        || near_preview_leg(center, corner, end, clearance)))
+            let basis = [angle::cos(o.head), angle::sin(o.head)];
+            let mut circle = None;
+            let mut near = |a, b| {
+                // A moving neighbour may turn during this preview. Keep its
+                // swept circle; the tighter rectangle proves static clearance.
+                if !o.moving && !near_preview_box(o, basis, a, b, own_radius) {
+                    return false;
+                }
+                let clearance = *circle.get_or_insert_with(|| own_radius.add(radius(o.half)));
+                near_preview_leg(center, a, b, clearance)
+            };
+            near(p, end)
+                || near(p, coast)
+                || ((rounded || passed) && (near(p, corner) || near(corner, end)))
         }) {
             return None;
         }

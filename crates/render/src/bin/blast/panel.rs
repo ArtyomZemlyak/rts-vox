@@ -537,7 +537,7 @@ fn ui_camera() -> (Camera2d, Camera, Msaa) {
     )
 }
 
-pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Assets<Font>>) {
+pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Assets<Font>>, mut images: ResMut<Assets<Image>>) {
     if edit.layout.is_none() {
         return;
     }
@@ -564,8 +564,9 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
     pilot::build(&mut commands, camera, &text_font);
     minimap::build(&mut commands, camera, &text_font);
     laboratory::build(&mut commands, camera, &text_font);
-    frontend::build(&mut commands, camera, &text_font);
+    frontend::build(&mut commands, camera, &text_font, &mut fonts, &mut images);
     construction::build(&mut commands, camera, &text_font);
+    spatial_ui::build(&mut commands, camera, &text_font, &mut fonts, &mut images);
     let mut root = commands.spawn((
         PanelRoot,
         hud::Drawer,

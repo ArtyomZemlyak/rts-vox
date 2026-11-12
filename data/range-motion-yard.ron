@@ -1,0 +1,42 @@
+// Movement-only yard. First patrol points are diagnostic move orders.
+// Rows: commander, crawler, tank, Walker; three parked hulls block each row.
+(
+    battle: true, endless_battle: true, gun_point: true,
+    size: (2048, 512, 4096),
+    clear_min: (0,0), clear_max: (2048,4096),
+    target: (1300,16,350), airburst_on_target: false,
+    power_milli: [1000], unit_resistance: 180,
+    course: Some((
+        min: (40,40), max: (2008,4056),
+        tank_speed: 40, walker_speed: 84, step_height: 5, walker_step_height: 8,
+        walker_terrain_tilt_pct: 70, tank_terrain_tilt_pct: 88,
+        tank_terrain_approach_pct: 70, walker_terrain_approach_pct: 90,
+        arrival: 4, reload_ticks: 40, turn_alignment_pct: 97, replan_ticks: 60,
+        ramps: [],
+        patrols: [
+            (unit: 0, points: [(1300,350),(520,350)]),
+            (unit: 1, points: [(1300,1200),(520,1200)]),
+            (unit: 2, points: [(1300,2100),(520,2100)]),
+            (unit: 3, points: [(1300,3100),(520,3100)]),
+        ],
+    )),
+    units: [
+        (allied: true, kind: Commander, at: (520,16,350)),
+        (allied: true, kind: Crawler, at: (520,16,1200)),
+        (allied: true, kind: Tank, at: (520,16,2100)),
+        (allied: true, kind: Walker04, at: (520,16,3100)),
+        (allied: true, kind: Tank, at: (800,16,280)),
+        (allied: true, kind: Tank, at: (800,16,350)),
+        (allied: true, kind: Tank, at: (800,16,420)),
+        (allied: true, kind: Tank, at: (800,16,1130)),
+        (allied: true, kind: Tank, at: (800,16,1200)),
+        (allied: true, kind: Tank, at: (800,16,1270)),
+        (allied: true, kind: Tank, at: (800,16,2070)),
+        (allied: true, kind: Tank, at: (800,16,2100)),
+        (allied: true, kind: Tank, at: (800,16,2130)),
+        (allied: true, kind: Tank, at: (800,16,3030)),
+        (allied: true, kind: Tank, at: (800,16,3100)),
+        (allied: true, kind: Tank, at: (800,16,3170)),
+    ],
+    blocks: [],
+)

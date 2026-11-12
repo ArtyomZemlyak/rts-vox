@@ -5,6 +5,9 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::ui::FocusPolicy;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use panel::theme;
+#[path = "frontend_skin.rs"]
+mod skin;
+pub use skin::sync as skin_sync;
 
 /// Bevy's atmosphere probes need an active 3D view to allocate their shared
 /// GPU uniforms. A tiny offscreen target keeps those resources valid while
@@ -83,6 +86,7 @@ pub struct Menu {
     lab_command: Option<laboratory::LabAction>,
     notice: String,
     battle_setup: BattleSetup,
+    focus: usize,
 }
 impl Menu {
     pub fn new(open: bool) -> Self {
@@ -97,6 +101,7 @@ impl Menu {
             lab_command: None,
             notice: String::new(),
             battle_setup: BattleSetup::default(),
+            focus: if open {1}else{0},
         }
     }
     pub fn shown(&self) -> bool {
@@ -118,6 +123,7 @@ impl Menu {
             self.scale_before = scale;
         }
         self.page = Page::Home;
+        self.focus = usize::from(!self.has_session);
         self.notice.clear();
         scene.paused = true;
         scene.acc = 0.0;
@@ -231,6 +237,21 @@ pub fn input(
     let mut action = buttons
         .iter()
         .find_map(|(a, i)| (*i == Interaction::Pressed).then_some(*a));
+    if menu.page == Page::Home {
+        for (action, interaction) in &buttons {
+            if *interaction == Interaction::Hovered {
+                if let Some(index) = skin::ITEMS.iter().position(|(a,_,_)|a==action) {
+                    if index>0 || menu.has_session {menu.focus=index;}
+                }
+            }
+        }
+        let direction=if keys.just_pressed(KeyCode::ArrowDown){1}
+            else if keys.just_pressed(KeyCode::ArrowUp){-1}else{0};
+        if direction!=0 {menu.focus=skin::step_focus(menu.focus,direction,menu.has_session);}
+        if keys.just_pressed(KeyCode::Enter)||keys.just_pressed(KeyCode::NumpadEnter) {
+            action=Some(skin::ITEMS[menu.focus].0);
+        }
+    }
     if keys.just_pressed(KeyCode::F10) {
         action = match menu.page {
             Page::Session => Some(Action::Menu),
@@ -392,54 +413,22 @@ fn content() -> Node {
         max_width: px(1240),
         flex_direction: FlexDirection::Column,
         row_gap: px(24),
+        padding: UiRect::all(px(36)),
+        border: UiRect::all(px(1)),
         ..default()
     }
 }
 
-pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
+pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont, fonts: &mut Assets<Font>, images: &mut Assets<Image>) {
+    let assets=skin::DeckAssets::new(fonts,images);
     commands.spawn((Root, GlobalZIndex(100), FocusPolicy::Block, UiTargetCamera(camera),
         Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: px(0), bottom: px(0),
             align_items: AlignItems::Center, justify_content: JustifyContent::Center, display: Display::None, ..default() },
         BackgroundColor(Color::srgb(0.018, 0.030, 0.048))))
         .with_children(|root| {
-            // A bounded command-grid backdrop; no world rendering or particles.
-            for i in 0..14 { root.spawn((Node { position_type: PositionType::Absolute,
-                left: percent(i as f32 * 8.0), top: px(0), bottom: px(0), width: px(1), ..default() },
-                BackgroundColor(Color::srgba(0.10, 0.20, 0.27, 0.2)))); }
-            root.spawn((Part(Page::Home), content())).with_children(|p| {
-                text(p, font, "КОМАНДНЫЙ ЦЕНТР / 01", 14.0, theme::ACCENT);
-                text(p, font, "RTS VOX", 72.0, theme::TEXT);
-                text(p, font, "Кубический мир. Полностью разрушаемая среда.", 20.0, theme::MUTED);
-                p.spawn(Node { column_gap: px(18), row_gap: px(18), flex_wrap: FlexWrap::Wrap, ..default() }).with_children(|p| {
-                    for (number, name, description, destination) in [
-                        ("01", "ПОЛИГОН", "Техника, оружие и готовые испытания", Destination::Range),
-                        ("02", "БОЙ ПРОТИВ ИИ", "Управляйте армией и уничтожьте базу противника", Destination::Battle),
-                        ("03", "ЛАБОРАТОРИЯ", "Конструктор сцен, материалы, физика и реплеи", Destination::Laboratory),
-                    ] {
-                        p.spawn((Button, Action::Start(destination), Node {
-                            flex_grow: 1.0, flex_basis: px(310), min_width: px(250), min_height: px(210),
-                            padding: UiRect::all(px(24)), flex_direction: FlexDirection::Column,
-                            justify_content: JustifyContent::SpaceBetween, row_gap: px(16), border: UiRect::all(px(1)), ..default()
-                        }, BackgroundColor(theme::BUTTON), BorderColor::all(theme::FRAME)))
-                        .with_children(|p| {
-                            text(p, font, number, 28.0, theme::ACCENT);
-                            text(p, font, name, 23.0, theme::TEXT);
-                            text(p, font, description, 16.0, theme::MUTED);
-                            text(p, font, "Открыть →", 16.0, Color::srgb(0.42, 0.79, 0.91));
-                        });
-                    }
-                });
-                p.spawn(Node { column_gap: px(12), row_gap: px(12), flex_wrap: FlexWrap::Wrap, ..default() }).with_children(|p| {
-                    let id = button(p, font, "Продолжить", Action::Resume); p.commands().entity(id).insert(Resume);
-                    button(p, font, "Настройки", Action::Settings);
-                    button(p, font, "Как играть", Action::Help);
-                    button(p, font, "Наблюдать ИИ × ИИ", Action::Start(Destination::Spectate));
-                    button(p, font, "Выход", Action::Exit);
-                });
-                p.spawn((Notice, Text::new(""), TextFont {font_size: FontSize::Px(15.0), ..font.clone()}, TextColor(theme::ACCENT)));
-                text(p, font, "Карта боя: лесной полигон     •     F10 — главное меню", 14.0, theme::MUTED);
-            });
-            root.spawn((Part(Page::BattleRoom), content())).with_children(|p| {
+            skin::backdrop(root,&assets);
+            skin::home(root,&assets,font);
+            root.spawn((Part(Page::BattleRoom), content(), BackgroundColor(Color::srgba(0.015,0.033,0.043,0.96)), BorderColor::all(theme::FRAME))).with_children(|p| {
                 text(p, font, "НАСТРОЙКА СРАЖЕНИЯ", 40.0, theme::TEXT);
                 text(p, font, "КАРТА   Лесной полигон · 1 карта доступна", 21.0, theme::TEXT);
                 text(p, font, "СТОРОНА 1  /  ИГРОК", 18.0, theme::ACCENT);
@@ -458,7 +447,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                     button(p, font, "← Главное меню", Action::Back);
                 });
             });
-            root.spawn((Part(Page::Help), content())).with_children(|p| {
+            root.spawn((Part(Page::Help), content(), BackgroundColor(Color::srgba(0.015,0.033,0.043,0.96)), BorderColor::all(theme::FRAME))).with_children(|p| {
                 text(p, font, "КАК ИГРАТЬ", 40.0, theme::TEXT);
                 text(p, font, "Полигон — выберите испытание, технику или оружие в верхней панели.\n\nБой — ЛКМ выбирает юнитов, рамка выделяет отряд. ПКМ отдаёт приказ двигаться или атаковать.\n\nЛаборатория — выберите объект в библиотеке снизу и разместите в сцене. «Живые» включает инструменты во время симуляции.\n\nКолесо мыши — приближение. В лаборатории средняя кнопка вращает вид, Shift + средняя кнопка перемещает его.\n\nF10 открывает главное меню и приостанавливает текущую сессию. Esc сначала отменяет активный инструмент или вид от первого лица.", 20.0, theme::TEXT);
                 button(p, font, "← Главное меню", Action::Back);
@@ -555,7 +544,7 @@ pub fn sync(
         Vec2::new(w.width(), w.height())
     });
     if menu.shown() {
-        scale.0 = (size.x / 1920.0).min(size.y / 1080.0).clamp(0.7, 1.8);
+        scale.0 = (size.x / 1920.0).min(size.y / 1080.0).clamp(0.45, 2.0);
         for mut cursor in &mut cursors {
             cursor.grab_mode = CursorGrabMode::None;
             cursor.visible = true;
@@ -768,6 +757,9 @@ mod tests {
         click(&mut app, Action::RoomPlayerStock);
         click(&mut app, Action::RoomEnemyStock);
         click(&mut app, Action::RoomEnemyStock);
+        let chosen=app.world().resource::<Menu>().battle_setup();
+        assert_ne!(chosen.player_stock,BattleSetup::default().player_stock);
+        assert_ne!(chosen.enemy_stock,BattleSetup::default().enemy_stock);
         click(&mut app, Action::StartPreparedBattle);
         let edit = app.world().resource::<Workshop>();
         let (_, layout) = edit.pending.as_ref().expect("battle is prepared only after Start");
@@ -777,8 +769,8 @@ mod tests {
         assert!(layout.units[0].at[0] > layout.units[1].at[0]);
         assert_eq!(layout.economy.as_ref().unwrap().kind(RangeUnitKind::Commander).unwrap().dig_edits_per_tick, 512);
         let ready = layout.ready.as_ref().unwrap();
-        assert_eq!(ready.commander_stock, 75_000_000);
-        assert_eq!(ready.enemy_commander_stock, Some(100_000_000));
+        assert_eq!(ready.commander_stock, chosen.player_stock);
+        assert_eq!(ready.enemy_commander_stock, Some(chosen.enemy_stock));
     }
 
     #[test]
@@ -792,6 +784,60 @@ mod tests {
         assert_eq!(app.world().get::<Node>(home).unwrap().display, Display::None);
         assert_eq!(app.world().get::<Node>(room).unwrap().display, Display::Flex);
         assert!(app.world().resource::<Workshop>().pending.is_none());
+    }
+    #[test]
+    fn optical_menu_keyboard_skips_unavailable_resume_and_opens_the_room() {
+        let mut app=app(true);
+        assert_eq!(app.world().resource::<Menu>().focus,1);
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::ArrowUp);
+        app.update();
+        assert_eq!(app.world().resource::<Menu>().focus,7);
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().reset_all();
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::ArrowDown);
+        app.update();
+        assert_eq!(app.world().resource::<Menu>().focus,1);
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().reset_all();
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::Enter);
+        app.update();
+        assert_eq!(app.world().resource::<Menu>().page,Page::BattleRoom);
+        assert!(app.world().resource::<Workshop>().pending.is_none());
+        assert_eq!(skin::step_focus(0,-1,true),7);
+        assert_eq!(skin::step_focus(7,1,true),0);
+    }
+    #[test]
+    fn optical_menu_builds_native_controls_and_keeps_background_as_one_image() {
+        let mut app=app(true);
+        let mut fonts=Assets::<Font>::default();
+        let mut images=Assets::<Image>::default();
+        let camera=app.world_mut().spawn(Camera2d).id();
+        build(&mut app.world_mut().commands(),camera,&TextFont::default(),&mut fonts,&mut images);
+        app.world_mut().flush();
+        app.add_systems(PostUpdate,(sync,skin_sync).chain());
+        app.update();
+        let world=app.world_mut();
+        assert_eq!(world.query_filtered::<Entity,With<skin::HomeRow>>().iter(world).count(),8);
+        assert_eq!(world.query_filtered::<Entity,With<skin::Backdrop>>().iter(world).count(),1);
+        let labels:Vec<_>=world.query::<&Text>().iter(world).map(|t|t.0.clone()).collect();
+        assert!(labels.iter().any(|t|t=="ПЕРИМЕТР"));
+        assert!(labels.iter().any(|t|t=="ЛАБОРАТОРИЯ"));
+        assert_eq!(images.len(),3);
+        assert_eq!(fonts.len(),1);
+        let lab=world.query::<(Entity,&Action)>().iter(world)
+            .find(|(_,a)|**a==Action::Start(Destination::Laboratory)).unwrap().0;
+        *world.get_mut::<Interaction>(lab).unwrap()=Interaction::Hovered;
+        app.update();
+        assert_eq!(app.world().resource::<Menu>().focus,3);
+        let resume=app.world_mut().query::<(Entity,&Action)>().iter(app.world())
+            .find(|(_,a)|**a==Action::Resume).unwrap().0;
+        *app.world_mut().get_mut::<Interaction>(resume).unwrap()=Interaction::Hovered;
+        app.update();
+        assert_eq!(app.world().resource::<Menu>().focus,3,"disabled resume must not steal focus");
+        *app.world_mut().get_mut::<Interaction>(resume).unwrap()=Interaction::None;
+        let help=app.world_mut().query::<(Entity,&Action)>().iter(app.world())
+            .find(|(_,a)|**a==Action::Help).unwrap().0;
+        *app.world_mut().get_mut::<Interaction>(help).unwrap()=Interaction::Pressed;
+        app.update();
+        assert_eq!(app.world().resource::<Menu>().page,Page::Help,"secondary footer remains a live control");
     }
     #[test]
     fn room_spectator_setting_starts_ai_against_ai() {

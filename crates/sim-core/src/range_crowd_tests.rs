@@ -48,6 +48,39 @@ fn arena(count: usize, gate: bool) -> BlastRange {
 fn config() -> ExplosionConfig {
     ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap()
 }
+
+#[test]
+fn opposing_traffic_finishes_and_replays_across_navigation_workers() {
+    let mut scene = arena(8, false);
+    scene.set_navigation_workers(1);
+    scene.set_physics_workers(1);
+    for id in 0..8 {
+        let from = [if id % 2 == 0 {360} else {1160}, 16, 400+(id/2) as i32*100];
+        scene.units[id].motion.pos = from.map(Fx::from_int);
+        scene.units[id].motion.drive.head = if id % 2 == 0 {0} else {fx::angle::HALF};
+        let goal = [1520-from[0],from[2]];
+        assert!(scene.units[id].motion.queue_move(&scene.world,goal));
+    }
+    let mut replica = None;
+    let mut refused = 0;
+    for tick in 0..900 {
+        scene.step();
+        assert_separate(&scene);
+        refused += scene.units.iter().filter(|u|u.motion.blocked).count();
+        if let Some(other) = replica.as_mut() {
+            let other: &mut BlastRange = other;
+            other.step();
+            assert_eq!(scene.state_hash(),other.state_hash(),"traffic diverged at {tick}");
+        } else if tick == 100 {
+            let mut copy = BlastRange::restore(config(),&scene.snapshot()).unwrap();
+            copy.set_navigation_workers(2); copy.set_physics_workers(1); replica = Some(copy);
+        }
+        if scene.units.iter().all(|u|u.motion.destination.is_none()) { break; }
+    }
+    assert!(replica.is_some() && scene.units.iter().all(|u|u.motion.destination.is_none()));
+    assert_eq!(refused,0);
+    assert_eq!(scene.snapshot(),replica.unwrap().snapshot());
+}
 fn assert_separate(s: &BlastRange) {
     for a in 0..s.units.len() {
         for b in a + 1..s.units.len() {
@@ -263,6 +296,8 @@ fn formation_edge_slots_are_distinct_size_aware_and_bounded() {
 #[test]
 fn gate_convoy_remains_collision_free_and_all_orders_finish() {
     let mut s = arena(10, true);
+    s.set_navigation_workers(1);
+    s.set_physics_workers(1);
     let dest: Vec<_> = s
         .units
         .iter()
@@ -278,12 +313,67 @@ fn gate_convoy_remains_collision_free_and_all_orders_finish() {
         })
         .collect();
     assert_eq!(s.battle_group_move(&dest, [1100, 700]), 10);
-    for _ in 0..3600 {
+    let mut replica: Option<BlastRange> = None;
+    let mut searching = 0;
+    let mut finished = None;
+    for tick in 0..1200 {
         s.step();
         assert_separate(&s);
+        searching += s.units.iter().filter(|u| u.motion.searching()).count();
+        for u in &s.units {
+            assert!(u.motion.drive.vel.abs() <= Fx::from_int(u.motion.speed));
+        }
+        if let Some(other) = replica.as_mut() {
+            other.step();
+            assert_eq!(s.state_hash(), other.state_hash(), "gate replay at {tick}");
+        } else if tick == 210 {
+            let mut copy = BlastRange::restore(config(), &s.snapshot()).unwrap();
+            copy.set_navigation_workers(2);
+            copy.set_physics_workers(1);
+            replica = Some(copy);
+        }
+        if s.units.iter().all(|u| u.motion.destination.is_none()) {
+            finished = Some(tick + 1);
+            break;
+        }
     }
-    assert!(s.units.iter().all(|u| u.motion.destination.is_none()));
+    assert!(finished.is_some(), "gate convoy stalled");
+    assert!(searching < 1000, "local search churn: {searching}");
+    assert_eq!(s.snapshot(), replica.unwrap().snapshot());
+    eprintln!("gate convoy finished at {} ticks; searching {searching}", finished.unwrap());
     assert!(s.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn gate_search_admission_keeps_shared_work_and_immediate_response() {
+    for starts in [1, 2] {
+        let mut sim = arena(10, true);
+        sim.set_navigation_workers(1); sim.set_physics_workers(1);
+        sim.navigation.searches_started_per_tick = starts;
+        let destinations: Vec<_> = sim.units.iter().enumerate().map(|(id, u)|
+            (id, [u.motion.pos[0].to_int_trunc() + 700, u.motion.pos[2].to_int_trunc()])).collect();
+        let initial: Vec<_> = sim.units.iter().map(|u| u.motion.pos).collect();
+        assert_eq!(sim.battle_group_move(&destinations, [1100, 700]), 10);
+        let mut searching = 0;
+        let mut finished = None;
+        let mut last_initial_route = 0;
+        let mut got_route = [false; 10];
+        for tick in 0..2000 {
+            let work = sim.coarse_work;
+            sim.step(); assert_separate(&sim);
+            assert!(sim.coarse_work.wrapping_sub(work) <= sim.navigation.global_work_per_tick);
+            searching += sim.units.iter().filter(|u| u.motion.searching()).count();
+            for (id, u) in sim.units.iter().enumerate() {
+                if tick == 3 { assert!(u.motion.pos[0] > initial[id][0], "response {id}"); }
+                if !got_route[id] && !u.motion.path.is_empty() {
+                    got_route[id] = true; last_initial_route = tick + 1;
+                }
+            }
+            if sim.units.iter().all(|u| u.motion.destination.is_none()) { finished = Some(tick + 1); break; }
+        }
+        eprintln!("gate starts={starts}: finish={finished:?}, initial_routes={last_initial_route}, searching={searching}");
+        assert!(finished.is_some()); assert!(got_route.iter().all(|v| *v));
+    }
 }
 
 #[test]
@@ -374,6 +464,8 @@ fn walking_group_advances_without_detouring_around_its_own_moving_members() {
         }
         if sim.units.iter().all(|u| u.motion.destination.is_none()) { break; }
     }
-    assert!(sim.units.iter().all(|u| u.motion.destination.is_none()), "walking group never arrived");
+    assert!(sim.units.iter().all(|u| u.motion.destination.is_none()), "walking group never arrived: {:?}",
+        sim.units.iter().map(|u| (&u.motion.pos, &u.motion.path, u.motion.cursor,
+            u.motion.drive, u.motion.destination, u.motion.recovery_state())).collect::<Vec<_>>());
     assert_eq!(sim.state_hash(), copy.unwrap().state_hash());
 }

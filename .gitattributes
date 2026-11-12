@@ -1,3 +1,6 @@
 * text=auto eol=lf
 *.png binary
 *.vox binary
+*.rgba binary
+# Preserve the upstream font license verbatim, including its whitespace.
+data/ui/menu/OFL-Oswald.txt -whitespace

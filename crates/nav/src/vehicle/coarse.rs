@@ -137,6 +137,28 @@ impl<'a> Ground<'a> {
         let Some((lo, hi)) = self.bounds(a, b) else {
             return false;
         };
+        let first = [lo[0] as u32 / 8, lo[1] as u32 / 8];
+        let end = [hi[0] as u32 / 8 + 1, hi[1] as u32 / 8 + 1];
+        // Tiny corridors already read only a handful of contiguous tiles.
+        // Shared requirements amortize their lookup on broad hulls/corridors.
+        // Rubble must retain its live, exact tile overlay (including columns
+        // outside the corridor but inside the floor tiles it reads).
+        if end[0] - first[0] >= 12
+            && end[1] - first[1] >= 12
+            && !self
+                .debris
+                .may_touch(first.map(|v| v as usize), end.map(|v| v as usize))
+        {
+            if let Some(clear) = self.world.prepared_floor_passage(
+                first,
+                end,
+                self.yielding,
+                self.local_grade,
+                self.step,
+            ) {
+                return clear;
+            }
+        }
         if self.local_grade {
             let width = (hi[0] / 8 - lo[0] / 8 + 1) as usize;
             // Missing upper/left neighbours have neutral extrema. Reset on
@@ -1688,6 +1710,110 @@ mod tests {
         assert!(refused.into_iter().all(|n| n > 100));
     }
     struct Floor;
+    #[test]
+    fn shared_requirements_keep_broad_corridors_exact_with_live_craters_and_rubble() {
+        struct Ramp;
+        impl voxel::Generator for Ramp {
+            fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+                let h = 8 + x / 16 + z / 32;
+                if y < h {
+                    2
+                } else if x % 13 == 0 && y < h + 10 {
+                    4
+                } else {
+                    AIR
+                }
+            }
+        }
+        let mut world = World::new(384, 96, 384, 100000, Box::new(Ramp));
+        world.prepare_navigation([4, 5]);
+        let mut rubble = Rubble::new();
+        let mut accepted = [0; 2];
+        let mut refused = [0; 2];
+        for stage in 0..4 {
+            match stage {
+                1 => {
+                    world.queue_edit(voxel::Edit::put(159, 80, 159, 3));
+                    world.flush();
+                }
+                // Tile top outside the exact box, but inside its coarse tiles.
+                2 => {
+                    world.queue_edit(voxel::Edit::dig(159, 80, 159));
+                    world.flush();
+                    rubble.insert([96, 96], 85);
+                }
+                3 => {
+                    rubble.remove(&[96, 96]);
+                    for y in 1..35 {
+                        world.queue_edit(voxel::Edit::dig(191, y, 191));
+                    }
+                    world.flush();
+                }
+                _ => {}
+            }
+            for local_grade in [false, true] {
+                for step in [-1, 0, 1, 2, 4, 12, 50, 100] {
+                    let mut g = Ground::new(
+                        &world,
+                        &rubble,
+                        Shape {
+                            half: [60, 60],
+                            step,
+                            ..shape()
+                        },
+                        Config {
+                            local_grade,
+                            ..config()
+                        },
+                    );
+                    for k in 0..16 {
+                        let a = [150 + k * 3, 150 + k * 2];
+                        let b = [180 + k * 3, 180 + k * 2];
+                        let expected = reference_clear(&g, a, b);
+                        assert_eq!(
+                            g.clear(a, b),
+                            expected,
+                            "{stage} {step} {local_grade} {a:?}"
+                        );
+                        assert_eq!(g.clear(b, a), expected);
+                        if expected {
+                            accepted[usize::from(local_grade)] += 1;
+                        } else {
+                            refused[usize::from(local_grade)] += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(accepted.into_iter().all(|n| n > 0));
+        assert!(refused.into_iter().all(|n| n > 0));
+    }
+    #[test]
+    fn debris_certificate_mask_covers_word_edges_zero_tops_and_sparse_pages() {
+        let columns = vec![
+            ([2047, 31], 20),
+            ([2048, 32], 0),
+            ([4095, 200], 80),
+            ([64, 64], 15),
+        ];
+        for size in [[8192, 512], [40000, 40000]] {
+            let tiles = DebrisTiles::build(size, &columns);
+            for &(at, top) in &columns {
+                if top == 0 {
+                    continue;
+                }
+                let p = at.map(|v| v as usize / 8);
+                assert!(tiles.may_touch(p, [p[0] + 1, p[1] + 1]));
+                let lo = [p[0].saturating_sub(2), p[1].saturating_sub(2)];
+                assert!(tiles.may_touch(lo, [p[0] + 3, p[1] + 3]));
+            }
+            assert!(!tiles.may_touch([800, 50], [820, 60]));
+        }
+        let empty = DebrisTiles::build([8192, 512], &[]);
+        assert!(!empty.may_touch([0, 0], [1024, 64]));
+        let zero = DebrisTiles::build([8192, 512], &[([2048, 32], 0)]);
+        assert!(!zero.may_touch([255, 3], [258, 6]));
+    }
     impl voxel::Generator for Floor {
         fn material(&self, _x: u32, y: u32, _z: u32) -> Mat {
             if y < 6 {
@@ -2500,6 +2626,9 @@ const PAGE: usize = 32;
 pub struct DebrisTiles {
     width: usize,
     dense: Vec<u16>,
+    /// Conservative 4x4-tile occupancy; reject the terrain-only certificate
+    /// without building the exact rubble-column rectangle index.
+    blocks: Vec<u64>,
     pages: Vec<Option<Box<[u16; PAGE * PAGE]>>>,
     page_width: usize,
 }
@@ -2519,6 +2648,11 @@ impl DebrisTiles {
             width: tiles[0],
             dense: if dense {
                 vec![0u16; tiles[0] * tiles[1]]
+            } else {
+                Vec::new()
+            },
+            blocks: if dense {
+                vec![0; tiles[0].div_ceil(4).div_ceil(64) * tiles[1].div_ceil(4)]
             } else {
                 Vec::new()
             },
@@ -2544,8 +2678,45 @@ impl DebrisTiles {
                 &mut page[z % PAGE * PAGE + x % PAGE]
             };
             *pile = (*pile).max(top);
+            if dense && top != 0 {
+                let stride = tiles[0].div_ceil(4).div_ceil(64);
+                out.blocks[z / 4 * stride + x / 4 / 64] |= 1u64 << (x / 4 % 64);
+            }
         }
         out
+    }
+    fn may_touch(&self, lo: [usize; 2], hi: [usize; 2]) -> bool {
+        if !self.blocks.is_empty() {
+            let stride = self.width.div_ceil(4).div_ceil(64);
+            let first = lo[0] / 4;
+            let last = (hi[0] - 1) / 4;
+            for z in lo[1] / 4..=(hi[1] - 1) / 4 {
+                for word in first / 64..=last / 64 {
+                    let left = if word == first / 64 {
+                        u64::MAX << (first % 64)
+                    } else {
+                        u64::MAX
+                    };
+                    let right = if word == last / 64 {
+                        u64::MAX >> (63 - last % 64)
+                    } else {
+                        u64::MAX
+                    };
+                    if self.blocks[z * stride + word] & left & right != 0 {
+                        return true;
+                    }
+                }
+            }
+        } else if !self.pages.is_empty() {
+            for z in lo[1] / PAGE..=(hi[1] - 1) / PAGE {
+                for x in lo[0] / PAGE..=(hi[0] - 1) / PAGE {
+                    if self.pages[z * self.page_width + x].is_some() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
     /// Highest debris top on the tile, zero with none.
     pub(crate) fn top(&self, x: usize, z: usize) -> u16 {

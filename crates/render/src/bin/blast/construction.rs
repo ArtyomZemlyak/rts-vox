@@ -774,7 +774,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
 }
 
 pub fn refresh(
-    mut c: ResMut<Catalog>,
+    (mut c, spatial): (ResMut<Catalog>, Option<Res<spatial_ui::State>>),
     (scene, publication): (Res<Scene>, Option<Res<super::ui_snapshot::UiSnapshot>>),
     panel: Res<panel::Panel>,
     edit: Res<Workshop>,
@@ -887,10 +887,10 @@ pub fn refresh(
     if context == Context::Hidden || context != c.context {
         return;
     }
-    c.per_page = windows
+    c.per_page = if spatial.as_ref().is_some_and(|s| s.enabled) && matches!(context,Context::Engineer(_)|Context::Factory(_)) {4}else{windows
         .single()
         .map_or(8, |w| ((w.width() - 64.0) / 190.0) as usize)
-        .clamp(3, SLOTS);
+        .clamp(3, SLOTS)};
     let list = choices(&c, &scene.sim);
     let pages = list.len().div_ceil(c.per_page).max(1);
     c.page = c.page.min(pages - 1);
@@ -1147,4 +1147,47 @@ pub fn refresh(
             }
         }
     }
+}
+
+/// Read-only bridge for the world-anchored deck. Recipes and actions still use
+/// the single catalogue, permission checks, thumbnails and simulation queues.
+pub(super) struct SpatialRecipe {
+    pub kind: RangeUnitKind,
+    pub image: Handle<Image>,
+    pub cost: String,
+}
+pub(super) struct SpatialCatalog {
+    pub recipes: Vec<SpatialRecipe>,
+    pub heading: String,
+    pub queue: Vec<(RangeUnitKind,Handle<Image>)>,
+    pub progress: u64,
+    pub hint: String,
+    pub greben: bool,
+}
+pub(super) fn spatial_catalog(c:&Catalog,sim:&BlastRange,generation:u64,selected:usize)->Option<SpatialCatalog> {
+    let actor=match c.context {Context::Engineer(id)|Context::Factory(id)=>id,_=>return None};
+    if c.generation!=generation || actor!=selected {return None;}
+    sim.units.get(actor)?;
+    let list=choices(c,sim);
+    let pages=list.len().div_ceil(c.per_page.max(1)).max(1);
+    let recipes:Vec<_>=list.into_iter().skip(c.page*c.per_page.max(1)).take(4).map(|kind| {
+        let cost=if matches!(c.context,Context::Factory(_)) {
+            sim.production_quote(actor,kind).map(|(mass,ticks,power)|format!("М {} · Э {}",economy_display::mass(mass),economy_display::energy_work(power.saturating_mul(u64::from(ticks))))).unwrap_or_else(||"Недоступно".into())
+        }else {
+            c.costs.get(&kind.index()).map(|&mass|if sim.units[actor].kind==RangeUnitKind::Commander {
+                format!("М {} · Э ~{}",economy_display::mass(mass),economy_display::energy_work(sim.construction_energy_estimate(mass)))
+            }else{format!("М {} · пит. {}/дрон",economy_display::mass(mass),economy_display::energy(sim.economic_rules().drone_power))}).unwrap_or_default()
+        };
+        SpatialRecipe{kind,image:c.icons.get(&kind.index()).cloned().unwrap_or_default(),cost}
+    }).collect();
+    let empty=recipes.is_empty();
+    let plans:Vec<_>=if matches!(c.context,Context::Engineer(_)) {sim.order_queue(actor).into_iter().filter_map(|p|match p.order {
+        sim_core::blast::battle::Order::Build(site)=>sim.construction_site_state(site).filter(|s|!s.complete&&!s.cancelled&&!s.destroyed),_=>None}).collect()}else{Vec::new()};
+    let queue=if plans.is_empty(){queue_actor(c.context,sim).and_then(|id|sim.production_queue(id)).unwrap_or_default()}else{plans.iter().map(|s|s.kind).collect()};
+    let progress=if plans.is_empty(){sim.production_progress(actor).map_or(0,|(ticks,build,paid,cost)|
+        (u64::from(ticks)*100/u64::from(build.max(1))).min(paid.saturating_mul(100)/cost.max(1)).min(100))}else{plans[0].delivered.saturating_mul(100)/plans[0].required.max(1)};
+    Some(SpatialCatalog{recipes,heading:format!("{} · {}/{}",if matches!(c.context,Context::Factory(_)){"ПРОИЗВОДСТВО"}else{"СТРОИТЕЛЬСТВО"},c.page+1,pages),
+        queue:queue.into_iter().map(|k|(k,c.icons.get(&k.index()).cloned().unwrap_or_default())).collect(),progress,
+        hint:if empty {"В этом тире нет доступных рецептов · выберите другой тир".into()}else if matches!(c.context,Context::Factory(_)){"ЛКМ — в очередь · ПКМ по карте — точка сбора".into()}else if c.pending.is_some(){"ЛКМ по земле — поставить · Shift — очередь · Esc — отменить".into()}else{"Выберите постройку · Shift — очередь размещений".into()},
+        greben:sim.units.get(actor).is_some_and(|u|u.kind==RangeUnitKind::GrebenStorage)})
 }

@@ -31,16 +31,24 @@
     search_resume_per_unit: 192,
     // Starts admitted per tick. Already-running searches keep their own
     // bounded slice; a hull beyond this start allowance retains its order.
-    searches_started_per_tick: 1,
-    // After recovery_ticks refused, the hull runs a cycle of escape
+    searches_started_per_tick: 2,
+    // After recovery_ticks of obstruction, the hull runs a cycle of escape
     // manoeuvres (ADR-275): astern, ahead, then each turning both ways by
     // recovery_turn_deg, escape_ticks each at escape_speed_pct of full speed.
+    // The same saved refusal age separates briefly stopped moving traffic
+    // from persistent hull blockers; a parked order never uses this grace.
+    // Bipeds translate independently of torso yaw: after contact, creeping
+    // below escape_speed_pct of available powered speed keeps its age.
+    // Tracks keep ordinary pivot recovery; completed/cancelled orders clear it.
     recovery_ticks: 24,
-    // A newly arrived hull requests a replacement promptly. The old route
-    // remains collision-checked and usable until that search answers.
+    // A newly arrived stationary hull requests a replacement promptly.
+    // Moving traffic keeps the normal cadence before a local detour.
+    // The old route remains collision-checked until the search answers.
     contact_replan_ticks: 2,
     escape_ticks: 32,
     escape_speed_pct: 30,
+    // Also bounds the steering correction of tracked vehicles when passing
+    // oncoming traffic. Bipeds translate sideways while their torso slews.
     recovery_turn_deg: 25,
     // The planner probes two units more contact than the hull: a plan never
     // leads into a grade the executor refuses between two search samples.

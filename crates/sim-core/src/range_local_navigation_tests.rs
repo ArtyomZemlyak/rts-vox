@@ -99,20 +99,24 @@ fn distant_local_fallback_moves_early_crosses_trees_and_reaches_the_real_order()
             "{kind:?} first_motion_ticks local={:?} full={:?}",
             first[0], first[1]
         );
-        assert!(first[0].is_some_and(|n| n <= 12), "{kind:?}: {first:?}");
-        assert!(first[0].unwrap() < first[1].unwrap(), "{kind:?}: {first:?}");
+        // Both planners now allow checked provisional movement immediately.
+        // The local fallback must not need an artificial delay in the full
+        // search to demonstrate that it starts promptly.
+        assert_eq!(first, [Some(1), Some(1)], "{kind:?}: delayed response");
         assert_eq!(m.destination, Some(goal));
-        assert!(m.partial_path);
+        let mut local_prefix = m.partial_path;
         let mut cut = false;
         for tick in next_tick..2600 {
             step(&mut m, &world, &body, tick);
             assert!(m.drive.vel <= Fx::from_int(m.speed), "speed cap changed");
             cut |= !m.cut.is_empty();
+            local_prefix |= m.partial_path;
             if m.destination.is_none() {
                 break;
             }
         }
         assert!(cut, "{kind:?}: forest was not crossed");
+        assert!(local_prefix, "{kind:?}: fixture never exercised a local prefix");
         assert!(m.destination.is_none(), "{kind:?}: stopped at {:?}", m.pos);
         assert!((m.pos[0].to_int_trunc() - goal[0]).abs() <= m.arrival + 1);
     }
@@ -196,9 +200,9 @@ fn a_local_leg_search_restores_and_short_orders_keep_their_original_target() {
     let body = voxel::unit::spider();
     let mut m = Motion::new([200, 16, 500], RangeUnitKind::Spider, &body);
     m.set_global_search_limit(0);
-    assert_eq!(m.local_goal([500, 500]), [500, 500]);
+    assert_eq!(m.local_goal([500, 500], &body, &[]), [500, 500]);
     for goal in [[1800, 500], [1800, 900], [60, 900]] {
-        let local = m.local_goal(goal);
+        let local = m.local_goal(goal, &body, &[]);
         assert!((0..2).all(|a| (EDGE..2048 - EDGE).contains(&local[a])));
         assert!((0..2).any(|a| (goal[a] - local[a]).abs() > 8 * m.navigation.cell_units));
     }

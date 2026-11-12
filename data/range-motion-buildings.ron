@@ -1,0 +1,41 @@
+// Mixed marching group through a yard with real buildings. No combat.
+// Patrol first points are the destinations for bench_mobility --case yard.
+(
+    battle: true, endless_battle: true, gun_point: true,
+    size: (2400, 512, 2400),
+    clear_min: (0,0), clear_max: (2400,2400),
+    target: (1800,16,1000), airburst_on_target: false,
+    power_milli: [1000], unit_resistance: 180,
+    course: Some((
+        min: (40,40), max: (2360,2360),
+        tank_speed: 40, walker_speed: 84, step_height: 5, walker_step_height: 8,
+        walker_terrain_tilt_pct: 70, tank_terrain_tilt_pct: 88,
+        tank_terrain_approach_pct: 70, walker_terrain_approach_pct: 90,
+        arrival: 4, reload_ticks: 40, turn_alignment_pct: 97, replan_ticks: 60,
+        ramps: [],
+        patrols: [
+            (unit: 0, points: [(1800,700),(450,700)]),
+            (unit: 1, points: [(1800,1000),(450,1000)]),
+            (unit: 2, points: [(1800,1300),(450,1300)]),
+            (unit: 3, points: [(1800,1700),(450,1700)]),
+            (unit: 4, points: [(2000,650),(330,650)]),
+            (unit: 5, points: [(1800,850),(330,850)]),
+            (unit: 6, points: [(2000,1050),(330,1050)]),
+            (unit: 7, points: [(1800,1250),(330,1250)]),
+        ],
+    )),
+    units: [
+        (allied: true, kind: Commander, at: (450,16,700)),
+        (allied: true, kind: Crawler, at: (450,16,1000)),
+        (allied: true, kind: Tank, at: (450,16,1300)),
+        (allied: true, kind: Walker04, at: (450,16,1700)),
+        (allied: true, kind: Tank, at: (330,16,650)),
+        (allied: true, kind: Tank, at: (330,16,850)),
+        (allied: true, kind: Tank, at: (330,16,1050)),
+        (allied: true, kind: Tank, at: (330,16,1250)),
+        (allied: true, kind: Base, at: (1000,16,1000)),
+        (allied: true, kind: GrebenStorage, at: (1000,16,1400)),
+        (allied: true, kind: KilFactoryT1, at: (1350,16,500)),
+    ],
+    blocks: [],
+)

@@ -21,6 +21,8 @@ use std::sync::Arc;
 
 #[path = "columns.rs"]
 pub mod columns;
+#[path = "navigation_floor.rs"]
+mod navigation_floor;
 #[cfg(test)]
 #[path = "world_material_tests.rs"]
 mod material_tests;
@@ -282,6 +284,8 @@ pub struct World {
     ceiling: Vec<u16>,
     /// Derived 8x8-column terrain tiles; a write invalidates its tile immediately.
     floor_tiles: Vec<std::sync::OnceLock<FloorTile>>,
+    /// Shared capability requirements, derived from 4x4 floor tiles.
+    floor_blocks: Vec<std::sync::OnceLock<navigation_floor::Block>>,
     wx: u32,
     /// Очередь отложенных правок. FIFO — порядок дренажа детерминирован.
     queue: std::collections::VecDeque<Edit>,
@@ -551,6 +555,9 @@ impl World {
             floor_tiles: (0..nx.div_ceil(8) as usize * nz.div_ceil(8) as usize)
                 .map(|_| std::sync::OnceLock::new())
                 .collect(),
+            floor_blocks: (0..nx.div_ceil(32) as usize * nz.div_ceil(32) as usize)
+                .map(|_| std::sync::OnceLock::new())
+                .collect(),
             wx: nx.div_ceil(64),
             queue: std::collections::VecDeque::new(),
             pending_digs: PendingDigs::new((cx * cy * cz) as usize),
@@ -612,6 +619,7 @@ impl World {
                 });
             }
         });
+        self.prepare_floor_requirements(yielding);
     }
     /// Terrain heights excluding the two crushable materials. An alternate
     /// material profile remains correct without replacing the resident cache.
@@ -696,6 +704,14 @@ impl World {
         hi: [i32; 2],
         yielding: [Mat; 2],
     ) -> Option<u16> {
+        self.prepared_level_area(lo, hi, yielding, true)
+    }
+    /// Uniform prepared floor, allowing yielding vegetation above it.
+    /// Positive block summaries replace tile reduction; mixed edges stay exact.
+    pub fn prepared_level_floor_area(&self, lo: [i32; 2], hi: [i32; 2], yielding: [Mat; 2]) -> Option<u16> {
+        self.prepared_level_area(lo, hi, yielding, false)
+    }
+    fn prepared_level_area(&self, lo: [i32; 2], hi: [i32; 2], yielding: [Mat; 2], bare: bool) -> Option<u16> {
         if lo[0] < 0
             || lo[1] < 0
             || hi[0] < lo[0]
@@ -707,17 +723,27 @@ impl World {
         }
         let stride = self.nx.div_ceil(8) as usize;
         let mut level = None;
-        for z in (lo[1] as usize / 8)..=(hi[1] as usize / 8) {
-            for x in (lo[0] as usize / 8)..=(hi[0] as usize / 8) {
-                let (key, _, clear, _) = self.floor_tiles[x + stride * z].get()?;
-                if *key != yielding {
-                    return None;
+        let low = lo.map(|n| n as u32 / 8);
+        let high = hi.map(|n| n as u32 / 8);
+        for bz in low[1] / 4..=high[1] / 4 {
+            for bx in low[0] / 4..=high[0] / 4 {
+                if let Some(h) = self.prepared_level_block(bx, bz, yielding, bare) {
+                    if level.is_some_and(|was| was != h) { return None; }
+                    level = Some(h);
+                    continue;
                 }
-                let h = (*clear)?;
-                if level.is_some_and(|was| was != h) {
-                    return None;
+                // A mixed outer block says nothing about its queried portion.
+                // Preserve the former exact answer at edges and after edits.
+                for z in low[1].max(bz*4)..=high[1].min(bz*4+3) {
+                    for x in low[0].max(bx*4)..=high[0].min(bx*4+3) {
+                        let (key, bounds, clear, _) = self.floor_tiles[x as usize + stride*z as usize].get()?;
+                        if *key != yielding { return None; }
+                        let h = if bare { (*clear)? }
+                            else { if bounds[0] != bounds[1] { return None; } bounds[0] };
+                        if level.is_some_and(|was| was != h) { return None; }
+                        level = Some(h);
+                    }
                 }
-                level = Some(h);
             }
         }
         level
@@ -775,6 +801,7 @@ impl World {
     fn forget_floor_tile(&mut self, x: u32, z: u32) {
         let i = (x / 8) as usize + self.nx.div_ceil(8) as usize * (z / 8) as usize;
         self.floor_tiles[i].take();
+        self.forget_floor_requirements(x, z);
     }
     #[inline]
     pub fn inside(&self, x: u32, y: u32, z: u32) -> bool {

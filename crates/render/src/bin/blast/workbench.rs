@@ -2061,6 +2061,7 @@ fn shield_field(giz: &mut Gizmos, centre: Vec3, radius: f32, charge: f32, tick: 
     }
 }
 pub fn overlay(
+    spatial: Option<Res<spatial_ui::State>>,
     mut giz: Gizmos,
     scene: Res<Scene>,
     edit: Res<Workshop>,
@@ -2124,7 +2125,9 @@ pub fn overlay(
                 / voxel::unit::WORLD_MM as f32
                 * 0.6)
                 .max(24.0);
-            giz.circle(Isometry3d::new(p + Vec3::Y * 0.8, flat), radius, color);
+            if !spatial.as_ref().is_some_and(|s|s.enabled&&s.visible&&!edit.editing) {
+                giz.circle(Isometry3d::new(p + Vec3::Y * 0.8, flat), radius, color);
+            }
             let selected = edit.selected_units.contains(&i)
                 || (edit.selected_units.is_empty() && edit.controlled == Some(i));
             if panel.ranges && selected && u.status.weapon {
@@ -2162,11 +2165,9 @@ pub fn overlay(
                     ground_range(&mut giz, &scene.sim, [u.at[0], u.at[2]],
                         scene.sim.supply_radius() as i32, Color::srgba(0.3, 1.0, 0.45, 0.55));
                 }
-                giz.circle(
-                    Isometry3d::new(p + Vec3::Y, flat),
-                    radius + 3.0,
-                    Color::WHITE,
-                );
+                if !spatial.as_ref().is_some_and(|s|s.enabled&&s.visible&&!edit.editing) {
+                    giz.circle(Isometry3d::new(p + Vec3::Y, flat),radius + 3.0,Color::WHITE);
+                }
             }
             if edit.controlled == Some(i) {
                 let mut from = [u.at[0], u.at[2]];

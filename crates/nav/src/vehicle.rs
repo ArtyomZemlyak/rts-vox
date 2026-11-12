@@ -1217,17 +1217,7 @@ impl<'a> Probe<'a> {
         {
             return None;
         }
-        let mut level = None;
-        for z in lo[1] as u32 / 8..=hi[1] as u32 / 8 {
-            for x in lo[0] as u32 / 8..=hi[0] as u32 / 8 {
-                let [low, high] = self.world.prepared_floor_tile(x, z, [*a, *b])?;
-                if low != high || level.is_some_and(|h| h != low) {
-                    return None;
-                }
-                level = Some(low);
-            }
-        }
-        let level = level?;
+        let level = self.world.prepared_level_floor_area(lo, hi, [*a, *b])?;
         if self.rubble.is_some_and(|r| r.upper_in(lo, hi) > level) {
             return None;
         }
@@ -1336,7 +1326,10 @@ impl<'a> Probe<'a> {
             let corner = self.surface([p[0].add(radius.mul(along)), p[1].add(radius.mul(across))]);
             height = height.max(corner.sub(s.ramp.mul(radius)));
             let mid = self.surface([p[0].add(half.mul(along)), p[1].add(half.mul(across))]);
-            if s.span >= 2 && corner.sub(mid) > step {
+            // A supported bridge already holds this contact at `level`.
+            // A dip inside its patch is not a new ledge above that plane.
+            // Raised corners still refuse entry just like the belt line.
+            if s.span >= 2 && corner.sub(mid) > step && corner.sub(level) > step {
                 steep = true;
             }
         }
@@ -3271,7 +3264,9 @@ mod tests {
                 let corner = self.surface(local(radius));
                 height = height.max(corner.sub(s.ramp.mul(radius)));
                 let mid = self.surface(local(half));
-                if s.span >= 2 && corner.sub(mid) > step {
+                // Compare the rise above the supported contact plane too:
+                // an already bridged dip is not a ledge to climb.
+                if s.span >= 2 && corner > mid.add(step) && corner > level.add(step) {
                     steep = true;
                 }
             }

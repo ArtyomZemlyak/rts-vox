@@ -973,10 +973,11 @@ fn main() {
                 detail_last = now;
                 match name {
                     "motion_begin" => {}
+                    "motion_traffic" => motion_detail[0] = elapsed,
                     // The coarse continuation (ADR-680) counts as route work.
                     "motion_coarse" => {
-                        motion_detail[0] = elapsed;
-                        coarse_us = elapsed;
+                        motion_detail[0] += elapsed;
+                        coarse_us = motion_detail[0];
                     }
                     "motion_routes" => motion_detail[0] += elapsed,
                     "motion_routes_ground" => {

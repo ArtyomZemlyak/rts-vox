@@ -180,6 +180,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
             let mut header_row = row();
             header_row.flex_wrap = FlexWrap::NoWrap;
             p.spawn(header_row).with_children(|p| {
+                spatial_ui::entry(p, font);
                 for (name, action) in [
                     ("Сражения", Action::Drawer(1)),
                     ("Испытания", Action::Drawer(2)),

@@ -65,6 +65,8 @@ mod profile;
 mod status_log;
 #[path = "blast/strategic_icons.rs"]
 mod strategic_icons;
+#[path = "blast/spatial_ui.rs"]
+mod spatial_ui;
 #[path = "blast/streaming.rs"]
 mod streaming;
 #[path = "blast/surround.rs"]
@@ -389,6 +391,9 @@ fn main() {
     let mut fps_limit = 200u32;
     let mut surround_enabled = true;
     let mut start_laboratory = false;
+    let mut select_unit = None;
+    let mut start_layout_battle = false;
+    let mut pause_at_start = false;
     let mut profile_background = false;
     let mut out = None;
     let mut all_frames = false;
@@ -453,6 +458,9 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "--main-menu" | "--skip-menu" => {},
+            "--select-unit" => {i+=1;select_unit=Some(args[i].parse::<usize>().expect("--select-unit zero-based unit index"));},
+            "--start-battle" => start_layout_battle=true,
+            "--paused" => pause_at_start=true,
             "--laboratory" => start_laboratory = true,
             "--profile" => {
                 i += 1;
@@ -849,7 +857,7 @@ fn main() {
         view = 1;
     }
     let mut hud = panel::Panel::new(drive, demo);
-    hud.sandbox = !battle_preset && !world_battle && skirmish.is_none();
+    hud.sandbox = !battle_preset && !world_battle && skirmish.is_none() && !start_layout_battle;
     hud.script = skirmish
         .and_then(|id| modding::range_skirmish::stock(id as usize).ok())
         .map_or_else(Vec::new, |preset| preset.script);
@@ -914,11 +922,15 @@ fn main() {
             }
         }
     }
-    if battle_preset && !edit {
+    if (battle_preset || start_layout_battle) && !edit {
         sim.start_battle().expect("two battle teams");
         if let Some(mission) = &mut hud.mission {
             mission.begin(&mut sim, 0);
         }
+    }
+    if let Some(id)=select_unit {
+        assert!(sim.units.get(id).is_some_and(|u|u.status.alive)&&sim.allied(id),"--select-unit needs a living allied unit");
+        workshop.controlled=Some(id);workshop.selected=Some(workbench::Selection::Unit(id));workshop.selected_units=vec![id];
     }
     if let Some(mm) = gas_cell_mm {
         sim.config.gas_display_mm = mm;
@@ -1130,7 +1142,7 @@ fn main() {
             generation: 0,
             energy,
             anni,
-            paused: edit || start_menu,
+            paused: edit || start_menu || pause_at_start,
             frame: 0,
             finish,
             out,
@@ -1160,6 +1172,7 @@ fn main() {
         .insert_resource(hud)
         .insert_resource(frontend::Menu::new(start_menu))
         .init_resource::<construction::Catalog>()
+        .init_resource::<spatial_ui::State>()
         .init_resource::<construction::plans::Visuals>()
         .insert_resource(laboratory::Laboratory::new(start_laboratory))
         .insert_resource(knobs::Overrides::new(settings, stock_tuning))
@@ -1190,6 +1203,7 @@ fn main() {
                     (
                         laboratory::first_person_input.run_if(frontend::in_session),
                         laboratory::tools_input.run_if(frontend::in_session),
+                        spatial_ui::input,
                         panel::actions,
                         construction::input.run_if(frontend::in_session),
                         laboratory::actions,
@@ -1273,7 +1287,7 @@ fn main() {
                     )
                         .chain(),
                     panel::hud::refresh_selection_box,
-                    (panel::release_keys, frontend::sync).chain(),
+                    (panel::release_keys, frontend::sync, frontend::skin_sync, spatial_ui::update).chain(),
                     record,
                     capture,
                     profile::render_context,

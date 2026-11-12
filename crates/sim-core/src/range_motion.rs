@@ -14,6 +14,18 @@ use voxel::{UnitBody, World};
 mod flight;
 #[path = "range_steering.rs"]
 mod steering;
+#[path = "range_visibility.rs"]
+mod visibility;
+#[path = "range_traffic.rs"]
+mod traffic_index;
+pub(super) use traffic_index::{HullNeighbors, TrafficIndex};
+
+#[cfg(test)]
+#[path = "range_passing_tests.rs"]
+mod passing_tests;
+#[cfg(test)]
+#[path = "range_maneuver_tests.rs"]
+mod geometry_maneuver_tests;
 
 #[derive(Clone, Copy)]
 pub struct Obstacle {
@@ -30,21 +42,57 @@ pub struct Obstacle {
 /// the live, serially accepted hull positions. Rebuilt, never saved.
 pub(super) struct Traffic {
     obstacle: Obstacle,
+    passing_half: Fx,
     direction: [Fx; 2],
     velocity: Fx,
+    intent: bool,
     moving: bool,
+    reach: Fx,
+    passing_reach: Fx,
+    biped_intent: Option<(i32, [Fx; 2])>,
 }
 impl Traffic {
     pub(super) fn of(m: &Motion, b: &UnitBody, active: bool) -> Self {
+        let obstacle = Obstacle::of(m, b);
+        let intent = active && m.enabled && m.destination.is_some() && m.escape_left == 0;
+        // Parked actors neither request advice nor contribute traffic. Avoid
+        // roots/trigonometry for bases and idle units; collision bodies above
+        // are still complete and remain in the live physical obstacle list.
+        if !m.enabled || m.destination.is_none() || m.escape_left != 0 {
+            return Self { obstacle, passing_half: Fx::ZERO, direction: [Fx::ZERO; 2],
+                velocity: m.drive.vel, intent: false, moving: false,
+                reach: Fx::ZERO, passing_reach: Fx::ZERO, biped_intent: None };
+        }
+        let radius = obstacle.half[0].mul(obstacle.half[0])
+            .add(obstacle.half[1].mul(obstacle.half[1])).sqrt();
+        let turn = m.navigation.recovery_turn_deg * angle::FULL / 360;
+        let sine = angle::sin(turn);
+        let reach = Fx::from_int(4 * (m.shape(b).half[0].max(m.shape(b).half[1])
+            + m.navigation.cell_units));
+        // Tracks cannot adopt arbitrary yaw while passing. Reserving a full
+        // circle unnecessarily closes the gap between two neighbouring rows.
+        let side_peak = angle::atan2(obstacle.half[0].raw(), obstacle.half[1].raw());
+        let passing_half = if !m.leg_side_guard && turn < side_peak {
+            obstacle.half[1].mul(angle::cos(turn)).add(obstacle.half[0].mul(sine))
+        } else { radius };
         Self {
-            obstacle: Obstacle::of(m, b),
+            biped_intent: m.leg_side_guard.then(|| {
+                let goal=m.destination.unwrap();
+                let way=angle::atan2(Fx::from_int(goal[1]).sub(m.pos[2]).raw(),
+                    Fx::from_int(goal[0]).sub(m.pos[0]).raw());
+                (way,[angle::cos(way),angle::sin(way)])
+            }),
+            reach,
+            passing_reach: reach.div(sine.max(Fx::from_ratio(1, 8))),
+            passing_half,
+            obstacle,
             direction: m.travel_direction(),
             velocity: m.drive.vel,
-            moving: active
-                && m.enabled
-                && m.destination.is_some()
-                && m.escape_left == 0
-                && !m.blocked
+            intent,
+            // A short refusal belongs to the moving queue. Persistent
+            // obstruction ages into a static blocker using saved recovery time.
+            moving: intent
+                && m.blocked_ticks < m.navigation.recovery_ticks
                 && (m.cursor < m.path.len() || m.drive.vel > Fx::ZERO),
         }
     }
@@ -52,6 +100,9 @@ impl Traffic {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct TrafficHint {
     speed: Fx,
+    /// Local preferred heading, recomputed from the phase snapshot. It does
+    /// not replace the route or grant permission to cross any obstacle.
+    way: Option<i32>,
 }
 
 /// A local continuation computed against the pre-commit obstacle snapshot.
@@ -155,7 +206,8 @@ impl Obstacle {
     pub fn of(m: &Motion, b: &UnitBody) -> Self {
         Self {
             moving: m.enabled && !m.emplaced && m.destination.is_some()
-                && !m.blocked && m.escape_left == 0,
+                && m.blocked_ticks < m.navigation.recovery_ticks
+                && m.escape_left == 0,
             pos: m.pos,
             height: Fx::from_ratio(b.vol.ny as i32 * b.mm as i32, voxel::unit::WORLD_MM as i32),
             // A biped's navigation footprint stays stable while its torso
@@ -272,7 +324,7 @@ pub struct Motion {
     walker_turn_guard: bool,
     /// Two-legged articulated rigs keep their contacts on their own sides.
     leg_side_guard: bool,
-    /// First-line local yard detours for articulated bipeds and the collector.
+    /// First-line local yard detours for ground vehicles.
     /// Reconstructed capability, not saved state or a movement-speed setting.
     flat_detours: bool,
     pub pos: [Fx; 3],
@@ -325,6 +377,8 @@ pub struct Motion {
     /// Attempted velocity before admission/braking in this motion phase.
     /// Derived scratch, reset each phase and never saved or hashed.
     contact_velocity: V3,
+    /// Derived swept collision candidates; rebuilt from live hulls every step.
+    contact_candidates: traffic_index::CollisionCandidates,
     /// Consumed by the next step; derived from the immutable traffic phase.
     traffic_hint: Option<TrafficHint>,
     /// Legs computed once from the body.
@@ -561,11 +615,22 @@ impl Motion {
         traffic: &[Traffic],
         response: crate::mobility::Mobility,
     ) -> Option<TrafficHint> {
+        self.traffic_hint_from(b, id, traffic, response, 0..traffic.len())
+    }
+    pub(super) fn traffic_hint_near(
+        &self, b: &UnitBody, id: usize, traffic: &[Traffic],
+        response: crate::mobility::Mobility, candidates: &[usize],
+    ) -> Option<TrafficHint> {
+        self.traffic_hint_from(b, id, traffic, response, candidates.iter().copied())
+    }
+    fn traffic_hint_from(
+        &self, b: &UnitBody, id: usize, traffic: &[Traffic],
+        response: crate::mobility::Mobility, candidates: impl Iterator<Item = usize>,
+    ) -> Option<TrafficHint> {
         if !self.enabled
             || self.escape_left != 0
             || self.destination.is_none()
             || !self.can_drive(response)
-            || self.cursor >= self.path.len()
         {
             return None;
         }
@@ -576,36 +641,48 @@ impl Motion {
         );
         let limits = Limits::of(&self.chassis, TICKS);
         // During a gentle turn, traffic is still closing along the current
-        // heading, not the future waypoint's direction. Large turns keep
-        // the collision/replanning path instead of braking for another lane.
+        // heading, not the future waypoint's direction. Large turns do not
+        // brake for a vehicle in another lane; passing advice is independent.
         let follow_angle = (self.navigation.recovery_turn_deg * angle::FULL / 360).max(limits.turn);
-        if angle::diff(want, self.drive.head).abs() > follow_angle {
-            return None;
-        }
+        let following = angle::diff(want, self.drive.head).abs() <= follow_angle;
+        let route_way = want;
+        let route_forward = [angle::cos(route_way), angle::sin(route_way)];
         let want = self.drive.head;
         let forward = [angle::cos(want), angle::sin(want)];
         let dot = |a: [Fx; 2], b: [Fx; 2]| a[0].mul(b[0]).add(a[1].mul(b[1]));
         let own = Obstacle::of(self, b);
-        let reach = Fx::from_int(
+        let reach = traffic.get(id).map_or_else(|| Fx::from_int(
             4 * (self.shape(b).half[0].max(self.shape(b).half[1]) + self.navigation.cell_units),
-        );
+        ), |t| t.reach);
         let margin = Fx::from_int(self.navigation.plan_margin);
         let own_radius = own.half[0].max(own.half[1]);
+        let passing_half = traffic.get(id).map_or_else(||
+            own.half[0].mul(own.half[0]).add(own.half[1].mul(own.half[1])).sqrt(),
+            |t| t.passing_half);
         let mut hint = TrafficHint {
             speed: Fx::from_int(self.speed),
+            way: None,
         };
+        let mut passing: Option<(Fx, usize, i32)> = None;
+        let mut passing_sides = [false; 2];
+        let mut passing_gap: Option<Fx> = None;
         let turn = self.navigation.recovery_turn_deg * angle::FULL / 360;
         let aligned = angle::cos(turn);
+        // The warning distance includes enough run-up to gain lateral
+        // clearance at the installed avoidance angle, even for wide robots.
+        let turn_sine = angle::sin(turn).max(Fx::from_ratio(1, 8));
+        let passing_reach = traffic.get(id).map_or_else(|| reach.div(turn_sine), |t| t.passing_reach);
         let brake = response
             .limits(&limits, false)
             .brake
             .mul(self.drive_scale.mul(self.hull.load));
-        for (other_id, other) in traffic.iter().enumerate() {
+        for other_id in candidates {
+            let other = &traffic[other_id];
             if other_id == id
-                || !other.moving
+                || !other.intent
                 || !other.obstacle.overlaps_height(own.pos[1], own.height)
                 || other.velocity < Fx::ZERO
-                || !other.obstacle.within([self.pos[0], self.pos[2]], reach)
+                || !other.obstacle.within([self.pos[0], self.pos[2]], passing_reach)
             {
                 continue;
             }
@@ -613,6 +690,71 @@ impl Motion {
                 other.obstacle.pos[0].sub(self.pos[0]),
                 other.obstacle.pos[2].sub(self.pos[2]),
             ];
+            // A common passing convention breaks the head-on symmetry before
+            // contact. Resolve the closest conflict only: summing repulsion
+            // vectors can cancel in a crowd and changes with neighbour count.
+            // Work in the route frame, so a temporary avoidance turn cannot
+            // immediately make us forget the approaching vehicle.
+            // Intent may diverge substantially while differently sized robots
+            // pass. Keep a wider cone than the following rule, but exclude
+            // perpendicular traffic and a column rounding its own corner.
+            // Two independently walking torsos can have temporary local
+            // waypoints facing each other after a crossing. Preserve their
+            // command-space passing side until the rear hull clears, rather
+            // than redefining left/right from those short detour waypoints.
+            let (route_way,route_forward,other_direction)=traffic.get(id)
+                .and_then(|t|t.biped_intent).zip(other.biped_intent)
+                .map_or((route_way,route_forward,other.direction),|((way,forward),(_,other))|(way,forward,other));
+            if turn > 0 && dot(route_forward, other_direction) < turn_sine.neg()
+                && (self.leg_side_guard || dot(forward, other.direction) < Fx::ZERO) {
+                let ahead = dot(delta, route_forward);
+                let across = delta[0].mul(route_forward[1]).sub(delta[1].mul(route_forward[0]));
+                let extent = |o: &Obstacle, axis: [Fx; 2]| {
+                    let c = angle::cos(o.head); let s = angle::sin(o.head);
+                    axis[0].mul(c).add(axis[1].mul(s)).abs().mul(o.half[0])
+                        .add(axis[1].mul(c).sub(axis[0].mul(s)).abs().mul(o.half[1]))
+                };
+                let length = extent(&own, route_forward).add(extent(&other.obstacle, route_forward)).add(margin);
+                // Radii cover the permitted passing yaw sweep. They are
+                // computed once per actor in the immutable traffic snapshot,
+                // not per pair; rotated route projections must not inflate
+                // the same clearance repeatedly as a large robot sidesteps.
+                let width = if self.leg_side_guard && other.biped_intent.is_some() {
+                    // Both collision rectangles stay fixed as their torsos
+                    // turn. Reserve their actual lateral projections, not a
+                    // circumcircle needed by a rotating tracked chassis.
+                    let lateral = [route_forward[1].neg(), route_forward[0]];
+                    extent(&own, lateral).add(extent(&other.obstacle, lateral)).add(margin)
+                } else { passing_half.add(other.passing_half).add(margin) };
+                let warning = length.add(width.mul(aligned).div(turn_sine))
+                    .add(Fx::from_int(self.navigation.corner_lookahead_units));
+                // Keep the separation until the rear of the other hull has
+                // passed too. Dropping advice at centre crossing lets a slow
+                // commander turn straight into the fast walker's trailing side.
+                if ahead > length.neg() && across.abs() < width && ahead < warning.min(passing_reach) {
+                    // Bias away from an existing offset; exact ties pass to
+                    // the right. Do not assume the other hull can cooperate.
+                    let gap = ahead.sub(length).max(Fx::from_int(self.navigation.cell_units));
+                    let offset = width.sub(across.abs()).add(margin);
+                    let correction = angle::atan2(offset.raw(), gap.raw());
+                    // Bipeds already translate independently of torso yaw.
+                    // A close, very wide walker can sidestep; limiting that
+                    // step to a tank's steering angle guarantees a collision.
+                    let correction = if self.leg_side_guard { correction } else { correction.min(turn) };
+                    let way = angle::norm(route_way + if across > Fx::ZERO { correction } else { -correction });
+                    passing_sides[usize::from(across > Fx::ZERO)] = true;
+                    if id > other_id {
+                        let gap = ahead.sub(length);
+                        passing_gap = Some(passing_gap.map_or(gap, |old| old.min(gap)));
+                    }
+                    if passing.is_none_or(|(near, slot, _)| (ahead.abs(), other_id) < (near, slot)) {
+                        passing = Some((ahead.abs(), other_id, way));
+                    }
+                }
+            }
+            if !other.moving || !following || !other.obstacle.within([self.pos[0], self.pos[2]], reach) {
+                continue;
+            }
             let ahead = dot(delta, forward);
             if ahead <= Fx::ZERO {
                 continue;
@@ -683,7 +825,13 @@ impl Motion {
             if across >= own_side.add(width).add(margin) {
                 continue;
             }
-            if facing >= aligned {
+            // Converging lanes can each see the other hull just ahead in
+            // their own frame. Order the pair in a shared heading instead:
+            // only one can follow, so two stopped neighbours cannot deadlock.
+            let common_ahead = dot(delta, [forward[0].add(other.direction[0]),
+                forward[1].add(other.direction[1])]);
+            if facing >= aligned
+                && (common_ahead > Fx::ZERO || common_ahead == Fx::ZERO && id > other_id) {
                 let length = facing
                     .abs()
                     .mul(other.obstacle.half[0])
@@ -695,7 +843,20 @@ impl Motion {
                     .min(other.velocity.mul(facing).max(Fx::ZERO).add(closing));
             }
         }
-        Some(hint)
+        // Between two oncoming rows, steering for the nearest hull can
+        // alternate sides forever. Let the stable lower slot clear first;
+        // the yielding hull still steers and uses its normal braking curve.
+        // A simple pair or a column never enters this zipper rule.
+        if passing_sides.iter().all(|&side| side) {
+            if let Some(gap) = passing_gap {
+                // Braking speed is monotone in the available gap. One solve
+                // for the tightest constraint replaces a solve per neighbour.
+                hint.speed = hint.speed.min(drive::stopping_speed(
+                    gap, brake, TICKS, Fx::from_int(self.speed)));
+            }
+        }
+        hint.way = passing.map(|(_, _, way)| way);
+        (following || hint.way.is_some()).then_some(hint)
     }
     pub(super) fn set_traffic_hint(&mut self, hint: Option<TrafficHint>) {
         self.traffic_hint = hint;
@@ -765,8 +926,7 @@ impl Motion {
             emplaced: kind.emplacement(),
             walker_turn_guard: matches!(kind, modding::range::RangeUnitKind::Walker04 | modding::range::RangeUnitKind::Commander),
             leg_side_guard: matches!(kind, modding::range::RangeUnitKind::Walker04 | modding::range::RangeUnitKind::Commander),
-            flat_detours: matches!(kind, modding::range::RangeUnitKind::Commander
-                | modding::range::RangeUnitKind::Walker04 | modding::range::RangeUnitKind::Crawler),
+            flat_detours: !kind.emplacement() && kind != modding::range::RangeUnitKind::SkobaDrone,
             step_cycle: Default::default(),
             pos: at.map(Fx::from_int),
             drive: Drive {
@@ -886,6 +1046,7 @@ impl Motion {
             prepared_hunt: false,
             prepared_terrain_change: false,
             terrain_columns: nav::vehicle::Columns::default(),
+            contact_candidates: Default::default(),
             ground_memo: None,
             cut_limit: usize::MAX,
             defer_feet: false,
@@ -1197,7 +1358,9 @@ impl Motion {
         let mut candidate = previous;
         candidate.pos[0] = nx;
         candidate.pos[2] = nz;
-        let collision = others.iter().position(|p| hull_contact_blocks(&previous, &candidate, p));
+        self.contact_candidates.rebuild(&previous,
+            self.shove.x.abs().max(self.shove.z.abs()).div(Fx::from_int(TICKS)), others);
+        let collision = self.contact_candidates.first(&previous, &candidate, others);
         let (x, z) = (nx.to_int_trunc(), nz.to_int_trunc());
         let terrain_allowed = (target.blocked == 0 || target.blocked < current.blocked)
             && !target.tilt
@@ -1259,6 +1422,11 @@ impl Motion {
     }
     pub(super) fn can_drive(&self, response: crate::mobility::Mobility) -> bool {
         response.engine > Fx::ZERO && response.traction > Fx::ZERO && self.carried()
+    }
+    /// Passive settling reads neighbours only when a horizontal shove exists.
+    /// Driven motion keeps the complete live list, including failed engines.
+    pub(super) fn needs_obstacles(&self, driven: bool) -> bool {
+        driven && self.enabled || self.shove != V3::ZERO
     }
     /// Installed propulsion can try to recover a stance. Buckled legs do not
     /// permanently remove this ability; lost legs and severed machinery do.
@@ -1772,9 +1940,9 @@ impl Motion {
         self.next_plan = 0;
         true
     }
-    /// Fine routing keeps nearby hulls throughout a detour. Forgetting them
-    /// after the first accepted sidestep let a pending search plan straight
-    /// back through the very building it was going around.
+    /// Parked hulls remain in every detour. Brief contact with a moving
+    /// neighbour does not freeze the entire queue into a wall for A*; a
+    /// persistent refusal or recovery manoeuvre still admits all nearby hulls.
     fn local_blockers(
         &self,
         from: [Fx; 2],
@@ -1787,7 +1955,7 @@ impl Motion {
             .iter()
             .copied()
             .filter(|o| o.overlaps_height(self.pos[1], Fx::from_int(shape.height)))
-            .filter(|o| !o.moving || self.blocked_ticks > 0 || self.escape > 0)
+            .filter(|o| !o.moving || self.blocked_ticks >= self.navigation.recovery_ticks || self.escape > 0)
             .filter(|o| o.within(from, radius))
             .collect()
     }
@@ -1838,11 +2006,55 @@ impl Motion {
         // Moving traffic is followed/yielded to, not given a frozen yard
         // detour. A real contact can still use the ordinary local search.
         if blocker.moving { return false; }
-        let box_ = bounds(blocker, padding);
+        let single_box = bounds(blocker, padding);
+        let mut box_ = single_box;
         let axis = usize::from(end[1].sub(from[1]).abs() > end[0].sub(from[0]).abs());
+        let mut best: Option<(Fx, Vec<[i32; 2]>)> = None;
+        // The stable biped collision rectangle does not rotate with its
+        // torso, but the terrain probe still samples yawed belly/support
+        // positions. Prove their whole reach, not just the collision box.
+        let terrain = self.shape(b);
+        let x=Fx::from_int(terrain.half[0].max(terrain.support[0]));
+        let z=Fx::from_int(terrain.half[1].max(terrain.support[1]));
+        let terrain_reach = x.mul(x).add(z.mul(z)).sqrt().to_int_trunc() + 1
+            + terrain.span.max(0) + terrain.step.max(0) + 2;
+        for variant in 0..3 {
+            let clustered = variant != 0;
+            if clustered {
+                if best.as_ref().is_some_and(|(_, path)| path.last() == Some(&to)) { break; }
+                // Try the envelope of a small connected cluster only after
+                // the ordinary two-corner route failed. Never drop blockers:
+                // dense yards retain the normal budgeted oriented search.
+                const MAX_CLUSTER: usize = 8;
+                box_ = single_box;
+                let boxes: Vec<_> = blockers.iter().filter(|o| !o.moving)
+                    .filter(|o| variant != 1 || intersects(from, end,
+                        bounds(o, HULL_CONTACT_SLOP.neg())).is_some())
+                    .map(|o| bounds(o, padding)).collect();
+                let mut included = vec![false; boxes.len()];
+                let mut count = 0;
+                let mut oversized = false;
+                loop {
+                    let mut grew = false;
+                    for (i, next) in boxes.iter().enumerate() {
+                        if included[i] || (0..2).any(|a| next[a][0] > box_[a][1] || next[a][1] < box_[a][0]) { continue; }
+                        if count == MAX_CLUSTER { oversized = true; break; }
+                        included[i] = true; count += 1; grew = true;
+                        for a in 0..2 { box_[a][0] = box_[a][0].min(next[a][0]); box_[a][1] = box_[a][1].max(next[a][1]); }
+                    }
+                    if oversized || !grew { break; }
+                }
+                if oversized || box_ == single_box { continue; }
+            }
+        let interior = clustered && (0..2).all(|a| end[a] >= box_[a][0] && end[a] <= box_[a][1]);
+        if interior && blockers.iter().any(|o| {
+            let limits = bounds(o, HULL_CONTACT_SLOP.neg());
+            (0..2).all(|a| end[a] >= limits[a][0] && end[a] <= limits[a][1])
+        }) { break; }
+        for orientation in 0..if interior { 2 } else { 1 } {
+        let axis = if orientation == 0 { axis } else { 1 - axis };
         let side = 1 - axis;
         let forward = usize::from(end[axis] >= from[axis]);
-        let mut best: Option<(Fx, Vec<[i32; 2]>)> = None;
         for edge in 0..2 {
             // Round outwards so conversion to grid coordinates cannot put a
             // corner back into the expanded obstacle.
@@ -1854,10 +2066,22 @@ impl Motion {
             a[axis] = rounded(box_[axis][1 - forward], forward == 0);
             z[axis] = rounded(box_[axis][forward], forward == 1);
             a[side] = rounded(box_[side][edge], edge == 1); z[side] = a[side];
+            // A free pocket inside the cluster envelope is not a solid
+            // building. Leave by this side, round the far edge, then enter
+            // the pocket from that edge; validate every leg below. Starting
+            // inside the envelope must not send us back to its near corner.
+            if interior && from[axis] >= box_[axis][0] && from[axis] <= box_[axis][1] {
+                a[axis] = from[axis].to_int_trunc();
+            }
             let mut path = vec![a, z];
+            if interior {
+                let mut entry = z;
+                entry[side] = to[side];
+                path.push(entry);
+            }
             // Keep this fast path local even for a cross-map order. The real
             // destination is retained; its continuation uses normal routing.
-            if (0..2).all(|axis| (to[axis] - z[axis]).abs() <= self.navigation.global_min_distance) {
+            if (0..2).all(|axis| (to[axis] - path.last().unwrap()[axis]).abs() <= self.navigation.global_min_distance) {
                 path.push(to);
             }
             if path.iter().any(|p| p[0] < EDGE || p[1] < EDGE
@@ -1878,7 +2102,7 @@ impl Motion {
             let mut lo = [from[0].to_int_trunc(), from[1].to_int_trunc()];
             let mut hi = lo;
             for p in &path { for a in 0..2 { lo[a] = lo[a].min(p[a]); hi[a] = hi[a].max(p[a]); } }
-            for a in 0..2 { let r = own.half[a].to_int_trunc() + self.navigation.plan_margin + 1;
+            for a in 0..2 { let r = (own.half[a].to_int_trunc() + self.navigation.plan_margin + 1).max(terrain_reach);
                 lo[a] -= r; hi[a] += r; }
             if lo.iter().any(|&v| v < 0) || hi[0] >= w.nx as i32 || hi[1] >= w.nz as i32
                 || rubble.touches(lo, hi) { continue; }
@@ -1892,6 +2116,8 @@ impl Motion {
                 }
             }
             if clear && best.as_ref().is_none_or(|(old, _)| cost < *old) { best = Some((cost, path)); }
+        }
+        }
         }
         let Some((_, path)) = best else { return false; };
         self.partial_path = path.last().copied() != Some(to);
@@ -1934,6 +2160,7 @@ impl Motion {
         if self.destination != Some(to) {
             self.escape = 0;
             self.blocked_ticks = 0;
+            self.needs_recovery = false;
         }
         self.escape_left = 0;
         self.destination = (0..2)
@@ -1948,16 +2175,16 @@ impl Motion {
             completed("plan_reverse");
             return true;
         }
-        // Global routing is terrain-only. A hull enters dynamic avoidance
-        // only after physical contact or an escape attempt on this order.
-        let avoid = self.blocked_ticks > 0 || self.escape > 0
+        // A temporary traffic contact does not invalidate the terrain
+        // corridor. Reuse global routing when there are no persistent local
+        // blockers; otherwise use the oriented hull-aware detour below.
+        let avoid = self.escape > 0
             || self.flat_detours && !self.local_blockers(from, shape, others).is_empty();
         if self.destination.is_some() && self.flat_hull_detour(w, to, b, others, rubble) {
             completed("plan_hull_detour");
             return true;
         }
-        if !self.blocked
-            && !self.needs_recovery
+        if !self.needs_recovery
             && !avoid
             && self.route.is_empty()
             // Finish a checked local bypass before returning to the global map.
@@ -1984,7 +2211,6 @@ impl Motion {
                     CoarseAdvance::Pending => {
                         completed("plan_coarse");
                         self.blocked = false;
-                        self.needs_recovery = false;
                         self.dry = false;
                         return true;
                     }
@@ -2068,7 +2294,7 @@ impl Motion {
         let from = [self.pos[0], self.pos[2]];
         // Never turn a rejected off-map order into a valid local waypoint.
         let to = if self.destination.is_some() {
-            self.local_goal(to)
+            self.local_goal(to, b, others)
         } else {
             to
         };
@@ -2096,7 +2322,8 @@ impl Motion {
                 nav::vehicle::Hunting::Open(hunt) => {
                     self.hunt = Some(hunt);
                     self.blocked = false;
-                    self.needs_recovery = false;
+                    // A pending query is not proof that invalidated ground
+                    // is safe again. A checked plan/prefix releases the hold.
                     self.dry = false;
                 }
             }
@@ -2203,7 +2430,6 @@ impl Motion {
                 // the direct sweep and frontier resume on the next tick.
                 self.hunt = Some(hunt);
                 self.blocked = false;
-                self.needs_recovery = false;
                 self.dry = false;
             }
         }
@@ -2213,7 +2439,7 @@ impl Motion {
     /// A global refusal or a live contact needs a local maneuver, not an
     /// exact oriented sweep across the entire map. Keep the real order and
     /// lead toward it by one local horizon; mark_entry keeps this a prefix.
-    fn local_goal(&self, to: [i32; 2]) -> [i32; 2] {
+    fn local_goal(&self, to: [i32; 2], body: &UnitBody, others: &[Obstacle]) -> [i32; 2] {
         // A moving hull already has a checked route to use while a pursuit
         // replacement is searched. Preserve that full replacement.
         if self.cursor < self.path.len() && !self.blocked {
@@ -2231,7 +2457,17 @@ impl Motion {
             return to;
         }
         let fraction = Fx::from_int(horizon).div(distance);
-        [0, 1].map(|a| from[a].add(delta[a].mul(fraction)).to_int_trunc())
+        let point = [0, 1].map(|a| from[a].add(delta[a].mul(fraction)).to_int_trunc());
+        let mut candidate = Obstacle::of(self, body);
+        candidate.pos[0] = Fx::from_int(point[0]);
+        candidate.pos[2] = Fx::from_int(point[1]);
+        // An artificial prefix inside a factory has no goal-ring endpoint:
+        // repeating that search cannot ever find a way around the factory.
+        // Keep the real order as this search's target instead. The frontier
+        // still obeys the same node/work quotas and can report a trapped start.
+        if others.iter().any(|o| !o.moving
+            && o.overlaps_height(candidate.pos[1], candidate.height)
+            && o.blocks_route(&candidate)) { to } else { point }
     }
     /// The planner's budget and rules for this hull. Its bounds are the
     /// world's, less a margin at the edge (ADR-315).
@@ -2935,7 +3171,9 @@ impl Motion {
         self.blocked = false;
         self.blocked_ticks = 0;
         self.escape = 0;
-        self.needs_recovery = false;
+        // A checked continuation must release this saved safety hold. A
+        // pending query alone cannot resume startup movement into a crater.
+        self.needs_recovery = true;
         self.dry = false;
         self.next_plan = tick;
         // Keep velocity: normal braking and fresh physical clearance still
@@ -3219,7 +3457,8 @@ impl Motion {
             // Route work is shared and may take several ticks. Start toward
             // the order now; every actual step still checks fresh terrain and
             // hulls below. A refused step hands control back to the search.
-            let provisional = self.cursor >= self.path.len() && !self.blocked
+            let provisional = self.cursor >= self.path.len()
+                && (!self.blocked || traffic_hint.is_some_and(|hint| hint.way.is_some()))
                 && !self.needs_recovery && self.destination.is_some();
             if alive && engine && self.escape_left == 0
                 && (self.cursor < self.path.len() || provisional) {
@@ -3285,7 +3524,7 @@ impl Motion {
                     }
                     }
                 } else {
-                    let aim = steering.map_or([dx, dz], |s| s.delta);
+                    let mut aim = steering.map_or([dx, dz], |s| s.delta);
                     want = steering.map_or(original_way, |s| s.way);
                     speed = Fx::from_int(self.speed)
                         .mul(response.engine)
@@ -3293,7 +3532,17 @@ impl Motion {
                     if let Some(hint) = traffic_hint {
                         speed = speed.min(hint.speed);
                     }
-                    let alignment = steering.map_or(original_alignment, |s| s.alignment);
+                    let passing = traffic_hint.and_then(|hint| hint.way);
+                    if let Some(way) = passing {
+                        want = way;
+                        // A heading is enough for the local transmission; the
+                        // original goal below still determines when to brake.
+                        aim = [angle::cos(way), angle::sin(way)].map(|v|
+                            v.mul(Fx::from_int(self.navigation.corner_lookahead_units.max(1))));
+                    }
+                    let alignment = if passing.is_some() {
+                        angle::cos(angle::diff(want, self.drive.head)).max(Fx::ZERO)
+                    } else { steering.map_or(original_alignment, |s| s.alignment) };
                     // A checked, rounded corner is not a stop. Brake for the
                     // a little beyond the short steering preview, capped by
                     // the conservative distance to the following waypoint.
@@ -3315,7 +3564,7 @@ impl Motion {
                     // on every step and refuse any unsafe move.
                     let rolling_correction =
                         steering.is_none() && alignment > Fx::from_ratio(25, 100);
-                    if !self.leg_side_guard && (steering.is_some() || rolling_correction) {
+                    if !self.leg_side_guard && (steering.is_some() || rolling_correction || passing.is_some()) {
                         speed = drive::corner_speed(
                             aim,
                             angle::diff(want, self.drive.head),
@@ -3324,7 +3573,7 @@ impl Motion {
                             speed,
                         );
                     }
-                    let threshold = if steering.is_some() {
+                    let threshold = if steering.is_some() || passing.is_some() {
                         self.navigation.moving_turn_alignment_pct
                     } else if rolling_correction {
                         25
@@ -3336,15 +3585,15 @@ impl Motion {
                     // impossible even though the straight rear lane is open.
                     // Use the existing low-speed reverse gear; normal braking
                     // and live pose/contact checks still govern each step.
-                    let reverse = (steering.is_none() && !self.partial_path
+                    let reverse = (steering.is_none() && passing.is_none() && !self.partial_path
                         && self.cursor + 1 >= self.path.len())
                         .then(|| self.reverse_aim(goal, b)).flatten();
                     if self.leg_side_guard {
                         // Bipeds can take a side/back step while their torso
                         // slews. Treating them as tracked vehicles required a
                         // full pivot before every nearby order.
-                        let length = dx.mul(dx).add(dz.mul(dz)).sqrt();
-                        walk_direction = Some([dx.div(length), dz.div(length)]);
+                        let length = aim[0].mul(aim[0]).add(aim[1].mul(aim[1])).sqrt();
+                        walk_direction = Some([aim[0].div(length), aim[1].div(length)]);
                     } else if let Some((reverse_way, reverse_alignment)) = reverse {
                         want = reverse_way;
                         speed = speed.mul(Fx::from_ratio(self.navigation.escape_speed_pct, 100))
@@ -3522,9 +3771,12 @@ impl Motion {
         let mut candidate = Obstacle::of(self, b);
         candidate.pos[0] = nx;
         candidate.pos[2] = nz;
-        let mut collision = others
-            .iter()
-            .position(|p| hull_contact_blocks(&previous, &candidate, p));
+        // Every alternative below advances the same old drive by at most one
+        // acceleration step. Include shove and all yaw sweeps conservatively.
+        let travel = old.vel.abs().add(lim.accel.mul(drive_factor))
+            .add(self.shove.x.abs().max(self.shove.z.abs())).div(Fx::from_int(TICKS));
+        self.contact_candidates.rebuild(&previous, travel, others);
+        let mut collision = self.contact_candidates.first(&previous, &candidate, others);
         // A hull never enters a pose that leans it past its limit or
         // grounds more of its belly. The contact grade is a softer rule: a
         // rise the hull already stands in may be left through another such
@@ -3564,7 +3816,7 @@ impl Motion {
             candidate.pos[0] = ux;
             candidate.pos[2] = uz;
             candidate.head = previous.head;
-            let hull_clear = !others.iter().any(|p| hull_contact_blocks(&previous, &candidate, p));
+            let hull_clear = self.contact_candidates.first(&previous, &candidate, others).is_none();
             let (x, z) = (ux.to_int_trunc(), uz.to_int_trunc());
             if (ux != self.pos[0] || uz != self.pos[2])
                 && hull_clear && unturned.blocked == 0 && !unturned.tilt
@@ -3587,15 +3839,19 @@ impl Motion {
         }
         if alive && engine && self.pilot.is_none() && self.escape_left == 0
             && self.shove == V3::ZERO && collision.is_some() {
-            // At a static hull edge, try its two tangents before giving up
+            // At a hull edge, try two feasible tangents before giving up
             // the whole tick. Each trial uses the installed transmission,
-            // fresh terrain and every live neighbour. Moving traffic retains
-            // the ordinary yielding/contact path; no speculative side push.
+            // fresh terrain and every live neighbour. Bipeds can also slide
+            // along moving traffic without replacing their route or pushing it.
             let blocker = &others[collision.unwrap()];
-            if !blocker.moving {
+            if !blocker.moving || self.leg_side_guard {
                 if let Some(goal) = self.destination {
-                    let aim = [Fx::from_int(goal[0]).sub(self.pos[0]),
-                        Fx::from_int(goal[1]).sub(self.pos[2])];
+                    let preferred = if blocker.moving && want != drive::NO_WAY {
+                        let reach = Fx::from_int(self.navigation.corner_lookahead_units.max(1));
+                        [self.pos[0].add(angle::cos(want).mul(reach)),
+                            self.pos[2].add(angle::sin(want).mul(reach))]
+                    } else { goal.map(Fx::from_int) };
+                    let aim = [preferred[0].sub(self.pos[0]), preferred[1].sub(self.pos[2])];
                     let distance = aim[0].mul(aim[0]).add(aim[1].mul(aim[1]));
                     let mut best = None;
                     let mut best_cost = Fx::MAX;
@@ -3619,7 +3875,7 @@ impl Motion {
                             movement.dz = direction[1].mul(travel);
                         }
                         let at = [self.pos[0].add(movement.dx), self.pos[2].add(movement.dz)];
-                        let remaining = [Fx::from_int(goal[0]).sub(at[0]), Fx::from_int(goal[1]).sub(at[1])];
+                        let remaining = [preferred[0].sub(at[0]), preferred[1].sub(at[1])];
                         let cost = remaining[0].mul(remaining[0]).add(remaining[1].mul(remaining[1]));
                         if cost > distance || (cost == distance
                             && angle::diff(way, drive.head).abs() >= angle::diff(way, old.head).abs()) { continue; }
@@ -3628,7 +3884,7 @@ impl Motion {
                         let mut alternative = previous;
                         alternative.pos[0] = at[0]; alternative.pos[2] = at[1];
                         if !self.leg_side_guard { alternative.head = drive.head; }
-                        if others.iter().any(|o| hull_contact_blocks(&previous, &alternative, o)) { continue; }
+                        if self.contact_candidates.first(&previous, &alternative, others).is_some() { continue; }
                         let pose = ground.pose(at, drive.head, shape);
                         if pose.blocked != 0 || pose.tilt || pose.steep && !current.steep
                             || pose.height.sub(current.height) > Fx::from_int(self.step) { continue; }
@@ -3653,7 +3909,7 @@ impl Motion {
                         let reach = Fx::from_int(self.navigation.corner_lookahead_units).min(along);
                         let point = [self.pos[0].add(direction[0].mul(reach)).to_int_trunc(),
                             self.pos[2].add(direction[1].mul(reach)).to_int_trunc()];
-                        if cost < distance && reach > Fx::from_int(self.arrival)
+                        if !blocker.moving && cost < distance && reach > Fx::from_int(self.arrival)
                             && point[0] >= EDGE && point[1] >= EDGE
                             && point[0] < w.nx as i32 - EDGE && point[1] < w.nz as i32 - EDGE {
                             self.path = vec![point]; self.cursor = 0; self.partial_path = true;
@@ -3678,9 +3934,10 @@ impl Motion {
             if terrain_allowed {
                 if let Some(index) = collision {
                     // The route was valid when planned, but another hull
-                    // now occupies it. Ask for one new route promptly;
-                    // repeated refusals keep the normal replan cadence.
-                    if self.blocked_ticks == 0 && self.destination.is_some() {
+                    // now occupies it. Parked hulls request an immediate
+                    // detour. Moving queues retain the existing cadence,
+                    // giving the leader time to clear before rerouting.
+                    if self.blocked_ticks == 0 && self.destination.is_some() && !others[index].moving {
                         self.next_plan = self
                             .next_plan
                             .min(tick.saturating_add(self.navigation.contact_replan_ticks));
@@ -3733,7 +3990,13 @@ impl Motion {
                     self.blocked_ticks = self.navigation.recovery_ticks;
                 }
             }
-        } else if self.blocked {
+        } else if self.blocked || (self.leg_side_guard && self.blocked_ticks > 0 && self.destination.is_some()
+            && self.drive.vel.abs() <= Fx::from_int(self.speed).mul(response.engine)
+                .mul(response.traction).mul(Fx::from_ratio(self.navigation.escape_speed_pct, 100))) {
+            // A biped translates independently of its torso heading. A tiny
+            // accepted step or torso turn between contacts is not clearance:
+            // it must not reset recovery forever in converging walking rows.
+            // Tracks retain their ordinary pivot/acceleration recovery rules.
             self.blocked_ticks = self.blocked_ticks.saturating_add(1);
         } else {
             self.blocked_ticks = 0;
@@ -3894,6 +4157,7 @@ impl Motion {
     }
     pub(crate) fn load_version(&mut self, s: &mut Scan, continuation: bool) -> bool {
         self.ground_memo = None;
+        self.contact_candidates.clear();
         self.clear_contact();
         self.pilot = None;
         self.dry = false;
@@ -4578,8 +4842,13 @@ mod tests {
         assert_eq!(hint(&follower, &leader), Some(Fx::from_int(follower.speed)));
         leader.destination = Some([570, 300]);
         leader.blocked = true;
+        leader.blocked_ticks = 1;
+        assert!(hint(&follower, &leader).unwrap() < Fx::from_int(follower.speed),
+            "a brief traffic stop must retain following advice");
+        leader.blocked_ticks = leader.navigation.recovery_ticks;
         assert_eq!(hint(&follower, &leader), Some(Fx::from_int(follower.speed)));
         leader.blocked = false;
+        leader.blocked_ticks = 0;
         let inactive = [
             Traffic::of(&follower, &body, true),
             Traffic::of(&leader, &body, false),
@@ -6308,6 +6577,7 @@ mod tests {
         m.impulse(&body, [264, 8, 300], 240_000);
         let mut peak = m.pos[1];
         for tick in 90..300 {
+            let previous = Obstacle::of(&m, &body);
             m.passive(
                 &w,
                 &nav::vehicle::Rubble::new(),
@@ -6317,7 +6587,14 @@ mod tests {
                 &[neighbour],
             );
             peak = peak.max(m.pos[1]);
-            assert_eq!(Obstacle::of(&m, &body).penetration(&neighbour), Fx::ZERO);
+            let candidate = Obstacle::of(&m, &body);
+            // Range hulls intentionally permit the existing 40 cm edge
+            // contact. Validate against the full admission oracle as well,
+            // rather than requiring a stricter zero-contact legacy contract.
+            assert!(candidate.penetration(&neighbour) <= HULL_CONTACT_SLOP);
+            if candidate.pos[0] != previous.pos[0] || candidate.pos[2] != previous.pos[2] {
+                assert!(!hull_contact_blocks(&previous, &candidate, &neighbour));
+            }
             assert!(m.pos[1].abs() < Fx::from_int(64), "unbounded hop at {tick}");
         }
         assert!(m.pos[0] > origin[0], "no shove: {:?}", m.pos);
@@ -6326,7 +6603,7 @@ mod tests {
             .sub(half[0].mul(Fx::from_int(2)));
         let step = Fx::from_ratio(m.speed, crate::TICKS_PER_SECOND);
         assert!(
-            gap >= Fx::ZERO && gap < step,
+            gap >= HULL_CONTACT_SLOP.neg() && gap < step,
             "missed contact by more than one motion step: {gap:?}"
         );
         assert!(peak > origin[1], "no hop: {peak:?}");
@@ -7208,8 +7485,11 @@ mod tests {
             "a moving leader caused a static detour: {:?}", follower.path);
         assert!(follower.local_blockers([follower.pos[0], follower.pos[2]], follower.shape(&body), &[other]).is_empty());
         follower.blocked_ticks = 1;
+        assert!(follower.local_blockers([follower.pos[0], follower.pos[2]], follower.shape(&body), &[other]).is_empty(),
+            "brief contact must not freeze a moving queue into the route");
+        follower.blocked_ticks = follower.navigation.recovery_ticks;
         assert!(!follower.local_blockers([follower.pos[0], follower.pos[2]], follower.shape(&body), &[other]).is_empty(),
-            "real contact must still admit a local avoidance query");
+            "persistent contact must admit a local avoidance query");
         leader.stop();
         follower.blocked_ticks = 0;
         let parked = Obstacle::of(&leader, &body);
@@ -7423,7 +7703,7 @@ mod tests {
             let upper = Obstacle::of_unit(&drone);
             let mut lower = upper; lower.pos[1] = Fx::from_int(16);
             let mut m = unit.motion;
-            m.blocked_ticks = 1;
+            m.blocked_ticks = m.navigation.recovery_ticks;
             let from = [m.pos[0], m.pos[2]];
             assert!(m.local_blockers(from, m.shape(&unit.body), &[upper]).is_empty());
             assert!(!m.local_blockers(from, m.shape(&unit.body), &[lower]).is_empty());
@@ -7563,14 +7843,17 @@ mod tests {
     }
 
     #[test]
-    fn commander_and_crawler_start_then_detour_a_blocking_building() {
+    fn ground_units_start_then_detour_a_blocking_building() {
         struct Flat;
         impl voxel::Generator for Flat {
             fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
         }
         let w = World::new(1400, 256, 1400, 65536, Box::new(Flat));
         w.prepare_navigation([4, 5]);
-        for kind in [RangeUnitKind::Commander, RangeUnitKind::Crawler] {
+        for kind in [RangeUnitKind::Commander, RangeUnitKind::Crawler, RangeUnitKind::Tank,
+            RangeUnitKind::Strider, RangeUnitKind::Spider, RangeUnitKind::Walker04,
+            RangeUnitKind::Artillery, RangeUnitKind::ArtilleryT2, RangeUnitKind::LightningTank,
+            RangeUnitKind::EidolonTank] {
             let unit = super::super::RangeUnit::of_kind(kind, [300, 16, 700]);
             let mut m = unit.motion.clone();
             let building = Obstacle { height: Fx::ZERO, moving: false, pos: [Fx::from_int(600), Fx::from_int(16), Fx::from_int(700)],

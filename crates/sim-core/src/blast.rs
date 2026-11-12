@@ -7669,12 +7669,25 @@ impl BlastRange {
                 )
             })
             .collect();
+        let traffic_index = (traffic.len() >= 32).then(|| motion::TrafficIndex::new(
+            &traffic, self.world.nx.max(self.world.nz) as i32,
+            self.navigation.global_cell_units.saturating_mul(4).max(1)));
+        let mut traffic_candidates = Vec::new();
         let traffic_hints: Vec<_> = self
             .units
             .iter()
             .enumerate()
-            .map(|(id, u)| u.motion.traffic_hint(&u.body, id, &traffic, u.mobility))
+            .map(|(id, u)| {
+                if !u.motion.enabled || u.motion.destination.is_none() { return None; }
+                if let Some(index) = &traffic_index {
+                    index.candidates(&traffic[id], &mut traffic_candidates);
+                    u.motion.traffic_hint_near(&u.body, id, &traffic, u.mobility, &traffic_candidates)
+                } else {
+                    u.motion.traffic_hint(&u.body, id, &traffic, u.mobility)
+                }
+            })
             .collect();
+        detail("motion_traffic");
         // Whole-map searches in flight walk on before any hull moves
         // (ADR-680): one shared work allowance a tick, the oldest search
         // first, ties by slot, each up to its ceiling; what the first round
@@ -7814,6 +7827,16 @@ impl BlastRange {
             starts,
             self.tick,
         );
+        // Optional route repair gets its own bounded, fair offers. It cannot
+        // consume a real route search's start or evict an in-flight search.
+        let shortcut_offers = start_offers(
+            (0..self.units.len())
+                .filter(|&id| self.units[id].status.alive && self.units[id].status.engine
+                    && self.units[id].motion.wants_visible_shortcut())
+                .collect(),
+            self.navigation.searches_started_per_tick,
+            self.tick,
+        );
         let mut motion_order: Vec<_> = (0..self.units.len()).collect();
         motion_order.sort_unstable_by_key(|&id| {
             let p = self.units[id].motion.pos;
@@ -7900,6 +7923,8 @@ impl BlastRange {
         // which does not depend on foot state or segment frames.
         let parallel_feet = self.units.len() >= 4 && self.navigation_pool.is_some();
         let mut contacts = Vec::new();
+        let mut neighbors = motion::HullNeighbors::new(positions.len() + 1);
+        let gun_obstacle = physical_gun.then(|| motion::Obstacle::of_unit(&self.gun));
         for id in motion_order {
             unit_detail(id, "begin");
             let u = &mut self.units[id];
@@ -7914,18 +7939,12 @@ impl BlastRange {
                 coarse_left.min(self.navigation.global_work_per_search),
             ));
             {
-                let mut others = Vec::with_capacity(positions.len() + 1);
-                others.extend(
-                    positions
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| *i != id && Some(*i) != launch_owners[id])
-                        .map(|(_, p)| *p)
-                        .chain(
-                            physical_gun
-                                .then(|| motion::Obstacle::of_unit(&self.gun)),
-                        ),
-                );
+                neighbors.clear();
+                if (u.kind != RangeUnitKind::SkobaDrone || !u.status.alive)
+                    && u.motion.needs_obstacles(driven) {
+                    neighbors.gather(&positions, id, launch_owners[id], gun_obstacle);
+                }
+                let others = neighbors.as_slice();
                 if u.kind == RangeUnitKind::SkobaDrone && u.status.alive {
                     if driven
                         && (u.motion.pilot.is_some()
@@ -7952,7 +7971,7 @@ impl BlastRange {
                     if let Some(prepared) = local_hunts[id].take() {
                         let accepted = u
                             .motion
-                            .accept_local_hunt(prepared, &u.body, &others, self.tick);
+                            .accept_local_hunt(prepared, &u.body, others, self.tick);
                         unit_detail(
                             id,
                             if accepted {
@@ -7962,13 +7981,17 @@ impl BlastRange {
                             },
                         );
                     }
+                    if shortcut_offers.binary_search(&id).is_ok() {
+                        u.motion.shorten_visible_route(&self.world, &u.body, others, &self.rubble);
+                        unit_detail(id, "visible_shortcut");
+                    }
                     u.motion.step_observed_ground(
                         &self.world,
                         &u.body,
                         u.status.alive,
                         u.status.engine,
                         u.mobility,
-                        &others,
+                        others,
                         self.tick,
                         self.config.gravity,
                         &self.rubble,
@@ -7983,7 +8006,7 @@ impl BlastRange {
                         &u.body,
                         self.config.gravity,
                         u.mobility,
-                        &others,
+                        others,
                         Some(&changed),
                     );
                 }
@@ -8000,7 +8023,7 @@ impl BlastRange {
                 }
                 positions[id] = motion::Obstacle::of_unit(u);
                 if let Some((other, velocity)) = u.motion.take_contact() {
-                    let target = if other < id { other } else { other + 1 };
+                    let target = neighbors.target(other);
                     contacts.push((id, target, velocity));
                 }
             }
