@@ -4901,6 +4901,9 @@ pub struct BlastRange {
     /// Fixed-size, local pool for terrain-only route continuations. Runtime
     /// infrastructure, never part of the authoritative snapshot or hash.
     navigation_pool: Option<rayon::ThreadPool>,
+    /// Differential oracle only; never part of a product build or snapshot.
+    #[cfg(test)]
+    full_hull_lists: bool,
     navigation_workers: usize,
     /// Fixed-size pool every tick runs in (analysis 240, B4): the physics
     /// phases' Rayon work used the global pool, sized by the machine's
@@ -5495,6 +5498,8 @@ impl BlastRange {
             ),
             navigation,
             navigation_pool: None,
+            #[cfg(test)]
+            full_hull_lists: false,
             navigation_workers,
             physics_pool: None,
             physics_workers: DEFAULT_PHYSICS_WORKERS,
@@ -7851,7 +7856,6 @@ impl BlastRange {
                 // actors share one pool barrier and the ordered commit is unchanged.
                 let world = &self.world;
                 let rubble = &self.rubble;
-                let tick = self.tick;
                 let gun_obstacle =
                     physical_gun.then(|| motion::Obstacle::of_unit(&self.gun));
                 (local_hunts, prepared_ground) = pool.install(|| {
@@ -7862,16 +7866,9 @@ impl BlastRange {
                             let u = &mut chunk[0];
                             let local = if count >= 2 {
                                 task_detail(id, "route_begin");
-                                u.motion.prepare_terrain_hunt(
-                                    world,
-                                    &u.body,
-                                    rubble,
-                                    tick,
-                                    &changed,
-                                    positions.iter().enumerate().filter(|(other, _)| *other != id)
-                                        .map(|(_, p)| *p).chain(gun_obstacle),
-                                    |stage| task_detail(id, stage),
-                                );
+                                // Every speculative continuation is validated against the
+                                // live commit list. Even an empty blocker snapshot can gain
+                                // a stopped hull after an earlier actor commits this tick.
                                 if !driven || !u.motion.needs_local_hunt() {
                                     task_detail(id, "route_end");
                                     None
@@ -7924,6 +7921,14 @@ impl BlastRange {
         let parallel_feet = self.units.len() >= 4 && self.navigation_pool.is_some();
         let mut contacts = Vec::new();
         let mut neighbors = motion::HullNeighbors::new(positions.len() + 1);
+        // Build only when the first local motor query needs it. A completely
+        // parked group (or a phase containing only full planning queries)
+        // must not pay for a spatial index it will never read.
+        let mut live_hulls: Option<motion::LiveHulls> = None;
+        #[cfg(test)]
+        let force_full_hulls = self.full_hull_lists;
+        #[cfg(not(test))]
+        let force_full_hulls = false;
         let gun_obstacle = physical_gun.then(|| motion::Obstacle::of_unit(&self.gun));
         for id in motion_order {
             unit_detail(id, "begin");
@@ -7942,7 +7947,15 @@ impl BlastRange {
                 neighbors.clear();
                 if (u.kind != RangeUnitKind::SkobaDrone || !u.status.alive)
                     && u.motion.needs_obstacles(driven) {
-                    neighbors.gather(&positions, id, launch_owners[id], gun_obstacle);
+                    let region = if force_full_hulls || positions.len() < 128 || shortcut_offers.binary_search(&id).is_ok() {
+                        None
+                    } else { u.motion.step_neighbor_region(&positions[id], u.mobility) };
+                    if region.is_some() && positions.len() >= 128 && live_hulls.is_none() {
+                        live_hulls = Some(motion::LiveHulls::new(&positions,
+                            self.navigation.global_cell_units.saturating_mul(4).max(1)));
+                    }
+                    neighbors.gather_step(&positions, id, launch_owners[id], gun_obstacle,
+                        live_hulls.as_ref(), region);
                 }
                 let others = neighbors.as_slice();
                 if u.kind == RangeUnitKind::SkobaDrone && u.status.alive {
@@ -8022,6 +8035,7 @@ impl BlastRange {
                     bounds[id] = u.bounds();
                 }
                 positions[id] = motion::Obstacle::of_unit(u);
+                if let Some(index) = &mut live_hulls { index.relocate(id, &positions[id]); }
                 if let Some((other, velocity)) = u.motion.take_contact() {
                     let target = neighbors.target(other);
                     contacts.push((id, target, velocity));

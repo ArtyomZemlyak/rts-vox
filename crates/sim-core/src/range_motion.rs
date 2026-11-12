@@ -18,7 +18,7 @@ mod steering;
 mod visibility;
 #[path = "range_traffic.rs"]
 mod traffic_index;
-pub(super) use traffic_index::{HullNeighbors, TrafficIndex};
+pub(super) use traffic_index::{HullNeighbors, LiveHulls, TrafficIndex};
 
 #[cfg(test)]
 #[path = "range_passing_tests.rs"]
@@ -1424,9 +1424,37 @@ impl Motion {
         response.engine > Fx::ZERO && response.traction > Fx::ZERO && self.carried()
     }
     /// Passive settling reads neighbours only when a horizontal shove exists.
-    /// Driven motion keeps the complete live list, including failed engines.
+    /// Driven motion includes failed engines in its live obstacle domain.
     pub(super) fn needs_obstacles(&self, driven: bool) -> bool {
         driven && self.enabled || self.shove != V3::ZERO
+    }
+    /// Conservative domain of a motor-only tick. Planning may inspect remote
+    /// goals or an older search origin, so it deliberately retains a full list.
+    /// No guessed local radius is substituted for any planning consumer.
+    pub(super) fn step_neighbor_region(&self, own: &Obstacle,
+        response: crate::mobility::Mobility) -> Option<([Fx; 2], Fx)> {
+        if self.may_start || self.hunt.is_some() { return None; }
+        // advance approaches its target without overshooting. Existing
+        // momentum or the maximum requested speed therefore bounds all
+        // acceleration/braking outcomes without rebuilding chassis Limits.
+        let mut peak = Fx::from_int(self.speed).mul(response.engine).mul(response.traction).abs();
+        if self.navigation.escape_speed_pct > 100 {
+            peak = peak.mul(Fx::from_ratio(self.navigation.escape_speed_pct, 100));
+        }
+        if let Some([throttle, _]) = self.pilot {
+            peak = peak.mul(Fx::from_int(i32::from(throttle).abs().max(1)));
+        }
+        let travel = self.drive.vel.abs().max(peak)
+            .add(self.shove.x.abs().max(self.shove.z.abs())).div(Fx::from_int(TICKS));
+        let collision = own.half[0].add(own.half[1]).add(travel).add(Fx::ONE);
+        // A rounded preview reaches at most preview to the corner, then at
+        // most preview along its next leg. Coast reaches only one preview.
+        // Cover that whole square, every body yaw and the margin used by it.
+        let preview = Fx::from_int(self.navigation.corner_lookahead_units.max(0))
+            .mul(Fx::from_int(2))
+            .add(own.half[0]).add(own.half[1])
+            .add(Fx::from_int(self.navigation.plan_margin + 2));
+        Some(([self.pos[0], self.pos[2]], collision.max(preview)))
     }
     /// Installed propulsion can try to recover a stance. Buckled legs do not
     /// permanently remove this ability; lost legs and severed machinery do.
@@ -2969,32 +2997,6 @@ impl Motion {
                 self.hunt = None;
                 self.next_plan = tick;
             }
-        }
-    }
-    /// Continue a search that cannot read live blockers independently of the
-    /// spatial motion commit. The caller may run these on a fixed worker pool.
-    pub(super) fn prepare_terrain_hunt(
-        &mut self,
-        w: &World,
-        b: &UnitBody,
-        rubble: &nav::vehicle::Rubble,
-        tick: u32,
-        changed: &nav::vehicle::Changed,
-        neighbours: impl Iterator<Item = Obstacle>,
-        detail: impl Fn(&'static str) + Sync,
-    ) {
-        if self.enabled && self.hunt.is_some() && self.blocked_ticks == 0 && self.escape == 0 {
-            let shape = self.shape(b);
-            let radius = Fx::from_int(4 * (shape.half[0].max(shape.half[1]) + self.navigation.cell_units));
-            if neighbours.into_iter().any(|o| !o.moving && o.within([self.pos[0], self.pos[2]], radius)) {
-                return;
-            }
-            detail("terrain_advance_begin");
-            self.hunt_step(w, b, &[], rubble, tick, changed, &detail, |batch, begin| {
-                detail(sweep_event(batch, begin));
-            });
-            self.prepared_hunt = true;
-            detail("terrain_advance_end");
         }
     }
     #[cfg(test)]

@@ -42,6 +42,110 @@ pub(in crate::blast) struct HullNeighbors {
     ids: Vec<usize>,
 }
 
+/// Serial-commit broad phase. Each ordinary centre belongs to one cell;
+/// oversized hulls stay in a separate list rather than inflating every query.
+/// Only slot IDs are stored. The authoritative Obstacle is always read live.
+pub(in crate::blast) struct LiveHulls {
+    cell: i32,
+    origin: [i32; 2],
+    size: [usize; 2],
+    heads: Vec<usize>,
+    next: Vec<usize>,
+    prev: Vec<usize>,
+    large: Vec<usize>,
+    locations: Vec<Option<usize>>,
+}
+impl LiveHulls {
+    const NONE: usize = usize::MAX;
+    pub(in crate::blast) fn new(positions: &[Obstacle], cell: i32) -> Self {
+        let mut cell = cell.max(1);
+        // Keep the directory linear in actor count even for a huge sparse
+        // world. Cell coarsening affects candidate cost, never admission.
+        let (origin, size) = loop {
+            let mut lo = [i32::MAX; 2]; let mut hi = [i32::MIN; 2];
+            for o in positions {
+                for a in 0..2 {
+                    let k = o.pos[a * 2].to_int_trunc().div_euclid(cell);
+                    lo[a] = lo[a].min(k); hi[a] = hi[a].max(k);
+                }
+            }
+            if positions.is_empty() { lo = [0; 2]; hi = [0; 2]; }
+            let size = [0, 1].map(|a| (i64::from(hi[a]) - i64::from(lo[a]) + 1) as u64);
+            if size[0].saturating_mul(size[1]) <= positions.len().saturating_mul(16).max(16) as u64 {
+                break (lo, size.map(|n| n as usize));
+            }
+            cell = cell.saturating_mul(2);
+        };
+        let mut out = Self { cell, origin, size, heads: vec![Self::NONE; size[0] * size[1]],
+            next: vec![Self::NONE; positions.len()], prev: vec![Self::NONE; positions.len()],
+            large: Vec::new(), locations: vec![None; positions.len()] };
+        for (id, o) in positions.iter().enumerate() { out.insert(id, o); }
+        out
+    }
+    fn coordinate(&self, p: [i32; 2]) -> [usize; 2] {
+        [0, 1].map(|a| (i64::from(p[a].div_euclid(self.cell)) - i64::from(self.origin[a]))
+            .clamp(0, self.size[a] as i64 - 1) as usize)
+    }
+    fn location(&self, o: &Obstacle) -> Option<usize> {
+        (o.half[0].abs().add(o.half[1].abs()) <= Fx::from_int(self.cell)).then(|| {
+            let [x, z] = self.coordinate([o.pos[0].to_int_trunc(), o.pos[2].to_int_trunc()]);
+            z * self.size[0] + x
+        })
+    }
+    fn insert(&mut self, id: usize, o: &Obstacle) {
+        let at = self.location(o);
+        self.locations[id] = at;
+        if let Some(at) = at {
+            let old = self.heads[at];
+            self.prev[id] = Self::NONE; self.next[id] = old;
+            if old != Self::NONE { self.prev[old] = id; }
+            self.heads[at] = id;
+        } else {
+            let slot = self.large.binary_search(&id).expect_err("duplicate live hull");
+            self.large.insert(slot, id);
+        }
+    }
+    pub(in crate::blast) fn relocate(&mut self, id: usize, o: &Obstacle) {
+        let old = self.locations[id];
+        if old == self.location(o) { return; }
+        if let Some(at) = old {
+            let (prev, next) = (self.prev[id], self.next[id]);
+            if prev == Self::NONE { self.heads[at] = next; } else { self.next[prev] = next; }
+            if next != Self::NONE { self.prev[next] = prev; }
+        } else {
+            self.large.remove(self.large.binary_search(&id).unwrap());
+        }
+        self.insert(id, o);
+    }
+    fn candidates(&self, positions: &[Obstacle], at: [Fx; 2], radius: Fx,
+        out: &mut Vec<usize>) {
+        out.clear();
+        // L1 body radii cover every heading. Two units cover fractional
+        // truncation at both ends, including centres outside the map.
+        let pad = radius.add(Fx::from_int(self.cell)).to_int_trunc().saturating_add(2);
+        let center = at.map(Fx::to_int_trunc);
+        let lo = self.coordinate(center.map(|p| p.saturating_sub(pad)));
+        let hi = self.coordinate(center.map(|p| p.saturating_add(pad)));
+        if (hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1) >= positions.len() {
+            out.extend(0..positions.len());
+        } else {
+            out.extend(self.large.iter().copied());
+            for z in lo[1]..=hi[1] {
+                for x in lo[0]..=hi[0] {
+                    let mut id = self.heads[z * self.size[0] + x];
+                    while id != Self::NONE { out.push(id); id = self.next[id]; }
+                }
+            }
+            out.sort_unstable();
+        }
+        out.retain(|&id| {
+            let o = &positions[id];
+            let reach = radius.add(o.half[0].abs()).add(o.half[1].abs());
+            (0..2).all(|a| o.pos[a * 2].sub(at[a]).abs() <= reach)
+        });
+    }
+}
+
 /// Rebuilt from this step's live list. Covers any heading and every possible
 /// translated trial of the installed drive, not just the first proposed pose.
 #[derive(Clone, Debug, Default)]
@@ -76,12 +180,38 @@ impl HullNeighbors {
     pub(in crate::blast) fn gather(&mut self, positions: &[Obstacle], own: usize,
         ignored: Option<usize>, gun: Option<Obstacle>) {
         self.clear();
-        for (id, obstacle) in positions.iter().enumerate() {
-            if id != own && Some(id) != ignored {
-                self.obstacles.push(*obstacle);
-                self.ids.push(id);
-            }
+        // At most three bulk copies replace a branch and Vec::push for
+        // every hull. Source slot order and ignored launch ownership stay exact.
+        let len = positions.len();
+        let mut skip = [own.min(len), ignored.unwrap_or(len).min(len)];
+        skip.sort_unstable();
+        let mut begin = 0;
+        for end in skip {
+            if end < begin { continue; }
+            self.obstacles.extend_from_slice(&positions[begin..end]);
+            self.ids.extend(begin..end);
+            begin = end.saturating_add(1).min(len);
         }
+        self.obstacles.extend_from_slice(&positions[begin..]);
+        self.ids.extend(begin..len);
+        if let Some(gun) = gun {
+            self.obstacles.push(gun);
+            self.ids.push(positions.len());
+        }
+    }
+    /// Local motor/turn-preview list only. Route starts, continuations and
+    /// optional long shortcuts retain their full original obstacle domain.
+    pub(in crate::blast) fn gather_step(&mut self, positions: &[Obstacle], own: usize,
+        ignored: Option<usize>, gun: Option<Obstacle>, index: Option<&LiveHulls>,
+        region: Option<([Fx; 2], Fx)>) {
+        let (Some(index), Some((at, radius))) = (index, region) else {
+            self.gather(positions, own, ignored, gun);
+            return;
+        };
+        self.obstacles.clear();
+        index.candidates(positions, at, radius, &mut self.ids);
+        self.ids.retain(|&id| id != own && Some(id) != ignored);
+        self.obstacles.extend(self.ids.iter().map(|&id| positions[id]));
         if let Some(gun) = gun {
             self.obstacles.push(gun);
             self.ids.push(positions.len());
@@ -297,4 +427,116 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn live_hulls_matches_exact_domain_after_relocations_and_size_changes() {
+        let b = voxel::unit::tank();
+        let seed = Obstacle::of(&Motion::new([100, 16, 100], RangeUnitKind::Tank, &b), &b);
+        let mut positions: Vec<_> = (0..512).map(|id| {
+            let mut o = seed;
+            o.pos[0] = Fx::from_ratio((id * 197 % 3500) as i32 - 700, 2);
+            o.pos[2] = Fx::from_ratio((id * 311 % 3500) as i32 - 700, 2);
+            if id % 9 == 0 { o.half = [Fx::from_int(700), Fx::ONE]; }
+            if id % 7 == 0 { o.pos[1] = Fx::from_int(800); }
+            o
+        }).collect();
+        let mut index = LiveHulls::new(&positions, 128);
+        let mut ids = Vec::new();
+        for round in 0..4 {
+            for id in 0..positions.len() {
+                if round > 0 {
+                    positions[id].pos[0] = Fx::from_ratio((id * 157 % 4400) as i32 - 1400, round + 1);
+                    positions[id].pos[2] = Fx::from_int(100 * (round - 2));
+                    positions[id].half = [Fx::from_int(if (id + round as usize) % 3 == 0 { 900 } else { 16 }); 2];
+                    index.relocate(id, &positions[id]);
+                }
+                for radius in [Fx::ZERO, Fx::from_ratio(257, 2), Fx::from_int(100000)] {
+                    let at = [positions[id].pos[0], positions[id].pos[2]];
+                    index.candidates(&positions, at, radius, &mut ids);
+                    let full: Vec<_> = positions.iter().enumerate().filter(|(_, o)| {
+                        let reach = radius.add(o.half[0].abs()).add(o.half[1].abs());
+                        (0..2).all(|a| o.pos[a * 2].sub(at[a]).abs() <= reach)
+                    }).map(|(id, _)| id).collect();
+                    assert_eq!(ids, full, "round {round}, actor {id}");
+                }
+            }
+        }
+        // A dense pile must never drop a neighbour or reorder contact ties.
+        for o in &mut positions { o.pos = seed.pos; }
+        let dense = LiveHulls::new(&positions, 128);
+        dense.candidates(&positions, [seed.pos[0], seed.pos[2]], Fx::ONE, &mut ids);
+        assert_eq!(ids, (0..512).collect::<Vec<_>>());
+        let mut neighbors = HullNeighbors::new(513);
+        neighbors.gather_step(&positions, 5, Some(2), Some(seed), Some(&dense),
+            Some(([seed.pos[0], seed.pos[2]], Fx::ONE)));
+        assert_eq!(neighbors.ids.len(), 511);
+        assert!(!neighbors.ids.contains(&5) && !neighbors.ids.contains(&2));
+        assert_eq!(neighbors.target(510), 512);
+    }
+
+    #[test]
+    fn indexed_motor_matches_full_live_lists_for_mixed_hulls_and_shoves() {
+        let w = World::new(4096, 512, 4096, 65536, Box::new(Flat));
+        w.prepare_navigation([4, 5]);
+        let templates: Vec<_> = [RangeUnitKind::Tank, RangeUnitKind::Commander,
+            RangeUnitKind::Crawler, RangeUnitKind::Walker04].into_iter()
+            .map(|kind| super::super::super::RangeUnit::of_kind(kind, [500, 16, 500])).collect();
+        let mut full: Vec<_> = (0..48).map(|id| {
+            let mut m = templates[id % 4].motion.clone();
+            m.pos = [200 + (id % 8) as i32 * 180, 16, 200 + (id / 8) as i32 * 200].map(Fx::from_int);
+            m.enabled = true;
+            m.drive.vel = Fx::from_int(if id % 3 == 0 { -10 } else { 20 });
+            m.drive.head = angle::norm(id as i32 * 3131);
+            let at = [m.pos[0].to_int_trunc(), m.pos[2].to_int_trunc()];
+            m.destination = Some([at[0] + 300, at[1] + 400]);
+            m.path = vec![[at[0] + 50, at[1] + 80], m.destination.unwrap()];
+            m.allow_start(false);
+            m
+        }).collect();
+        let mut reduced = full.clone();
+        let response = crate::mobility::Mobility::intact(true);
+        let rubble = nav::vehicle::Rubble::new();
+        let changed = Default::default();
+        let mut checked = 0;
+        let mut baseline = 0;
+        let mut contacts = 0;
+        for tick in 0..80 {
+            let mut positions: Vec<_> = full.iter().enumerate()
+                .map(|(id, m)| Obstacle::of(m, &templates[id % 4].body)).collect();
+            let mut index = LiveHulls::new(&positions, 128);
+            let mut old = HullNeighbors::new(49);
+            let mut new = HullNeighbors::new(49);
+            for id in 0..48 {
+                let b = &templates[id % 4].body;
+                for m in [&mut full[id], &mut reduced[id]] {
+                    m.allow_start(false);
+                    if tick == 10 && id % 3 == 0 { m.shove = V3::new(Fx::from_int(400), Fx::ZERO, Fx::from_int(-150)); }
+                    if tick == 30 && id % 5 == 0 { m.pilot = Some([-1, 1]); }
+                }
+                let region = reduced[id].step_neighbor_region(&positions[id], response);
+                assert!(region.is_some());
+                // Skip an owner, preserve slot IDs and include the physical gun.
+                let ignored = (id != 0).then_some(0);
+                let gun = Some(positions[47]);
+                old.gather(&positions, id, ignored, gun);
+                new.gather_step(&positions, id, ignored, gun, Some(&index), region);
+                checked += new.ids.len(); baseline += old.ids.len();
+                full[id].step(&w, b, true, true, response, old.as_slice(), tick, 98, &rubble, &changed);
+                reduced[id].step(&w, b, true, true, response, new.as_slice(), tick, 98, &rubble, &changed);
+                let mut a = Blob::new(); let mut z = Blob::new();
+                full[id].save(&mut a); reduced[id].save(&mut z);
+                assert_eq!(a.v, z.v, "motion actor {id} tick {tick}");
+                let a = full[id].take_contact().map(|(slot, v)| (old.target(slot), v));
+                let z = reduced[id].take_contact().map(|(slot, v)| (new.target(slot), v));
+                contacts += usize::from(a.is_some());
+                assert_eq!(a, z, "contact actor {id} tick {tick}");
+                positions[id] = Obstacle::of(&reduced[id], b);
+                index.relocate(id, &positions[id]);
+            }
+        }
+        assert!(contacts > 0, "no physical contacts exercised");
+        assert!(checked < baseline * 3 / 4, "no useful candidate reduction: {checked}/{baseline}");
+        reduced[0].allow_start(true);
+        assert!(reduced[0].step_neighbor_region(&Obstacle::of(&reduced[0], &templates[0].body), response).is_none());
+    }
+
 }

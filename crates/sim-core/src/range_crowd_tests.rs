@@ -469,3 +469,39 @@ fn walking_group_advances_without_detouring_around_its_own_moving_members() {
             u.motion.drive, u.motion.destination, u.motion.recovery_state())).collect::<Vec<_>>());
     assert_eq!(sim.state_hash(), copy.unwrap().state_hash());
 }
+
+#[test]
+fn live_hull_group_restores_in_motion_across_worker_counts() {
+    let mut scene = arena(128, false);
+    scene.set_navigation_workers(1);
+    scene.set_physics_workers(1);
+    for id in 0..128 {
+        let from = [if id % 2 == 0 { 600 } else { 1200 }, 16, 400 + (id / 2) as i32 * 50];
+        scene.units[id].motion.pos = from.map(Fx::from_int);
+        scene.units[id].motion.drive.head = if id % 2 == 0 { 0 } else { fx::angle::HALF };
+        assert!(scene.units[id].motion.queue_move(&scene.world, [1800 - from[0], from[2]]));
+    }
+    for _ in 0..80 { scene.step(); }
+    let mut copy = BlastRange::restore(config(), &scene.snapshot()).unwrap();
+    copy.set_navigation_workers(2);
+    copy.set_physics_workers(2);
+    let mut oracle = BlastRange::restore(config(), &scene.snapshot()).unwrap();
+    oracle.set_navigation_workers(1); oracle.set_physics_workers(1);
+    oracle.full_hull_lists = true;
+    for tick in 80..320 {
+        scene.step(); copy.step(); oracle.step();
+        assert_eq!(scene.state_hash(), oracle.state_hash(), "index vs full lists tick {tick}");
+        if scene.state_hash() != copy.state_hash() {
+            let different: Vec<_> = scene.units.iter().zip(&copy.units).enumerate()
+                .filter_map(|(id, (a, b))| {
+                    let mut x = fx::blob::Blob::new(); let mut y = fx::blob::Blob::new();
+                    a.motion.save(&mut x); b.motion.save(&mut y);
+                    (x.v != y.v).then(|| (id, a.motion.pos, b.motion.pos,
+                        a.motion.drive, b.motion.drive, a.motion.path.clone(), b.motion.path.clone()))
+                }).take(4).collect();
+            panic!("worker replay tick {tick}; changed motions: {different:?}");
+        }
+        assert_separate(&scene);
+    }
+    assert_eq!(scene.snapshot(), copy.snapshot());
+}
