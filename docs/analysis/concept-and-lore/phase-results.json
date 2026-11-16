@@ -1,0 +1,516 @@
+{
+  "status": "Illustrative design model, not measured faction balance",
+  "assumptions": {
+    "initial_matter": 1000,
+    "initial_economy_allocation": 600,
+    "initial_army_allocation": 400,
+    "common_seed_useful_output": 10,
+    "fixed_investment_fraction": 0.3,
+    "dt_seconds": 0.1,
+    "one_construction_slot": true,
+    "territory_useful_capacity_schedule": [
+      [
+        0,
+        20
+      ],
+      [
+        300,
+        60
+      ],
+      [
+        900,
+        120
+      ],
+      [
+        1800,
+        200
+      ]
+    ],
+    "costs_and_rates_already_net_of_energy_conversion": true,
+    "territory_unlocked_exogenously_not_a_free_game_mechanic": true,
+    "seed_is_a_hypothetical_bootstrap_not_existing_game_stats": true,
+    "no_combat_reclaim_transport_or_optimal_strategy_search": true,
+    "army_budget_is_fixed_policy_allocation_not_fighting_strength": true
+  },
+  "cases": {
+    "small_packages": {
+      "first_package_active_seconds": 10.0,
+      "resource_exhaustion_seconds": null,
+      "checkpoints": {
+        "60": {
+          "installed_useful_capacity": 10.0,
+          "current_useful_income": 20.0,
+          "army_budget_under_fixed_policy": 1135.0,
+          "unspent_economy_cash": 15.0,
+          "economy_paid": 900.0,
+          "cumulative_useful_output": 1050.0,
+          "normalized_field_budget_used": 450.0
+        },
+        "180": {
+          "installed_useful_capacity": 20.0,
+          "current_useful_income": 30.0,
+          "army_budget_under_fixed_policy": 4090.0,
+          "unspent_economy_cash": 75.0,
+          "economy_paid": 1200.0,
+          "cumulative_useful_output": 4365.0,
+          "normalized_field_budget_used": 2565.0
+        },
+        "300": {
+          "installed_useful_capacity": 20.0,
+          "current_useful_income": 30.0,
+          "army_budget_under_fixed_policy": 7690.0,
+          "unspent_economy_cash": 75.0,
+          "economy_paid": 1200.0,
+          "cumulative_useful_output": 7965.0,
+          "normalized_field_budget_used": 4965.0
+        },
+        "600": {
+          "installed_useful_capacity": 60.0,
+          "current_useful_income": 70.0,
+          "army_budget_under_fixed_policy": 21384.8,
+          "unspent_economy_cash": 196.2,
+          "economy_paid": 3600.0,
+          "cumulative_useful_output": 24181.0,
+          "normalized_field_budget_used": 18181.0
+        },
+        "900": {
+          "installed_useful_capacity": 60.0,
+          "current_useful_income": 70.0,
+          "army_budget_under_fixed_policy": 42384.8,
+          "unspent_economy_cash": 196.2,
+          "economy_paid": 3600.0,
+          "cumulative_useful_output": 45181.0,
+          "normalized_field_budget_used": 36181.0
+        },
+        "1200": {
+          "installed_useful_capacity": 120.0,
+          "current_useful_income": 130.0,
+          "army_budget_under_fixed_policy": 72654.15,
+          "unspent_economy_cash": 526.35,
+          "economy_paid": 7200.0,
+          "cumulative_useful_output": 79380.5,
+          "normalized_field_budget_used": 67380.5
+        },
+        "1800": {
+          "installed_useful_capacity": 120.0,
+          "current_useful_income": 130.0,
+          "army_budget_under_fixed_policy": 150654.15,
+          "unspent_economy_cash": 526.35,
+          "economy_paid": 7200.0,
+          "cumulative_useful_output": 157380.5,
+          "normalized_field_budget_used": 139380.5
+        },
+        "3600": {
+          "installed_useful_capacity": 200.0,
+          "current_useful_income": 210.0,
+          "army_budget_under_fixed_policy": 513814.15,
+          "unspent_economy_cash": 3766.35,
+          "economy_paid": 12000.0,
+          "cumulative_useful_output": 528580.5,
+          "normalized_field_budget_used": 492580.5
+        }
+      }
+    },
+    "matched_third_race": {
+      "first_package_active_seconds": 10.0,
+      "resource_exhaustion_seconds": null,
+      "checkpoints": {
+        "60": {
+          "installed_useful_capacity": 10.0,
+          "current_useful_income": 20.0,
+          "army_budget_under_fixed_policy": 1135.0,
+          "unspent_economy_cash": 15.0,
+          "economy_paid": 900.0,
+          "cumulative_useful_output": 1050.0,
+          "normalized_field_budget_used": 450.0
+        },
+        "180": {
+          "installed_useful_capacity": 20.0,
+          "current_useful_income": 30.0,
+          "army_budget_under_fixed_policy": 4090.0,
+          "unspent_economy_cash": 75.0,
+          "economy_paid": 1200.0,
+          "cumulative_useful_output": 4365.0,
+          "normalized_field_budget_used": 2565.0
+        },
+        "300": {
+          "installed_useful_capacity": 20.0,
+          "current_useful_income": 30.0,
+          "army_budget_under_fixed_policy": 7690.0,
+          "unspent_economy_cash": 75.0,
+          "economy_paid": 1200.0,
+          "cumulative_useful_output": 7965.0,
+          "normalized_field_budget_used": 4965.0
+        },
+        "600": {
+          "installed_useful_capacity": 60.0,
+          "current_useful_income": 70.0,
+          "army_budget_under_fixed_policy": 21384.8,
+          "unspent_economy_cash": 196.2,
+          "economy_paid": 3600.0,
+          "cumulative_useful_output": 24181.0,
+          "normalized_field_budget_used": 18181.0
+        },
+        "900": {
+          "installed_useful_capacity": 60.0,
+          "current_useful_income": 70.0,
+          "army_budget_under_fixed_policy": 42384.8,
+          "unspent_economy_cash": 196.2,
+          "economy_paid": 3600.0,
+          "cumulative_useful_output": 45181.0,
+          "normalized_field_budget_used": 36181.0
+        },
+        "1200": {
+          "installed_useful_capacity": 120.0,
+          "current_useful_income": 130.0,
+          "army_budget_under_fixed_policy": 72654.15,
+          "unspent_economy_cash": 526.35,
+          "economy_paid": 7200.0,
+          "cumulative_useful_output": 79380.5,
+          "normalized_field_budget_used": 67380.5
+        },
+        "1800": {
+          "installed_useful_capacity": 120.0,
+          "current_useful_income": 130.0,
+          "army_budget_under_fixed_policy": 150654.15,
+          "unspent_economy_cash": 526.35,
+          "economy_paid": 7200.0,
+          "cumulative_useful_output": 157380.5,
+          "normalized_field_budget_used": 139380.5
+        },
+        "3600": {
+          "installed_useful_capacity": 200.0,
+          "current_useful_income": 210.0,
+          "army_budget_under_fixed_policy": 513814.15,
+          "unspent_economy_cash": 3766.35,
+          "economy_paid": 12000.0,
+          "cumulative_useful_output": 528580.5,
+          "normalized_field_budget_used": 492580.5
+        }
+      }
+    },
+    "large_packages_same_payback": {
+      "first_package_active_seconds": 240.0,
+      "resource_exhaustion_seconds": null,
+      "checkpoints": {
+        "60": {
+          "installed_useful_capacity": 0.0,
+          "current_useful_income": 10.0,
+          "army_budget_under_fixed_policy": 820.0,
+          "unspent_economy_cash": 780.0,
+          "economy_paid": 0.0,
+          "cumulative_useful_output": 600.0,
+          "normalized_field_budget_used": 0.0
+        },
+        "180": {
+          "installed_useful_capacity": 0.0,
+          "current_useful_income": 10.0,
+          "army_budget_under_fixed_policy": 1660.0,
+          "unspent_economy_cash": 1140.0,
+          "economy_paid": 0.0,
+          "cumulative_useful_output": 1800.0,
+          "normalized_field_budget_used": 0.0
+        },
+        "300": {
+          "installed_useful_capacity": 20.0,
+          "current_useful_income": 30.0,
+          "army_budget_under_fixed_policy": 3880.0,
+          "unspent_economy_cash": 120.0,
+          "economy_paid": 1200.0,
+          "cumulative_useful_output": 4200.0,
+          "normalized_field_budget_used": 1200.0
+        },
+        "600": {
+          "installed_useful_capacity": 60.0,
+          "current_useful_income": 70.0,
+          "army_budget_under_fixed_policy": 13680.0,
+          "unspent_economy_cash": 600.0,
+          "economy_paid": 3600.0,
+          "cumulative_useful_output": 16880.0,
+          "normalized_field_budget_used": 10880.0
+        },
+        "900": {
+          "installed_useful_capacity": 60.0,
+          "current_useful_income": 70.0,
+          "army_budget_under_fixed_policy": 34680.0,
+          "unspent_economy_cash": 600.0,
+          "economy_paid": 3600.0,
+          "cumulative_useful_output": 37880.0,
+          "normalized_field_budget_used": 28880.0
+        },
+        "1200": {
+          "installed_useful_capacity": 120.0,
+          "current_useful_income": 130.0,
+          "army_budget_under_fixed_policy": 62234.8,
+          "unspent_economy_cash": 1321.2,
+          "economy_paid": 7200.0,
+          "cumulative_useful_output": 69756.0,
+          "normalized_field_budget_used": 57756.0
+        },
+        "1800": {
+          "installed_useful_capacity": 120.0,
+          "current_useful_income": 130.0,
+          "army_budget_under_fixed_policy": 140234.8,
+          "unspent_economy_cash": 1321.2,
+          "economy_paid": 7200.0,
+          "cumulative_useful_output": 147756.0,
+          "normalized_field_budget_used": 129756.0
+        },
+        "3600": {
+          "installed_useful_capacity": 200.0,
+          "current_useful_income": 210.0,
+          "army_budget_under_fixed_policy": 502554.8,
+          "unspent_economy_cash": 4201.2,
+          "economy_paid": 12000.0,
+          "cumulative_useful_output": 517756.0,
+          "normalized_field_budget_used": 481756.0
+        }
+      }
+    },
+    "two_percent_cheaper_packages": {
+      "first_package_active_seconds": 9.8,
+      "resource_exhaustion_seconds": null,
+      "checkpoints": {
+        "60": {
+          "installed_useful_capacity": 10.0,
+          "current_useful_income": 20.0,
+          "army_budget_under_fixed_policy": 1137.1,
+          "unspent_economy_cash": 33.9,
+          "economy_paid": 882.0,
+          "cumulative_useful_output": 1053.0,
+          "normalized_field_budget_used": 453.0
+        },
+        "180": {
+          "installed_useful_capacity": 20.0,
+          "current_useful_income": 30.0,
+          "army_budget_under_fixed_policy": 4154.9,
+          "unspent_economy_cash": 74.1,
+          "economy_paid": 1176.0,
+          "cumulative_useful_output": 4405.0,
+          "normalized_field_budget_used": 2605.0
+        },
+        "300": {
+          "installed_useful_capacity": 20.0,
+          "current_useful_income": 30.0,
+          "army_budget_under_fixed_policy": 7754.9,
+          "unspent_economy_cash": 74.1,
+          "economy_paid": 1176.0,
+          "cumulative_useful_output": 8005.0,
+          "normalized_field_budget_used": 5005.0
+        },
+        "600": {
+          "installed_useful_capacity": 60.0,
+          "current_useful_income": 70.0,
+          "army_budget_under_fixed_policy": 21597.05,
+          "unspent_economy_cash": 192.45,
+          "economy_paid": 3528.0,
+          "cumulative_useful_output": 24317.5,
+          "normalized_field_budget_used": 18317.5
+        },
+        "900": {
+          "installed_useful_capacity": 60.0,
+          "current_useful_income": 70.0,
+          "army_budget_under_fixed_policy": 42597.05,
+          "unspent_economy_cash": 192.45,
+          "economy_paid": 3528.0,
+          "cumulative_useful_output": 45317.5,
+          "normalized_field_budget_used": 36317.5
+        },
+        "1200": {
+          "installed_useful_capacity": 120.0,
+          "current_useful_income": 130.0,
+          "army_budget_under_fixed_policy": 73043.5,
+          "unspent_economy_cash": 514.5,
+          "economy_paid": 7056.0,
+          "cumulative_useful_output": 79614.0,
+          "normalized_field_budget_used": 67614.0
+        },
+        "1800": {
+          "installed_useful_capacity": 120.0,
+          "current_useful_income": 130.0,
+          "army_budget_under_fixed_policy": 151043.5,
+          "unspent_economy_cash": 514.5,
+          "economy_paid": 7056.0,
+          "cumulative_useful_output": 157614.0,
+          "normalized_field_budget_used": 139614.0
+        },
+        "3600": {
+          "installed_useful_capacity": 200.0,
+          "current_useful_income": 210.0,
+          "army_budget_under_fixed_policy": 514500.3,
+          "unspent_economy_cash": 3689.7,
+          "economy_paid": 11760.0,
+          "cumulative_useful_output": 528950.0,
+          "normalized_field_budget_used": 492950.0
+        }
+      }
+    },
+    "finite_budget_60000": {
+      "first_package_active_seconds": 10.0,
+      "resource_exhaustion_seconds": 1138.5,
+      "checkpoints": {
+        "60": {
+          "installed_useful_capacity": 10.0,
+          "current_useful_income": 20.0,
+          "army_budget_under_fixed_policy": 1135.0,
+          "unspent_economy_cash": 15.0,
+          "economy_paid": 900.0,
+          "cumulative_useful_output": 1050.0,
+          "normalized_field_budget_used": 450.0
+        },
+        "180": {
+          "installed_useful_capacity": 20.0,
+          "current_useful_income": 30.0,
+          "army_budget_under_fixed_policy": 4090.0,
+          "unspent_economy_cash": 75.0,
+          "economy_paid": 1200.0,
+          "cumulative_useful_output": 4365.0,
+          "normalized_field_budget_used": 2565.0
+        },
+        "300": {
+          "installed_useful_capacity": 20.0,
+          "current_useful_income": 30.0,
+          "army_budget_under_fixed_policy": 7690.0,
+          "unspent_economy_cash": 75.0,
+          "economy_paid": 1200.0,
+          "cumulative_useful_output": 7965.0,
+          "normalized_field_budget_used": 4965.0
+        },
+        "600": {
+          "installed_useful_capacity": 60.0,
+          "current_useful_income": 70.0,
+          "army_budget_under_fixed_policy": 21384.8,
+          "unspent_economy_cash": 196.2,
+          "economy_paid": 3600.0,
+          "cumulative_useful_output": 24181.0,
+          "normalized_field_budget_used": 18181.0
+        },
+        "900": {
+          "installed_useful_capacity": 60.0,
+          "current_useful_income": 70.0,
+          "army_budget_under_fixed_policy": 42384.8,
+          "unspent_economy_cash": 196.2,
+          "economy_paid": 3600.0,
+          "cumulative_useful_output": 45181.0,
+          "normalized_field_budget_used": 36181.0
+        },
+        "1200": {
+          "installed_useful_capacity": 120.0,
+          "current_useful_income": 10.0,
+          "army_budget_under_fixed_policy": 65273.65,
+          "unspent_economy_cash": 526.35,
+          "economy_paid": 7200.0,
+          "cumulative_useful_output": 72000.0,
+          "normalized_field_budget_used": 60000.0
+        },
+        "1800": {
+          "installed_useful_capacity": 120.0,
+          "current_useful_income": 10.0,
+          "army_budget_under_fixed_policy": 71273.65,
+          "unspent_economy_cash": 526.35,
+          "economy_paid": 7200.0,
+          "cumulative_useful_output": 78000.0,
+          "normalized_field_budget_used": 60000.0
+        },
+        "3600": {
+          "installed_useful_capacity": 120.0,
+          "current_useful_income": 10.0,
+          "army_budget_under_fixed_policy": 89273.65,
+          "unspent_economy_cash": 526.35,
+          "economy_paid": 7200.0,
+          "cumulative_useful_output": 96000.0,
+          "normalized_field_budget_used": 60000.0
+        }
+      }
+    },
+    "matched_finite_third": {
+      "first_package_active_seconds": 10.0,
+      "resource_exhaustion_seconds": 1138.5,
+      "checkpoints": {
+        "60": {
+          "installed_useful_capacity": 10.0,
+          "current_useful_income": 20.0,
+          "army_budget_under_fixed_policy": 1135.0,
+          "unspent_economy_cash": 15.0,
+          "economy_paid": 900.0,
+          "cumulative_useful_output": 1050.0,
+          "normalized_field_budget_used": 450.0
+        },
+        "180": {
+          "installed_useful_capacity": 20.0,
+          "current_useful_income": 30.0,
+          "army_budget_under_fixed_policy": 4090.0,
+          "unspent_economy_cash": 75.0,
+          "economy_paid": 1200.0,
+          "cumulative_useful_output": 4365.0,
+          "normalized_field_budget_used": 2565.0
+        },
+        "300": {
+          "installed_useful_capacity": 20.0,
+          "current_useful_income": 30.0,
+          "army_budget_under_fixed_policy": 7690.0,
+          "unspent_economy_cash": 75.0,
+          "economy_paid": 1200.0,
+          "cumulative_useful_output": 7965.0,
+          "normalized_field_budget_used": 4965.0
+        },
+        "600": {
+          "installed_useful_capacity": 60.0,
+          "current_useful_income": 70.0,
+          "army_budget_under_fixed_policy": 21384.8,
+          "unspent_economy_cash": 196.2,
+          "economy_paid": 3600.0,
+          "cumulative_useful_output": 24181.0,
+          "normalized_field_budget_used": 18181.0
+        },
+        "900": {
+          "installed_useful_capacity": 60.0,
+          "current_useful_income": 70.0,
+          "army_budget_under_fixed_policy": 42384.8,
+          "unspent_economy_cash": 196.2,
+          "economy_paid": 3600.0,
+          "cumulative_useful_output": 45181.0,
+          "normalized_field_budget_used": 36181.0
+        },
+        "1200": {
+          "installed_useful_capacity": 120.0,
+          "current_useful_income": 10.0,
+          "army_budget_under_fixed_policy": 65273.65,
+          "unspent_economy_cash": 526.35,
+          "economy_paid": 7200.0,
+          "cumulative_useful_output": 72000.0,
+          "normalized_field_budget_used": 60000.0
+        },
+        "1800": {
+          "installed_useful_capacity": 120.0,
+          "current_useful_income": 10.0,
+          "army_budget_under_fixed_policy": 71273.65,
+          "unspent_economy_cash": 526.35,
+          "economy_paid": 7200.0,
+          "cumulative_useful_output": 78000.0,
+          "normalized_field_budget_used": 60000.0
+        },
+        "3600": {
+          "installed_useful_capacity": 120.0,
+          "current_useful_income": 10.0,
+          "army_budget_under_fixed_policy": 89273.65,
+          "unspent_economy_cash": 526.35,
+          "economy_paid": 7200.0,
+          "cumulative_useful_output": 96000.0,
+          "normalized_field_budget_used": 60000.0
+        }
+      }
+    }
+  },
+  "continuous_growth_sensitivity": {
+    "note": "Unbounded continuous approximation, not the staged-territory simulation",
+    "reference_doubling_seconds": 240,
+    "fractional_growth_rate_advantage": 0.02,
+    "income_ratio_at_seconds": {
+      "300": 1.0174796921026863,
+      "1200": 1.0717734625362931,
+      "1800": 1.109569472067845
+    }
+  },
+  "validation": "Budget conservation, identical matched cases, equal-payback packet-size mismatch and finite-source symmetry passed"
+}
