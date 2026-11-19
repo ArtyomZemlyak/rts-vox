@@ -85,7 +85,7 @@ impl Flow {
                     continue;
                 }
                 if self.active.len() >= self.tuning.motion.active_cells {
-                    self.revisit.insert(work.tile);
+                    self.tiles.insert_revisit(work.tile);
                     continue;
                 }
                 visited.insert(p);
@@ -108,11 +108,11 @@ impl Flow {
             }
             if work.cursor < CELLS {
                 self.queue.push_back(work);
-            } else {
-                self.queued.remove(&work.tile);
-                if self.revisit.remove(&work.tile) {
-                    self.wake_tile(work.tile);
-                }
+            } else if self.tiles.finish_tile(work.tile) {
+                self.queue.push_back(Work {
+                    tile: work.tile,
+                    cursor: 0,
+                });
             }
         }
         self.path_checks = self.tuning.motion.path_checks_per_tick - checks;
@@ -238,6 +238,16 @@ impl Flow {
     }
     pub fn has_motion(&self) -> bool {
         !self.active.is_empty()
+    }
+    /// Exact active columns for read-only presentation, streamed without a world scan.
+    pub fn diagnostic_motion<'a>(&'a self, w: &'a World) -> impl Iterator<Item = (Pos, Fx)> + 'a {
+        self.active.iter().flat_map(move |&(at, grain)| {
+            (at[1]..w.ny).map(move |y| [at[0], y, at[2]])
+                .take_while(move |p| {
+                    self.tuning.material(w.material(p[0], p[1], p[2])).is_some()
+                        && (p[1] == at[1] || !self.active_positions.contains(p))
+                }).map(move |p| (p, grain.speed))
+        })
     }
     pub fn motion_at(&self, w: &World, mut p: Pos) -> Option<(Fx, Fx)> {
         if self.active.is_empty() {

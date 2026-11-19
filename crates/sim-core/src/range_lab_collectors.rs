@@ -26,6 +26,7 @@ fn forget(c: &mut Collector) {
 }
 fn shape(t: Tuning) -> nav::vehicle::Shape {
     nav::vehicle::Shape {
+        continuous: false, detail: 0,
         half: [t.collector_half; 2],
         support: [t.collector_half - 1; 2],
         clearance: Fx::ZERO,
@@ -33,6 +34,8 @@ fn shape(t: Tuning) -> nav::vehicle::Shape {
         min_up: Fx::from_ratio(3, 4),
         height: t.collector_height,
         span: t.collector_half,
+        reach: 0,
+        grade_slack: Fx::ZERO,
         ramp: Fx::from_ratio(1, 2),
     }
 }

@@ -56,9 +56,11 @@
     // Exact centers when a rounded corridor cannot be proven (including
     // reversals). The final order still uses the course arrival radius.
     corner_arrival_mm: 50,
+    grade_exit_slack_mm: 100,
     // Rounded steering only inside a freshly proven bare, level corridor.
     // Bounds preview work; zero keeps exact stop-and-pivot movement.
     corner_lookahead_units: 32,
+    straight_through_deg: 25,
     moving_turn_alignment_pct: 10,
     // Weight of the planner's distance estimate, percent; 100 is plain A*.
     // Measured 17.09.2026 (ADR-301): the forest route from the gun took
@@ -76,7 +78,8 @@
     retarget_units: 160,
     // Foliage and trunk of range-materials.ron. A hull cuts what it
     // overlaps; the connected crown within the radius falls without a cut.
-    // A tree crossing at 60% speed costs about 10/0.6 = 17 instead of 10.
-    // A cap of 20 priced it as triple travel time and flooded the forest search.
-    fell: (materials: (4, 5), radius: 14, cells_per_tick: 4096, cost_per_column: 1, cost_cap: 7, speed_pct: 60),
+    // Small surface resistance is capped/mass-scaled by terrain-motion.ron.
+    // Do not create forest detours from an obsolete 40% speed penalty.
+    // Foliage uses accounted dust; wood retains physical falling fragments.
+    fell: (materials: (4, 5), radius: 14, cells_per_tick: 4096, cost_per_column: 0, cost_cap: 0, speed_pct: 90, dust_materials: (0,)),
 )

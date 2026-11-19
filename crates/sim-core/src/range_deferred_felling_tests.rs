@@ -32,6 +32,7 @@ fn battle_hull_cuts_finish_after_departure_and_snapshot_restore() {
     let mut a = BlastRange::with_layout(config, l).unwrap();
     assert!(a.set_navigation_workers(4));
     a.start_battle().unwrap();
+    a.navigation.fell.dust_materials = [0];
     a.matter.tuning.max_flying = 0; // Deterministic fully occupied pool fixture.
     assert!(a.battle_order(0, Order::Move, Some([250, 128])));
     for _ in 0..180 {
@@ -62,6 +63,7 @@ fn battle_hull_cuts_finish_after_departure_and_snapshot_restore() {
     assert_eq!(b.snapshot(), bytes);
     assert!(b.set_navigation_workers(1));
     for r in [&mut a, &mut b] {
+        r.navigation.fell.dust_materials = [0];
         r.matter.tuning.max_flying = 4096;
     }
     for _ in 0..8 {
@@ -112,6 +114,7 @@ fn autonomous_battle_reopens_a_full_debris_pool_and_finishes_felling() {
     a.set_navigation_workers(1);
     assert!(a.set_ai_vs_ai(true));
     a.start_battle().unwrap();
+    a.navigation.fell.dust_materials = [0];
     a.matter.tuning.max_flying = 0;
     a.matter.tuning.max_fragments = 1;
     a.matter.tuning.max_resting_fragments = 0;
@@ -137,6 +140,7 @@ fn autonomous_battle_reopens_a_full_debris_pool_and_finishes_felling() {
     assert!(a.matter.tuning.max_flying > 0 && a.matter.tuning.max_fragments > 1);
     assert!(a.matter.economy.ledger.balanced());
     let mut b = BlastRange::restore(config, &a.snapshot()).expect("expanded pool must restore");
+    b.navigation.fell.dust_materials = [0];
     assert_eq!(a.matter.tuning.max_flying, b.matter.tuning.max_flying);
     for _ in 0..3 {
         a.step();
@@ -178,6 +182,7 @@ fn autonomous_battle_keeps_settled_fragments_and_clears_queued_felling() {
     r.set_navigation_workers(1);
     assert!(r.set_ai_vs_ai(true));
     r.start_battle().unwrap();
+    r.navigation.fell.dust_materials = [0];
     r.matter.tuning.max_flying = 1;
     r.matter.tuning.max_fragments = 1;
     r.matter.tuning.max_resting_fragments = 0;
@@ -246,6 +251,7 @@ fn autonomous_battle_scales_world_drain_for_a_real_backlog() {
     r.set_navigation_workers(1);
     assert!(r.set_ai_vs_ai(true));
     r.start_battle().unwrap();
+    r.navigation.fell.dust_materials = [0];
     r.world.max_edits_per_tick = 1;
     for x in 300..340 {
         r.world.queue_edit(voxel::Edit::put(x, 100, 300, 3));

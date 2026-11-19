@@ -2056,7 +2056,7 @@ pub fn nuclear_silo() -> UnitBody {
 
 /// Fixed T3 siege artillery: low faceted head, three charging chambers and
 /// one long barrel. Separate from the wave turret «Разлом».
-pub fn artillery_turret_t3() -> UnitBody {
+pub fn artillery_turret_t3_legacy() -> UnitBody {
     let mut u = UnitBody::new_scaled(112, 52, 56, 16, 150);
     let a = Part::Armour;
     fill_f(&mut u, (36, 76), (0, 5), (8, 48), a, FINISH_STEEL);
@@ -2219,6 +2219,34 @@ pub fn artillery_turret_t3() -> UnitBody {
     u
 }
 
+/// The siege barrel is a physical segment, on a transverse trunnion. Keep
+/// the legacy grid builder for decoding snapshots with the monolithic head.
+pub fn artillery_turret_t3() -> UnitBody {
+    let mut u = artillery_turret_t3_legacy();
+    let mut barrel = UnitBody::new_scaled(41, 7, 16, 4, u.mm);
+    for x in 71..112 { for y in 10..17 { for z in 20..36 {
+        if u.vol.get(x, y, z) && u.part_at(x, y, z) == Part::Weapon {
+            barrel.set(x - 71, y - 10, z - 20, Part::Weapon);
+            barrel.set_finish(x - 71, y - 10, z - 20, u.finish_at(x, y, z));
+            u.remove(x, y, z);
+        }
+    }}}
+    barrel.push_weapon_path(WeaponPath { min: [0, 0, 0], max: [41, 7, 16], axis: 0 });
+    // A real, destructible bearing/feed remains in the head. The barrel's
+    // own connectivity is checked independently from this short root feed.
+    fill_f(&mut u, (73, 75), (13, 15), (20, 36), Part::Weapon, FINISH_GUN);
+    for z in [(19, 23), (33, 37)] {
+        fill_f(&mut u, (72, 76), (11, 17), z, Part::Armour, FINISH_GUN);
+    }
+    std::sync::Arc::make_mut(&mut u.weapon_paths)[0] = WeaponPath {
+        min: [73, 13, 23], max: [75, 15, 33], axis: 0,
+    };
+    let mut mount = Attach::flat((74, 14, 28), (3, 4, 8));
+    mount.turret = true;
+    u.push_segment(mount, barrel);
+    u
+}
+
 /// T3 «Разлом»: broad wave turret with a recessed seven-segment emitter.
 pub fn razlom_t3() -> UnitBody {
     let mut u = UnitBody::new_scaled(48, 24, 48, 8, 300);
@@ -2360,11 +2388,26 @@ pub const GREBEN_CRAWLER_SOCKET_Z: [usize; 2] = [20, 60];
 
 /// «Гребень»: closed storage slabs, a fixed two-dock hub and amber fill gauges.
 pub fn greben_storage_modules(modules: u8) -> UnitBody {
+    greben_storage_shape(modules, true)
+}
+
+/// Historical clipped footprint, retained for existing damage/matter snapshots.
+pub fn greben_storage_legacy() -> UnitBody {
+    greben_storage_shape(2, false)
+}
+
+fn greben_storage_shape(modules: u8, full: bool) -> UnitBody {
     assert!((1..=4).contains(&modules));
     let extra = modules.saturating_sub(2) * 40;
     // A compact storage station: retain the authored geometry while scaling
     // all three dimensions to one quarter of the old 800 mm model.
-    let mut u = UnitBody::new_scaled(80 + extra, 104, 176, 8, 200);
+    // Modules run along X and are added across Z. Swapping these dimensions
+    // silently clipped their rear walls and left a long empty loading hub.
+    let mut u = if full {
+        UnitBody::new_scaled(176, 104, 80 + extra, 8, 200)
+    } else {
+        UnitBody::new_scaled(80 + extra, 104, 176, 8, 200)
+    };
     let a = Part::Armour;
 
     fill_f(&mut u, (0, 40), (0, 4), (0, 176), a, FINISH_GUN);
@@ -3181,6 +3224,11 @@ mod command_base_tests {
             );
             assert_eq!(body.extent_mm().1, 20_800);
             assert_eq!(body.mm, 200);
+            for index in 0..modules {
+                let centre = 20 + usize::from(index) * 40;
+                assert!(body.vol.get(160, 60, centre), "rear storage was clipped: module {index}");
+                assert!(body.vol.get(174, 100, centre), "rear wall is missing: module {index}");
+            }
             for z in [20usize, 60] {
                 assert!(!body.vol.get(0, 8, z), "dock is solid at z={z}");
                 assert!(!body.vol.get(20, 12, z), "dock is blocked at z={z}");
@@ -4492,9 +4540,8 @@ pub fn spider() -> UnitBody {
                 mark(&mut foot, (x, x + 1), (3, 4), (1, 7), FINISH_STEEL);
             }
             u.push_segment(Attach::flat((ax as i16, 4, az as i16), (6, 4, 4)), foot);
-            // Two legs per suspension quadrant, but not a synchronized pair:
-            // the second leg starts 38% of a cycle later. With a 25% swing,
-            // one foot in each quadrant stays planted at every phase.
+            // Opposite phases inside each quadrant match the spatially safe
+            // 50% stance gait; a delayed foot cannot lift its sole neighbour.
             let support = u8::from(hx < 44) * 2 + u8::from(hz < 40);
             u.push_leg(Leg {
                 hip: (hx as i16, 31, hz as i16),
@@ -4506,7 +4553,7 @@ pub fn spider() -> UnitBody {
                 ankle_ball: Some(first + 3),
                 foot: Some(first + 4),
                 support,
-                phase_shift_pct: if hx == 34 || hx == 66 { 38 } else { 0 },
+                phase_shift_pct: if hx == 34 || hx == 66 { 50 } else { 0 },
             });
             u.push_load_path(WeaponPath {
                 min: [(hx - 3) as u8, 28, (hz - 3) as u8],
@@ -5342,11 +5389,11 @@ mod spider_tests {
             .iter()
             .map(|leg| (support_offsets[leg.support as usize] + leg.phase_shift_pct as i32) % 100)
             .collect();
-        assert_eq!(phases.len(), 8, "every leg needs its own step phase");
+        assert_eq!(phases.len(), 4, "four staggered groups keep quadrant support");
         for (a, b) in [(0, 2), (1, 3), (4, 6), (5, 7)] {
             assert_eq!(body.legs[a].support, body.legs[b].support);
             assert_eq!(body.legs[a].phase_shift_pct, 0);
-            assert_eq!(body.legs[b].phase_shift_pct, 38);
+            assert_eq!(body.legs[b].phase_shift_pct, 50);
         }
         assert_eq!(body.weapon_paths.len(), 1);
         assert!(body.segments.len() >= 40);

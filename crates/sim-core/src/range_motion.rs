@@ -9,6 +9,7 @@ use fx::{
 };
 use phys::{Chassis, V3};
 use voxel::{UnitBody, World};
+use nav::vehicle::transition::{TransitionProof, Policy as TransitionPolicy, Reason as TransitionReason};
 
 #[path = "range_flight.rs"]
 mod flight;
@@ -26,6 +27,26 @@ mod passing_tests;
 #[cfg(test)]
 #[path = "range_maneuver_tests.rs"]
 mod geometry_maneuver_tests;
+
+#[cfg(test)]
+#[path = "range_body_inertia_tests.rs"]
+mod body_inertia_tests;
+
+#[cfg(test)]
+#[path = "range_leg_clearance_tests.rs"]
+mod leg_clearance_tests;
+
+#[cfg(test)]
+#[path = "range_height_tests.rs"]
+mod height_tests;
+
+#[cfg(test)]
+#[path = "range_biped_support_tests.rs"]
+mod biped_support_tests;
+
+#[cfg(test)]
+#[path = "range_live_support_tests.rs"]
+mod live_support_tests;
 
 #[derive(Clone, Copy)]
 pub struct Obstacle {
@@ -93,7 +114,9 @@ impl Traffic {
             // obstruction ages into a static blocker using saved recovery time.
             moving: intent
                 && m.blocked_ticks < m.navigation.recovery_ticks
-                && (m.cursor < m.path.len() || m.drive.vel > Fx::ZERO),
+                && (m.cursor < m.path.len()
+                    || m.drive.vel > Fx::ZERO
+                    || (m.path.is_empty() && !m.needs_recovery && !m.dry)),
         }
     }
 }
@@ -163,11 +186,469 @@ enum HuntAdvance {
 }
 /// Inputs from accepted hull motion. Feet use the previous tick for suspension,
 /// then advance against the tick's immutable terrain before contacts or felling.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FeetStep {
     linear: V3,
     angular: i32,
     cycles: Fx,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedFeet {
+    position:[Fx;3],head:i32,up:V3,phase:i32,step:FeetStep,
+    feet:Vec<crate::gait::Foot>,trace:Option<crate::gait::AnchorTrace>,
+}
+
+#[derive(Clone, Copy)]
+struct SupportForecast {
+    turning: bool,
+    intent:Option<(V3,i32,i32)>,
+    ride: phys::Ride,
+    previous_velocity: V3,
+    balance: bool,
+    drive: Drive,
+    limits: Limits,
+    factor: Fx,
+    direction: Option<[Fx;2]>,
+}
+
+/// Exact heights within one immutable motor selection only. Column-invariant
+/// cells (zero overlapping unstable pieces below ceiling) share one integer
+/// cell entry across all fractional sole rotations; occupied cells memoize the
+/// exact `(x, z)`. No entry survives a root commit.
+struct FeetScratch {
+    inline: [crate::gait::Foot; 8],
+    spill: Vec<crate::gait::Foot>,
+    len: usize,
+}
+impl FeetScratch {
+    #[inline]
+    fn from_slice(src: &[crate::gait::Foot]) -> Self {
+        let len = src.len();
+        if len <= 8 {
+            Self {
+                inline: std::array::from_fn(|i| src.get(i).cloned().unwrap_or_default()),
+                spill: Vec::new(),
+                len,
+            }
+        } else {
+            Self {
+                inline: Default::default(),
+                spill: src.to_vec(),
+                len,
+            }
+        }
+    }
+}
+impl std::ops::Deref for FeetScratch {
+    type Target = [crate::gait::Foot];
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        if self.len <= 8 {
+            &self.inline[..self.len]
+        } else {
+            &self.spill
+        }
+    }
+}
+impl std::ops::DerefMut for FeetScratch {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        if self.len <= 8 {
+            &mut self.inline[..self.len]
+        } else {
+            &mut self.spill
+        }
+    }
+}
+impl<'a> IntoIterator for &'a FeetScratch {
+    type Item = &'a crate::gait::Foot;
+    type IntoIter = std::slice::Iter<'a, crate::gait::Foot>;
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        (&**self).iter()
+    }
+}
+
+const MOTOR_CLEAN_BUCKETS: usize = 2048;
+const MOTOR_EXACT_BUCKETS: usize = 512;
+const MOTOR_SUPPORT_BUCKETS: usize = 512;
+
+/// Reusable generation-tagged motor selection memo.Allocated once on the first
+/// articulated pass of a walker; `begin_pass` advances the generation counter
+/// in O(1) without clearing 30 KiB of stack per tick, and 2-way associative
+/// sets prevent self-eviction across 8-legged multi-trial lookaheads. Never
+/// outlives a single immutable motor or foot pass, and never saved or hashed.
+struct MotorScratch {
+    gen: std::cell::Cell<u32>,
+    floor_clean: Vec<[std::cell::Cell<(u32, i32, i32, Fx)>; 2]>,
+    floor_clean_ways: [std::cell::Cell<u64>; MOTOR_CLEAN_BUCKETS / 64],
+    floor_exact: Vec<[std::cell::Cell<(u32, Fx, Fx, Fx)>; 2]>,
+    floor_exact_ways: [std::cell::Cell<u64>; MOTOR_EXACT_BUCKETS / 64],
+    surf_clean: Vec<[std::cell::Cell<(u32, i32, i32, nav::vehicle::support::Sample)>; 2]>,
+    surf_clean_ways: [std::cell::Cell<u64>; MOTOR_CLEAN_BUCKETS / 64],
+    surf_exact: Vec<[std::cell::Cell<(u32, Fx, Fx, Fx, nav::vehicle::support::Sample)>; 2]>,
+    surf_exact_ways: [std::cell::Cell<u64>; MOTOR_EXACT_BUCKETS / 64],
+    support: Vec<[std::cell::Cell<(u32, [Fx; 2], i32, [Fx; 4])>; 2]>,
+    support_ways: [std::cell::Cell<u64>; MOTOR_SUPPORT_BUCKETS / 64],
+}
+impl Default for MotorScratch {
+    fn default() -> Self {
+        let zero_sample = nav::vehicle::support::Sample {
+            height: Fx::ZERO,
+            source: nav::vehicle::support::SupportRef::default(),
+            validity: nav::vehicle::support::Validity::Unsupported,
+        };
+        Self {
+            gen: std::cell::Cell::new(0),
+            floor_clean: (0..MOTOR_CLEAN_BUCKETS)
+                .map(|_| [std::cell::Cell::new((0, 0, 0, Fx::ZERO)), std::cell::Cell::new((0, 0, 0, Fx::ZERO))])
+                .collect(),
+            floor_clean_ways: std::array::from_fn(|_| std::cell::Cell::new(0)),
+            floor_exact: (0..MOTOR_EXACT_BUCKETS)
+                .map(|_| [std::cell::Cell::new((0, Fx::ZERO, Fx::ZERO, Fx::ZERO)), std::cell::Cell::new((0, Fx::ZERO, Fx::ZERO, Fx::ZERO))])
+                .collect(),
+            floor_exact_ways: std::array::from_fn(|_| std::cell::Cell::new(0)),
+            surf_clean: (0..MOTOR_CLEAN_BUCKETS)
+                .map(|_| [std::cell::Cell::new((0, 0, 0, zero_sample)), std::cell::Cell::new((0, 0, 0, zero_sample))])
+                .collect(),
+            surf_clean_ways: std::array::from_fn(|_| std::cell::Cell::new(0)),
+            surf_exact: (0..MOTOR_EXACT_BUCKETS)
+                .map(|_| [std::cell::Cell::new((0, Fx::ZERO, Fx::ZERO, Fx::ZERO, zero_sample)), std::cell::Cell::new((0, Fx::ZERO, Fx::ZERO, Fx::ZERO, zero_sample))])
+                .collect(),
+            surf_exact_ways: std::array::from_fn(|_| std::cell::Cell::new(0)),
+            support: (0..MOTOR_SUPPORT_BUCKETS)
+                .map(|_| [std::cell::Cell::new((0, [Fx::ZERO; 2], 0, [Fx::ZERO; 4])), std::cell::Cell::new((0, [Fx::ZERO; 2], 0, [Fx::ZERO; 4]))])
+                .collect(),
+            support_ways: std::array::from_fn(|_| std::cell::Cell::new(0)),
+        }
+    }
+}
+impl MotorScratch {
+    #[inline]
+    fn next_pass(&self) {
+        let next = self.gen.get().wrapping_add(1);
+        if next == 0 {
+            for s in &self.floor_clean { for w in s { let mut v = w.get(); v.0 = 0; w.set(v); } }
+            for s in &self.floor_exact { for w in s { let mut v = w.get(); v.0 = 0; w.set(v); } }
+            for s in &self.surf_clean { for w in s { let mut v = w.get(); v.0 = 0; w.set(v); } }
+            for s in &self.surf_exact { for w in s { let mut v = w.get(); v.0 = 0; w.set(v); } }
+            for s in &self.support { for w in s { let mut v = w.get(); v.0 = 0; w.set(v); } }
+            for w in &self.floor_clean_ways { w.set(0); }
+            for w in &self.floor_exact_ways { w.set(0); }
+            for w in &self.surf_clean_ways { w.set(0); }
+            for w in &self.surf_exact_ways { w.set(0); }
+            for w in &self.support_ways { w.set(0); }
+            self.gen.set(1);
+        } else {
+            self.gen.set(next);
+        }
+    }
+    #[inline]
+    fn pick_way(g: u32, g0: u32, g1: u32, bucket: usize, ways: &[std::cell::Cell<u64>]) -> usize {
+        if g0 != g {
+            0
+        } else if g1 != g {
+            1
+        } else {
+            let word = bucket >> 6;
+            let bit = 1u64 << (bucket & 63);
+            let m = ways[word].get();
+            let w = usize::from(m & bit != 0);
+            ways[word].set(m ^ bit);
+            w
+        }
+    }
+    #[inline]
+    fn floor_at(&self, x: Fx, z: Fx, read: impl FnOnce() -> (Fx, bool)) -> Fx {
+        let g = self.gen.get();
+        let ix = (x.raw() >> 32) as i32;
+        let iz = (z.raw() >> 32) as i32;
+        let ch = (ix as u32).wrapping_mul(73_856_093) ^ (iz as u32).wrapping_mul(19_349_663);
+        let ckey = ((ch ^ (ch >> 11)) as usize) & (MOTOR_CLEAN_BUCKETS - 1);
+        let cset = &self.floor_clean[ckey];
+        let c0 = cset[0].get();
+        if c0.0 == g && c0.1 == ix && c0.2 == iz {
+            return c0.3;
+        }
+        let c1 = cset[1].get();
+        if c1.0 == g && c1.1 == ix && c1.2 == iz {
+            return c1.3;
+        }
+        let a = x.raw() as u64;
+        let b = z.raw() as u64;
+        let eh = (a ^ (a >> 32)).wrapping_mul(73_856_093) ^ (b ^ (b >> 32)).wrapping_mul(19_349_663);
+        let ekey = ((eh ^ (eh >> 11)) as usize) & (MOTOR_EXACT_BUCKETS - 1);
+        let eset = &self.floor_exact[ekey];
+        let e0 = eset[0].get();
+        if e0.0 == g && e0.1 == x && e0.2 == z {
+            return e0.3;
+        }
+        let e1 = eset[1].get();
+        if e1.0 == g && e1.1 == x && e1.2 == z {
+            return e1.3;
+        }
+        let (height, clean) = read();
+        if clean {
+            let way = Self::pick_way(g, c0.0, c1.0, ckey, &self.floor_clean_ways);
+            cset[way].set((g, ix, iz, height));
+        } else {
+            let way = Self::pick_way(g, e0.0, e1.0, ekey, &self.floor_exact_ways);
+            eset[way].set((g, x, z, height));
+        }
+        height
+    }
+    #[inline]
+    fn sample_at(
+        &self,
+        x: Fx,
+        y: Fx,
+        z: Fx,
+        read: impl FnOnce() -> (nav::vehicle::support::Sample, bool),
+    ) -> nav::vehicle::support::Sample {
+        let g = self.gen.get();
+        let ix = (x.raw() >> 32) as i32;
+        let iz = (z.raw() >> 32) as i32;
+        let ch = (ix as u32).wrapping_mul(73_856_093) ^ (iz as u32).wrapping_mul(19_349_663);
+        let ckey = ((ch ^ (ch >> 11)) as usize) & (MOTOR_CLEAN_BUCKETS - 1);
+        let cset = &self.surf_clean[ckey];
+        let c0 = cset[0].get();
+        if c0.0 == g && c0.1 == ix && c0.2 == iz {
+            return c0.3;
+        }
+        let c1 = cset[1].get();
+        if c1.0 == g && c1.1 == ix && c1.2 == iz {
+            return c1.3;
+        }
+        let a = x.raw() as u64;
+        let b = y.raw() as u64;
+        let c = z.raw() as u64;
+        let eh = (a ^ (a >> 32)).wrapping_mul(73_856_093)
+            ^ (b ^ (b >> 32)).wrapping_mul(83_492_791)
+            ^ (c ^ (c >> 32)).wrapping_mul(19_349_663);
+        let ekey = ((eh ^ (eh >> 11)) as usize) & (MOTOR_EXACT_BUCKETS - 1);
+        let eset = &self.surf_exact[ekey];
+        let e0 = eset[0].get();
+        if e0.0 == g && e0.1 == x && e0.2 == y && e0.3 == z {
+            return e0.4;
+        }
+        let e1 = eset[1].get();
+        if e1.0 == g && e1.1 == x && e1.2 == y && e1.3 == z {
+            return e1.4;
+        }
+        let (sample, clean) = read();
+        if clean {
+            let way = Self::pick_way(g, c0.0, c1.0, ckey, &self.surf_clean_ways);
+            cset[way].set((g, ix, iz, sample));
+        } else {
+            let way = Self::pick_way(g, e0.0, e1.0, ekey, &self.surf_exact_ways);
+            eset[way].set((g, x, y, z, sample));
+        }
+        sample
+    }
+    #[inline]
+    fn support_at(&self, pos: [Fx; 2], head: i32, read: impl FnOnce() -> [Fx; 4]) -> [Fx; 4] {
+        let g = self.gen.get();
+        let a = pos[0].raw() as u64;
+        let b = pos[1].raw() as u64;
+        let h = head as u32 as u64;
+        let sh = (a ^ (a >> 32)).wrapping_mul(73_856_093)
+            ^ (b ^ (b >> 32)).wrapping_mul(19_349_663)
+            ^ h.wrapping_mul(83_492_791);
+        let bucket = ((sh ^ (sh >> 11)) as usize) & (MOTOR_SUPPORT_BUCKETS - 1);
+        let set = &self.support[bucket];
+        let s0 = set[0].get();
+        if s0.0 == g && s0.1 == pos && s0.2 == head {
+            return s0.3;
+        }
+        let s1 = set[1].get();
+        if s1.0 == g && s1.1 == pos && s1.2 == head {
+            return s1.3;
+        }
+        let floors = read();
+        let way = Self::pick_way(g, s0.0, s1.0, bucket, &self.support_ways);
+        set[way].set((g, pos, head, floors));
+        floors
+    }
+}
+
+std::thread_local! {
+    static MOTOR_SCRATCH: std::cell::RefCell<Box<MotorScratch>> =
+        std::cell::RefCell::new(Box::default());
+}
+#[inline]
+fn with_motor_scratch<R>(f: impl FnOnce(&MotorScratch) -> R) -> R {
+    MOTOR_SCRATCH.with(|slot| match slot.try_borrow_mut() {
+        Ok(guard) => {
+            guard.next_pass();
+            f(&guard)
+        }
+        Err(_) => {
+            let fallback = MotorScratch::default();
+            fallback.next_pass();
+            f(&fallback)
+        }
+    })
+}
+
+struct ScratchSurface<'s, 'a, 'w> {
+    scratch: &'s MotorScratch,
+    probe: &'a std::cell::RefCell<nav::vehicle::Probe<'w>>,
+}
+impl nav::vehicle::support::Surface for ScratchSurface<'_, '_, '_> {
+    #[inline]
+    fn sample(&self, x: Fx, y: Fx, z: Fx) -> nav::vehicle::support::Sample {
+        self.scratch
+            .sample_at(x, y, z, || self.probe.borrow_mut().support_sample_cell(x, y, z))
+    }
+    #[inline]
+    fn validity(&self, source: nav::vehicle::support::SupportRef) -> nav::vehicle::support::Validity {
+        self.probe.borrow().source_validity(source)
+    }
+}
+
+struct ScratchSurfaceRef<'s, 'a, 'p, 'w> {
+    scratch: &'s MotorScratch,
+    probe: &'a std::cell::RefCell<&'p mut nav::vehicle::Probe<'w>>,
+}
+impl nav::vehicle::support::Surface for ScratchSurfaceRef<'_, '_, '_, '_> {
+    #[inline]
+    fn sample(&self, x: Fx, y: Fx, z: Fx) -> nav::vehicle::support::Sample {
+        self.scratch
+            .sample_at(x, y, z, || self.probe.borrow_mut().support_sample_cell(x, y, z))
+    }
+    #[inline]
+    fn validity(&self, source: nav::vehicle::support::SupportRef) -> nav::vehicle::support::Validity {
+        self.probe.borrow().source_validity(source)
+    }
+}
+
+#[cfg(test)]
+struct MotorFloorMemo {
+    clean_cells:[std::cell::Cell<Option<(i32,i32,Fx)>>;256],
+    exact_cells:[std::cell::Cell<Option<(Fx,Fx,Fx)>>;128],
+}
+#[cfg(test)]
+impl Default for MotorFloorMemo {
+    fn default()->Self {
+        Self{
+            clean_cells:std::array::from_fn(|_|std::cell::Cell::new(None)),
+            exact_cells:std::array::from_fn(|_|std::cell::Cell::new(None)),
+        }
+    }
+}
+#[cfg(test)]
+impl MotorFloorMemo {
+    #[cfg(test)]
+    #[inline]
+    fn at(&self,x:Fx,z:Fx,read:impl FnOnce()->Fx)->Fx {
+        self.at_cell(x,z,||(read(),false))
+    }
+    #[inline]
+    fn at_cell(&self,x:Fx,z:Fx,read:impl FnOnce()->(Fx,bool))->Fx {
+        let ix=(x.raw()>>32) as i32;let iz=(z.raw()>>32) as i32;
+        let ckey=((ix as u32).wrapping_mul(73_856_093)^(iz as u32).wrapping_mul(19_349_663)) as usize &255;
+        if let Some((ox,oz,h))=self.clean_cells[ckey].get() {
+            if ox==ix && oz==iz {return h;}
+        }
+        let a=x.raw() as u64;let b=z.raw() as u64;
+        let ekey=((a^(a>>32)).wrapping_mul(73_856_093)^(b^(b>>32)).wrapping_mul(19_349_663)) as usize &127;
+        if let Some((ox,oz,h))=self.exact_cells[ekey].get() {
+            if ox==x && oz==z {return h;}
+        }
+        let (height,clean)=read();
+        if clean {self.clean_cells[ckey].set(Some((ix,iz,height)));}
+        else {self.exact_cells[ekey].set(Some((x,z,height)));}
+        height
+    }
+}
+
+/// Phase-local `Surface` wrapper within one immutable motor selection.
+/// Never outlives a root commit.
+#[cfg(test)]
+struct MotorSurface<'a,'p,'w> {
+    probe:&'a std::cell::RefCell<&'p mut nav::vehicle::Probe<'w>>,
+    clean_cells:[std::cell::Cell<Option<(i32,i32,nav::vehicle::support::Sample)>>;256],
+    exact_cells:[std::cell::Cell<Option<(Fx,Fx,Fx,nav::vehicle::support::Sample)>>;128],
+}
+#[cfg(test)]
+impl<'a,'p,'w> MotorSurface<'a,'p,'w> {
+    fn new(probe:&'a std::cell::RefCell<&'p mut nav::vehicle::Probe<'w>>)->Self {
+        Self{
+            probe,
+            clean_cells:std::array::from_fn(|_|std::cell::Cell::new(None)),
+            exact_cells:std::array::from_fn(|_|std::cell::Cell::new(None)),
+        }
+    }
+}
+#[cfg(test)]
+impl nav::vehicle::support::Surface for MotorSurface<'_,'_,'_> {
+    #[inline]
+    fn sample(&self,x:Fx,y:Fx,z:Fx)->nav::vehicle::support::Sample {
+        let ix=(x.raw()>>32) as i32;let iz=(z.raw()>>32) as i32;
+        let ckey=((ix as u32).wrapping_mul(73_856_093)^(iz as u32).wrapping_mul(19_349_663)) as usize &255;
+        if let Some((ox,oz,sample))=self.clean_cells[ckey].get() {
+            if ox==ix && oz==iz {return sample;}
+        }
+        let a=x.raw() as u64;let b=y.raw() as u64;let c=z.raw() as u64;
+        let ekey=((a^(a>>32)).wrapping_mul(73_856_093)
+            ^(b^(b>>32)).wrapping_mul(83_492_791)
+            ^(c^(c>>32)).wrapping_mul(19_349_663)) as usize &127;
+        if let Some((ox,oy,oz,sample))=self.exact_cells[ekey].get() {
+            if ox==x && oy==y && oz==z {return sample;}
+        }
+        let (sample,clean)=self.probe.borrow_mut().support_sample_cell(x,y,z);
+        if clean {self.clean_cells[ckey].set(Some((ix,iz,sample)));}
+        else {self.exact_cells[ekey].set(Some((x,y,z,sample)));}
+        sample
+    }
+    #[inline]
+    fn validity(&self,source:nav::vehicle::support::SupportRef)->nav::vehicle::support::Validity {
+        self.probe.borrow().source_validity(source)
+    }
+}
+
+/// Exact four-point support floors within one immutable motor selection only.
+/// Two-way 128-set cache retains an entire 80-tick braking trajectory across
+/// candidate trials without self-eviction; never outlives a root commit.
+#[cfg(test)]
+struct MotorSupportMemo {
+    cells:[[std::cell::Cell<Option<([Fx;2],i32,[Fx;4])>>;2];128],
+    ways:std::cell::Cell<u128>,
+}
+#[cfg(test)]
+impl Default for MotorSupportMemo {
+    fn default()->Self {
+        Self{
+            cells:std::array::from_fn(|_|[std::cell::Cell::new(None),std::cell::Cell::new(None)]),
+            ways:std::cell::Cell::new(0),
+        }
+    }
+}
+#[cfg(test)]
+impl MotorSupportMemo {
+    #[inline]
+    fn at(&self,pos:[Fx;2],head:i32,read:impl FnOnce()->[Fx;4])->[Fx;4] {
+        let a=pos[0].raw() as u64;let b=pos[1].raw() as u64;let h=head as u32 as u64;
+        let bucket=((a^(a>>32)).wrapping_mul(73_856_093)
+            ^(b^(b>>32)).wrapping_mul(19_349_663)
+            ^h.wrapping_mul(83_492_791)) as usize &127;
+        let set=&self.cells[bucket];
+        for way in 0..2 {
+            if let Some((old_pos,old_head,floors))=set[way].get() {
+                if old_pos==pos && old_head==head {return floors;}
+            }
+        }
+        let floors=read();
+        let way=if set[0].get().is_none() {0} else if set[1].get().is_none() {1} else {
+            let m=self.ways.get();
+            let w=((m>>bucket)&1) as usize;
+            self.ways.set(m^(1u128<<bucket));
+            w
+        };
+        set[way].set(Some((pos,head,floors)));
+        floors
+    }
 }
 
 /// Derived terrain facts only. Suspension and contacts still advance every tick.
@@ -190,6 +671,7 @@ impl GroundMemo {
             + self.shape.half[1].abs()
             + self.shape.span.abs()
             + self.shape.step.abs()
+            + self.shape.detail_halo()
             + 4;
         changed.touches(
             self.position.map(|p| p.to_int_trunc() - r),
@@ -381,8 +863,16 @@ pub struct Motion {
     contact_candidates: traffic_index::CollisionCandidates,
     /// Consumed by the next step; derived from the immutable traffic phase.
     traffic_hint: Option<TrafficHint>,
+    /// Bounded opt-in diagnostics; observations never enter save/hash state.
+    anchor_trace: Option<Box<crate::gait::AnchorTrace>>,
     /// Legs computed once from the body.
     rigs: Vec<crate::gait::LegRig>,
+    /// Pristine root's lowest occupied row; legs are separate articulated volumes.
+    /// Derived once, never a second terrain query or a saved state variable.
+    root_clearance: Fx,
+    terrain_detail: i32,
+    /// Derived freshness gate: restored evidence is checked before admission.
+    support_fresh:bool,
     /// Share of a buckled leg's rest reach its foot keeps, thousandths
     /// (ADR-288), from the integrity data.
     fold_milli: u32,
@@ -392,6 +882,8 @@ pub struct Motion {
     // Installed engine sizing is based on the pristine machine. Losing armour
     // must not silently resize the motor each movement tick.
     drive_scale: Fx,
+    /// Derived from the same initial body mass as drive_scale; no tick history.
+    surface_loss: Fx,
     /// Derived gait geometry; live chassis inputs are checked before reuse.
     /// Not serialized and never an answer about terrain or body integrity.
     step_cycle: drive::StepCycleCache,
@@ -470,6 +962,7 @@ pub struct Motion {
     /// Scratch inside one atomic range tick; never saved or hashed.
     defer_feet: bool,
     pending_feet: Option<FeetStep>,
+    prepared_feet: Option<PreparedFeet>,
     started: bool,
 }
 /// Fair continuation shares in stable slot order. Rotate the remainder so
@@ -499,14 +992,32 @@ pub(super) fn spider_tuning() -> &'static modding::spider::Tuning {
 /// 240 files. Each is a pure function of a compiled-in constant, so the
 /// cache is that constant, not state.
 struct StockPacks {
+    tracked_motion: modding::tracked_motion::Tuning,
+    terrain_motion: modding::terrain_motion::Tuning,
+    walking_terrain: modding::walking_terrain::Tuning,
     sim: crate::Tuning,
     course: modding::range::RangeCourse,
     navigation: modding::navigation::Navigation,
     integrity: modding::integrity::Integrity,
 }
+/// Shared by initial roster placement, course reload and factory production.
+pub(super) fn course_speed(kind:modding::range::RangeUnitKind,c:&modding::range::RangeCourse)->i32 {
+    use modding::range::RangeUnitKind::*;
+    if kind.emplacement() {0}
+    else if let Some(speed)=stock_packs().tracked_motion.speed(kind,c.tank_speed) {speed}
+    else {match kind {
+        Spider=>spider_tuning().speed,
+        Commander=>((c.walker_speed*9/10).max(1)/3).max(1),
+        Walker04=>(c.walker_speed*9/10).max(1),
+        _=>c.walker_speed,
+    }}
+}
 fn stock_packs() -> &'static StockPacks {
     static P: std::sync::OnceLock<StockPacks> = std::sync::OnceLock::new();
     P.get_or_init(|| StockPacks {
+        terrain_motion: modding::terrain_motion::Tuning::from_ron(include_str!("../../../data/terrain-motion.ron")).expect("terrain motion"),
+        tracked_motion: modding::tracked_motion::Tuning::from_ron(include_str!("../../../data/tracked-motion.ron")).expect("tracked motion"),
+        walking_terrain: modding::walking_terrain::Tuning::from_ron(include_str!("../../../data/walking-terrain.ron")).expect("walking terrain"),
         sim: crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("tuning"),
         course: modding::range::RangeLayout::from_ron(include_str!(
             "../../../data/range-cover.ron"
@@ -593,7 +1104,7 @@ impl Motion {
         let slot = Self::ground_slot(memo, position, head, shape);
         *slot
             .pose
-            .get_or_insert_with(|| probe.pose(position, head, shape))
+            .get_or_insert_with(|| probe.pose_crush_flag(position, head, shape))
     }
     fn cached_floors(
         memo: &mut Option<GroundMemo>,
@@ -647,8 +1158,7 @@ impl Motion {
         let following = angle::diff(want, self.drive.head).abs() <= follow_angle;
         let route_way = want;
         let route_forward = [angle::cos(route_way), angle::sin(route_way)];
-        let want = self.drive.head;
-        let forward = [angle::cos(want), angle::sin(want)];
+        let forward = [angle::cos(self.drive.head), angle::sin(self.drive.head)];
         let dot = |a: [Fx; 2], b: [Fx; 2]| a[0].mul(b[0]).add(a[1].mul(b[1]));
         let own = Obstacle::of(self, b);
         let reach = traffic.get(id).map_or_else(|| Fx::from_int(
@@ -675,7 +1185,7 @@ impl Motion {
         let brake = response
             .limits(&limits, false)
             .brake
-            .mul(self.drive_scale.mul(self.hull.load));
+            .mul(self.drive_scale.mul(self.traction_load(self.hull.load)));
         for other_id in candidates {
             let other = &traffic[other_id];
             if other_id == id
@@ -731,11 +1241,11 @@ impl Motion {
                 // Keep the separation until the rear of the other hull has
                 // passed too. Dropping advice at centre crossing lets a slow
                 // commander turn straight into the fast walker's trailing side.
-                if ahead > length.neg() && across.abs() < width && ahead < warning.min(passing_reach) {
+                if ahead > length.neg() && across.abs() < width.add(margin) && ahead < warning.min(passing_reach) {
                     // Bias away from an existing offset; exact ties pass to
                     // the right. Do not assume the other hull can cooperate.
                     let gap = ahead.sub(length).max(Fx::from_int(self.navigation.cell_units));
-                    let offset = width.sub(across.abs()).add(margin);
+                    let offset = width.sub(across.abs()).add(margin).max(Fx::ZERO);
                     let correction = angle::atan2(offset.raw(), gap.raw());
                     // Bipeds already translate independently of torso yaw.
                     // A close, very wide walker can sidestep; limiting that
@@ -814,14 +1324,7 @@ impl Motion {
                 .abs()
                 .mul(other.obstacle.half[1])
                 .add(side.mul(other.obstacle.half[0]));
-            let own_side = angle::sin(angle::diff(self.drive.head, want))
-                .abs()
-                .mul(own.half[0])
-                .add(
-                    angle::cos(angle::diff(self.drive.head, want))
-                        .abs()
-                        .mul(own.half[1]),
-                );
+            let own_side = own.half[1];
             if across >= own_side.add(width).add(margin) {
                 continue;
             }
@@ -880,6 +1383,10 @@ impl Motion {
             modding::range::RangeUnitKind::Spider => spider_tuning().chassis,
             _ => t.walking,
         };
+        if packs.tracked_motion.speed(kind,packs.course.tank_speed).is_some() {
+            chassis.thrust=chassis.thrust.saturating_mul(packs.tracked_motion.acceleration_multiplier);
+            chassis.brake=chassis.brake.saturating_mul(packs.tracked_motion.brake_multiplier);
+        }
         if kind == modding::range::RangeUnitKind::Commander {
             chassis.thrust = (chassis.thrust / 2).max(1);
             chassis.turn = (chassis.turn / 2).max(1);
@@ -898,11 +1405,17 @@ impl Motion {
             // lift three times less often and take correspondingly longer steps.
             let rig = super::walker::tuning();
             chassis.turn = rig.turn_deg_s;
+            chassis.support_x_cm = rig.support_x_cm;
+            chassis.support_z_cm = rig.support_z_cm;
+            chassis.max_tilt_pct = rig.max_tilt_pct;
+            chassis.inertia = rig.inertia;
+            chassis.settle_tilt_pct = rig.settle_tilt_pct;
             if let Some(gait) = chassis.gait.as_mut() {
                 gait.stride_cm = rig.stride_cm;
                 gait.duty_pct = rig.duty_pct;
                 gait.lift_cm = rig.lift_cm;
                 gait.offset_pct = rig.offset_pct;
+                gait.body_sway_pct = rig.body_sway_pct;
             }
             chassis.thrust = (chassis.thrust * 3 / 4).max(1);
         }
@@ -916,16 +1429,36 @@ impl Motion {
         }
         let yielding = navigation.fell.materials.to_vec();
         let rigs = crate::gait::rigs_of(body);
+        let root_clearance=if rigs.is_empty() {Fx::ZERO} else {
+            (0..usize::from(body.vol.ny)).find(|&y| (0..usize::from(body.vol.nz)).any(|z| {
+                let at=(z*usize::from(body.vol.ny)+y)*usize::from(body.vol.words);
+                body.vol.cols[at..at+usize::from(body.vol.words)].iter().any(|v|*v!=0)
+            })).map_or(Fx::ZERO,|y|Fx::from_ratio(y as i32*i32::from(body.mm),i32::from(voxel::unit::WORLD_MM)))
+        };
+        if let Some(g)=chassis.gait.as_mut() {
+            if g.lane_duty_pct>0 && crate::gait::lane_stride(&rigs,Fx::from_ratio(g.duty_pct,100))
+                .is_some_and(|limit|limit<Fx::from_ratio(g.stride_cm,voxel::unit::WORLD_MM as i32/10)) {
+                g.duty_pct=g.duty_pct.min(i32::from(g.lane_duty_pct));
+            }
+            if let Some(limit)=crate::gait::lane_stride(&rigs,Fx::from_ratio(g.duty_pct,100)) {
+                let cm=limit.mul(Fx::from_int(voxel::unit::WORLD_MM as i32/10)).to_int_trunc();
+                g.stride_cm=g.stride_cm.min(cm.max(1));
+            }
+        }
+        let body_mass=(u128::from(body.volume_mm3())*chassis.density as u128/1_000_000_000).max(1);
+        let reference_mass=u128::from(packs.terrain_motion.reference_mass_kg);
+        let surface_loss=Fx::from_ratio(packs.terrain_motion.max_loss_pct,100)
+            .mul(Fx(((reference_mass<<32)/(reference_mass+body_mass)) as i64));
         let feet = vec![crate::gait::Foot::default(); rigs.len()];
         let integrity = &packs.integrity;
         let fold_milli = integrity.leg_fold_pct.clamp(0, 100) as u32 * 10;
         let collapse_pct = integrity.collapse_clearance_pct.clamp(0, 100);
         let legs_lost = vec![false; rigs.len()];
         let legs_buckled = vec![false; rigs.len()];
-        Self {
+        let mut motion = Self {
             emplaced: kind.emplacement(),
             walker_turn_guard: matches!(kind, modding::range::RangeUnitKind::Walker04 | modding::range::RangeUnitKind::Commander),
-            leg_side_guard: matches!(kind, modding::range::RangeUnitKind::Walker04 | modding::range::RangeUnitKind::Commander),
+            leg_side_guard: rigs.len()==2,
             flat_detours: !kind.emplacement() && kind != modding::range::RangeUnitKind::SkobaDrone,
             step_cycle: Default::default(),
             pos: at.map(Fx::from_int),
@@ -947,27 +1480,7 @@ impl Motion {
             pilot: None,
             blocked: false,
             chassis,
-            speed: if kind.emplacement() {
-                0
-            } else if kind == modding::range::RangeUnitKind::Spider {
-                spider_tuning().speed
-            } else if kind == modding::range::RangeUnitKind::Commander {
-                ((c.walker_speed * 9 / 10).max(1) / 3).max(1)
-            } else if kind == modding::range::RangeUnitKind::Walker04 {
-                (c.walker_speed * 9 / 10).max(1)
-            } else if matches!(
-                kind,
-                modding::range::RangeUnitKind::Tank
-                    | modding::range::RangeUnitKind::LightningTank
-                    | modding::range::RangeUnitKind::EidolonTank
-                    | modding::range::RangeUnitKind::Crawler
-                    | modding::range::RangeUnitKind::Artillery
-                    | modding::range::RangeUnitKind::ArtilleryT2
-            ) {
-                c.tank_speed
-            } else {
-                c.walker_speed
-            },
+            speed: course_speed(kind,c),
             step: if kind.emplacement() {
                 0
             } else if kind == modding::range::RangeUnitKind::Spider {
@@ -1023,7 +1536,10 @@ impl Motion {
             contact: None,
             contact_velocity: V3::ZERO,
             traffic_hint: None,
+            anchor_trace: None,
             rigs,
+            root_clearance,
+            terrain_detail: 0,
             fold_milli,
             collapse_pct,
             navigation,
@@ -1051,6 +1567,7 @@ impl Motion {
             cut_limit: usize::MAX,
             defer_feet: false,
             pending_feet: None,
+            prepared_feet: None,
             started: false,
             last_plan: [0; 2],
             last_probe: [0; 2],
@@ -1061,13 +1578,73 @@ impl Motion {
             fine_unwalked: false,
             walked_start: false,
             dry: false,
+            surface_loss,
+            support_fresh:false,
             drive_scale: drive::drive_factor(
                 i64::from(chassis.mass) * 1000,
-                (u128::from(body.volume_mm3()) * chassis.density as u128 / 1_000_000_000).max(1)
-                    as i64,
+                body_mass as i64,
             ),
-        }
+        };
+        motion.apply_walking_terrain(c);
+        motion
     }
+    /// Initial spawn and course changes use the same cached capability.
+    pub(super) fn apply_walking_terrain(&mut self,c:&modding::range::RangeCourse) {
+        if self.rigs.is_empty() {
+            let cm_per_unit=voxel::unit::WORLD_MM as i32/10;
+            let cm=stock_packs().terrain_motion.track_detail_cm;
+            self.terrain_detail=((cm+cm_per_unit-1)/cm_per_unit).min(self.step.max(0));
+            return;
+        }
+        let profiles=&stock_packs().walking_terrain;
+        let p=if self.rigs.len()>4 {profiles.spider} else if self.rigs.len()>=4 {profiles.multiped} else {profiles.biped};
+        let leg_limit=self.rigs.iter().map(|r|r.l1.add(r.l2)).min().unwrap_or(Fx::ZERO)
+            .mul(Fx::from_ratio(p.leg_reach_pct,100)).to_int_trunc().max(1);
+        let cm_per_unit=voxel::unit::WORLD_MM as i32/10;
+        let requested=if self.rigs.len()>4 {spider_tuning().step}
+            else {(c.walker_step_height*p.step_pct/100).max(1)};
+        self.step=requested
+            .min((p.max_step_cm/cm_per_unit).max(1)).min(leg_limit);
+        let m = Fx::from_ratio(self.chassis.max_tilt_pct.clamp(1, 100), 100);
+        let tan_tilt = Fx::ONE.sub(m.mul(m)).max(Fx::ZERO).sqrt().div(m);
+        let support_half = Fx::from_ratio(
+            self.chassis.support_x_cm.max(self.chassis.support_z_cm) * 10,
+            voxel::unit::WORLD_MM as i32,
+        )
+        .max(Fx::ONE);
+        let g = Fx::from_int(leg_limit)
+            .add(support_half.mul(tan_tilt))
+            .div(support_half);
+        let geom_min_up_pct = Fx::ONE
+            .div(Fx::ONE.add(g.mul(g)).sqrt())
+            .mul(Fx::from_int(100))
+            .to_int_trunc()
+            .clamp(1, 100);
+        self.terrain_tilt_pct = c
+            .walker_terrain_tilt_pct
+            .max(p.min_up_pct)
+            .max(geom_min_up_pct);
+        self.terrain_approach_pct=c.walker_terrain_approach_pct.min(p.approach_pct);
+        let detail=self.rigs.iter().map(|r|r.sole.width()).min().unwrap_or(Fx::ZERO)
+            .mul(Fx::from_ratio(p.detail_pct,100));
+        let whole=detail.to_int_trunc().max(0);
+        self.terrain_detail=(whole+i32::from(detail>Fx::from_int(whole)))
+            .min(p.max_detail_cm/cm_per_unit);
+    }
+    /// Apply one mass-scaled resistance target. Only this environmental
+    /// component eases in; a lower goal/turn/brake target always wins.
+    fn surface_speed(&self,requested:Fx,forest:bool,rough:bool)->Fx {
+        let tree_loss=if forest {self.surface_loss.min(Fx::from_ratio(100-self.navigation.fell.speed_pct,100))}
+            else {Fx::ZERO};
+        let loss=tree_loss.max(if rough {self.surface_loss} else {Fx::ZERO});
+        if loss==Fx::ZERO {return requested;}
+        let magnitude=requested.abs();
+        let step=Fx::from_int(self.speed).mul(loss).div(Fx::from_int(stock_packs().terrain_motion.blend_ticks));
+        let cap=magnitude.mul(Fx::ONE.sub(loss))
+            .max(self.drive.vel.abs().sub(step)).min(magnitude);
+        if requested<Fx::ZERO {cap.neg()} else {cap}
+    }
+
     pub fn frame(&self, b: &UnitBody) -> crate::damage::Frame {
         crate::damage::Frame::new(
             b,
@@ -1350,10 +1927,10 @@ impl Motion {
             nav::vehicle::Probe::around(w, &self.yielding, [self.pos[0], self.pos[2]], 96)
                 .with_rubble(rubble);
         let shape = self.shape(b);
-        let current = ground.pose([self.pos[0], self.pos[2]], self.drive.head, shape);
+        let current = ground.pose_crush_flag([self.pos[0], self.pos[2]], self.drive.head, shape);
         let nx = self.pos[0].add(self.shove.x.div(Fx::from_int(TICKS)));
         let nz = self.pos[2].add(self.shove.z.div(Fx::from_int(TICKS)));
-        let target = ground.pose([nx, nz], self.drive.head, shape);
+        let target = ground.pose_crush_flag([nx, nz], self.drive.head, shape);
         let previous = Obstacle::of(self, b);
         let mut candidate = previous;
         candidate.pos[0] = nx;
@@ -1362,13 +1939,20 @@ impl Motion {
             self.shove.x.abs().max(self.shove.z.abs()).div(Fx::from_int(TICKS)), others);
         let collision = self.contact_candidates.first(&previous, &candidate, others);
         let (x, z) = (nx.to_int_trunc(), nz.to_int_trunc());
-        let terrain_allowed = (target.blocked == 0 || target.blocked < current.blocked)
-            && !target.tilt
+        let mut transition=TransitionProof::geometry([self.pos[0],self.pos[2]],[nx,nz],current,target,shape,
+            TransitionPolicy::passive(shape,true,target.blocked<current.blocked));
+        let terrain_allowed = transition.accepted()
             && x >= EDGE
             && z >= EDGE
             && x < w.nx as i32 - EDGE
             && z < w.nz as i32 - EDGE
-            && target.height.sub(current.height) <= Fx::from_int(self.step);
+;
+        if !terrain_allowed && transition.accepted() {transition.refuse(TransitionReason::Bounds);}
+        if collision.is_some() {transition.refuse(TransitionReason::Obstacle);}
+        if self.anchor_trace.is_some() {
+            self.transition_sources(&mut ground,&mut transition,[self.drive.head;2],shape);
+            self.anchor_trace.as_deref_mut().unwrap().transition=Some(transition);
+        }
         let allowed = terrain_allowed && collision.is_none();
         let moved = if allowed {
             let d = V3::new(nx.sub(self.pos[0]), Fx::ZERO, nz.sub(self.pos[2]));
@@ -1466,6 +2050,18 @@ impl Motion {
     /// The ride of this hull now: the chassis' ride at the range's gravity
     /// and the body's own mobility (ADR-305), low on its legs when none
     /// carries them (ADR-304).
+    #[inline]
+    fn traction_load(&self, hull_load: Fx) -> Fx {
+        if !self.rigs.is_empty()
+            && self.carried()
+            && hull_load > Fx::ZERO
+            && self.chassis.max_tilt_pct >= 95
+        {
+            Fx::ONE
+        } else {
+            hull_load
+        }
+    }
     fn ride_now(
         &self,
         b: &UnitBody,
@@ -1475,6 +2071,20 @@ impl Motion {
         let mut r = crate::ride::ride_of(&self.chassis);
         r.gravity = Fx::from_int(gravity);
         r.preload = r.gravity.div(Fx::from_int(4));
+        if !self.rigs.is_empty()
+            && (self.legs_lost.iter().any(|lost| *lost)
+                || self.legs_buckled.iter().any(|buckled| *buckled))
+        {
+            let damaged_min_up = Fx::from_ratio(
+                stock_packs()
+                    .sim
+                    .chassis(modding::tuning::ChassisKind::Walking)
+                    .max_tilt_pct
+                    .clamp(0, 100),
+                100,
+            );
+            r.min_up = r.min_up.min(damaged_min_up);
+        }
         if !self.carried() {
             // The surviving root lands on its belly. Empty space where
             // the legs used to be is not a contact surface. Keep the
@@ -1637,7 +2247,10 @@ impl Motion {
         self.drive.vel = Fx::ZERO;
         self.drive.yaw_rate = 0;
         let moved = self.slide(w, rubble, b, others, response);
+        let previous_hull=self.hull;
         self.settle(w, rubble, b, gravity, response);
+        self.refresh_footing(w, rubble, b, changed);
+        if !self.rigs.is_empty() {let root=self.frame(b);self.fit_stance_height(w,rubble,b,previous_hull,&root,Fx::ZERO,V3::ZERO,0);}
         self.step_feet(w, rubble, b, moved, 0, Fx::ZERO);
     }
     /// Only the enclosing range can defer feet: it joins every job before
@@ -1656,6 +2269,36 @@ impl Motion {
     /// (ADR-279): the displacement, yaw step and phase advance of this
     /// tick, the terrain under each sole, and whether the hull carries
     /// load. A lost leg keeps its last state.
+    fn transition_sources(&self,ground:&mut nav::vehicle::Probe<'_>,proof:&mut TransitionProof,heads:[i32;2],shape:nav::vehicle::Shape) {
+        if self.rigs.is_empty() {ground.resolve_transition_sources(proof,heads,shape);return;}
+        proof.heads=heads;
+        if self.feet.len()>256 {proof.refuse(TransitionReason::Budget);return;}
+        for (leg,foot) in self.feet.iter().enumerate() {
+            if self.legs_lost[leg] || self.legs_buckled[leg] {continue;}
+            let Some(contact)=foot.contact else {continue;};let Some(source)=foot.support.source else {continue;};
+            let validity=ground.source_validity(source);
+            // The ankle is above the surface by the occupied sole's offset.
+            // Query its first supported probe (or an occupied probe while
+            // rejected), not the ankle and not a nominal hull corner.
+            let index=if foot.support.supported_mask==0 {0}else{foot.support.supported_mask.trailing_zeros() as usize};
+            let p=self.rigs[leg].sole.probes().get(index).copied().unwrap_or(V3::ZERO);
+            let axes=contact.axes();let at=contact.pos.add(axes[0].scale(p.x)).add(axes[1].scale(p.y)).add(axes[2].scale(p.z));
+            let query=std::cell::RefCell::new(&mut *ground);
+            proof.sources.push(nav::vehicle::support::Surface::sample(&query,at.x,at.y,at.z));
+            proof.soles.push(nav::vehicle::transition::SoleEvidence {leg,at:[contact.pos.x,contact.pos.y,contact.pos.z],probe_at:[at.x,at.y,at.z],source,
+                signature:foot.support.signature,supported_mask:foot.support.supported_mask,samples:foot.support.samples,
+                planted:foot.planted(),ready:foot.ready(),validity});
+        }
+        proof.sources_checked=true;
+    }
+
+    pub fn trace_anchors(&mut self, enabled:bool) {
+        if enabled {self.anchor_trace.get_or_insert_with(Default::default);}
+        else {self.anchor_trace=None;}
+    }
+    pub fn anchor_trace(&self)->Option<&crate::gait::AnchorTrace> {self.anchor_trace.as_deref()}
+    pub fn clear_anchor_trace(&mut self) {if let Some(t)=self.anchor_trace.as_deref_mut(){t.clear();}}
+
     fn step_feet(
         &mut self,
         w: &World,
@@ -1664,7 +2307,7 @@ impl Motion {
         linear: V3,
         angular: i32,
         cycles: Fx,
-    ) {
+        ) {
         let Some(g) = self.chassis.gait.as_ref() else {
             return;
         };
@@ -1683,60 +2326,918 @@ impl Motion {
         let gait = crate::gait::Gait::of(g);
         let root = self.frame(b);
         // A slow walk lifts less: the picture's rule, in per-second terms.
-        let lift_scale = cycles
-            .mul(Fx::from_int(crate::TICKS_PER_SECOND))
-            .mul(gait.stride)
-            .mul(Fx::from_int(4))
-            .div(Fx::from_int(self.speed.max(1)))
-            .min(Fx::ONE);
-        // A resting heap of debris is floor for a foot too (ADR-292).
+        let lift_scale = self.walking_lift(&gait,cycles);
+        // Reuse the motor's already invalidated, same-phase column pages.
+        // Store rubble-inclusive answers on both paths: bare foot queries
+        // must not poison the next motor query with a missing rubble top.
         let ground = std::cell::RefCell::new(nav::vehicle::Probe::for_search(
-            w,
-            &self.yielding,
-            Default::default(),
-        ));
-        let floor = |x: Fx, z: Fx| {
-            let (x, z) = (x.to_int_trunc(), z.to_int_trunc());
-            let top = rubble.get(&[x, z]).map_or(0, |t| i32::from(*t));
-            Fx::from_int(ground.borrow_mut().floor(x, z).max(top))
-        };
-        let stance = crate::gait::Stance {
-            grounded: self.hull.grounded(),
-            root: &root,
-            head: self.drive.head,
-            phase: self.phase,
-            lift_scale,
-            linear,
-            angular,
-            cycles,
-            gait: &gait,
-            floor: &floor,
-        };
-        for (((rig, foot), lost), buckled) in self
-            .rigs
-            .iter()
-            .zip(&mut self.feet)
-            .zip(&self.legs_lost)
-            .zip(&self.legs_buckled)
-        {
-            if *lost {
-                continue;
+            w, &self.yielding, std::mem::take(&mut self.terrain_columns),
+        ).with_rubble(rubble));
+        let ceiling = self.foot_ceiling(&root);
+        let profile=self.terrain_capability();
+        let share = profile.min_support_pct;
+        let carried = self.carried();
+        let lock_anchors=self.has_support_window();
+        let guided_biped=self.guided_biped(b);
+        let spread = Self::walking_spread(&root);
+        let grounded = self.hull.grounded();
+        let head = self.drive.head;
+        let phase = self.phase;
+        let fold_milli = self.fold_milli;
+        let side_guard = self.leg_side_guard;
+        let multilegged = self.rigs.len() > 4;
+        let prepared=self.prepared_feet.take().filter(|p|p.position==self.pos && p.head==head
+            && p.up==self.hull.up && p.phase==phase && p.step==FeetStep{linear,angular,cycles}
+            && lock_anchors && p.feet.len()==self.feet.len());
+        if let Some(prepared) = prepared {
+            self.feet = prepared.feet;
+            if let (Some(trace), Some(events)) = (self.anchor_trace.as_deref_mut(), prepared.trace) {
+                trace.append(events);
             }
-            if *buckled {
-                foot.fold(rig, &root, self.drive.head, self.fold_milli, &floor);
-            } else {
-                foot.step(rig, &stance);
-                if self.leg_side_guard && stance.grounded {
-                    let spread = if b.mm == 500 { Fx::ONE } else { Fx::from_ratio(6, 5) };
-                    foot.keep_walker_side(rig, &root, self.drive.head, spread, &floor);
+        } else {
+            with_motor_scratch(|scratch| {
+                let floor = |x: Fx, z: Fx| {
+                    scratch.floor_at(x, z, || ground.borrow_mut().foot_floor_cell(x, z, ceiling))
+                };
+                let stance = crate::gait::Stance {
+                    grounded,
+                    root: &root,
+                    head,
+                    phase,
+                    lift_scale,
+                    linear,
+                    angular,
+                    cycles,
+                    gait: &gait,
+                    floor: &floor,
+                };
+                let surface_memo = ScratchSurface { scratch, probe: &ground };
+                let alt_memo = crate::gait::AlternativeMemo::default();
+                Self::advance_walking_feet_memo(
+                    &self.rigs, &mut self.feet, &self.legs_lost,
+                    &self.legs_buckled, &stance, side_guard,
+                    share, carried, lock_anchors,
+                    spread, fold_milli, guided_biped, self.anchor_trace.as_deref_mut(),
+                    &surface_memo, profile, Some(&alt_memo),
+                );
+                if lock_anchors && multilegged {
+                    for (i, (rig, foot)) in self.rigs.iter().zip(&mut self.feet).enumerate() {
+                        if !self.legs_lost[i] && !self.legs_buckled[i] {
+                            let trace = self.anchor_trace.as_deref_mut();
+                            if let Some(t) = trace {
+                                t.leg = i;
+                                foot.clamp_arriving_reach(rig, &root, head, Some(t));
+                            } else {
+                                foot.clamp_arriving_reach(rig, &root, head, None);
+                            }
+                        }
+                    }
+                }
+                if !lock_anchors {
+                    let alt_memo2 = crate::gait::AlternativeMemo::default();
+                    for (i, (rig, foot)) in self.rigs.iter().zip(&mut self.feet).enumerate() {
+                        if !self.legs_lost[i] && !self.legs_buckled[i] {
+                            if let Some(t) = self.anchor_trace.as_deref_mut() {
+                                t.leg = i;
+                            }
+                            foot.reproject_stance_traced(
+                                rig, &root, head, &floor, multilegged, self.anchor_trace.as_deref_mut(),
+                            );
+                            if foot.planted()
+                                && (foot.support.readiness == crate::gait::Readiness::Pending
+                                    || foot.contact.is_some_and(|c| {
+                                        let d = c.pos.sub(root.base);
+                                        !rig.contact_reachable(V3::new(
+                                            d.dot(root.x),
+                                            d.dot(root.y),
+                                            d.dot(root.z),
+                                        ))
+                                    }))
+                            {
+                                foot.assess_support_memo(
+                                    rig, &root, head, &surface_memo, &floor, profile,
+                                    gait.lift.mul(lift_scale), false, Some(&alt_memo2),
+                                    self.anchor_trace.as_deref_mut(),
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        self.terrain_columns = ground.into_inner().take_columns();
+        self.cut_feet(w, b);
+    }
+
+    // A recovery tripod is admitted by geometry, never by lowering the
+    // ordinary gait's support count. Keep a full occupied-cell margin.
+    fn support_triangle(feet:&[crate::gait::Foot],root:&crate::damage::Frame,exclude:Option<usize>)->bool {
+        let points:Vec<_>=feet.iter().enumerate().filter(|(i,f)|Some(*i)!=exclude && f.ready())
+            .filter_map(|(_,f)|f.contact.map(|c|c.pos)).collect();
+        if points.len()<3 || points.len()>9 {return false;}
+        let margin=Fx::ONE.div(root.scale);
+        let cross=|a:V3,b:V3,p:V3|b.x.sub(a.x).mul(p.z.sub(a.z)).sub(b.z.sub(a.z).mul(p.x.sub(a.x)));
+        for a in 0..points.len() {for b in a+1..points.len() {for c in b+1..points.len() {
+            let triangle=[points[a],points[b],points[c]];
+            let mut sign=0;let mut valid=true;
+            for i in 0..3 {
+                let (a,b)=(triangle[i],triangle[(i+1)%3]);
+                let side=cross(a,b,root.base);
+                let edge=V3::new(b.x.sub(a.x),Fx::ZERO,b.z.sub(a.z)).len_sq().sqrt();
+                let current=side.raw().signum();
+                if side.abs()<=margin.mul(edge) || sign!=0 && current!=sign {valid=false;break;}
+                sign=current;
+            }
+            if valid {return true;}
+        }}}
+        false
+    }
+
+    /// Shared by motor support preview and the deferred articulation phase.
+    /// Previewing the same liftoff decisions prevents a departing foot from
+    /// pulling the hull down immediately before its swing starts.
+    #[cfg(test)]
+    fn advance_walking_feet(rigs: &[crate::gait::LegRig], feet: &mut [crate::gait::Foot],
+        lost: &[bool], buckled: &[bool], stance: &crate::gait::Stance<'_>,
+        side_guard: bool, share: i32, carried: bool, lock_anchors: bool, spread: Fx, fold_milli: u32, guided_biped: bool,
+        trace:Option<&mut crate::gait::AnchorTrace>,surface:&dyn nav::vehicle::support::Surface,profile:modding::walking_terrain::Capability) {
+        Self::advance_walking_feet_memo(rigs,feet,lost,buckled,stance,side_guard,share,carried,lock_anchors,spread,fold_milli,guided_biped,trace,surface,profile,None);
+    }
+
+    fn advance_walking_feet_memo(rigs: &[crate::gait::LegRig], feet: &mut [crate::gait::Foot],
+        lost: &[bool], buckled: &[bool], stance: &crate::gait::Stance<'_>,
+        side_guard: bool, share: i32, carried: bool, lock_anchors: bool, spread: Fx, fold_milli: u32, guided_biped: bool,
+        trace:Option<&mut crate::gait::AnchorTrace>,surface:&dyn nav::vehicle::support::Surface,profile:modding::walking_terrain::Capability,
+        alt_memo:Option<&crate::gait::AlternativeMemo>) {
+        // Stock rigs have at most eight legs. Only the live prefix is read;
+        // large authored rigs retain the original 256-slot implementation.
+        if rigs.len()<=8 {
+            Self::advance_walking_feet_sized_memo::<8>(rigs,feet,lost,buckled,stance,side_guard,share,carried,lock_anchors,spread,fold_milli,guided_biped,trace,surface,profile,alt_memo);
+        } else {
+            Self::advance_walking_feet_sized_memo::<256>(rigs,feet,lost,buckled,stance,side_guard,share,carried,lock_anchors,spread,fold_milli,guided_biped,trace,surface,profile,alt_memo);
+        }
+    }
+
+    #[cfg(test)]
+    fn advance_walking_feet_sized<const N:usize>(rigs: &[crate::gait::LegRig], feet: &mut [crate::gait::Foot],
+        lost: &[bool], buckled: &[bool], stance: &crate::gait::Stance<'_>,
+        side_guard: bool, share: i32, carried: bool, lock_anchors: bool, spread: Fx, fold_milli: u32, guided_biped: bool,
+        trace:Option<&mut crate::gait::AnchorTrace>,surface:&dyn nav::vehicle::support::Surface,profile:modding::walking_terrain::Capability) {
+        Self::advance_walking_feet_sized_memo::<N>(rigs,feet,lost,buckled,stance,side_guard,share,carried,lock_anchors,spread,fold_milli,guided_biped,trace,surface,profile,None);
+    }
+
+    fn advance_walking_feet_sized_memo<const N:usize>(rigs: &[crate::gait::LegRig], feet: &mut [crate::gait::Foot],
+        lost: &[bool], buckled: &[bool], stance: &crate::gait::Stance<'_>,
+        side_guard: bool, share: i32, carried: bool, lock_anchors: bool, spread: Fx, fold_milli: u32, guided_biped: bool,
+        mut trace:Option<&mut crate::gait::AnchorTrace>,surface:&dyn nav::vehicle::support::Surface,profile:modding::walking_terrain::Capability,
+        alt_memo:Option<&crate::gait::AlternativeMemo>) {
+        if lock_anchors && stance.cycles==Fx::ZERO && stance.linear==V3::ZERO && stance.angular==0
+            && feet.iter().all(|f|f.ready()) {
+            for foot in feet {foot.rebase(stance.root,stance.head);}
+            return;
+        }
+        // Two-legged walkers must finish existing swings before admitting a
+        // new lift. Independent urgent/lane starts otherwise overlap even when
+        // duty > 50%. This is O(legs), uses saved Foot state, and never gates
+        // a route. The same decisions are previewed before body admission.
+        let biped = side_guard && rigs.len() == 2;
+        let carrying=if guided_biped {crate::gait::Foot::departure_share()}else{Fx::ONE};
+        // Reserve the existing biped placement width when choosing lift
+        // deadlines and future footholds. Keep authored/saved rigs unchanged:
+        // this local plan never refits an already planted world contact.
+        let biped_rigs = (guided_biped && lock_anchors).then(|| std::array::from_fn::<_,2,_>(|i| {
+            let mut rig=rigs[i].clone();
+            let side=rig.ankle.z.abs().mul(spread);
+            if rig.ankle.z<Fx::ZERO {rig.lane.max[1]=rig.lane.max[1].min(side.neg());}
+            else {rig.lane.min[1]=rig.lane.min[1].max(side);}
+            rig
+        }));
+        let rigs=biped_rigs.as_ref().map_or(rigs,|planned|planned.as_slice());
+        let healthy = lost.iter().zip(buckled).filter(|(a,b)| !**a && !**b).count();
+        let coordinated = carried && rigs.len() <= 256 &&
+            (biped || rigs.len() >= 4 && share > 0);
+        let minimum = if biped {1} else {(healthy * share as usize / 100).max(1)};
+        let can_recover=coordinated && rigs.len()>4 && healthy==rigs.len() && minimum==4;
+        let mut immediate_blocked=false;
+        let mut has_landing_goal=false;
+        let mut landing_feet:[Option<crate::gait::Foot>;N]=std::array::from_fn(|_|None);
+        let mut pre_contacts=[None::<crate::gait::Contact>;N];
+        if can_recover {
+            for (idx,foot) in feet.iter().enumerate() {
+                if foot.next_landing(stance.gait,stance.cycles).is_some_and(|t|t<=Fx::ONE) {
+                    if foot.support.readiness==crate::gait::Readiness::Rejected {
+                        immediate_blocked=true;
+                        break;
+                    }
+                    landing_feet[idx]=Some(foot.clone());
+                    has_landing_goal=true;
+                }
+            }
+            if immediate_blocked || has_landing_goal {
+                for (idx,foot) in feet.iter().enumerate() {
+                    if foot.planted() {
+                        pre_contacts[idx]=foot.contact;
+                    }
                 }
             }
         }
-        self.cut_feet(w, b);
+        let mut recovery_allowed:Option<bool>=None;
+        let mut advanced = [false; N];
+        if coordinated {
+            for (i, ((rig, foot), (lost, buckled))) in rigs.iter().zip(feet.iter_mut())
+                .zip(lost.iter().zip(buckled)).enumerate() {
+                if !*lost && !*buckled && !foot.planted() {
+                    if let Some(t)=trace.as_deref_mut(){t.leg=i;}
+                    let initial=foot.contact.is_none();
+                    if side_guard && stance.grounded && lock_anchors && !initial {
+                        foot.fit_walker_landing_side(rig,stance,spread,guided_biped,trace.as_deref_mut());
+                    }
+                    foot.step_ready_traced_memo(rig, stance, false, false, lock_anchors,carrying,surface,profile,alt_memo,trace.as_deref_mut());
+                    if side_guard && stance.grounded {
+
+                        if lock_anchors && !initial {
+                        foot.fit_walker_landing_side(rig,stance,spread,guided_biped,trace.as_deref_mut());
+                    } else {
+                        foot.keep_walker_side_traced(rig, stance.root, stance.head, spread, stance.floor,false,initial,trace.as_deref_mut());
+                    }
+                    }
+                    if foot.planted() {
+                        foot.assess_support_memo(rig,stance.root,stance.head,surface,stance.floor,profile,stance.gait.lift.mul(stance.lift_scale),false,alt_memo,trace.as_deref_mut());
+                    }
+                    advanced[i] = true;
+                }
+            }
+        }
+        let mut supports = feet.iter().enumerate().filter(|(i, f)|
+            !lost[*i] && !buckled[*i] && f.ready()).count();
+        let mut quadrant=[0usize;4];let mut quadrant_legs=[0usize;4];
+        if coordinated && rigs.len()>4 {
+            for (i,(rig,foot)) in rigs.iter().zip(feet.iter()).enumerate() {
+                if !lost[i] && !buckled[i] {
+                    quadrant_legs[rig.support.min(3)]+=1;
+                    quadrant[rig.support.min(3)]+=usize::from(foot.ready());
+                }
+            }
+        }
+        // Admit the earliest geometric deadline first, with the leg index
+        // breaking ties. A boolean 'urgent' is insufficient: two legs may
+        // both need a step within a swing, but only one runs out of lane now.
+        let mut order=std::array::from_fn::<_,N,_>(|i|i);
+        if coordinated && (!biped || guided_biped) {
+            let mut deadlines=[Fx::MAX;N];
+            for (i,(rig,foot)) in rigs.iter().zip(feet.iter()).enumerate() {
+                deadlines[i]=foot.lift_deadline(rig,stance,Fx::from_ratio(profile.stance_reach_pct,100));
+                if guided_biped {deadlines[i]=deadlines[i].min(foot.heading_deadline(stance));}
+            }
+            order[..rigs.len()].sort_unstable_by_key(|&i|(deadlines[i],i));
+        }
+        let cohorts=coordinated && rigs.len()==4 && healthy==4 && minimum==2;
+        let mut paired=[false;N];
+        if cohorts && supports==4 {
+            for &i in &order[..4] {
+                if advanced[i] || !feet[i].requests_step(&rigs[i],stance,Fx::from_ratio(profile.stance_reach_pct,100)) {continue;}
+                let partner=(0..4).find(|&j|j!=i && !advanced[j]
+                    && rigs[i].hip.x.mul(rigs[j].hip.x)<Fx::ZERO
+                    && rigs[i].hip.z.mul(rigs[j].hip.z)<Fx::ZERO);
+                if let Some(j)=partner {paired[i]=true;paired[j]=true;break;}
+            }
+        }
+        for slot in 0..rigs.len() {
+            let i=if coordinated {order[slot]} else {slot};
+            if let Some(t)=trace.as_deref_mut(){t.leg=i;}
+            if lost[i] {
+                continue;
+            }
+            if buckled[i] {
+                feet[i].fold(&rigs[i], stance.root, stance.head, fold_milli, stance.floor);
+            } else {
+                if coordinated && advanced[i] { continue; }
+                // With four healthy legs, the final pair must span both axes.
+                // Two adjacent feet meet the count but leave the opposite side
+                // without a stance while the hull turns over it.
+                let balanced_pair = if coordinated && rigs.len() == 4 && healthy == 4 && supports == 3 {
+                    let mut remaining = rigs.iter().zip(feet.iter()).enumerate()
+                        .filter(|(j, (_, f))| *j != i && f.ready()).map(|(_, (r, _))| r);
+                    match (remaining.next(), remaining.next()) {
+                        (Some(a), Some(b)) => a.hip.x.mul(b.hip.x) < Fx::ZERO
+                            && a.hip.z.mul(b.hip.z) < Fx::ZERO,
+                        _ => false,
+                    }
+                } else { true };
+                let recovery=can_recover && supports==minimum
+                    && (immediate_blocked || has_landing_goal)
+                    && Self::support_triangle(feet,stance.root,Some(i))
+                    && *recovery_allowed.get_or_insert_with(|| {
+                        let blocked=immediate_blocked || rigs.iter().zip(&landing_feet[..rigs.len()]).any(|(rig,f)| {
+                            f.as_ref().is_some_and(|foot| foot.blocked_landing(rig,stance))
+                        });
+                        if !blocked {return false;}
+                        let mut low=Fx::MAX;let mut high=Fx::MIN;
+                        for (rig,c) in rigs.iter().zip(&pre_contacts[..rigs.len()]) {
+                            if let Some(c)=c {
+                                let axes=c.axes();
+                                let top=rig.sole.probes().iter().map(|p| {
+                                    let at=c.pos.add(axes[0].scale(p.x)).add(axes[1].scale(p.y)).add(axes[2].scale(p.z));
+                                    (stance.floor)(at.x,at.z)
+                                }).max().unwrap_or(c.pos.y);
+                                low=low.min(top);high=high.max(top);
+                            }
+                        }
+                        high>low && high.sub(low)>Fx::ONE.div(stance.root.scale)
+                    });
+                let rig=&rigs[i];let foot=&mut feet[i];
+                let was_planted = foot.planted();
+                let was_ready=foot.ready();
+                let was_contact=foot.contact;
+                let initial=foot.contact.is_none();
+                let group=rig.support.min(3);
+                let keep_quadrant=rigs.len()>4 && quadrant_legs[group]>1;
+                let allow=!coordinated || recovery || supports > minimum && balanced_pair
+                    && (!keep_quadrant || quadrant[group]>1) && (!cohorts || paired[i]);
+                if side_guard && stance.grounded && lock_anchors && !initial {
+                    foot.fit_walker_landing_side(rig,stance,spread,guided_biped,trace.as_deref_mut());
+                }
+                foot.step_ready_traced_memo(rig,stance,allow,cohorts && paired[i],lock_anchors,carrying,surface,profile,alt_memo,trace.as_deref_mut());
+                if initial && side_guard && stance.grounded {
+                    foot.keep_walker_side_traced(rig,stance.root,stance.head,spread,stance.floor,false,true,trace.as_deref_mut());
+                }
+                if foot.planted() && (!was_planted || foot.support.readiness==crate::gait::Readiness::Pending) {
+                    foot.assess_support_memo(rig,stance.root,stance.head,surface,stance.floor,profile,stance.gait.lift.mul(stance.lift_scale),false,alt_memo,trace.as_deref_mut());
+                }
+                if coordinated && was_ready && !foot.ready() {
+                    if recovery {if let (Some(t),Some(c))=(trace.as_deref_mut(),foot.contact) {
+                        t.record(crate::gait::AnchorReason::SupportRecovery,was_contact,c,Some(c),true,false);
+                    }}
+                    supports -= 1;
+                    if keep_quadrant {quadrant[group]-=1;}
+                }
+                if side_guard && stance.grounded && !initial {
+
+                    if lock_anchors && !initial {
+                        foot.fit_walker_landing_side(rig,stance,spread,guided_biped,trace.as_deref_mut());
+                    } else {
+                        foot.keep_walker_side_traced(rig, stance.root, stance.head, spread, stance.floor,false,initial,trace.as_deref_mut());
+                    }
+                }
+                if coordinated && !was_ready && foot.ready() {supports+=1;if keep_quadrant {quadrant[group]+=1;}}
+                if coordinated {advanced[i]=true;}
+            }
+        }
+    }
+
+    fn terrain_capability(&self) -> modding::walking_terrain::Capability {
+        let profiles = &stock_packs().walking_terrain;
+        if self.rigs.len() > 4 {profiles.spider}
+        else if self.rigs.len() >= 4 {profiles.multiped} else {profiles.biped}
+    }
+
+    fn foot_ceiling(&self, root: &crate::damage::Frame) -> Fx {
+        self.rigs.iter().map(|r| root.base.y
+            .add(root.x.y.mul(r.hip.x)).add(root.y.y.mul(r.hip.y)).add(root.z.y.mul(r.hip.z)))
+            .max().unwrap_or(root.base.y)
+    }
+
+    fn has_support_window(&self)->bool {
+        (self.leg_side_guard && self.rigs.len()==2
+            || self.rigs.len()>=4 && self.terrain_capability().min_support_pct>=50)
+            && self.carried() && self.hull.grounded() && self.shove==V3::ZERO
+            && !self.legs_lost.iter().any(|v|*v) && !self.legs_buckled.iter().any(|v|*v)
+    }
+
+    fn guided_biped(&self,b:&UnitBody)->bool {
+        self.leg_side_guard && self.walker_turn_guard && b.mm!=500
+    }
+
+    fn walking_spread(root:&crate::damage::Frame)->Fx {
+        if root.scale==Fx::from_ratio(500,i32::from(voxel::unit::WORLD_MM)) {Fx::ONE}
+        else {Fx::from_ratio(6,5)}
+    }
+
+    fn walking_lift(&self,gait:&crate::gait::Gait,cycles:Fx)->Fx {
+        cycles.mul(Fx::from_int(TICKS)).mul(gait.stride).mul(Fx::from_int(4))
+            .div(Fx::from_int(self.speed.max(1))).min(Fx::ONE)
+    }
+
+    /// Motor prediction and committed articulation use the same turning
+    /// cadence, including the large biped's geometry-derived turn steps.
+    fn walking_advance(&self,c:drive::StepCycle,b:&UnitBody,path:Fx,yaw:i32)->i32 {
+        let mut advanced=c.advance(path,yaw);
+        if self.walker_turn_guard {
+            if b.mm==500 {
+                let step=super::walker::tuning().turn_step_degrees;
+                let turning=(i64::from(yaw.abs())*360/i64::from(step))as i32;
+                advanced=advanced.max(turning);
+            } else {
+                advanced=advanced.saturating_add(c.advance(Fx::ZERO,yaw).saturating_mul(2));
+            }
+        }
+        advanced
+    }
+
+    /// Check the support window before publishing a translated/turned hull.
+    /// Feet may finish or start their coordinated step at this pose, but a
+    /// surviving stance must fit the leg reach and its motor height window.
+    fn walking_motion_fits(&self,b:&UnitBody,at:[Fx;3],head:i32,body_yaw:i32,linear:V3,angular:i32,advanced:i32,
+        window:SupportForecast,floor:&dyn Fn(Fx,Fx)->Fx,surface:&dyn nav::vehicle::support::Surface,support_floor:&dyn Fn([Fx;2],i32)->[Fx;4],
+        alt_memo:Option<&crate::gait::AlternativeMemo>)->Result<(),TransitionReason> {
+        let velocity=V3::new(at[0].sub(self.pos[0]),Fx::ZERO,at[2].sub(self.pos[2])).scale(Fx::from_int(TICKS));
+        let mut hull=self.walking_ride_preview(self.hull,[at[0],at[2]],head,velocity,window.previous_velocity,window,support_floor);
+        let mut root=crate::damage::Frame::new(b,V3::new(at[0],hull.y.sub(crate::ride::ride_of(&self.chassis).clearance),at[2]),head,hull.up);
+        let Some(g)=self.chassis.gait.as_ref() else {return Ok(());};
+        let gait=crate::gait::Gait::of(g);
+        let stance=crate::gait::Stance {grounded:true,root:&root,head,
+            phase:angle::norm(self.phase.wrapping_add(advanced)),lift_scale:self.walking_lift(&gait,Fx::from_ratio(advanced,angle::FULL)),
+            linear,angular,cycles:Fx::from_ratio(advanced,angle::FULL),gait:&gait,floor};
+        let mut feet=FeetScratch::from_slice(&self.feet);
+        Self::advance_walking_feet_memo(&self.rigs,&mut feet,&self.legs_lost,&self.legs_buckled,
+            &stance,self.leg_side_guard,self.terrain_capability().min_support_pct,true,true,
+            Self::walking_spread(&root),self.fold_milli,self.guided_biped(b),None,surface,self.terrain_capability(),alt_memo);
+        if !self.constrain_walking_pose(b,head,self.hull,&feet,&mut hull,&mut root) {return Err(TransitionReason::LandingRejected);}
+        for f in feet.iter_mut() {f.rebase(&root,head);}
+        let stance=crate::gait::Stance {grounded:true,root:&root,head,
+            phase:angle::norm(self.phase.wrapping_add(advanced)),lift_scale:self.walking_lift(&gait,Fx::from_ratio(advanced,angle::FULL)),
+            linear,angular,cycles:Fx::from_ratio(advanced,angle::FULL),gait:&gait,floor};
+        let lane_tolerance=if self.rigs.len()==4 {Fx::from_ratio(i32::from(b.mm),i32::from(voxel::unit::WORLD_MM))}else{Fx::from_ratio(1,1000)};
+        let mut supports=0;
+        for (rig,foot) in self.rigs.iter().zip(&feet) {
+            let Some(c)=foot.contact else {continue;};
+            // An airborne ankle still has a yaw joint. The body must not
+            // outrun its actual swing pose; fixed stance contacts never turn.
+            if self.guided_biped(b)
+                && (self.pilot.is_some_and(|p|p!=[0,0]) || self.destination.is_some())
+                && angle::diff(c.head,head).abs()>crate::gait::Foot::heading_limit() {
+                return Err(TransitionReason::Lane);
+            }
+            if !foot.planted() && !foot.departing() {continue;}
+            let d=c.pos.sub(root.base);
+            let local=V3::new(d.dot(root.x),d.dot(root.y),d.dot(root.z));
+            // Height fitting has already spent its bounded travel. Validate
+            // the executed joint target; do not grant that travel a second time.
+            if !rig.contact_reachable(local) {return Err(TransitionReason::Reach);}
+            if foot.planted() && body_yaw!=0 && rig.lane_target(local).sub(local).len_sq()>lane_tolerance.mul(lane_tolerance) {return Err(TransitionReason::Lane);}
+            supports+=usize::from(foot.ready());
+        }
+        let mut minimum=if self.leg_side_guard && self.rigs.len()==2 {1}
+            else {self.rigs.len()*self.terrain_capability().min_support_pct as usize/100};
+        if supports==3 && self.rigs.len()>4 && minimum==4 && Self::support_triangle(&feet,&root,None) {minimum=3;}
+        if supports<minimum {return Err(TransitionReason::WindowUnready);}
+        if window.turning {
+            // Strider lanes are placement/lift-order targets. Its existing
+            // touchdown solver admits physically reachable contacts outside
+            // them after tilt/yaw; they must not be refitted as stance anchors.
+            // The coordinator orders lifts by lane/reach deadline. A four-leg
+            // cohort needs the returning diagonal, not the first lone ankle.
+            let times=feet.iter().filter_map(|f|f.next_landing(&gait,stance.cycles));
+            let landing=if self.rigs.len()==4 {times.max()}else{times.min()}.unwrap_or(Fx::ONE);
+            if let Err(err) = self.braking_support_window(b,&root,&feet,minimum,landing,window,&stance,hull,surface,support_floor,alt_memo,true) {
+                self.braking_support_window(b,&root,&feet,minimum,landing,window,&stance,hull,surface,support_floor,alt_memo,false).map_err(|_| err)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn walking_ride_preview(&self,mut hull:phys::Chassis,at:[Fx;2],head:i32,
+        velocity:V3,previous:V3,window:SupportForecast,
+        support_floor:&dyn Fn([Fx;2],i32)->[Fx;4])->phys::Chassis {
+        let f=support_floor(at,head);let floors=[f[3],f[1],f[2],f[0]];
+        let nominal=crate::ride::supports_of(&self.chassis);
+        let legs=self.leg_supports(&nominal,&floors);
+        let (supports,ground)=legs.as_ref().map_or((nominal.as_slice(),floors.as_slice()),SupportSet::slices);
+        let acceleration=velocity.sub(previous).scale(Fx::from_int(TICKS));
+        let peak=acceleration.x.abs().max(acceleration.z.abs()).max(window.ride.gravity);
+        let share=Fx::from_ratio(i32::from(self.chassis.gait.map_or(0,|g|g.body_sway_pct)),100);
+        let sway=if window.balance && peak>Fx::ZERO {acceleration.scale(share.mul(window.ride.gravity.div(peak)))}else{V3::ZERO};
+        phys::step(&mut hull,supports,ground,crate::ride::heading_of(head),sway,&window.ride,Fx::from_ratio(1,TICKS));
+        hull
+    }
+
+    /// Existence of a bounded continuation, not a constant-speed demand.
+    /// All hypothetical ticks use the installed transmission and immutable
+    /// current contacts. No neighbour pose or actual foot state is changed.
+    fn braking_support_window(&self,b:&UnitBody,root:&crate::damage::Frame,feet:&[crate::gait::Foot],
+        minimum:usize,landing:Fx,window:SupportForecast,stance:&crate::gait::Stance<'_>,mut hull:phys::Chassis,surface:&dyn nav::vehicle::support::Surface,support_floor:&dyn Fn([Fx;2],i32)->[Fx;4],alt_memo:Option<&crate::gait::AlternativeMemo>,brake_linear:bool)->Result<(),TransitionReason> {
+        let span=landing.to_int_trunc()+i32::from(landing.raw()&0xffff_ffff!=0);
+        let brake=window.limits.brake.mul(window.factor);
+        if window.drive.vel.abs()>brake.mul(Fx::from_int(80)) {return Err(TransitionReason::SpeedBound);}
+        let linear_stop=if window.drive.vel==Fx::ZERO {0} else if brake>Fx::ZERO {
+            let t=window.drive.vel.abs().div(brake);t.to_int_trunc()+i32::from(t.raw()&0xffff_ffff!=0)
+        } else {return Err(TransitionReason::NoBrake);};
+        let alpha=window.limits.turn_acc.mul(window.factor).to_int_trunc().max(1);
+        let yaw_stop=(window.drive.yaw_rate.abs() + alpha - 1) / alpha;
+        let ticks=span.max(linear_stop).max(yaw_stop).max(1);
+        if ticks>80 || self.rigs.len()>256 {return Err(TransitionReason::TickBound);}
+        let mut incoming_buf=[0usize;256];let mut incoming_len=0;
+        for (i,f) in feet.iter().enumerate() {if !f.ready() {incoming_buf[incoming_len]=i;incoming_len+=1;}}
+        let incoming=&incoming_buf[..incoming_len];
+        let mut preview=FeetScratch::from_slice(feet);
+        let mut position=root.base;let mut drive=window.drive;let mut phase=stance.phase;
+        let direction=window.direction.unwrap_or([angle::cos(drive.head),angle::sin(drive.head)]);
+        let mut previous_velocity=V3::new(direction[0].mul(drive.vel),Fx::ZERO,direction[1].mul(drive.vel));
+        let cycle=drive::StepCycle::of(&self.chassis);
+        let p=self.terrain_capability();
+        for _ in 0..80 {
+            let factor = self.drive_scale.mul(self.traction_load(hull.load));
+            let (next, mut movement) = drive::advance(
+                drive,
+                if brake_linear {
+                    drive::NO_WAY
+                } else {
+                    drive.head
+                },
+                if brake_linear { Fx::ZERO } else { drive.vel },
+                &window.limits,
+                factor,
+                Fx::from_ratio(1, TICKS),
+            );
+            if let Some(direction)=window.direction {
+                let travel=next.vel.div(Fx::from_int(TICKS));
+                movement.dx=direction[0].mul(travel);movement.dz=direction[1].mul(travel);
+            }
+            let linear=V3::new(movement.dx,Fx::ZERO,movement.dz);
+            let angular=angle::diff(next.head,drive.head);
+            let advanced=cycle.map_or(0,|c|
+                self.walking_advance(c,b,linear.len_sq().sqrt(),angular)).max(window.intent.map_or(0,|(_,_,c)|c));
+            phase=angle::norm(phase.wrapping_add(advanced));
+            position=position.add(linear);drive=next;
+            let velocity=linear.scale(Fx::from_int(TICKS));
+            let previous_hull=hull;
+            hull=self.walking_ride_preview(hull,[position.x,position.z],drive.head,velocity,previous_velocity,window,support_floor);
+            previous_velocity=velocity;position.y=hull.y.sub(crate::ride::ride_of(&self.chassis).clearance);
+            let mut pose=crate::damage::Frame::new(b,position,drive.head,hull.up);
+            let cycles=Fx::from_ratio(advanced,angle::FULL);
+            let (foot_linear,foot_yaw)=window.intent.map_or((linear,angular),|(l,a,_)|(l,a));
+            let future=crate::gait::Stance {root:&pose,head:drive.head,phase,linear:foot_linear,angular:foot_yaw,cycles,
+                lift_scale:self.walking_lift(stance.gait,cycles),..*stance};
+            Self::advance_walking_feet_memo(&self.rigs,&mut preview,&self.legs_lost,&self.legs_buckled,
+                &future,self.leg_side_guard,p.min_support_pct,true,true,Self::walking_spread(&pose),self.fold_milli,self.guided_biped(b),None,surface,self.terrain_capability(),alt_memo);
+            if !self.constrain_walking_pose(b,drive.head,previous_hull,&preview,&mut hull,&mut pose) {
+                for (rig,foot) in self.rigs.iter().zip(&preview) {
+                    if !foot.planted() && !foot.departing() {continue;}
+                    let Some(c)=foot.contact else {continue;};
+                    let d=c.pos.sub(pose.base);
+                    let local=V3::new(d.dot(pose.x),d.dot(pose.y),d.dot(pose.z));
+                    if !rig.contact_reachable(local) {
+                        let hip=pose.base.add(pose.x.scale(rig.hip.x)).add(pose.y.scale(rig.hip.y)).add(pose.z.scale(rig.hip.z));
+                        let dx=c.pos.x.sub(hip.x);let dz=c.pos.z.sub(hip.z);
+                        let far=rig.l1.add(rig.l2).mul(Fx::from_ratio(999,1000));
+                        let span=dx.mul(dx).add(dz.mul(dz))>far.mul(far);
+                        return Err(match (foot.departing(),span) {(true,true)=>TransitionReason::DepartingSpan,(true,false)=>TransitionReason::DepartingHeight,
+                            (false,true)=>TransitionReason::StanceSpan,(false,false)=>TransitionReason::StanceHeight});
+                    }
+                }
+                return Err(TransitionReason::VerticalStep);
+            }
+            position.y=pose.base.y;
+            for f in preview.iter_mut() {f.rebase(&pose,drive.head);}
+            let mut count=0;let mut groups=[0usize;4];let mut pair=[None;2];
+            for (rig,foot) in self.rigs.iter().zip(&preview) {
+                if !foot.planted() && !foot.departing() {continue;}
+                let Some(c)=foot.contact else {continue;};
+                let d=c.pos.sub(pose.base);
+                let local=V3::new(d.dot(pose.x),d.dot(pose.y),d.dot(pose.z));
+                let reachable=rig.contact_reachable(local);
+                let eps=if self.rigs.len()==4 {Fx::from_ratio(i32::from(b.mm),i32::from(voxel::unit::WORLD_MM))}else{Fx::from_ratio(1,1000)};
+                if !reachable || foot.planted() && (window.drive.yaw_rate!=0 || window.intent.is_some_and(|(_,yaw,_)|yaw!=0)) && rig.lane_target(local).sub(local).len_sq()>eps.mul(eps) {return Err(TransitionReason::ReachLane);}
+                if foot.ready() {
+                    if count<2 {pair[count]=Some(rig);}
+                    count+=1;groups[rig.support.min(3)]+=1;
+                }
+            }
+            if count<minimum || self.rigs.len()>4 && groups.iter().any(|&n|n==0)
+                && !Self::support_triangle(&preview,&pose,None) {return Err(TransitionReason::WindowUnready);}
+            if self.rigs.len()==4 && count==2 {
+                let (a,b)=(pair[0].unwrap(),pair[1].unwrap());
+                if a.hip.x.mul(b.hip.x)>=Fx::ZERO || a.hip.z.mul(b.hip.z)>=Fx::ZERO {return Err(TransitionReason::Diagonal);}
+            }
+            let ready=if self.rigs.len()==4 {
+                !incoming.is_empty() && incoming.iter().all(|&i|preview[i].ready())
+            } else {incoming.iter().any(|&i|preview[i].ready())};
+            if !brake_linear && (ready || incoming.is_empty() && drive.yaw_rate==0) {
+                let continuation=crate::gait::Stance {root:&pose,head:drive.head,phase,linear:foot_linear,angular:foot_yaw,cycles,
+                    lift_scale:self.walking_lift(stance.gait,cycles),..*stance};
+                return self.braking_support_window(
+                    b,
+                    &pose,
+                    &preview,
+                    minimum,
+                    Fx::ONE,
+                    SupportForecast {
+                        drive,
+                        factor: self.drive_scale.mul(self.traction_load(hull.load)),
+                        ..window
+                    },
+                    &continuation,
+                    hull,
+                    surface,
+                    support_floor,
+                    alt_memo,
+                    true,
+                );
+            }
+            // With no incoming cohort, yaw at rest closes the rolling window.
+            // The second continuation instead proves a complete bounded stop.
+            if brake_linear && drive.yaw_rate==0 && drive.vel==Fx::ZERO {return Ok(());}
+            if drive.yaw_rate==0 && drive.vel==Fx::ZERO && advanced==0
+                && hull.y==previous_hull.y && hull.vy==previous_hull.vy
+                && hull.up==previous_hull.up && hull.w==previous_hull.w
+                && hull.load==previous_hull.load && preview.iter().all(crate::gait::Foot::planted) {
+                break;
+            }
+        }
+
+        Err(TransitionReason::NoHandoff)
+    }
+
+    /// A support reaction constrains the physical chassis before publication.
+    /// Fixed world contacts never move: spend suspension travel and, only when
+    /// necessary, dissipate this tick's tilt increment. Admission, lookahead
+    /// and execution use this identical bounded constraint.
+    fn constrain_walking_pose(&self,b:&UnitBody,head:i32,previous:phys::Chassis,
+        feet:&[crate::gait::Foot],hull:&mut phys::Chassis,root:&mut crate::damage::Frame)->bool {
+        let protected=|i:usize| !self.legs_lost[i] && !self.legs_buckled[i]
+            && (feet[i].planted() || feet[i].departing());
+        let ride=crate::ride::ride_of(&self.chassis);
+        let bound=if self.rigs.len()==4 { Fx::from_ratio(i32::from(b.mm),2*i32::from(voxel::unit::WORLD_MM)) }
+            else {ride.travel.mul(Fx::from_ratio(self.terrain_capability().stance_drop_pct,100))};
+        let reachable=|pose:&crate::damage::Frame| self.rigs.iter().enumerate().all(|(i,rig)| {
+            if !protected(i) {return true;}
+            feet[i].contact.is_none_or(|c| {
+                let d=c.pos.sub(pose.base);
+                rig.contact_reachable(V3::new(d.dot(pose.x),d.dot(pose.y),d.dot(pose.z)))
+            })
+        });
+        let previous_y=previous.y.sub(ride.clearance);
+        if reachable(root) {return true;}
+        let raw=*root;let mut best:Option<(Fx,usize,crate::damage::Frame,V3,Fx)>=None;
+        // Preserve ordinary spring fitting first. If that interval has no safe
+        // pose, a grounded four-legged chassis may retain its previous height.
+        // Reaction stays inside installed travel and the published step budget;
+        // this does not move contacts or grant an instantaneous full-travel snap.
+        let reaction=ride.travel.mul(Fx::from_ratio(self.terrain_capability().stance_drop_pct,100));
+        for retain in [false,true] {
+            if retain && self.rigs.len()!=4 {break;}
+            let centre=if retain {previous_y}else{raw.base.y};
+            let mut tried_up=[V3::ZERO;9];let mut up_count=0;
+            for index in 0..=8 {
+                let share=Fx::from_ratio(8-index as i32,8);
+                let trial=previous.up.add(hull.up.sub(previous.up).scale(share));
+                let n=trial.len_sq();if n<=Fx::ZERO {continue;}
+                let up=trial.scale(Fx::ONE.div(n.sqrt()));
+                // Equal normalized tilt repeats the same reach/cost. Its first
+                // index already wins the tie, including angular damping.
+                if tried_up[..up_count].contains(&up) {continue;}
+                tried_up[up_count]=up;up_count+=1;
+                let mut pose=crate::damage::Frame::new(b,raw.base,head,up);
+                let mut low=centre.sub(bound);let mut high=centre.add(bound);
+                if retain {low=low.max(raw.base.y.sub(reaction));high=high.min(raw.base.y.add(reaction));}
+                for (i,rig) in self.rigs.iter().enumerate() {
+                    if !protected(i) {continue;}
+                    let Some(c)=feet[i].contact else {continue;};
+                    let hip=pose.x.scale(rig.hip.x).add(pose.y.scale(rig.hip.y)).add(pose.z.scale(rig.hip.z));
+                    let dx=pose.base.x.add(hip.x).sub(c.pos.x);
+                    let dz=pose.base.z.add(hip.z).sub(c.pos.z);
+                    let far=rig.l1.add(rig.l2).mul(Fx::from_ratio(999,1000));
+                    let square=far.mul(far).sub(dx.mul(dx).add(dz.mul(dz)));
+                    if square<Fx::ZERO {low=Fx::ONE;high=Fx::ZERO;break;}
+                    let extent=square.sqrt();let centre=c.pos.y.sub(hip.y);
+                    low=low.max(centre.sub(extent));high=high.min(centre.add(extent));
+                }
+                if low>high {continue;}
+                let mid0=centre.max(low).min(high);
+                let mut candidates=[mid0;5];
+                let mut cand_len=3;
+                candidates[1]=low;candidates[2]=high;
+                if self.rigs.len()>4 {
+                    pose.base.y=mid0;
+                    if !reachable(&pose) {
+                        // Intersecting only outer spheres leaves inner-fold
+                        // violations to snap all the way to low/high (±bound).
+                        // Bracket and bisect the nearest valid heights to mid0.
+                        let mut brackets=Vec::with_capacity(self.rigs.len()*2+2);
+                        brackets.push(low);brackets.push(high);
+                        let margin=Fx::from_ratio(2,100);
+                        for (i,rig) in self.rigs.iter().enumerate() {
+                            if !protected(i) {continue;}
+                            let Some(c)=feet[i].contact else {continue;};
+                            let hip=pose.x.scale(rig.hip.x).add(pose.y.scale(rig.hip.y)).add(pose.z.scale(rig.hip.z));
+                            let dx=pose.base.x.add(hip.x).sub(c.pos.x);
+                            let dz=pose.base.z.add(hip.z).sub(c.pos.z);
+                            let near=rig.l1.sub(rig.l2).abs().max(Fx::from_ratio(1,1000));
+                            let inner_sq=near.mul(near).sub(dx.mul(dx).add(dz.mul(dz)));
+                            if inner_sq>=Fx::ZERO {
+                                let ext=inner_sq.sqrt().add(margin);
+                                let cy=c.pos.y.sub(hip.y);
+                                brackets.push(cy.sub(ext).max(low).min(high));
+                                brackets.push(cy.add(ext).max(low).min(high));
+                            }
+                        }
+                        let mut best_lo:Option<Fx>=None;
+                        let mut best_hi:Option<Fx>=None;
+                        for y in brackets {
+                            pose.base.y=y;
+                            if !reachable(&pose) {continue;}
+                            if y<=mid0 && best_lo.is_none_or(|b|y>b) {best_lo=Some(y);}
+                            if y>=mid0 && best_hi.is_none_or(|b|y<b) {best_hi=Some(y);}
+                        }
+                        cand_len=1;
+                        if let Some(mut good)=best_lo {
+                            let mut bad=mid0;
+                            for _ in 0..12 {
+                                let mid=good.add(bad).mul(Fx::from_ratio(1,2));
+                                pose.base.y=mid;
+                                if reachable(&pose) {good=mid;} else {bad=mid;}
+                            }
+                            candidates[cand_len]=good;cand_len+=1;
+                        }
+                        if let Some(mut good)=best_hi {
+                            let mut bad=mid0;
+                            for _ in 0..12 {
+                                let mid=bad.add(good).mul(Fx::from_ratio(1,2));
+                                pose.base.y=mid;
+                                if reachable(&pose) {good=mid;} else {bad=mid;}
+                            }
+                            candidates[cand_len]=good;cand_len+=1;
+                        }
+                        candidates[cand_len]=low;cand_len+=1;
+                        candidates[cand_len]=high;cand_len+=1;
+                    }
+                }
+                let heights=&candidates[..cand_len];
+                for (height_index,&y) in heights.iter().enumerate() {
+                    if heights[..height_index].contains(&y) {continue;}
+                    pose.base.y=y;
+                    if !reachable(&pose) {continue;}
+                    let dy=y.sub(centre);
+                    let cost=dy.mul(dy).add(ride.inertia.mul(up.sub(hull.up).len_sq()));
+                    if best.as_ref().is_none_or(|(old,k,_,_,_)| (cost,index)<(*old,*k)) {
+                        best=Some((cost,index,pose,up,share));
+                    }
+                }
+            }
+            if best.is_some() {break;}
+        }
+        let Some((_,_,pose,up,share))=best else {return false;};
+        let dy=pose.base.y.sub(raw.base.y);
+        hull.y=hull.y.add(dy);hull.up=up;hull.w=hull.w.scale(share);
+        if dy<Fx::ZERO {hull.vy=hull.vy.min(Fx::ZERO);}
+        if dy>Fx::ZERO {hull.vy=hull.vy.max(Fx::ZERO);}
+        *root=pose;
+        true
+    }
+
+    /// Same actual contact geometry for motor admission and lookahead.
+    fn walking_height_drop(&self,root:&crate::damage::Frame,preview:&[crate::gait::Foot],locked:bool)->Fx {
+        let p=self.terrain_capability();
+        let mut top=root.base.y;
+        for (i,(rig,lost)) in self.rigs.iter().zip(&self.legs_lost).enumerate() {
+            if *lost || self.legs_buckled[i] {continue;}
+            // Validate the actual post-suspension proposal before publication.
+            // A departing foot no longer votes as support, but its executed
+            // contact must remain reachable too; lane refits cannot prove it.
+            let departing=preview[i].departing();
+            let Some(c)=preview[i].contact.filter(|_|preview[i].planted() || departing) else {continue;};
+            let hip=root.x.scale(rig.hip.x).add(root.y.scale(rig.hip.y)).add(root.z.scale(rig.hip.z));
+            let dx=root.base.x.add(hip.x).sub(c.pos.x);
+            let dz=root.base.z.add(hip.z).sub(c.pos.z);
+            let dy=root.base.y.add(hip.y).sub(c.pos.y);
+            let reserve=if departing || self.rigs.len()==4 && locked {
+                Fx::from_ratio(999,1000)
+            } else {Fx::from_ratio(p.stance_reach_pct,100)};
+            let reach=rig.l1.add(rig.l2).mul(reserve);
+            let remaining=reach.mul(reach).sub(dx.mul(dx).add(dz.mul(dz)));
+            if remaining>Fx::ZERO && dy>Fx::ZERO && dy.mul(dy)>remaining {
+                top=top.min(c.pos.y.add(remaining.sqrt()).sub(hip.y));
+            }
+        }
+        let limit=crate::ride::ride_of(&self.chassis).travel.mul(Fx::from_ratio(p.stance_drop_pct,100));
+        root.base.y.sub(top).max(Fx::ZERO).min(limit)
+    }
+
+    /// Dirty-page filtering keeps parked walkers free of repeated sole reads.
+    /// This runs in the motor phase, before support fitting and deferred feet.
+    fn refresh_footing(&mut self, w: &World, rubble: &nav::vehicle::Rubble,
+        b: &UnitBody, changed: Option<&nav::vehicle::Changed>) {
+        // A severed/buckled limb cannot retain a cached Ready vote, even on a
+        // quiet page or immediately after restoring the damaged hull.
+        for (i,foot) in self.feet.iter_mut().enumerate() {
+            if self.legs_lost[i] || self.legs_buckled[i] {
+                foot.support.readiness=crate::gait::Readiness::Rejected;
+                foot.support.reason=crate::gait::SupportReason::Unsupported;
+            }
+        }
+        if self.rigs.is_empty() || self.support_fresh && changed.is_some_and(|c| c.is_empty()) && rubble.support_changes().is_empty()
+            && !self.feet.iter().any(|f|f.planted() && f.support.readiness==crate::gait::Readiness::Pending) { return; }
+        let root = self.frame(b);
+        // Sole assessment precedes the motor's normal for_local() query.
+        // Apply the same edit/rubble invalidation here; a prepared motor has
+        // already taken its pages, while the serial motor still owns them.
+        let columns = std::mem::take(&mut self.terrain_columns);
+        let probe = match changed {
+            Some(changed) => nav::vehicle::Probe::for_local(w, &self.yielding, columns, changed),
+            None => nav::vehicle::Probe::for_search(w, &self.yielding, Default::default()),
+        };
+        let ground = std::cell::RefCell::new(probe.with_rubble(rubble));
+        let ceiling = self.foot_ceiling(&root);
+        let floor = |x: Fx, z: Fx| ground.borrow_mut().foot_floor_below(x, z, ceiling);
+        let profile=self.terrain_capability();
+        for (i, (rig, foot)) in self.rigs.iter().zip(&mut self.feet).enumerate() {
+            if self.legs_lost[i] || self.legs_buckled[i] { continue; }
+            let Some(c) = (if foot.planted(){foot.contact}else{foot.placement()}) else { continue; };
+            // A rotation-independent L1 bound: no trigonometry, square root,
+            // or transformed voxel walk for the many unaffected parked soles.
+            let radius = rig.sole.probes().iter()
+                .map(|p| p.x.abs().add(p.y.abs()).add(p.z.abs())).max()
+                .unwrap_or(Fx::ZERO).to_int_trunc().saturating_add(1);
+            let at = [c.pos.x.to_int_trunc(), c.pos.z.to_int_trunc()];
+            let lo = at.map(|v| v.saturating_sub(radius));
+            let hi = at.map(|v| v.saturating_add(radius));
+            let dirty=changed.is_none_or(|c| c.touches(lo,hi)) || rubble.support_changes().touches(lo,hi);
+            if foot.planted() && (!self.support_fresh || foot.support.readiness==crate::gait::Readiness::Pending) || dirty {
+                if !foot.planted() {foot.invalidate_placement();continue;}
+                if let Some(t)=self.anchor_trace.as_deref_mut(){t.leg=i;}
+                foot.assess_support(rig,&root,self.drive.head,&ground,&floor,profile,
+                    self.chassis.gait.as_ref().map(crate::gait::Gait::of).map_or(Fx::ZERO,|g|g.lift),true,self.anchor_trace.as_deref_mut());
+            }
+        }
+        self.terrain_columns = ground.into_inner().take_columns();
+        self.support_fresh=true;
+    }
+
+    /// The motor commits hull height before any later hull sees it. Preview
+    /// existing supports and imminent landings; the feet phase may refine
+    /// contacts afterwards, but cannot move the accepted blocker pose.
+    fn fit_stance_height(&mut self,w:&World,rubble:&nav::vehicle::Rubble,b:&UnitBody,previous_hull:phys::Chassis,root:&crate::damage::Frame,cycles:Fx,linear:V3,angular:i32) {
+        self.prepared_feet=None;
+        if !self.hull.grounded() || !self.carried() {return;}
+        let Some(gait)=self.chassis.gait.as_ref().map(crate::gait::Gait::of) else {return;};
+        let ground=std::cell::RefCell::new(nav::vehicle::Probe::for_search(
+            w,&self.yielding,std::mem::take(&mut self.terrain_columns)).with_rubble(rubble));
+        let p=self.terrain_capability();
+        let ceiling=self.foot_ceiling(root);
+        let lift_scale = self.walking_lift(&gait,cycles);
+        let head = self.drive.head;
+        let phase = self.phase;
+        let lock=self.has_support_window();
+        let carried = self.carried();
+        let guided = self.guided_biped(b);
+        let mut preview=self.feet.clone();
+        let mut events=self.anchor_trace.as_ref().map(|_|crate::gait::AnchorTrace::default());
+        let mut fitted=*root;
+        with_motor_scratch(|scratch| {
+            let floor=|x:Fx,z:Fx|scratch.floor_at(x,z,||ground.borrow_mut().foot_floor_cell(x,z,ceiling));
+            let surface_memo = ScratchSurface { scratch, probe: &ground };
+            let alt_memo = crate::gait::AlternativeMemo::default();
+            let stance=crate::gait::Stance {grounded:true,root,head,phase,
+                lift_scale,linear,angular,cycles,gait:&gait,floor:&floor};
+            Self::advance_walking_feet_memo(&self.rigs,&mut preview,&self.legs_lost,&self.legs_buckled,
+                &stance,self.leg_side_guard,p.min_support_pct,carried,lock,
+                Self::walking_spread(root),self.fold_milli,guided,events.as_mut(),&surface_memo,p,Some(&alt_memo));
+            if lock {
+                let mut hull=self.hull;
+                if self.constrain_walking_pose(b,head,previous_hull,&preview,&mut hull,&mut fitted) {
+                    let _ = scratch;
+                    self.hull=hull;self.pos[1]=fitted.base.y;
+                } else {
+                    // An edited support/physical reaction can make the accepted
+                    // chassis pose impossible for an old contact. Before publishing
+                    // that pose, withdraw only its unreachable weight votes. Keep
+                    // the actual take-off point and start ordinary recovery; neither
+                    // the anchor nor the chassis is teleported to fake support.
+                    for (i,(rig,foot)) in self.rigs.iter().zip(&mut preview).enumerate() {
+                        if self.legs_lost[i] || self.legs_buckled[i] || !foot.planted() {continue;}
+                        let Some(c)=foot.contact else {continue;};
+                        let d=c.pos.sub(fitted.base);
+                        if !rig.contact_reachable(V3::new(d.dot(fitted.x),d.dot(fitted.y),d.dot(fitted.z))) {
+                            if let Some(t)=events.as_mut(){t.leg=i;}
+                            foot.assess_support_memo(rig,&fitted,head,&surface_memo,&floor,p,
+                                gait.lift.mul(lift_scale),false,Some(&alt_memo),events.as_mut());
+                        }
+                    }
+                }
+            } else {
+                let drop=self.walking_height_drop(root,&preview,false);
+                self.pos[1]=self.pos[1].sub(drop);self.hull.y=self.hull.y.sub(drop);
+                if drop>Fx::ZERO {self.hull.vy=self.hull.vy.min(Fx::ZERO);}
+                fitted.base.y=self.pos[1];
+            }
+        });
+        self.terrain_columns=ground.into_inner().take_columns();
+        if lock {
+            for (i,(rig,foot)) in self.rigs.iter().zip(&mut preview).enumerate() {
+                if self.rigs.len()>4 && !self.legs_lost[i] && !self.legs_buckled[i] {
+                    if let Some(t)=events.as_mut() {t.leg=i;}
+                    foot.clamp_arriving_reach(rig,&fitted,self.drive.head,events.as_mut());
+                }
+                foot.rebase(&fitted,self.drive.head);
+            }
+            self.prepared_feet=Some(PreparedFeet {position:self.pos,head:self.drive.head,up:self.hull.up,
+                phase:self.phase,step:FeetStep{linear,angular,cycles},feet:preview,trace:events});
+        }
     }
     /// Yielding vegetation touches a walker's actual feet, including a
     /// swinging foot, rather than the empty rectangle between its legs.
-    fn cut_feet(&mut self, w: &World, b: &UnitBody) {
+    #[cfg(test)]
+    fn legacy_cut_feet18(&mut self, w: &World, b: &UnitBody) {
         if self.rigs.is_empty() {
             return;
         }
@@ -1798,6 +3299,130 @@ impl Motion {
                             let q = local.map(|v| v.to_int_trunc() as usize);
                             if foot.vol.get(q[0], q[1], q[2]) {
                                 cells.insert(p);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Same column order and claim quota as the tracked hull's cut.
+        let mut cells: Vec<_> = cells.into_iter().collect();
+        cells.sort_unstable_by_key(|p| (p[2], p[0], p[1]));
+        let mut claimed = 0;
+        for p in cells {
+            if !w.on_frame(p[0], p[1], p[2]) {
+                if claimed == self.cut_limit {
+                    break;
+                }
+                claimed += 1;
+            }
+            self.cut.push(p);
+        }
+    }
+    fn cut_feet(&mut self, w: &World, b: &UnitBody) {
+        if self.rigs.is_empty() {
+            return;
+        }
+        self.cut.clear();
+        let yielding_air = self.yielding.contains(&voxel::store::AIR);
+        if !yielding_air && self.yielding.iter().all(|&m| m == voxel::store::AIR) {
+            return;
+        }
+        let root = self.frame(b);
+        let mut frames = crate::damage::segment_frames(&root, b, self.drive.head, self.drive.head);
+        let mut cells = std::collections::BTreeSet::new();
+        // Reuse the column buffer, material cursor and hit-Y list across feet.
+        // Testing rotated foot occupancy and bit-volume solidity first avoids
+        // procedural terrain column evaluations on bare ground under soles.
+        let mut materials = Vec::new();
+        let mut mat_cursor = World::mat_cursor();
+        let mut hit_ys = Vec::with_capacity(16);
+        let half = Fx::from_ratio(1, 2);
+        for (leg, rig) in self.rigs.iter().enumerate() {
+            if self.legs_lost[leg] {
+                continue;
+            }
+            let (Some(part), Some(contact)) = (rig.foot, self.feet[leg].contact.as_ref()) else {
+                continue;
+            };
+            crate::gait::leg_frames(rig, &root, contact, &mut frames);
+            let foot = &b.segments[part].body;
+            let frame = &frames[part];
+            let dims = [foot.vol.nx, foot.vol.ny, foot.vol.nz].map(i32::from);
+            let dims_fx = dims.map(Fx::from_int);
+            let mut lo = [i32::MAX; 3];
+            let mut hi = [i32::MIN; 3];
+            for corner in 0..8 {
+                let p = frame.world(
+                    [0, 1, 2]
+                        .map(|a| Fx::from_int(if corner & (1 << a) == 0 { 0 } else { dims[a] })),
+                );
+                for (a, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+                    lo[a] = lo[a].min((v.raw() >> 32) as i32);
+                    hi[a] = hi[a].max((v.raw() >> 32) as i32);
+                }
+            }
+            let (x0, x1) = (lo[0].max(0), hi[0].min(w.nx as i32 - 1));
+            let (y0, mut y1) = (lo[1].max(0), hi[1].min(w.ny as i32 - 1));
+            let (z0, z1) = (lo[2].max(0), hi[2].min(w.nz as i32 - 1));
+            if x0 > x1 || y0 > y1 || z0 > z1 {
+                continue;
+            }
+            if !yielding_air {
+                let box_top =
+                    w.column_box_ceiling([x0 as u32, z0 as u32], [x1 as u32 + 1, z1 as u32 + 1]) as i32 - 1;
+                y1 = y1.min(box_top);
+                if y0 > y1
+                    || !w.any_solid_box(
+                        [x0 as u32, y0 as u32, z0 as u32],
+                        [x1 as u32, y1 as u32, z1 as u32],
+                    )
+                {
+                    continue;
+                }
+            }
+            for z in z0..=z1 {
+                let fz = Fx::from_int(z).add(half);
+                for x in x0..=x1 {
+                    let bottom = y0;
+                    // Preserve the original column domain even if authored
+                    // yielding materials include AIR.
+                    let top = y1.min(w.column_ceiling(x as u32, z as u32) as i32 - 1);
+                    if bottom > top {
+                        continue;
+                    }
+                    let fx = Fx::from_int(x).add(half);
+                    hit_ys.clear();
+                    for y in bottom..=top {
+                        if !yielding_air && !w.solid(x as u32, y as u32, z as u32) {
+                            continue;
+                        }
+                        let local = frame.local(V3::new(fx, Fx::from_int(y).add(half), fz));
+                        if (0..3).all(|a| local[a] >= Fx::ZERO && local[a] < dims_fx[a]) {
+                            let q = local.map(|v| v.to_int_trunc() as usize);
+                            if foot.vol.get(q[0], q[1], q[2]) {
+                                hit_ys.push(y);
+                            }
+                        }
+                    }
+                    match hit_ys.as_slice() {
+                        [] => {}
+                        &[y] => {
+                            let material =
+                                w.material_cached(&mut mat_cursor, x as u32, y as u32, z as u32);
+                            if self.yielding.contains(&material) {
+                                cells.insert([x as u32, y as u32, z as u32]);
+                            }
+                        }
+                        ys => {
+                            let first = ys[0];
+                            let last = *ys.last().unwrap();
+                            materials.resize((last - first + 1) as usize, voxel::store::AIR);
+                            w.column(x as u32, z as u32, first as u32, &mut materials);
+                            for &y in ys {
+                                if self.yielding.contains(&materials[(y - first) as usize]) {
+                                    cells.insert([x as u32, y as u32, z as u32]);
+                                }
                             }
                         }
                     }
@@ -2212,8 +3837,11 @@ impl Motion {
             completed("plan_hull_detour");
             return true;
         }
-        if !self.needs_recovery
-            && !avoid
+        // Invalidated terrain holds unchecked startup movement, not the
+        // terrain planner itself. A fresh coarse route can lead to a doorway;
+        // forcing local prefixes toward the final order loses that corridor.
+        // The hold stays set until a newly checked plan/prefix is accepted.
+        if !avoid
             && self.route.is_empty()
             // Finish a checked local bypass before returning to the global map.
             && (!self.partial_path || self.cursor >= self.path.len())
@@ -2396,8 +4024,10 @@ impl Motion {
                            ground: &mut nav::vehicle::Probe<'_>| {
             use rayon::prelude::*;
             let shape = request.shape;
+            let count_crush = request.count_crush;
             let samples = &request.samples;
-            let prefix = ground.route_prefix(shape, &samples[..4], |p| request.prefix_open(p));
+            let prefix =
+                ground.route_prefix_cost(shape, &samples[..4], count_crush, |p| request.prefix_open(p));
             if !request.prefix_open(&prefix) {
                 return nav::vehicle::PreparedSweep {
                     poses: samples[..4].iter().copied().zip(prefix).collect(),
@@ -2409,7 +4039,7 @@ impl Motion {
                 .with_max_len(1)
                 .map(|batch| {
                     let mut probe = ground.fork_route();
-                    let answers = probe.route_samples(shape, batch);
+                    let answers = probe.route_samples_cost(shape, batch, count_crush);
                     let reads = [probe.scans, probe.samples];
                     (
                         batch.iter().copied().zip(answers).collect::<Vec<_>>(),
@@ -2505,7 +4135,7 @@ impl Motion {
             min: [EDGE; 2],
             max: [w.nx as i32 - EDGE, w.nz as i32 - EDGE],
             nodes: self.navigation.search_nodes,
-            crush_cost: self.navigation.fell.cost_per_column,
+            crush_cost: if self.rigs.is_empty() {self.navigation.fell.cost_per_column} else {0},
             crush_cap: self.navigation.fell.cost_cap,
             margin: self.navigation.plan_margin,
             heuristic_pct: self.navigation.heuristic_pct,
@@ -2526,6 +4156,9 @@ impl Motion {
         self.partial_path = plan.partial;
         self.path = plan.path;
         self.cursor = 0;
+        if !self.path.is_empty() {
+            self.escape = 0;
+        }
     }
     /// A route searched from `from` taken up by a hull that moved on while
     /// the search ran (ADR-462): a turn point near the search's start that
@@ -2759,7 +4392,7 @@ impl Motion {
     /// not describe one this hull could own.
     pub(super) fn load_coarse(&mut self, s: &mut Scan, size: [u32; 2]) -> bool {
         let waited = s.u32();
-        let Some(search) = nav::vehicle::coarse::Search::load(s, size) else {
+        let Some(search) = nav::vehicle::coarse::Search::load_with_surface(s, size, self.terrain_detail, self.rigs.is_empty()) else {
             return false;
         };
         if !self.enabled || self.destination != Some(search.goal()) {
@@ -2788,6 +4421,10 @@ impl Motion {
     /// there is one; both zero for one set up unwalked (ADR-691).
     pub fn fine_work(&self) -> Option<[u32; 2]> {
         self.hunt.as_ref().map(|h| [h.nodes(), h.poses()])
+    }
+    #[cfg(test)]
+    pub(crate) fn route_wait_evidence(&self)->(bool,u32,bool,bool) {
+        (self.needs_recovery,self.blocked_ticks,self.dry,self.hunt.as_ref().is_some_and(|h|h.starting()))
     }
     /// One tick's worth of the search in flight, if there is one. A world
     /// that changed under it drops what it scanned, not the search.
@@ -2906,9 +4543,12 @@ impl Motion {
                 })
                 .map(|(shape, samples)| {
                     use rayon::prelude::*;
+                    let count_crush = hunt.counts_crush();
                     let mut seed = hunt.sweep_probe(w, rubble);
-                    let prefix =
-                        seed.route_prefix(shape, &samples[..4], |p| hunt.sweep_prefix_open(p));
+                    let prefix = seed
+                        .route_prefix_cost(shape, &samples[..4], count_crush, |p| {
+                            hunt.sweep_prefix_open(p)
+                        });
                     if !hunt.sweep_prefix_open(&prefix) {
                         return nav::vehicle::PreparedSweep {
                             poses: samples[..4].iter().copied().zip(prefix).collect(),
@@ -2923,7 +4563,7 @@ impl Motion {
                         .map(|(id, batch)| {
                             sweep_detail(id, true);
                             let mut ground = seed.fork_route();
-                            let poses = ground.route_samples(shape, batch);
+                            let poses = ground.route_samples_cost(shape, batch, count_crush);
                             let reads = [ground.scans, ground.samples];
                             let columns = ground.take_columns();
                             sweep_detail(id, false);
@@ -3161,37 +4801,72 @@ impl Motion {
             + shape.half[1].max(shape.support[1])
             + self.navigation.plan_margin
             + 1;
-        if !changed.touches_segment(from, to, radius) {
+        let minimum=if self.leg_side_guard && self.rigs.len()==2 {1}
+            else {self.rigs.len()*self.terrain_capability().min_support_pct as usize/100};
+        let affected = if self.rigs.is_empty() {
+            // A tracked hull cuts trees inside its own crushing footprint;
+            // live pose/collision checks still inspect the current world every
+            // tick, so felling edits on the hull's own page must not clear
+            // the route and force an admission stop.
+            let near = [0, 1].map(|a| {
+                shape.half[a].max(shape.support[a])
+                    + self.navigation.fell.radius
+                    + nav::vehicle::Changed::page_side()
+            });
+            changed.touches_segment_beyond(from, to, radius, near)
+        } else if self.has_support_window() && self.feet.iter().filter(|f| f.ready()).count() >= minimum {
+            // Existing and incoming soles already own this near region: their
+            // source/coverage and the full motion window are checked before XY.
+            // Repeated settling here must not discard an otherwise valid route
+            // and allow only one acceleration step per completed search.
+            let mut near=[0;2];
+            for (rig,foot) in self.rigs.iter().zip(&self.feet) {
+                let sole=rig.sole.probes().iter().map(|p|p.x.abs().add(p.y.abs()).add(p.z.abs()))
+                    .max().unwrap_or(Fx::ZERO).to_int_trunc().saturating_add(1);
+                for c in [foot.contact,foot.placement()].into_iter().flatten() {
+                    for (a,v) in [c.pos.x,c.pos.z].into_iter().enumerate() {
+                        near[a]=near[a].max(v.sub(self.pos[if a==0 {0}else{2}]).abs().to_int_trunc().saturating_add(sole));
+                    }
+                }
+            }
+            changed.touches_segment_beyond(from,to,radius,near)
+        }else{changed.touches_segment(from,to,radius)};
+        if !affected {
             return;
         }
-        self.hunt = None;
-        self.coarse = None;
         self.prepared_hunt = false;
         self.path.clear();
         self.cursor = 0;
         self.partial_path = false;
         self.blocked = false;
-        self.blocked_ticks = 0;
-        self.escape = 0;
         // A checked continuation must release this saved safety hold. A
         // pending query alone cannot resume startup movement into a crater.
         self.needs_recovery = true;
         self.dry = false;
         self.next_plan = tick;
-        // Keep velocity: normal braking and fresh physical clearance still
-        // govern the hull while its replacement waits for shared admission.
+        // Keep velocity and in-flight searches (`hunt`/`coarse` forget/note
+        // changed pages themselves, and `blocked_ticks`/`escape` must not reset
+        // while digging or felling runs every tick).
     }
     /// Whether this tick's step may begin a new route search, read before
     /// the step. A superset of the start conditions in `step_observed_ground`:
     /// the range only uses it to choose who is offered the shared start
     /// allowance (analysis 240, C3), and an offer that is not taken is lost
     /// for this tick, never mis-spent.
+    fn retargeted_path(&self) -> bool {
+        !self.partial_path
+            && self.path.last().is_some_and(|goal| {
+                self.destination.is_some_and(|d| {
+                    (0..2).any(|a| (d[a] - goal[a]).abs() > 4 * self.navigation.cell_units)
+                })
+            })
+    }
     pub(super) fn wants_start(&self, tick: u32) -> bool {
         self.enabled
             && !self.searching()
             && self.escape_left == 0
             && ((self.destination.is_some()
-                && (self.blocked || self.path.is_empty())
+                && (self.blocked || self.path.is_empty() || self.retargeted_path())
                 && tick >= self.next_plan)
                 || (self.cursor == self.path.len() && !self.route.is_empty() && !self.partial_path))
     }
@@ -3229,11 +4904,14 @@ impl Motion {
         let terrain_tilt = if self.legs_lost.iter().any(|lost| *lost)
             || self.legs_buckled.iter().any(|buckled| *buckled)
         {
-            self.chassis.max_tilt_pct
+            self.chassis
+                .max_tilt_pct
+                .min(stock_packs().sim.chassis(modding::tuning::ChassisKind::Walking).max_tilt_pct)
         } else {
             self.terrain_tilt_pct
         };
         nav::vehicle::Shape {
+            continuous: self.rigs.is_empty(), detail: self.terrain_detail,
             half: [
                 b.vol.nx as i32 * b.mm as i32 / units / 2,
                 b.vol.nz as i32 * b.mm as i32 / units / 2,
@@ -3242,11 +4920,13 @@ impl Motion {
                 self.chassis.support_x_cm * 10 / units,
                 self.chassis.support_z_cm * 10 / units,
             ],
-            clearance: Fx::from_ratio(self.chassis.clearance_cm * 10, units),
+            clearance: Fx::from_ratio(self.chassis.clearance_cm * 10, units).max(self.root_clearance),
             step: self.step,
             min_up: Fx::from_ratio(terrain_tilt, 100),
             height: b.vol.ny as i32 * b.mm as i32 / units,
             span: self.chassis.contact_cm * 10 / units,
+            reach: 0,
+            grade_slack: Fx::from_ratio(self.navigation.grade_exit_slack_mm, units),
             ramp: Fx::from_ratio(self.terrain_approach_pct, 100),
         }
     }
@@ -3351,6 +5031,7 @@ impl Motion {
         prepared: Option<PreparedGround<'a>>,
         mut completed: impl FnMut(&'static str),
     ) {
+        if let Some(trace)=self.anchor_trace.as_deref_mut() {trace.transition=None;}
         self.invalidate_ground(Some(changed));
         if !std::mem::take(&mut self.prepared_terrain_change) {
             if alive && engine && self.can_drive(response) {
@@ -3388,7 +5069,7 @@ impl Motion {
             // requests a replacement; real steps always check fresh geometry.
             if !self.searching()
                 && self.escape_left == 0
-                && (self.blocked || self.path.is_empty())
+                && (self.blocked || self.path.is_empty() || self.retargeted_path())
                 && tick >= self.next_plan
                 && self.may_start
             {
@@ -3437,7 +5118,7 @@ impl Motion {
         let mut speed = Fx::ZERO;
         let mut walk_direction = None;
         let base_limits = Limits::of(&self.chassis, TICKS);
-        let drive_factor = self.drive_scale.mul(self.hull.load);
+        let drive_factor = self.drive_scale.mul(self.traction_load(self.hull.load));
         let brake = response.limits(&base_limits, false).brake.mul(drive_factor);
         if self.pilot.is_none() {
             // Consume reached intermediate biped points before choosing this
@@ -3503,22 +5184,29 @@ impl Motion {
                     self.cursor += 1;
                     self.escape = 0;
                     let reached_end = self.cursor == self.path.len();
-                    if reached_end && !self.partial_path {
+                    let completed_order = reached_end
+                        && !self.partial_path
+                        && self.destination.is_some_and(|d| {
+                            let goal = self.path[self.cursor - 1];
+                            let ring = 4 * self.navigation.cell_units;
+                            (0..2).all(|a| (d[a] - goal[a]).abs() <= ring)
+                        });
+                    if completed_order {
                         // A pending replacement must not revive a completed
                         // order or overwrite the next prefix/patrol request.
                         self.hunt = None;
                         self.coarse = None;
                     }
-                    if reached_end && self.partial_path {
+                    if reached_end && !completed_order {
                         // Keep the player's goal and patrol waypoint. The next tick
                         // requests a continuation under the normal start allowance.
                         self.path.clear();
                         self.cursor = 0;
                         self.next_plan = tick.saturating_add(1);
-                    } else if reached_end {
+                    } else if completed_order {
                         self.destination = None;
                     }
-                    if reached_end && !self.partial_path && !self.route.is_empty() {
+                    if completed_order && !self.route.is_empty() {
                         self.waypoint = (self.waypoint + 1) % self.route.len();
                         if self.waypoint == 0 {
                             self.laps += 1;
@@ -3549,6 +5237,38 @@ impl Motion {
                     // a little beyond the short steering preview, capped by
                     // the conservative distance to the following waypoint.
                     // Real terrain and hull contact are still checked each tick.
+                    let next_wp = self.path.get(self.cursor + 1).copied();
+                    let exit_speed = if self.rigs.is_empty() && !steering.is_some_and(|s| s.rounded) {
+                        next_wp.map_or(Fx::ZERO, |next| {
+                            let here = self.path[self.cursor];
+                            let leg_next = [
+                                Fx::from_int(next[0] - here[0]),
+                                Fx::from_int(next[1] - here[1]),
+                            ];
+                            if leg_next == [Fx::ZERO, Fx::ZERO] {
+                                Fx::ZERO
+                            } else {
+                                let next_way = angle::atan2(leg_next[1].raw(), leg_next[0].raw());
+                                let turn_err = angle::diff(next_way, self.drive.head).abs();
+                                let straight_limit =
+                                    (self.navigation.straight_through_deg * angle::FULL / 360)
+                                        .max(base_limits.pivot);
+                                if turn_err <= straight_limit {
+                                    drive::corner_speed(
+                                        leg_next,
+                                        turn_err,
+                                        base_limits.turn,
+                                        TICKS,
+                                        speed,
+                                    )
+                                } else {
+                                    Fx::ZERO
+                                }
+                            }
+                        })
+                    } else {
+                        Fx::ZERO
+                    };
                     let distance = steering::braking_distance(
                         [self.pos[0], self.pos[2]],
                         if steering.is_some_and(|s| s.rounded) {
@@ -3556,10 +5276,16 @@ impl Motion {
                         } else {
                             [dx, dz]
                         },
-                        self.path.get(self.cursor + 1).copied(),
+                        next_wp,
                         steering.is_some_and(|s| s.rounded) || self.leg_side_guard,
                     );
-                    speed = drive::stopping_speed(distance, brake, crate::TICKS_PER_SECOND, speed);
+                    speed = drive::stopping_speed_to(
+                        distance,
+                        brake,
+                        crate::TICKS_PER_SECOND,
+                        speed,
+                        exit_speed,
+                    );
                     // On a checked route, keep rolling through a modest
                     // forward-facing correction even when the large rounded
                     // preview is unavailable. The live pose and hull checks still run
@@ -3680,8 +5406,16 @@ impl Motion {
         }
         let mut lim = response.limits(&base_limits, want == drive::NO_WAY);
         if walk_direction.is_some() { lim.pivot_speed = Fx::ONE; }
+        self.refresh_footing(w,rubble,b,Some(changed));
         let old = self.drive;
+        let previous_hull=self.hull;
         let old_pos = self.pos;
+        // Use the actual walking direction, independent of the torso's yaw.
+        // This is phase-local input, not a second velocity history to save.
+        let old_velocity = if !self.rigs.is_empty() {
+            let direction = walk_direction.unwrap_or([angle::cos(old.head), angle::sin(old.head)]);
+            V3::new(direction[0].mul(old.vel), Fx::ZERO, direction[1].mul(old.vel)).add(self.shove)
+        } else { V3::ZERO };
         // Retain bounded column pages across nearby ticks. The world's edits
         // and rubble changes invalidate precisely the pages they touched.
         let shape = self.shape(b);
@@ -3727,11 +5461,16 @@ impl Motion {
                 (ground, current)
             }
         };
-        // Pushing through a tree is slower than open ground.
-        if current.crush > 0 {
-            speed = speed.mul(Fx::from_ratio(self.navigation.fell.speed_pct, 100));
+        let (min_floor, max_floor) = current.floors.iter().fold(
+            (current.floors[0], current.floors[0]),
+            |(lo, hi), &h| (lo.min(h), hi.max(h)),
+        );
+        let uneven = max_floor.sub(min_floor) > Fx::from_int(self.terrain_detail);
+        speed=self.surface_speed(speed,current.crush>0,uneven);
+        if let Some(trace)=self.anchor_trace.as_deref_mut() {
+            trace.motor_command=Some((speed,want,traffic_hint.map(|h|h.speed)));
         }
-        let (next, mut delta) = drive::advance(
+        let (mut next, mut delta) = drive::advance(
             old,
             want,
             speed,
@@ -3743,6 +5482,217 @@ impl Motion {
             let travel = next.vel.div(Fx::from_int(TICKS));
             delta.dx = direction[0].mul(travel);
             delta.dz = direction[1].mul(travel);
+        }
+        let mut support_advance=0;
+        // Each candidate carries its own installed drive and foot cadence.
+        // A support wait retains the route; it does not rewrite a published pose.
+        let mut requested_step=V3::new(delta.dx,Fx::ZERO,delta.dz);
+        let mut requested_yaw=angle::diff(next.head,old.head);
+        // Multiped stance admission is independent of terrain/collision
+        // refusal: a short support wait neither cancels nor replans a route.
+        let mut transition_cause=None;
+        let support_window=self.has_support_window();
+        if support_window {
+            if let Some(c)=self.step_cycle.get(&self.chassis) {
+                let travel=V3::new(delta.dx,Fx::ZERO,delta.dz).len_sq().sqrt();
+                // Support waits can reset actual torso yaw acceleration.
+                // Feet still prepare the requested turn at the installed
+                // rate; body motion itself remains drive::advance's result.
+                let nominal_yaw=angle::diff(next.head,old.head);
+                let preparing_turn=self.guided_biped(b) && want!=drive::NO_WAY;
+                let command_yaw=if preparing_turn {
+                    angle::diff(want,old.head).clamp(-lim.turn,lim.turn)
+                } else {nominal_yaw};
+                let cadence_yaw=if command_yaw.abs()>nominal_yaw.abs() {command_yaw}else{nominal_yaw};
+                let cadence=self.walking_advance(c,b,travel,cadence_yaw);
+                if preparing_turn {
+                    requested_yaw=if nominal_yaw!=0 && nominal_yaw.signum()!=command_yaw.signum() {
+                        nominal_yaw
+                    } else {cadence_yaw};
+                }
+                if let Some(t)=self.anchor_trace.as_deref_mut() {t.motor_step=Some([i64::from(cadence),0,0,0,0]);}
+                if cadence>0 {
+                    // Probe owns mutable column memoization through RefCell
+                    // while the bounded preview calls the sole floor closure.
+                    let ceiling=self.foot_ceiling(&self.frame(b));
+                    with_motor_scratch(|scratch| {
+                    let probe=std::cell::RefCell::new(&mut ground);
+                    let surface_memo=ScratchSurfaceRef{scratch,probe:&probe};
+                    let alt_memo=crate::gait::AlternativeMemo::default();
+                    let floor=|x:Fx,z:Fx|scratch.floor_at(x,z,||probe.borrow_mut().foot_floor_cell(x,z,ceiling));
+                    let support_floor=|at,head|scratch.support_at(at,head,||probe.borrow_mut().support_floors(at,head,shape));
+                    let window_reason=std::cell::Cell::new(None);
+                    // Saturated actuator commands often produce the exact same
+                    // drive/move. World, feet and intent are immutable in this
+                    // selection: share only the proof result within this call.
+                    let fit_cache=std::cell::RefCell::new(Vec::<((drive::Drive,drive::Move,V3,i32),Result<(),TransitionReason>)>::new());
+                    let fits=|candidate:drive::Drive,movement:drive::Move,nominal_intent:bool| {
+                        let actual=V3::new(movement.dx,Fx::ZERO,movement.dz);
+                        let (foot_linear,foot_yaw,foot_cadence)=if !nominal_intent {
+                            (actual,if preparing_turn {requested_yaw}else{angle::diff(candidate.head,old.head)},cadence)
+                        } else {(requested_step,requested_yaw,cadence)};
+                        let key=(candidate,movement,foot_linear,foot_yaw);
+                        let cached={let cache=fit_cache.borrow();cache.iter().find(|(k,_)|*k==key).map(|(_,r)|*r)};
+                        let result=if let Some(result)=cached {result} else {
+                            let result=self.walking_motion_fits(b,[self.pos[0].add(movement.dx),self.pos[1],self.pos[2].add(movement.dz)],candidate.head,angle::diff(candidate.head,old.head),
+                                foot_linear,foot_yaw,foot_cadence,SupportForecast{turning:cadence>0,intent:Some((foot_linear,foot_yaw,foot_cadence)),ride:self.ride_now(b,gravity,response),previous_velocity:old_velocity,balance:alive&&engine,drive:candidate,limits:lim,factor:drive_factor,direction:walk_direction},&floor,&surface_memo,&support_floor,Some(&alt_memo));
+                            fit_cache.borrow_mut().push((key,result));result
+                        };
+                        if window_reason.get().is_none() {window_reason.set(result.err());}
+                        result.is_ok()
+                    };
+                    // Commit the cadence used by the proof even when the
+                    // nominal body step fits; articulation must execute the
+                    // same lift/landing phase that admitted that body pose.
+                    if self.guided_biped(b) {support_advance=cadence;}
+                    if !fits(next,delta,true) {
+                        let mut rejected=1;let mut selected:Option<((Fx,i32),drive::Drive,drive::Move,bool)>=None;let mut braking=(next,delta);
+                        let nominal=next;
+                        // Prefer the feasible transmission result closest to
+                        // the nominal command. Independent tempo/yaw trials
+                        // avoid braking translation merely to reduce yaw.
+                        let mut trials=[((Fx::ZERO,0i32),old,delta);25];
+                        let mut n_trials=0;
+                        for mode in 0..3 {for i in 1..=8 {
+                            let share=Fx::from_ratio(8-i,8);
+                            let yaw_share=if mode==1 {Fx::ONE}else{share};
+                            let speed_share=if mode==0 {Fx::ONE}else{share};
+                            let target=if want==drive::NO_WAY {want} else {old.head.wrapping_add(
+                                (i128::from(angle::diff(want,old.head))*i128::from(yaw_share.raw())>>32)as i32)};
+                            let (candidate,mut movement)=drive::advance(old,target,speed.mul(speed_share),&lim,drive_factor,Fx::from_ratio(1,TICKS));
+                            if let Some(direction)=walk_direction {
+                                let travel=candidate.vel.div(Fx::from_int(TICKS));
+                                movement.dx=direction[0].mul(travel);movement.dz=direction[1].mul(travel);
+                            }
+                            if mode==2 && i==8 {braking=(candidate,movement);}
+                            let dv=candidate.vel.sub(nominal.vel).div(Fx::from_int(self.speed.max(1)));
+                            let da=Fx::from_ratio(angle::diff(candidate.head,nominal.head),lim.turn.max(1));
+                            trials[n_trials]=((dv.mul(dv).add(da.mul(da)),mode*8+i),candidate,movement);
+                            n_trials+=1;
+                        }}
+                        // A changed throttle must not erase the continuation
+                        // proved last tick: retain momentum while damping yaw
+                        // until the returning cohort can carry the next turn.
+                        let (candidate,mut movement)=drive::advance(old,old.head,old.vel,&lim,drive_factor,Fx::from_ratio(1,TICKS));
+                        if let Some(direction)=walk_direction {
+                            let travel=candidate.vel.div(Fx::from_int(TICKS));
+                            movement.dx=direction[0].mul(travel);movement.dz=direction[1].mul(travel);
+                        }
+                        let dv=candidate.vel.sub(nominal.vel).div(Fx::from_int(self.speed.max(1)));
+                        let da=Fx::from_ratio(angle::diff(candidate.head,nominal.head),lim.turn.max(1));
+                        trials[24]=((dv.mul(dv).add(da.mul(da)),25),candidate,movement);
+                        if self.anchor_trace.is_none() {
+                            // Unique tags 1..=25 make ascending key order total:
+                            // the first feasible candidate is the global minimum,
+                            // skipping expensive 80-tick proofs on worse ranks.
+                            trials.sort_unstable_by_key(|(key,_,_)|*key);
+                            for (key,cand,mov) in trials {
+                                if fits(cand,mov,true) {
+                                    selected=Some((key,cand,mov,true));
+                                    break;
+                                }
+                            }
+                        } else {
+                            for (key,cand,mov) in trials {
+                                if selected.as_ref().is_none_or(|(old,_,_,_)|key<*old) {
+                                    if fits(cand,mov,true) {selected=Some((key,cand,mov,true));}
+                                    else {rejected+=1;}
+                                }
+                            }
+                        }
+                        if selected.is_none() {
+                            let mut fallbacks=[((Fx::ZERO,0i32),old,delta);2];
+                            for (idx,(tag,(candidate,mut movement))) in [(26,(candidate,movement)),(27,braking)].into_iter().enumerate() {
+                                if let Some(direction)=walk_direction {
+                                    let travel=candidate.vel.div(Fx::from_int(TICKS));
+                                    movement.dx=direction[0].mul(travel);movement.dz=direction[1].mul(travel);
+                                }
+                                let dv=candidate.vel.sub(nominal.vel).div(Fx::from_int(self.speed.max(1)));
+                                let da=Fx::from_ratio(angle::diff(candidate.head,nominal.head),lim.turn.max(1));
+                                fallbacks[idx]=((dv.mul(dv).add(da.mul(da)),tag),candidate,movement);
+                            }
+                            if self.anchor_trace.is_none() {
+                                if fallbacks[1].0 < fallbacks[0].0 {
+                                    fallbacks.swap(0,1);
+                                }
+                                for (key,cand,mov) in fallbacks {
+                                    if fits(cand,mov,false) {
+                                        selected=Some((key,cand,mov,false));
+                                        break;
+                                    }
+                                }
+                            } else {
+                                for (key,cand,mov) in fallbacks {
+                                    if selected.as_ref().is_none_or(|(old,_,_,_)|key<*old) {
+                                        if fits(cand,mov,false) {selected=Some((key,cand,mov,false));}
+                                        else {rejected+=1;}
+                                    }
+                                }
+                            }
+                        }
+                        // Refine an already proved translation without losing
+                        // that safe fallback. Actuator limits are applied again
+                        // to every midpoint; eight trials bound the work.
+                        if let Some((_,safe,_,true))=selected {
+                            if safe.head==nominal.head && safe.yaw_rate==nominal.yaw_rate {
+                                let mut good=safe.vel;let mut bad=nominal.vel;
+                                for rank in 0..8 {
+                                    let middle=good.add(bad).mul(Fx::from_ratio(1,2));
+                                    let (candidate,mut movement)=drive::advance(old,want,middle,&lim,drive_factor,Fx::from_ratio(1,TICKS));
+                                    if candidate.head!=nominal.head || candidate.yaw_rate!=nominal.yaw_rate {break;}
+                                    if candidate.vel==good || candidate.vel==bad {break;}
+                                    if let Some(direction)=walk_direction {
+                                        let travel=candidate.vel.div(Fx::from_int(TICKS));
+                                        movement.dx=direction[0].mul(travel);movement.dz=direction[1].mul(travel);
+                                    }
+                                    if fits(candidate,movement,true) {
+                                        good=candidate.vel;
+                                        let dv=candidate.vel.sub(nominal.vel).div(Fx::from_int(self.speed.max(1)));
+                                        selected=Some(((dv.mul(dv),28+rank),candidate,movement,true));
+                                    } else {bad=candidate.vel;rejected+=1;}
+                                }
+                            }
+                        }
+                        // A rejected landing at a cliff may need room before
+                        // another turn is possible. A stationary safe brake is
+                        // not progress: try one actuator-bounded astern step,
+                        // with the same complete support proof and no yaw.
+                        let waiting_landing=self.feet.iter().enumerate().any(|(i,f)|
+                            !self.legs_lost[i] && !self.legs_buckled[i] && !f.planted()
+                            && f.support.readiness==crate::gait::Readiness::Rejected);
+                        let stationary=selected.as_ref().is_none_or(|(_,d,m,_)|
+                            d.head==old.head && m.dx==Fx::ZERO && m.dz==Fx::ZERO);
+                        if self.rigs.len()==4 && walk_direction.is_none() && self.pilot.is_none()
+                            && self.destination.is_some() && waiting_landing && stationary {
+                            let retreat=Fx::from_int(self.speed).mul(response.engine).mul(response.traction)
+                                .mul(Fx::from_ratio(self.navigation.escape_speed_pct,100)).neg();
+                            let retreat=self.surface_speed(retreat,current.crush>0,uneven);
+                            let (candidate,movement)=drive::advance(old,old.head,retreat,&lim,drive_factor,Fx::from_ratio(1,TICKS));
+                            if (movement.dx!=Fx::ZERO || movement.dz!=Fx::ZERO) && fits(candidate,movement,false) {
+                                selected=Some(((Fx::ZERO,36),candidate,movement,false));
+                            }
+                        }
+                        let unready=selected.is_none();
+                        let (chosen,move_chosen,nominal_intent)=selected.map(|(_,d,m,n)|(d,m,n)).unwrap_or((braking.0,braking.1,false));
+                        (next,delta)=(chosen,move_chosen);
+                        if unready {
+                            // Refused continuation is not permission to commit
+                            // the unproved brake pose. Hold XY/yaw while the
+                            // retained cadence completes or replants real feet.
+                            delta.dx=Fx::ZERO;delta.dz=Fx::ZERO;
+                            next.head=old.head;next.yaw_rate=0;
+                        }
+                        if !nominal_intent {
+                            requested_step=V3::new(delta.dx,Fx::ZERO,delta.dz);
+                            if !preparing_turn {requested_yaw=angle::diff(next.head,old.head);}
+                        }
+                        support_advance=cadence;
+                        transition_cause=window_reason.get();
+                        if let Some(trace)=self.anchor_trace.as_deref_mut(){trace.window(rejected,true,unready);trace.window_reason=window_reason.get().map(TransitionReason::as_str);}
+                    }
+                    });
+                }
+            }
         }
         let previous = Obstacle::of(self, b);
         self.contact_velocity = V3::new(
@@ -3767,7 +5717,7 @@ impl Motion {
         let mut target = if nx == self.pos[0] && nz == self.pos[2] && next.head == old.head {
             current
         } else {
-            ground.pose([nx, nz], next.head, shape)
+            ground.pose_crush_flag([nx, nz], next.head, shape)
         };
         completed("terrain_pose");
         let mut candidate = Obstacle::of(self, b);
@@ -3794,14 +5744,38 @@ impl Motion {
                     ([nx, nz], next.head, target),
                     shape,
                 ));
-        let clear =
-            belly_clear && !target.tilt && (self.escape_left > 0 || !target.steep || current.steep);
-        let mut terrain_allowed = clear
+        let policy = if self.shove != V3::ZERO || !alive || !engine {
+            TransitionPolicy::passive(shape, self.escape_left > 0 || current.steep, belly_clear)
+        } else {
+            TransitionPolicy::motor(shape, self.escape_left > 0 || current.steep, belly_clear)
+        };
+        let policy = if self.escape_left > 0 {
+            policy.unbounded_grade_exit()
+        } else {
+            policy
+        };
+        let mut transition = TransitionProof::geometry(
+            [self.pos[0], self.pos[2]],
+            [nx, nz],
+            current,
+            target,
+            shape,
+            policy,
+        );
+        let mut terrain_allowed = transition.accepted()
             && x >= EDGE
             && z >= EDGE
             && x < w.nx as i32 - EDGE
             && z < w.nz as i32 - EDGE
-            && target.height.sub(current.height) <= Fx::from_int(self.step);
+;
+        if !terrain_allowed && transition.accepted() {transition.refuse(TransitionReason::Bounds);}
+        let mut support_alternative=false;
+        if let Some(trace)=self.anchor_trace.as_deref_mut() {
+            trace.motor_terrain=Some([current.blocked as i64,target.blocked as i64,
+                i64::from(current.steep),i64::from(target.steep),i64::from(target.tilt),
+                target.height.sub(current.height).raw(),i64::from(self.step),
+                collision.map_or(-1,|i|i as i64),i64::from(terrain_allowed)]);
+        }
         if alive && engine && next.head != old.head
             && (!terrain_allowed || collision.is_some()) {
             // Translation and yaw are independent freedoms at a contact.
@@ -3820,12 +5794,22 @@ impl Motion {
             candidate.head = previous.head;
             let hull_clear = self.contact_candidates.first(&previous, &candidate, others).is_none();
             let (x, z) = (ux.to_int_trunc(), uz.to_int_trunc());
+            let unturned_policy = if self.shove != V3::ZERO {
+                TransitionPolicy::passive(shape, self.escape_left > 0 || current.steep, belly_clear)
+            } else {
+                TransitionPolicy::motor(shape, self.escape_left > 0 || current.steep, belly_clear)
+            };
+            let unturned_policy = if self.escape_left > 0 {
+                unturned_policy.unbounded_grade_exit()
+            } else {
+                unturned_policy
+            };
             if (ux != self.pos[0] || uz != self.pos[2])
-                && hull_clear && unturned.blocked == 0 && !unturned.tilt
-                && (!unturned.steep || current.steep)
-                && unturned.height.sub(current.height) <= Fx::from_int(self.step)
+                && hull_clear && TransitionProof::geometry([self.pos[0],self.pos[2]],[ux,uz],current,unturned,shape,unturned_policy).accepted()
                 && x >= EDGE && z >= EDGE
                 && x < w.nx as i32 - EDGE && z < w.nz as i32 - EDGE {
+                support_alternative=true;
+                requested_step=V3::new(dx,Fx::ZERO,dz);requested_yaw=0;
                 target = unturned;
                 nx = ux;
                 nz = uz;
@@ -3888,14 +5872,17 @@ impl Motion {
                         if !self.leg_side_guard { alternative.head = drive.head; }
                         if self.contact_candidates.first(&previous, &alternative, others).is_some() { continue; }
                         let pose = ground.pose(at, drive.head, shape);
-                        if pose.blocked != 0 || pose.tilt || pose.steep && !current.steep
-                            || pose.height.sub(current.height) > Fx::from_int(self.step) { continue; }
+                        if !TransitionProof::geometry([self.pos[0],self.pos[2]],at,current,pose,shape,
+                            TransitionPolicy::motor(shape,current.steep,false)).accepted() { continue; }
                         if cost < best_cost {
                             best_cost = cost;
                             best = Some((cost, drive, movement, at, pose, direction));
                         }
                     }
                     if let Some((cost, drive, movement, at, pose, direction)) = best {
+                        support_alternative=true;
+                        requested_step=V3::new(movement.dx,Fx::ZERO,movement.dz);
+                        requested_yaw=angle::diff(drive.head,old.head);
                         self.drive = drive;
                         delta = movement;
                         nx = at[0]; nz = at[1]; target = pose;
@@ -3915,12 +5902,43 @@ impl Motion {
                             && point[0] >= EDGE && point[1] >= EDGE
                             && point[0] < w.nx as i32 - EDGE && point[1] < w.nz as i32 - EDGE {
                             self.path = vec![point]; self.cursor = 0; self.partial_path = true;
-                            self.hunt = None; self.coarse = None;
-                            self.needs_recovery = false; self.dry = false;
+                            self.dry = false;
                         }
                     }
                 }
             }
+        }
+        // Contact alternatives must satisfy the same support window. Waiting
+        // in the current pose is safe and preserves the route while feet finish.
+        if support_window && support_alternative && terrain_allowed && collision.is_none() {
+            if let Some(c)=self.step_cycle.get(&self.chassis) {
+                let travel=V3::new(nx.sub(self.pos[0]),Fx::ZERO,nz.sub(self.pos[2])).len_sq().sqrt();
+                let cadence=self.walking_advance(c,b,travel,angle::diff(self.drive.head,old.head)).max(support_advance);
+                let ceiling=self.foot_ceiling(&self.frame(b));
+                with_motor_scratch(|scratch| {
+                let probe=std::cell::RefCell::new(&mut ground);
+                let surface_memo=ScratchSurfaceRef{scratch,probe:&probe};
+                let alt_memo=crate::gait::AlternativeMemo::default();
+                let floor=|x:Fx,z:Fx|scratch.floor_at(x,z,||probe.borrow_mut().foot_floor_cell(x,z,ceiling));
+                if let Err(reason)=self.walking_motion_fits(b,[nx,self.pos[1],nz],self.drive.head,angle::diff(self.drive.head,old.head),requested_step,requested_yaw,cadence,SupportForecast{turning:cadence>0,intent:Some((requested_step,requested_yaw,cadence)),ride:self.ride_now(b,gravity,response),previous_velocity:old_velocity,balance:alive&&engine,drive:self.drive,limits:lim,factor:drive_factor,direction:walk_direction},&floor,&surface_memo,&|at,head|scratch.support_at(at,head,||probe.borrow_mut().support_floors(at,head,shape)),Some(&alt_memo)) {
+                    nx=self.pos[0];nz=self.pos[2];target=current;
+                    delta.dx=Fx::ZERO;delta.dz=Fx::ZERO;
+                    self.drive.head=old.head;self.drive.yaw_rate=0;
+                    self.contact_velocity=V3::ZERO;
+                    support_advance=cadence;
+                    transition_cause.get_or_insert(reason);
+                    if let Some(trace)=self.anchor_trace.as_deref_mut() {
+                        trace.window(1,true,true);trace.window_reason=Some(reason.as_str());
+                    }
+                }
+                });
+            }
+        }
+        if collision.is_some() {transition.refuse(TransitionReason::Obstacle);}
+        if self.anchor_trace.is_some() {
+            if let Some(reason)=transition_cause {transition.refuse(reason);}
+            self.transition_sources(&mut ground,&mut transition,[old.head,next.head],shape);
+            self.anchor_trace.as_deref_mut().unwrap().transition=Some(transition);
         }
         let allowed = terrain_allowed && collision.is_none();
         let path = if allowed {
@@ -3998,31 +6016,24 @@ impl Motion {
             // A biped translates independently of its torso heading. A tiny
             // accepted step or torso turn between contacts is not clearance:
             // it must not reset recovery forever in converging walking rows.
-            // Tracks retain their ordinary pivot/acceleration recovery rules.
             self.blocked_ticks = self.blocked_ticks.saturating_add(1);
-        } else {
+        } else if self.leg_side_guard
+            || self.drive.vel.abs() > Fx::from_int(self.speed).mul(response.engine)
+                .mul(response.traction).mul(Fx::from_ratio(self.navigation.escape_speed_pct, 100))
+        {
             self.blocked_ticks = 0;
         }
         completed("terrain");
         let mut advanced = 0;
         if let Some(c) = self.step_cycle.get(&self.chassis) {
             let yaw = angle::diff(self.drive.head, old.head);
-            advanced = c.advance(path, yaw);
-            if self.walker_turn_guard {
-                // Preserve the long stride while translating, but take more
-                // frequent steps when pivoting instead of twisting planted feet.
-                if b.mm == 500 {
-                    let step = super::walker::tuning().turn_step_degrees;
-                    // The actual feet are metres apart, unlike the strider's
-                    // 90 cm suspension probes. Derive turning cadence from yaw,
-                    // not those unrelated probe dimensions.
-                    let turning = (i64::from(yaw.abs()) * 360 / i64::from(step)) as i32;
-                    advanced = advanced.max(turning);
-                } else {
-                    advanced = advanced.saturating_add(c.advance(Fx::ZERO, yaw).saturating_mul(2));
-                }
-            }
+            advanced = self.walking_advance(c,b,path,yaw).max(if allowed {support_advance} else {0});
             self.phase = angle::norm(self.phase.wrapping_add(advanced));
+        }
+        if let Some(t)=self.anchor_trace.as_deref_mut() {
+            let row=t.motor_step.get_or_insert([0;5]);
+            row[1]=i64::from(support_advance);row[2]=i64::from(advanced);
+            row[3]=i64::from(allowed);row[4]=i64::from(support_alternative);
         }
         let nominal = crate::ride::supports_of(&self.chassis);
         let (hc, hs) = crate::ride::heading_of(self.drive.head);
@@ -4043,14 +6054,23 @@ impl Motion {
             .as_ref()
             .map_or((nominal.as_slice(), floors.as_slice()), SupportSet::slices);
         let r = self.ride_now(b, gravity, response);
-        // Powered legs actively counter the drive's horizontal inertia. The
-        // suspension still responds to terrain and missing supports; tracked
-        // or unpowered bodies retain their passive acceleration response.
+        // Legs cancel most drive torque, but leave a damped body response.
+        // Read accepted displacement: a strafing biped must lean along its
+        // travel, not along its turning torso. A collision/order discontinuity
+        // is capped at gravity before active balancing, without a square root.
+        // Existing hull angular velocity supplies the inertia and is saved.
         let sway = if !self.rigs.is_empty() && self.carried() && alive && engine {
-            V3::ZERO
+            let velocity = V3::new(self.pos[0].sub(old_pos[0]), Fx::ZERO,
+                self.pos[2].sub(old_pos[2])).scale(Fx::from_int(TICKS));
+            let acceleration = velocity.sub(old_velocity).scale(Fx::from_int(TICKS));
+            let peak = acceleration.x.abs().max(acceleration.z.abs()).max(r.gravity);
+            let share = Fx::from_ratio(i32::from(self.chassis.gait.map_or(0, |g| g.body_sway_pct)),100);
+            acceleration.scale(if peak > Fx::ZERO { share.mul(r.gravity.div(peak)) } else { Fx::ZERO })
         } else {
+            let dv_cap = lim.brake.max(lim.accel).mul(drive_factor);
+            let dv = self.drive.vel.sub(old.vel).clamp(dv_cap.neg(), dv_cap);
             crate::ride::sway_of(
-                self.drive.vel.sub(old.vel).mul(Fx::from_int(TICKS)),
+                dv.mul(Fx::from_int(TICKS)),
                 self.drive.vel,
                 angle::diff(self.drive.head, old.head),
                 self.drive.head,
@@ -4070,19 +6090,12 @@ impl Motion {
             .y
             .sub(crate::ride::ride_of(&self.chassis).clearance);
         completed("ride");
-        let linear = V3::new(
-            self.pos[0].sub(old_pos[0]),
-            Fx::ZERO,
-            self.pos[2].sub(old_pos[2]),
-        );
-        self.step_feet(
-            w,
-            rubble,
-            b,
-            linear,
-            angle::diff(self.drive.head, old.head),
-            Fx::from_ratio(advanced, angle::FULL),
-        );
+        let feet_linear=if support_window && allowed {requested_step}else{
+            V3::new(self.pos[0].sub(old_pos[0]),self.pos[1].sub(old_pos[1]),self.pos[2].sub(old_pos[2]))};
+        let feet_yaw=if support_window && allowed {requested_yaw}else{angle::diff(self.drive.head,old.head)};
+        let cycles=Fx::from_ratio(advanced,angle::FULL);
+        if !self.rigs.is_empty() {let root=self.frame(b);self.fit_stance_height(w,rubble,b,previous_hull,&root,cycles,feet_linear,feet_yaw);}
+        self.step_feet(w,rubble,b,feet_linear,feet_yaw,cycles);
         completed("feet");
     }
     pub fn save(&self, b: &mut Blob) {
@@ -4155,9 +6168,11 @@ impl Motion {
         }
     }
     pub fn load(&mut self, s: &mut Scan) -> bool {
-        self.load_version(s, true)
+        self.load_version(s, true, true)
     }
-    pub(crate) fn load_version(&mut self, s: &mut Scan, continuation: bool) -> bool {
+    pub(crate) fn load_version(&mut self, s: &mut Scan, continuation: bool,live_support:bool) -> bool {
+        self.support_fresh=false;
+        self.prepared_feet=None;
         self.ground_memo = None;
         self.contact_candidates.clear();
         self.clear_contact();
@@ -4165,6 +6180,7 @@ impl Motion {
         self.dry = false;
         self.prepared_hunt = false;
         self.prepared_terrain_change = false;
+        self.anchor_trace = None;
         // A whole-map search in flight is the range's own snapshot section
         // (ADR-680), read after every hull.
         self.coarse = None;
@@ -4213,7 +6229,7 @@ impl Motion {
             return false;
         }
         for f in &mut self.feet {
-            match crate::gait::Foot::load(s) {
+            match crate::gait::Foot::load_version(s,live_support) {
                 Some(v) => *f = v,
                 None => return false,
             }
@@ -4229,7 +6245,7 @@ impl Motion {
             return false;
         }
         self.hunt = if s.bool() {
-            match nav::vehicle::Hunt::load(s, &self.yielding) {
+            match nav::vehicle::Hunt::load_with_surface(s, &self.yielding, self.terrain_detail, self.rigs.is_empty()) {
                 Some(hunt) => Some(Box::new(hunt)),
                 None => return false,
             }
@@ -4255,7 +6271,8 @@ impl Motion {
             && self.pos[2] >= Fx::ZERO
             && self.pos[2] < Fx::from_int(MAX_SIDE)
             && self.pos[1].abs() < Fx::from_int(384)
-            && self.drive.vel.abs() <= Fx::from_int(200)
+            && self.drive.vel.abs() <= Fx::from_int(200).max(
+                Fx::from_int(self.speed).mul(Fx::from_ratio(self.chassis.descend.max(100),100)))
             && [self.hull.up.x, self.hull.up.y, self.hull.up.z]
                 .iter()
                 .all(|v| v.abs() <= Fx::ONE)
@@ -4297,6 +6314,75 @@ mod coarse_obstacle_tests;
 mod tests {
     use super::*;
     use modding::range::RangeUnitKind;
+    #[test]
+    fn motor_height_memo_keeps_fractional_points_exact_and_restarts_with_selection() {
+        let read=|x:Fx,z:Fx|Fx(x.raw().rotate_left(19).wrapping_add(z.raw().rotate_right(7)));
+        for base in [Fx::ZERO,Fx::from_int(16)] {
+            let memo=MotorFloorMemo::default();let reads=std::cell::Cell::new(0);
+            let mut seed=17u64;
+            for i in 0..2048 {
+                seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let x=if i<8 {Fx::from_int(64).add(Fx(i))}else{Fx(seed as i64)};
+                let z=Fx(seed.rotate_left(29) as i64);let expected=read(x,z).add(base);
+                let evaluate=||{reads.set(reads.get()+1);expected};
+                assert_eq!(memo.at(x,z,evaluate),expected);let before=reads.get();
+                assert_eq!(memo.at(x,z,evaluate),expected);assert_eq!(reads.get(),before);
+            }
+            assert!(reads.get()>128,"exercise collisions and replacement,not just a fixed point");
+            let x=Fx::from_int(64);let z=Fx::from_int(65);
+            assert_eq!(memo.at(x,z,||base),base);
+        }
+    }
+
+    #[test]
+    fn spider_small_scratch_preserves_full_capacity_feet_and_reason_trace() {
+        let w=World::new(1536,96,1536,65536,Box::new(Ground {depth:0}));
+        let body=voxel::unit::spider();
+        let mut motion=Motion::new([320,16,512],RangeUnitKind::Spider,&body);
+        assert_eq!(motion.rigs.len(),8);
+        motion.enabled=true;motion.pilot=Some([1,1]);
+        let rubble=nav::vehicle::Rubble::new();
+        let mut saw_ready=false;let mut saw_swing=false;
+        for tick in 0..96 {
+            let old=(motion.pos,motion.drive.head,motion.phase);
+            step(&mut motion,&w,&body,&[],tick);
+            let root=motion.frame(&body);
+            let gait=crate::gait::Gait::of(motion.chassis.gait.as_ref().unwrap());
+            let ground=std::cell::RefCell::new(nav::vehicle::Probe::new(&w).with_rubble(&rubble));
+            let floor=|x:Fx,z:Fx|ground.borrow_mut().foot_floor(x,z);
+            let cycles=Fx::from_ratio(angle::diff(motion.phase,old.2),angle::FULL);
+            let stance=crate::gait::Stance {grounded:motion.hull.grounded(),root:&root,
+                head:motion.drive.head,phase:motion.phase,lift_scale:motion.walking_lift(&gait,cycles),
+                linear:V3::new(motion.pos[0].sub(old.0[0]),motion.pos[1].sub(old.0[1]),motion.pos[2].sub(old.0[2])),
+                angular:angle::diff(motion.drive.head,old.1),cycles,gait:&gait,floor:&floor};
+            let mut small=motion.feet.clone();let mut full=small.clone();
+            let mut cached=small.clone();let heights=MotorFloorMemo::default();
+            let cached_floor=|x,z|heights.at(x,z,||floor(x,z));
+            let cached_stance=crate::gait::Stance{floor:&cached_floor,..stance};
+            let mut trace_small=crate::gait::AnchorTrace::default();
+            let mut trace_full=crate::gait::AnchorTrace::default();
+            let mut trace_cached=crate::gait::AnchorTrace::default();
+            let profile=motion.terrain_capability();
+            Motion::advance_walking_feet_sized::<8>(&motion.rigs,&mut small,&motion.legs_lost,&motion.legs_buckled,
+                &stance,motion.leg_side_guard,profile.min_support_pct,motion.carried(),motion.has_support_window(),
+                Motion::walking_spread(&root),motion.fold_milli,false,Some(&mut trace_small),&ground,profile);
+            Motion::advance_walking_feet_sized::<256>(&motion.rigs,&mut full,&motion.legs_lost,&motion.legs_buckled,
+                &stance,motion.leg_side_guard,profile.min_support_pct,motion.carried(),motion.has_support_window(),
+                Motion::walking_spread(&root),motion.fold_milli,false,Some(&mut trace_full),&ground,profile);
+            Motion::advance_walking_feet_sized::<8>(&motion.rigs,&mut cached,&motion.legs_lost,&motion.legs_buckled,
+                &cached_stance,motion.leg_side_guard,profile.min_support_pct,motion.carried(),motion.has_support_window(),
+                Motion::walking_spread(&root),motion.fold_milli,false,Some(&mut trace_cached),&ground,profile);
+            assert_eq!(small,full,"real Spider scratch tick{tick}");
+            assert_eq!(cached,full,"real Spider exact floor memo tick{tick}");
+            assert_eq!(trace_cached.events(),trace_full.events(),"cached reason trace tick{tick}");
+            assert_eq!(trace_cached.dropped,trace_full.dropped);
+            assert_eq!(trace_small.events(),trace_full.events(),"reason trace tick{tick}");
+            assert_eq!(trace_small.dropped,trace_full.dropped);
+            saw_ready|=small.iter().any(|f|f.ready());
+            saw_swing|=small.iter().any(|f|!f.planted());
+        }
+        assert!(saw_ready && saw_swing,"exercise actual stance and swing");
+    }
     #[test]
     fn parked_ground_memo_matches_fresh_physics_after_edits_rubble_and_shoves() {
         struct Level;
@@ -4541,7 +6627,7 @@ mod tests {
         let extra = bytes.v.split_off(bytes.v.len() - 17);
         assert_eq!(extra[0], 0);
         let mut restored = Motion::new([60, 16, 100], RangeUnitKind::Tank, &body);
-        assert!(restored.load_version(&mut Scan::new(&bytes.v), false));
+        assert!(restored.load_version(&mut Scan::new(&bytes.v), false, true));
         assert!(!restored.partial_path);
         let mut check = Blob::new();
         restored.save(&mut check);
@@ -5382,18 +7468,22 @@ mod tests {
     #[test]
     fn prepared_ground_and_deferred_feet_match_serial_motion_across_workers() {
         use rayon::prelude::*;
-        let w = ground(0);
+        let w = World::new(2048,512,2048,65536,Box::new(Ground {depth:0}));
         let bodies = [
             voxel::unit::tank(),
             voxel::unit::strider(),
             voxel::unit::spider(),
             voxel::unit::artillery(),
+            voxel::unit::commander(),
+            voxel::unit::walker04(),
         ];
         let kinds = [
             RangeUnitKind::Tank,
             RangeUnitKind::Strider,
             RangeUnitKind::Spider,
             RangeUnitKind::Artillery,
+            RangeUnitKind::Commander,
+            RangeUnitKind::Walker04,
         ];
         let changed = nav::vehicle::Changed::default();
         for workers in [1, 2, 4, 8] {
@@ -6309,6 +8399,7 @@ mod tests {
         m.destination = Some([430, 300]);
         m.path = vec![[430, 300]];
         let mut lifted = 0;
+        let mut moving = 0;
         for tick in 0..300 {
             step(&mut m, &w, &body, &[], tick);
             let (support, ground) = m
@@ -6317,6 +8408,7 @@ mod tests {
             assert_eq!(support, nominal.to_vec());
             assert_eq!(ground, m.floors.to_vec());
             lifted += usize::from(m.feet.iter().any(|f| !f.planted()));
+            moving += usize::from(m.drive.vel > Fx::ZERO);
             assert_eq!(m.hull.load, Fx::ONE);
             assert!(
                 m.hull.up.y > Fx::from_ratio(99, 100),
@@ -6324,7 +8416,12 @@ mod tests {
                 m.hull.up
             );
         }
-        assert!(lifted > 200, "feet in the air on {lifted} ticks");
+        // This route ends before tick 100. The old >200 check depended on
+        // feet continuing an idle synthetic swing after arrival.
+        assert!(moving > 50 && lifted * 4 >= moving * 3,
+            "no active walk: {lifted} lifted ticks, {moving} moving ticks");
+        assert!(m.destination.is_none());
+        assert!(m.feet.iter().all(|f| f.planted()), "feet did not settle after arrival");
         assert!(
             m.pos[0] > Fx::from_int(300),
             "the walker did not walk: {:?}",
@@ -6958,7 +9055,7 @@ mod tests {
         assert_eq!(m.drive.vel, full, "the fixture needs a hull at full speed");
         let (route, goal) = (m.path.clone(), [580, 420]);
         m.navigation.global_nodes = 0; // Exercise the resumable fine planner.
-        m.navigation.search_nodes_per_tick = 8;
+        m.navigation.search_nodes_per_tick = 32;
         assert!(m.retarget(&w, goal, &body, &[], &rubble));
         assert!(
             m.searching(),
@@ -7229,13 +9326,14 @@ mod tests {
                     let mut old = m.pos[1];
                     let mut max_rise = Fx::ZERO;
                     // The original 0.1 m/tick envelope was measured at
-                    // Strider speed 28. Preserve it for tanks and scale it
-                    // with the intentional walking-speed change (ADR-725).
+                    // Strider speed 28 / stock track baseline. Scale it with
+                    // deliberately faster travel, preserving the vertical slope
+                    // envelope rather than the old per-tick displacement.
                     // This still rejects snapping to the 1.2 m crater rim.
                     let height_step_limit = if kind == RangeUnitKind::Strider {
                         Fx::ONE.max(Fx::from_ratio(m.speed, 28))
                     } else {
-                        Fx::ONE
+                        Fx::ONE.max(Fx::from_ratio(m.speed,stock_packs().course.tank_speed))
                     };
                     for tick in 0..750 {
                         step(&mut m, &w, &body, &[], tick);
@@ -7320,6 +9418,7 @@ mod tests {
             let mut last = unit.motion.drive.head;
             let mut replay: Option<Motion> = None;
             for tick in 0..600 {
+                unit.motion.clear_anchor_trace();
                 step(&mut unit.motion, &w, &body, &[], tick);
                 if let Some(saved) = &mut replay {
                     step(saved, &w, &body, &[], tick);
@@ -8032,6 +10131,390 @@ mod tests {
         }
     }
 
+    #[test]
+    fn foot_column_reuse_matches_fresh_queries_through_edits_and_restore() {
+        struct Flat;
+        impl voxel::Generator for Flat {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 { u16::from(y < 16) }
+        }
+        for kind in [RangeUnitKind::Commander, RangeUnitKind::Walker04,
+            RangeUnitKind::Strider, RangeUnitKind::Spider] {
+            let mut w = World::new(1536, 512, 1536, 65536, Box::new(Flat));
+            w.prepare_navigation([4, 5]);
+            let unit = super::super::RangeUnit::of_kind(kind, [768, 16, 768]);
+            let b = &unit.body;
+            let mut cached = unit.motion.clone();
+            cached.enabled = true; cached.pilot = Some([1, 0]);
+            let mut fresh = cached.clone();
+            let mut restored = None;
+            let mut rubble = nav::vehicle::Rubble::new();
+            let mut patch = Vec::new();
+            for tick in 0..150 {
+                let mut changed = nav::vehicle::Changed::default();
+                if tick == 25 {
+                    let foot = cached.feet[0].contact.unwrap();
+                    let at = [foot.pos.x.to_int_trunc(), foot.pos.z.to_int_trunc()];
+                    for z in at[1]-4..=at[1]+4 { for x in at[0]-4..=at[0]+4 {
+                        rubble.insert([x, z], 20); changed.column(x,z); patch.push([x,z]);
+                    } }
+                }
+                if tick == 50 {
+                    rubble = nav::vehicle::Rubble::new();
+                    for &[x,z] in &patch {
+                        w.queue_dig(x as u32, 15, z as u32); changed.column(x,z);
+                    }
+                    w.flush();
+                }
+                let pilot = if tick < 40 { [1,0] } else if tick < 80 { [0,1] }
+                    else if tick < 110 { [-1,0] } else { [0,0] };
+                cached.pilot = Some(pilot); fresh.pilot = Some(pilot);
+                fresh.terrain_columns = Default::default();
+                let response = crate::mobility::Mobility::intact(true);
+                cached.step(&w,b,true,true,response,&[],tick,98,&rubble,&changed);
+                fresh.step(&w,b,true,true,response,&[],tick,98,&rubble,&changed);
+                assert_eq!(motion_bytes(&cached), motion_bytes(&fresh), "cached feet {kind:?}, tick {tick}");
+                if let Some(copy) = restored.as_mut() {
+                    let copy: &mut Motion = copy;
+                    copy.pilot = Some(pilot);
+                    copy.step(&w,b,true,true,response,&[],tick,98,&rubble,&changed);
+                    assert_eq!(motion_bytes(&cached), motion_bytes(copy), "restored feet {kind:?}, tick {tick}");
+                } else if tick == 75 {
+                    let bytes = motion_bytes(&cached);
+                    let mut copy = Motion::new([768,16,768],kind,b);
+                    assert!(copy.load(&mut Scan::new(&bytes))); restored = Some(copy);
+                }
+            }
+        }
+    }
+
+
+    #[test]
+    fn cut_feet_preserves_column_ceiling_for_air_in_yielding_set() {
+        struct Ground;
+        impl voxel::Generator for Ground {
+            fn material(&self,_:u32,y:u32,_:u32)->u16 {u16::from(y<31)}
+        }
+        let w=World::new(256,64,256,4096,Box::new(Ground));
+        let body=voxel::unit::spider();let rubble=nav::vehicle::Rubble::new();
+        let mut m=Motion::new([128,31,128],RangeUnitKind::Spider,&body);
+        m.passive(&w,&rubble,&body,98,crate::mobility::Mobility::intact(true),&[]);
+        m.yielding=vec![voxel::store::AIR];m.cut_limit=usize::MAX;
+        m.legacy_cut_feet18(&w,&body);let expected=m.cut.clone();
+        assert!(expected.is_empty(),"original ceiling excludes air above bare ground");
+        m.cut_feet(&w,&body);
+        assert_eq!(m.cut.len(),expected.len(),"AIR membership must preserve the original ceiling domain");
+        assert_eq!(m.cut,expected);
+    }
+
+    #[test]
+    fn cut_feet_preserves_column_ceiling_on_edge_only_canopy() {
+        struct Ground;
+        impl voxel::Generator for Ground {
+            fn material(&self,_:u32,y:u32,_:u32)->u16 {u16::from(y<31)}
+        }
+        let mut w=World::new(256,64,256,4096,Box::new(Ground));
+        let body=voxel::unit::spider();let rubble=nav::vehicle::Rubble::new();
+        let mut m=Motion::new([128,31,128],RangeUnitKind::Spider,&body);m.drive.head=733;
+        m.passive(&w,&rubble,&body,98,crate::mobility::Mobility::intact(true),&[]);
+        let root=m.frame(&body);let mut frames=crate::damage::segment_frames(&root,&body,m.drive.head,m.drive.head);
+        let mut edge_cells=[None,None];
+        for (leg,rig) in m.rigs.iter().enumerate() {
+            let part=rig.foot.unwrap();crate::gait::leg_frames(rig,&root,m.feet[leg].contact.as_ref().unwrap(),&mut frames);
+            let foot=&body.segments[part].body;let frame=&frames[part];
+            let dims=[foot.vol.nx,foot.vol.ny,foot.vol.nz].map(i32::from);
+            let mut lo=[i32::MAX;3];let mut hi=[i32::MIN;3];
+            for corner in 0..8 {
+                let at=frame.world([0,1,2].map(|a|Fx::from_int(if corner&(1<<a)==0 {0}else{dims[a]})));
+                for (a,v) in [at.x,at.y,at.z].into_iter().enumerate() {lo[a]=lo[a].min(v.to_int_trunc());hi[a]=hi[a].max(v.to_int_trunc());}
+            }
+            for z in lo[2].max(1)..=hi[2].min(254) {for x in lo[0].max(1)..=hi[0].min(254) {
+                for y in lo[1].max(31)..=hi[1].min(62) {
+                    let local=frame.local(V3::new(Fx::from_int(x).add(Fx::from_ratio(1,2)),Fx::from_int(y).add(Fx::from_ratio(1,2)),Fx::from_int(z).add(Fx::from_ratio(1,2))));
+                    if !(0..3).all(|a|local[a]>=Fx::ZERO && local[a]<Fx::from_int(dims[a])) {continue;}
+                    let q=local.map(|v|v.to_int_trunc()as usize);if !foot.vol.get(q[0],q[1],q[2]) {continue;}
+                    for (slot,a) in [0usize,2].into_iter().enumerate() {
+                        if [x,y,z][a]==hi[a] {edge_cells[slot].get_or_insert((leg,[x as u32,y as u32,z as u32]));}
+                    }
+                }
+            }}
+        }
+        for (axis,pick) in edge_cells.into_iter().enumerate() {
+            let (leg,cell)=pick.expect("rotated real Spider sole must occupy its inclusive edge column");
+            m.legs_lost.fill(true);m.legs_lost[leg]=false;m.cut_limit=usize::MAX;m.yielding=vec![4];
+            w.queue_edit(voxel::Edit::put(cell[0],cell[1],cell[2],4));w.flush();
+            m.legacy_cut_feet18(&w,&body);let expected=m.cut.clone();assert_eq!(expected,vec![cell],"axis={axis}");
+            m.cut_feet(&w,&body);assert_eq!(m.cut,expected,"canopy only in inclusive foot edge axis={axis}");
+            w.queue_dig(cell[0],cell[1],cell[2]);w.flush();
+            m.cut_feet(&w,&body);assert!(m.cut.is_empty());
+        }
+    }
+
+    #[test]
+    fn feet_scratch_preserves_inline_spill_and_owned_clones() {
+        for n in [0,1,2,4,8,9,256,257] {
+            let src:Vec<_>=(0..n).map(|i| {let mut f=crate::gait::Foot::default();f.contact=Some(crate::gait::Contact {pos:V3::new(Fx::from_int(i),Fx::ZERO,Fx::ONE),head:i,normal:V3::UP});f}).collect();
+            let mut copy=FeetScratch::from_slice(&src);assert_eq!(copy.len(),src.len());
+            for (a,z) in copy.iter().zip(&src) {let mut ab=Blob::new();let mut zb=Blob::new();a.save(&mut ab);z.save(&mut zb);assert_eq!(ab.v,zb.v);}
+            if n>0 {copy[0].contact=None;assert!(src[0].contact.is_some());}
+        }
+    }
+
+    #[test]
+    fn sorted_motor_fallbacks_and_lazy_relief_match_traced_selection_bit_for_bit() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        struct Cliff;
+        impl voxel::Generator for Cliff {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                let h = if x > 268 { 2 } else if (x + z) % 7 == 0 { 18 } else { 16 };
+                u16::from(y < h)
+            }
+        }
+        let w = World::new(512, 64, 512, 4096, Box::new(Cliff));
+        let body = voxel::unit::spider();
+        let rubble = nav::vehicle::Rubble::new();
+        let quiet = nav::vehicle::Changed::default();
+        let mut untraced = Motion::new([252, 16, 256], RangeUnitKind::Spider, &body);
+        let mut traced = Motion::new([252, 16, 256], RangeUnitKind::Spider, &body);
+        untraced.enabled = true;
+        traced.enabled = true;
+        traced.anchor_trace = Some(Box::default());
+        let response = crate::mobility::Mobility::intact(true);
+        for tick in 0..90 {
+            let pilot = if tick < 55 { [1, 0] } else { [0, 1] };
+            untraced.pilot = Some(pilot);
+            traced.pilot = Some(pilot);
+            if let Some(t) = traced.anchor_trace.as_deref_mut() {
+                t.clear();
+            }
+            untraced.step(&w, &body, true, true, response, &[], tick, 98, &rubble, &quiet);
+            untraced.finish_feet(&w, &rubble, &body);
+            traced.step(&w, &body, true, true, response, &[], tick, 98, &rubble, &quiet);
+            traced.finish_feet(&w, &rubble, &body);
+            assert_eq!(
+                motion_bytes(&untraced),
+                motion_bytes(&traced),
+                "sorted fallback diverged from traced selection at tick {tick}"
+            );
+        }
+
+        // Verify lazy terrain_relief never queries sole floor probes when
+        // healthy support count stays strictly above minimum (> 4).
+        struct Flat16;
+        impl voxel::Generator for Flat16 {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 {
+                u16::from(y < 16)
+            }
+        }
+        let flat_w = World::new(256, 48, 256, 4096, Box::new(Flat16));
+        let mut calm = Motion::new([128, 16, 128], RangeUnitKind::Spider, &body);
+        calm.enabled = false;
+        calm.passive(&flat_w, &rubble, &body, 98, response, &[]);
+        let ground = std::cell::RefCell::new(nav::vehicle::Probe::new(&flat_w).with_rubble(&rubble));
+        let root = calm.frame(&body);
+        let base_gait = crate::gait::Gait::of(calm.chassis.gait.as_ref().unwrap());
+        let gait = crate::gait::Gait { duty: Fx::ONE, ..base_gait };
+        let mut feet = calm.feet.clone();
+        for f in &mut feet {
+            f.support.readiness = crate::gait::Readiness::Ready;
+        }
+        // Force leg 0 into swing near touchdown with Rejected readiness while legs 1..8 rest neutrally Ready.
+        let stance0 = crate::gait::Stance {
+            grounded: true,
+            root: &root,
+            head: calm.drive.head,
+            phase: 0,
+            lift_scale: Fx::ONE,
+            linear: V3::ZERO,
+            angular: 0,
+            cycles: Fx::from_ratio(9, 40),
+            gait: &base_gait,
+            floor: &|_, _| Fx::from_int(16),
+        };
+        let leg0_pos = feet[0].contact.unwrap().pos;
+        let planted_floor_calls = Arc::new(AtomicUsize::new(0));
+        let calls_ref = planted_floor_calls.clone();
+        let floor = move |x: Fx, z: Fx| {
+            if x.sub(leg0_pos.x).abs() > Fx::from_int(16) || z.sub(leg0_pos.z).abs() > Fx::from_int(16) {
+                calls_ref.fetch_add(1, Ordering::Relaxed);
+            }
+            Fx::from_int(16)
+        };
+        let _ = feet[0].step_supported(&calm.rigs[0], &stance0, true, true, true);
+        let _ = feet[0].step_supported(&calm.rigs[0], &stance0, false, false, true);
+        feet[0].support.readiness = crate::gait::Readiness::Rejected;
+        planted_floor_calls.store(0, Ordering::Relaxed);
+        let stance = crate::gait::Stance {
+            grounded: true,
+            root: &root,
+            head: calm.drive.head,
+            phase: 0,
+            lift_scale: Fx::ONE,
+            linear: V3::ZERO,
+            angular: 0,
+            cycles: Fx::from_ratio(1, 2),
+            gait: &gait,
+            floor: &floor,
+        };
+        Motion::advance_walking_feet_memo(
+            &calm.rigs,
+            &mut feet,
+            &calm.legs_lost,
+            &calm.legs_buckled,
+            &stance,
+            calm.leg_side_guard,
+            50,
+            true,
+            true,
+            Motion::walking_spread(&root),
+            calm.fold_milli,
+            false,
+            None,
+            &ground,
+            calm.terrain_capability(),
+            None,
+        );
+        assert_eq!(
+            planted_floor_calls.load(Ordering::Relaxed),
+            0,
+            "planted legs 1..8 must receive zero terrain_relief floor probes when supports > 4"
+        );
+    }
+
+    #[test]
+    fn cut_feet_skips_bare_ground_material_reads_and_matches_naive_bush_oracle() {
+        use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+        struct PostInitCount {
+            armed: Arc<AtomicBool>,
+            reads: Arc<AtomicUsize>,
+        }
+        impl voxel::Generator for PostInitCount {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 {
+                if self.armed.load(Ordering::Relaxed) {
+                    self.reads.fetch_add(1, Ordering::Relaxed);
+                }
+                u16::from(y < 31)
+            }
+            fn column(&self, _: u32, _: u32, y0: u32, out: &mut [u16]) {
+                if self.armed.load(Ordering::Relaxed) {
+                    self.reads.fetch_add(1, Ordering::Relaxed);
+                }
+                for (dy, dst) in out.iter_mut().enumerate() {
+                    *dst = u16::from((y0 + dy as u32) < 31);
+                }
+            }
+            fn batches_columns(&self) -> bool {
+                true
+            }
+        }
+        let armed = Arc::new(AtomicBool::new(false));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let w = World::new(
+            256,
+            64,
+            256,
+            4096,
+            Box::new(PostInitCount {
+                armed: armed.clone(),
+                reads: reads.clone(),
+            }),
+        );
+        let body = voxel::unit::spider();
+        let rubble = nav::vehicle::Rubble::new();
+        let mut m = Motion::new([128, 31, 128], RangeUnitKind::Spider, &body);
+        m.drive.head = 733;
+        m.enabled = false;
+        m.passive(&w, &rubble, &body, 98, crate::mobility::Mobility::intact(true), &[]);
+        assert!(m.feet.iter().all(|f| f.contact.is_some()), "all 8 Spider feet must be planted");
+        reads.store(0, Ordering::Relaxed);
+        armed.store(true, Ordering::Relaxed);
+        m.cut_feet(&w, &body);
+        assert!(m.cut.is_empty());
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            0,
+            "bare ground soles must not trigger procedural column/material reads"
+        );
+
+        // Verify bush world with single-hit and multi-hit columns + dig/put edits matches naive scan.
+        struct BushWorld;
+        impl voxel::Generator for BushWorld {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < 31 {
+                    1
+                } else if y < 45 && (x + y + z) % 5 != 0 {
+                    4 + (y % 2) as u16
+                } else {
+                    0
+                }
+            }
+        }
+        let mut wb = World::new(256, 64, 256, 4096, Box::new(BushWorld));
+        let mut mb = Motion::new([128, 31, 128], RangeUnitKind::Spider, &body);
+        mb.drive.head = 733;
+        mb.enabled = false;
+        mb.passive(&wb, &rubble, &body, 98, crate::mobility::Mobility::intact(true), &[]);
+        assert!(!mb.cut.is_empty());
+        let first_cut = mb.cut[0];
+        wb.queue_edit(voxel::Edit::put(first_cut[0], first_cut[1], first_cut[2], 2));
+        if mb.cut.len() > 1 {
+            let second_cut = mb.cut[1];
+            wb.queue_dig(second_cut[0], second_cut[1], second_cut[2]);
+        }
+        wb.flush();
+        for limit in [0, 1, 5, usize::MAX] {
+            mb.cut_limit = limit;
+            mb.cut_feet(&wb, &body);
+            let root = mb.frame(&body);
+            let mut frames = crate::damage::segment_frames(&root, &body, mb.drive.head, mb.drive.head);
+            let mut expected_set = std::collections::BTreeSet::new();
+            for (leg, rig) in mb.rigs.iter().enumerate() {
+                let (Some(part), Some(c)) = (rig.foot, mb.feet[leg].contact.as_ref()) else { continue };
+                crate::gait::leg_frames(rig, &root, c, &mut frames);
+                let foot = &body.segments[part].body;
+                let frame = &frames[part];
+                let dims = [foot.vol.nx, foot.vol.ny, foot.vol.nz].map(i32::from);
+                for z in 0..wb.nz as i32 {
+                    for x in 0..wb.nx as i32 {
+                        for y in 0..wb.ny as i32 {
+                            let mat = wb.material(x as u32, y as u32, z as u32);
+                            if !mb.yielding.contains(&mat) {
+                                continue;
+                            }
+                            let local = frame.local(V3::new(
+                                Fx::from_int(x).add(Fx::from_ratio(1, 2)),
+                                Fx::from_int(y).add(Fx::from_ratio(1, 2)),
+                                Fx::from_int(z).add(Fx::from_ratio(1, 2)),
+                            ));
+                            if (0..3).all(|a| local[a] >= Fx::ZERO && local[a] < Fx::from_int(dims[a])) {
+                                let q = local.map(|v| v.to_int_trunc() as usize);
+                                if foot.vol.get(q[0], q[1], q[2]) {
+                                    expected_set.insert([x as u32, y as u32, z as u32]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let mut expected_vec: Vec<_> = expected_set.into_iter().collect();
+            expected_vec.sort_unstable_by_key(|p| (p[2], p[0], p[1]));
+            let mut expected_cut = Vec::new();
+            let mut claimed = 0;
+            for p in expected_vec {
+                if !wb.on_frame(p[0], p[1], p[2]) {
+                    if claimed == mb.cut_limit {
+                        break;
+                    }
+                    claimed += 1;
+                }
+                expected_cut.push(p);
+            }
+            if limit > 0 {
+                assert!(!expected_cut.is_empty());
+            }
+            assert_eq!(mb.cut, expected_cut, "limit={limit}");
+        }
+    }
+
 }
 
 #[cfg(test)]
@@ -8066,3 +10549,70 @@ mod crater_route_tests;
 #[cfg(test)]
 #[path = "range_local_navigation_tests.rs"]
 mod local_navigation_tests;
+
+#[cfg(test)]
+#[path = "range_tracked_motion_tests.rs"]
+mod tracked_motion_tests;
+
+#[cfg(test)]
+#[path = "range_terrain_drag_tests.rs"]
+mod terrain_drag_tests;
+
+
+#[cfg(test)]
+mod motor_scratch_tests {
+    use super::*;
+
+    #[test]
+    fn motor_scratch_matches_legacy_memos_and_survives_generation_wrap() {
+        let scratch = MotorScratch::default();
+        scratch.gen.set(u32::MAX - 1);
+        for pass in 0..4u32 {
+            scratch.next_pass();
+            let legacy_floor = MotorFloorMemo::default();
+            let legacy_support = MotorSupportMemo::default();
+            for step in 0..320i32 {
+                let clean = (step % 3) != 0;
+                let x = Fx::from_int(100 + (step % 37)).add(Fx::from_ratio(step % 5, 8));
+                let z = Fx::from_int(200 + (step * 7 % 41)).add(Fx::from_ratio(step % 7, 8));
+                let expected_h = Fx::from_int(16 + ((step + pass as i32 * 13) % 9));
+                let mut calls_new = 0usize;
+                let got = scratch.floor_at(x, z, || {
+                    calls_new += 1;
+                    (expected_h, clean)
+                });
+                let old = legacy_floor.at_cell(x, z, || (expected_h, clean));
+                assert_eq!(got, old);
+                assert_eq!(got, expected_h);
+                // Immediate repeat must hit cache without invoking reader.
+                let got_repeat = scratch.floor_at(x, z, || panic!("unexpected cache miss"));
+                assert_eq!(got_repeat, expected_h);
+                assert!(calls_new <= 1);
+
+                let pos = [x, z];
+                let head = step * 1024;
+                let floors = [
+                    expected_h,
+                    expected_h.add(Fx::ONE),
+                    expected_h.sub(Fx::ONE),
+                    expected_h.add(Fx::from_int(2)),
+                ];
+                let s_got = scratch.support_at(pos, head, || floors);
+                let s_old = legacy_support.at(pos, head, || floors);
+                assert_eq!(s_got, s_old);
+                let s_rep = scratch.support_at(pos, head, || panic!("support cache miss"));
+                assert_eq!(s_rep, floors);
+            }
+        }
+        // Re-entrant fallback on thread-local borrow must also succeed without panicking.
+        let nested = with_motor_scratch(|outer| {
+            let a = outer.floor_at(Fx::from_int(12), Fx::from_int(34), || (Fx::from_int(5), true));
+            let b = with_motor_scratch(|inner| {
+                inner.floor_at(Fx::from_int(12), Fx::from_int(34), || (Fx::from_int(9), true))
+            });
+            let a_again = outer.floor_at(Fx::from_int(12), Fx::from_int(34), || panic!("outer evicted"));
+            (a, b, a_again)
+        });
+        assert_eq!(nested, (Fx::from_int(5), Fx::from_int(9), Fx::from_int(5)));
+    }
+}

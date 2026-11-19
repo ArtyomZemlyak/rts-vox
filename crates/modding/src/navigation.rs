@@ -44,8 +44,13 @@ pub struct Navigation {
     /// Precision at a checked turn centre or intermediate route endpoint.
     /// Final order arrival keeps the course's ordinary arrival radius.
     pub corner_arrival_mm: i32,
+    /// Hysteresis allowance (mm) when stepping along an already-steep slope.
+    pub grade_exit_slack_mm: i32,
     /// Bounded preview of a moving turn; zero retains exact pivot centers.
     pub corner_lookahead_units: i32,
+    /// Maximum next-leg turn angle (degrees) that keeps rolling without
+    /// braking to a full stop when a rounded preview cannot be proved.
+    pub straight_through_deg: i32,
     /// Minimum heading alignment for a moving turn in proven open ground.
     pub moving_turn_alignment_pct: i32,
     /// Weight of the planner's distance estimate, percent; 100 is plain A*.
@@ -71,6 +76,8 @@ pub struct Felling {
     pub cost_cap: u32,
     /// Speed while the hull is inside yielding matter.
     pub speed_pct: i32,
+    /// Configured yielding materials become accounted dust; zero disables it.
+    pub dust_materials: [u16; 1],
 }
 impl Navigation {
     pub fn from_ron(text: &str) -> Result<Self, String> {
@@ -97,7 +104,9 @@ impl Navigation {
             || !(0..=60).contains(&n.recovery_turn_deg)
             || !(0..=16).contains(&n.plan_margin)
             || !(1..=500).contains(&n.corner_arrival_mm)
+            || !(0..=500).contains(&n.grade_exit_slack_mm)
             || !(0..=64).contains(&n.corner_lookahead_units)
+            || !(0..=90).contains(&n.straight_through_deg)
             || !(1..=100).contains(&n.moving_turn_alignment_pct)
             || !(0..=256).contains(&n.retarget_units)
             || n.fell.materials.contains(&0)
@@ -106,6 +115,7 @@ impl Navigation {
             || n.fell.cost_per_column > 1000
             || n.fell.cost_cap > 1000
             || !(1..=100).contains(&n.fell.speed_pct)
+            || n.fell.dust_materials.iter().any(|&m| m != 0 && !n.fell.materials.contains(&m))
         {
             return Err("invalid range navigation limits".into());
         }
@@ -116,6 +126,14 @@ impl Navigation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stock_foliage_is_physical_and_the_material_policy_is_explicit() {
+        let source=include_str!("../../../data/range-navigation.ron");
+        assert_eq!(Navigation::from_ron(source).unwrap().fell.dust_materials,[0]);
+        assert!(Navigation::from_ron(&source.replace(", dust_materials: (0,)", "")).is_err());
+        assert!(Navigation::from_ron(&source.replace("dust_materials: (0,)","dust_materials: (4,)")).is_ok());
+        assert!(Navigation::from_ron(&source.replace("dust_materials: (0,)","dust_materials: (6,)")).is_err());
+    }
     /// Every number is in the file (ADR-429): one left out is an error,
     /// not a default in code. A missing slice budget used to lift the
     /// per-tick ceiling on search work altogether.
@@ -132,15 +150,19 @@ mod tests {
             "search_start_budget: 768,",
             "search_resume_budget: 768,",
             "search_resume_per_unit: 192,",
-            "searches_started_per_tick: 1,",
+            "searches_started_per_tick: 2,",
             "contact_replan_ticks: 2,",
             "corner_arrival_mm: 50,",
+            "grade_exit_slack_mm: 100,",
             "corner_lookahead_units: 32,",
+            "straight_through_deg: 25,",
             "moving_turn_alignment_pct: 10,",
             "heuristic_pct: 200,",
             "retarget_units: 160,",
         ] {
-            let cut = include_str!("../../../data/range-navigation.ron").replace(field, "");
+            let source=include_str!("../../../data/range-navigation.ron");
+            assert!(source.contains(field),"navigation fixture no longer contains {field}");
+            let cut=source.replace(field, "");
             assert!(
                 Navigation::from_ron(&cut).is_err(),
                 "accepted without {field}"

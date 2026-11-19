@@ -954,7 +954,7 @@ impl Effects {
                         )
                     )
                 {
-                    let frame = unit.root_frame(usize::from(unit.body.turret_y));
+                    let frame = unit.muzzle_frame(&unit.pose, unit.turret_delta, unit.turret_pitch);
                     let axis = point([frame.x.x, frame.x.y, frame.x.z]);
                     let scale = if matches!(
                         sim.battle_weapon(id),

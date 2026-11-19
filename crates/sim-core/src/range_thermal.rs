@@ -363,6 +363,7 @@ impl Thermals {
             if !matter.melt_unit_with_room(id, u, usize::from(p.part), cell, &mut room) {
                 continue;
             }
+            matter.liquefy_last_body_fragment(self.heat(p));
             if p.part == 0 {
                 u.body.remove(cell[0], cell[1], cell[2]);
                 u.removed.push(p.at);
@@ -482,6 +483,7 @@ impl BlastRange {
         completed: impl FnMut(&'static str),
         task: &(impl Fn(usize, &'static str) + Send + Sync),
     ) {
+        self.matter.set_melt_tuning(self.heat_tuning);
         self.thermals.step_observed(
             &mut self.units,
             &mut self.matter,
@@ -725,6 +727,151 @@ mod tests {
         }
         assert_eq!(r.thermals.hot(), 0);
         assert_eq!(r.units[0].revision, 0);
+    }
+    #[test]
+    fn molten_hull_cell_uses_the_same_liquid_phase_as_world_steel() {
+        let mut r = range();
+        r.thermal_tuning.cooling_milli = 0;
+        r.thermal_tuning.conduction_milli = 0;
+        let p = cell(&r, Part::Armour);
+        let mm = p.body(&r.units).unwrap().mm;
+        let heat = (500u64 * u64::from(mm).pow(3) / u64::from(WORLD_MM).pow(3)) as u32;
+        let held = r.matter.body_container(0);
+        let before = r.matter.economy.ledger.held(held);
+        r.thermals.deposit_direct(p, heat, &r.thermal_tuning);
+        r.step_unit_heat();
+        assert!(p.body(&r.units).is_none());
+        let f = r.matter.debris.fragments.last().unwrap();
+        assert_eq!(f.material, 13, "molten hull became an ordinary steel fragment");
+        assert_eq!(r.matter.economy.ledger.held(held) + r.matter.economy.ledger.held(f.held), before);
+        assert!(r.matter.economy.ledger.balanced());
+    }
+    #[test]
+    fn molten_hull_descends_without_bounce_freezes_and_restores_with_exact_matter() {
+        let mut r = range();
+        r.thermal_tuning.conduction_milli = 0;
+        let p = cell(&r, Part::Armour);
+        r.thermals.deposit_direct(p, 500, &r.thermal_tuning);
+        r.step_unit_heat();
+        let f = r.matter.debris.fragments.last_mut().unwrap();
+        f.position.y = Fx::from_int(80);
+        let id = f.id;
+        let held = f.held;
+        let amount = r.matter.economy.ledger.held(held);
+        let mass = f.mass_g;
+        let mut copy = BlastRange::restore_observed(r.config, &r.snapshot(), |phase, offset, id| eprintln!("drop restore {phase} {offset} {id:?}")).expect("hot drop restore");
+        assert_eq!(r.state_hash(), copy.state_hash());
+        let start = r.matter.debris.fragments.last().unwrap().position;
+        let mut descended = false;
+        for tick in 0..100 {
+            for sim in [&mut r, &mut copy] {
+                sim.matter.debris.step_molten(&sim.world, &mut sim.matter.economy,
+                    &sim.matter.tuning, &sim.heat_tuning, Fx::from_ratio(1, 2), tick, &[]);
+                assert_eq!(sim.matter.economy.ledger.held(held), amount);
+                assert!(sim.matter.economy.ledger.balanced());
+            }
+            assert_eq!(r.state_hash(), copy.state_hash(), "drop replay tick {tick}");
+            let f = r.matter.debris.fragments.last().unwrap();
+            descended |= f.position.y < start.y;
+            assert!(f.velocity.y <= Fx::ZERO, "liquid bounced upward");
+            assert_eq!(f.mass_g, mass);
+            if r.matter.debris.molten_heat(id).is_some() {
+                assert!(!f.resting, "liquid acquired solid support state");
+            }
+        }
+        assert!(descended);
+        assert!(r.matter.debris.molten_heat(id).is_none());
+        assert_eq!(r.matter.debris.fragments.last().unwrap().material, 3);
+        assert!(BlastRange::restore(r.config, &r.snapshot()).is_some());
+    }
+    #[test]
+    fn molten_hull_absorbs_volume_scaled_vapor_energy_and_sinks_exactly_once() {
+        let mut r = range();
+        r.thermal_tuning.conduction_milli = 0;
+        let p = cell(&r, Part::Armour);
+        r.thermals.deposit_direct(p, 500, &r.thermal_tuning);
+        r.step_unit_heat();
+        let f = r.matter.debris.fragments.last().unwrap();
+        let (id, held, mm) = (f.id, f.held, f.mm);
+        let amount = r.matter.economy.ledger.held(held);
+        let threshold = (1080u64 * u64::from(mm).pow(3) / u64::from(WORLD_MM).pow(3)) as u32;
+        let mut restored = BlastRange::restore_observed(r.config, &r.snapshot(), |phase, offset, id| eprintln!("vapor restore {phase} {offset} {id:?}")).unwrap();
+        for sim in [&mut r, &mut restored] {
+            let before = sim.matter.economy.ledger.sunk(crate::matter::Sink::Pulverised);
+            let energy = sim.matter.debris.molten_heat(id).unwrap();
+            let needed = threshold - energy;
+            assert_eq!(sim.matter.debris.heat_molten(id, needed - 1, &sim.heat_tuning, &mut sim.matter.economy), (needed - 1, false));
+            assert_eq!(sim.matter.economy.ledger.sunk(crate::matter::Sink::Pulverised), before);
+            assert_eq!(sim.matter.debris.heat_molten(id, 51, &sim.heat_tuning, &mut sim.matter.economy), (1, true));
+            assert_eq!(sim.matter.debris.heat_molten(id, 51, &sim.heat_tuning, &mut sim.matter.economy), (0, true));
+            assert_eq!(sim.matter.economy.ledger.sunk(crate::matter::Sink::Pulverised), before + amount);
+            assert!(!sim.matter.debris.fragments.iter().any(|f| f.id == id));
+            assert!(sim.matter.economy.ledger.balanced());
+        }
+        assert_eq!(r.state_hash(), restored.state_hash());
+    }
+    #[test]
+    fn dense_body_melt_rotates_bounded_moves_without_losing_heat_or_matter() {
+        let mut r = range();
+        r.thermal_tuning.conduction_milli = 0;
+        let mut cells = Vec::new();
+        let b = &r.units[0].body;
+        for z in 0..b.vol.nz { for y in 0..b.vol.ny { for x in 0..b.vol.nx {
+            if b.vol.get(x as usize, y as usize, z as usize) && cells.len() < 64 {
+                cells.push(Cell { unit: 0, part: 0, at: [x, y, z] });
+            }
+        } } }
+        for p in cells { r.thermals.deposit_direct(p, 1000, &r.thermal_tuning); }
+        r.step_unit_heat();
+        assert_eq!(r.matter.debris.molten.cells.len(), 64);
+        r.heat_tuning.melt_moves_per_tick = 2;
+        r.heat_tuning.cooling_milli = 1;
+        let mut origins = BTreeMap::new();
+        for f in &mut r.matter.debris.fragments {
+            f.position.y = Fx::from_int(100);
+            origins.insert(f.id, f.position);
+        }
+        for tick in 0..32 {
+            let old: Vec<_> = r.matter.debris.fragments.iter().map(|f| f.position).collect();
+            r.matter.debris.step_molten(&r.world, &mut r.matter.economy, &r.matter.tuning,
+                &r.heat_tuning, Fx::from_ratio(1, 2), tick, &[]);
+            assert!(r.matter.debris.fragments.iter().zip(&old).filter(|(f, p)| f.position != **p).count() <= 2);
+            assert_eq!(r.matter.debris.molten.cells.len(), 64);
+            assert!(r.matter.economy.ledger.balanced());
+        }
+        assert!(r.matter.debris.fragments.iter().all(|f| f.position.y < origins[&f.id].y), "bounded flow starved later drops");
+    }
+    #[test]
+    fn molten_hull_runs_off_a_step_then_stops_on_level_ground() {
+        struct Floor;
+        impl voxel::Generator for Floor {
+            fn material(&self, _x: u32, y: u32, _z: u32) -> u16 { if y < 2 { 1 } else { 0 } }
+        }
+        let mut r = range();
+        r.world = voxel::World::new(128, 128, 128, 4096, Box::new(Floor));
+        r.thermal_tuning.conduction_milli = 0;
+        let p = cell(&r, Part::Armour);
+        r.thermals.deposit_direct(p, 5000, &r.thermal_tuning);
+        r.step_unit_heat();
+        r.heat_tuning.cooling_milli = 1;
+        r.world.queue_transfer(voxel::Edit::put(100, 2, 100, 3));
+        r.world.flush_transfers();
+        let f = r.matter.debris.fragments.last_mut().unwrap();
+        f.position = phys::V3::new(Fx::from_ratio(201, 2), Fx::from_ratio(7, 2), Fx::from_ratio(201, 2));
+        let start = f.position;
+        for tick in 0..40 {
+            r.matter.debris.step_molten(&r.world, &mut r.matter.economy, &r.matter.tuning,
+                &r.heat_tuning, Fx::from_ratio(1, 2), tick, &[]);
+        }
+        let landed = r.matter.debris.fragments.last().unwrap().position;
+        assert!(landed.y < start.y, "liquid never left the raised support");
+        assert!(landed.x != start.x || landed.z != start.z);
+        for tick in 40..80 {
+            r.matter.debris.step_molten(&r.world, &mut r.matter.economy, &r.matter.tuning,
+                &r.heat_tuning, Fx::from_ratio(1, 2), tick, &[]);
+        }
+        assert_eq!(r.matter.debris.fragments.last().unwrap().position, landed, "liquid drifts on a level floor");
+        assert!(r.matter.economy.ledger.balanced());
     }
     #[test]
     fn engine_fails_before_armour_and_matter_falls_without_blast_impulse() {

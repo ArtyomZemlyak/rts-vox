@@ -16,8 +16,206 @@ pub struct Report {
     pub drive: Fx,
 }
 
+#[cfg(test)]
+#[path = "integrity_review_tests.rs"]
+mod integrity_review_tests;
+
+/// Whether any single 18-connected void cavity of destroyed core cells spans
+/// from one face of `[min .. max)` to the opposite face along X, Y, or Z and
+/// removes at least `bore_pct`% of `total_cells`. Disconnected small holes do
+/// not sum together; diagonal (`30°–45°`) through-shots are caught identically
+/// to cardinal ones.
+fn core_cavity_breached(
+    min: [usize; 3],
+    max: [usize; 3],
+    ny: usize,
+    words: usize,
+    reached: &[u64],
+    organ_mask: Option<&[u64]>,
+    total_cells: u32,
+    bore_pct: i32,
+) -> bool {
+    if bore_pct >= 100 || total_cells < 8 {
+        return false;
+    }
+    let dims = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+    if dims.iter().any(|&d| d < 2) {
+        return false;
+    }
+    let vol = dims[0] * dims[1] * dims[2];
+    let mut state = vec![0u8; vol];
+    let mut destroyed = 0u32;
+    for iz in 0..dims[2] {
+        for iy in 0..dims[1] {
+            let word_base = ((min[2] + iz) * ny + (min[1] + iy)) * words;
+            for ix in 0..dims[0] {
+                let gx = min[0] + ix;
+                let word = word_base + gx / 64;
+                let bit = 1u64 << (gx % 64);
+                let was_core = organ_mask.map_or(true, |m| m[word] & bit != 0);
+                if was_core && (reached[word] & bit == 0) {
+                    state[(iz * dims[1] + iy) * dims[0] + ix] = 1;
+                    destroyed += 1;
+                }
+            }
+        }
+    }
+    if u64::from(destroyed) * 100 < u64::from(total_cells) * bore_pct as u64 {
+        return false;
+    }
+    let mut stack = Vec::new();
+    for idx in 0..vol {
+        if state[idx] != 1 {
+            continue;
+        }
+        state[idx] = 2;
+        stack.clear();
+        stack.push(idx);
+        let mut comp_cells = 0u32;
+        let mut touches = [0u8; 6];
+        while let Some(cur) = stack.pop() {
+            comp_cells += 1;
+            let ix = cur % dims[0];
+            let rem = cur / dims[0];
+            let iy = rem % dims[1];
+            let iz = rem / dims[1];
+            if ix == 0 {
+                touches[0] = 1;
+            }
+            if ix + 1 == dims[0] {
+                touches[1] = 1;
+            }
+            if iy == 0 {
+                touches[2] = 1;
+            }
+            if iy + 1 == dims[1] {
+                touches[3] = 1;
+            }
+            if iz == 0 {
+                touches[4] = 1;
+            }
+            if iz + 1 == dims[2] {
+                touches[5] = 1;
+            }
+            for dz in -1..=1isize {
+                for dy in -1..=1isize {
+                    for dx in -1..=1isize {
+                        let manhattan = dx.abs() + dy.abs() + dz.abs();
+                        if manhattan == 0 || manhattan > 2 {
+                            continue;
+                        }
+                        let nx = ix as isize + dx;
+                        let ny_i = iy as isize + dy;
+                        let nz = iz as isize + dz;
+                        if nx < 0
+                            || ny_i < 0
+                            || nz < 0
+                            || nx as usize >= dims[0]
+                            || ny_i as usize >= dims[1]
+                            || nz as usize >= dims[2]
+                        {
+                            continue;
+                        }
+                        let nidx =
+                            (nz as usize * dims[1] + ny_i as usize) * dims[0] + nx as usize;
+                        if state[nidx] == 1 {
+                            state[nidx] = 2;
+                            stack.push(nidx);
+                        }
+                    }
+                }
+            }
+        }
+        let spans_through = (touches[0] & touches[1]) != 0
+            || (touches[2] & touches[3]) != 0
+            || (touches[4] & touches[5]) != 0;
+        if spans_through
+            && u64::from(comp_cells) * 100 >= u64::from(total_cells) * bore_pct as u64
+        {
+            return true;
+        }
+    }
+    false
+}
+
+struct CoreOrgan {
+    min: [u8; 3],
+    max: [u8; 3],
+    total: u32,
+    mask: Vec<u64>,
+    sections: [Vec<u32>; 3],
+}
+
+impl CoreOrgan {
+    fn from_template(template: &UnitBody) -> Option<Self> {
+        let (nx, ny, nz) = (
+            template.vol.nx as usize,
+            template.vol.ny as usize,
+            template.vol.nz as usize,
+        );
+        let words = nx.div_ceil(64);
+        let mut mask = vec![0u64; ny * nz * words];
+        let mut lo = [usize::MAX; 3];
+        let mut hi = [0usize; 3];
+        let mut total = 0u32;
+        for z in 0..nz {
+            for y in 0..ny {
+                for x in 0..nx {
+                    if template.vol.get(x, y, z) && template.part_at(x, y, z) == Part::Core {
+                        lo[0] = lo[0].min(x);
+                        lo[1] = lo[1].min(y);
+                        lo[2] = lo[2].min(z);
+                        hi[0] = hi[0].max(x + 1);
+                        hi[1] = hi[1].max(y + 1);
+                        hi[2] = hi[2].max(z + 1);
+                        mask[(z * ny + y) * words + x / 64] |= 1u64 << (x % 64);
+                        total += 1;
+                    }
+                }
+            }
+        }
+        if total == 0 {
+            return None;
+        }
+        let min = lo.map(|v| v as u8);
+        let max = hi.map(|v| v as u8);
+        let mut sections: [Vec<u32>; 3] = Default::default();
+        for axis in 0..3 {
+            let a = (axis + 1) % 3;
+            let b = (axis + 2) % 3;
+            let len_s = hi[axis] - lo[axis];
+            let len_a = hi[a] - lo[a];
+            let len_b = hi[b] - lo[b];
+            let mut sec = vec![0u32; len_s];
+            for ia in 0..len_a {
+                for ib in 0..len_b {
+                    for is in 0..len_s {
+                        let mut p = [0usize; 3];
+                        p[axis] = lo[axis] + is;
+                        p[a] = lo[a] + ia;
+                        p[b] = lo[b] + ib;
+                        let word = (p[2] * ny + p[1]) * words + p[0] / 64;
+                        if mask[word] & (1u64 << (p[0] % 64)) != 0 {
+                            sec[is] += 1;
+                        }
+                    }
+                }
+            }
+            sections[axis] = sec;
+        }
+        Some(Self {
+            min,
+            max,
+            total,
+            mask,
+            sections,
+        })
+    }
+}
+
 pub struct Model {
     rules: modding::integrity::Integrity,
+    organ: Option<CoreOrgan>,
     engine: u32,
     paths: Vec<(WeaponPath, Vec<u32>)>,
     /// Cells of each leg's thigh and shin in the template (ADR-281).
@@ -133,6 +331,7 @@ impl Model {
                 "../../../data/unit-integrity.ron"
             ))
             .expect("unit integrity tuning"),
+            organ: CoreOrgan::from_template(template),
             engine: template.subsystem_count(Part::Engine),
             paths: template
                 .load_paths()
@@ -174,27 +373,99 @@ impl Model {
 
     pub fn evaluate(&self, body: &UnitBody, scratch: &mut CoreBufs) -> (Status, Report) {
         let mut status = body.status(scratch);
+        let reached = scratch.reached_cols();
+        let ny = body.vol.ny as usize;
+        let words = body.vol.nx.div_ceil(64) as usize;
         let minimum = [body.core.0, body.core.1, body.core.2];
         let maximum = minimum.map(|v| v + body.core_size);
-        let mut core_count = 0;
+        let face_rays = u32::from(body.core_size).pow(2);
+        let mut core_count = 0u32;
         let mut core_section = Fx::ONE;
         for axis in 0..3 {
-            let path = WeaponPath {
-                min: minimum,
-                max: maximum,
-                axis,
-            };
-            let values = sections(body, path, scratch.reached_cols());
-            if axis == 0 {
-                core_count = values.iter().sum();
-            }
-            for count in values {
-                core_section = core_section.min(fraction(count, u32::from(body.core_size).pow(2)));
+            let a = (axis + 1) % 3;
+            let b = (axis + 2) % 3;
+            for slice in minimum[axis]..maximum[axis] {
+                let mut count = 0u32;
+                for u in minimum[a]..maximum[a] {
+                    for v in minimum[b]..maximum[b] {
+                        let mut p = [0usize; 3];
+                        p[axis] = slice as usize;
+                        p[a] = u as usize;
+                        p[b] = v as usize;
+                        let word = (p[2] * ny + p[1]) * words + p[0] / 64;
+                        count += u32::from(reached[word] & (1u64 << (p[0] % 64)) != 0);
+                    }
+                }
+                if axis == 0 {
+                    core_count += count;
+                }
+                core_section = core_section.min(fraction(count, face_rays));
             }
         }
-        let core = fraction(core_count, u32::from(body.core_size).pow(3));
+        let mut perforated = body.core_size >= 2
+            && self.rules.core_bore_pct < 100
+            && core_cavity_breached(
+                minimum.map(usize::from),
+                maximum.map(usize::from),
+                ny,
+                words,
+                reached,
+                None,
+                u32::from(body.core_size).pow(3),
+                self.rules.core_bore_pct,
+            );
+        let mut core = fraction(core_count, u32::from(body.core_size).pow(3));
+        if let Some(organ) = &self.organ {
+            if organ.mask.len() == reached.len() {
+                let organ_connected: u32 = organ
+                    .mask
+                    .iter()
+                    .zip(reached)
+                    .map(|(m, r)| (m & r).count_ones())
+                    .sum();
+                core = core.min(fraction(organ_connected, organ.total));
+                for axis in 0..3 {
+                    let a = (axis + 1) % 3;
+                    let b = (axis + 2) % 3;
+                    let lo = organ.min.map(usize::from);
+                    let hi = organ.max.map(usize::from);
+                    for (is, &base) in organ.sections[axis].iter().enumerate() {
+                        if base == 0 {
+                            continue;
+                        }
+                        let mut count = 0u32;
+                        for u in lo[a]..hi[a] {
+                            for v in lo[b]..hi[b] {
+                                let mut p = [0usize; 3];
+                                p[axis] = lo[axis] + is;
+                                p[a] = u;
+                                p[b] = v;
+                                let word = (p[2] * ny + p[1]) * words + p[0] / 64;
+                                count += u32::from(
+                                    (organ.mask[word] & reached[word]) & (1u64 << (p[0] % 64)) != 0,
+                                );
+                            }
+                        }
+                        core_section = core_section.min(fraction(count, base));
+                    }
+                }
+                if !perforated && self.rules.core_bore_pct < 100 {
+                    perforated = core_cavity_breached(
+                        organ.min.map(usize::from),
+                        organ.max.map(usize::from),
+                        ny,
+                        words,
+                        reached,
+                        Some(&organ.mask),
+                        organ.total,
+                        self.rules.core_bore_pct,
+                    );
+                }
+            }
+        }
         status.alive &= core >= Fx::from_ratio(self.rules.core_volume_pct, 100)
-            && core_section >= Fx::from_ratio(self.rules.core_section_pct, 100);
+            && core_section >= Fx::from_ratio(self.rules.core_section_pct, 100)
+            && !perforated;
         let engine = fraction(
             body.connected_subsystem_count(Part::Engine, scratch),
             self.engine,
@@ -388,5 +659,60 @@ mod tests {
             assert_eq!(report.gears[0], Fx::ZERO, "{mm} mm track");
             assert_eq!(report.drive, Fx::ZERO);
         }
+    }
+
+    #[test]
+    fn through_breach_across_core_at_cardinal_or_oblique_angle_destroys_unit() {
+        let base = voxel::unit::commander();
+        let model = Model::new(&base);
+        let (cx, cy, cz) = (
+            base.core.0 as usize,
+            base.core.1 as usize,
+            base.core.2 as usize,
+        );
+        let cs = base.core_size as usize;
+        assert!(cs >= 6);
+
+        let mut pinhole = base.clone();
+        for dx in 0..cs {
+            pinhole.remove(cx + dx, cy + cs / 2, cz + cs / 2);
+        }
+        assert!(inspect(&model, &pinhole).0.alive);
+
+        let mut blind_dent = base.clone();
+        for dx in 2..cs {
+            for dy in 2..6 {
+                for dz in 2..6 {
+                    blind_dent.remove(cx + dx, cy + dy, cz + dz);
+                }
+            }
+        }
+        assert!(inspect(&model, &blind_dent).0.alive);
+
+        let mut cardinal_bore = base.clone();
+        for dx in 0..cs {
+            for dy in 2..6 {
+                for dz in 2..6 {
+                    cardinal_bore.remove(cx + dx, cy + dy, cz + dz);
+                }
+            }
+        }
+        let (status, report) = inspect(&model, &cardinal_bore);
+        assert!(report.core >= Fx::from_ratio(60, 100));
+        assert!(!status.alive && !status.engine && !status.weapon);
+
+        let mut oblique_bore = base;
+        for dx in 0..cs {
+            let z_shift = dx / 2;
+            for dy in 2..6 {
+                for dz in (1 + z_shift)..(4 + z_shift) {
+                    if dz < cs {
+                        oblique_bore.remove(cx + dx, cy + dy, cz + dz);
+                    }
+                }
+            }
+        }
+        let (status_oblique, _) = inspect(&model, &oblique_bore);
+        assert!(!status_oblique.alive);
     }
 }

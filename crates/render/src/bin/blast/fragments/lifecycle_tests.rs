@@ -1,6 +1,6 @@
 use super::*;
 
-fn app() -> App {
+pub(crate) fn app() -> App {
     let sim = BlastRange::new(config(false, false));
     let scene = Scene {
         sim,
@@ -55,7 +55,7 @@ fn app() -> App {
         .add_systems(Update, draw);
     app
 }
-fn piece(id: u64) -> sim_core::burst::Fragment {
+pub(crate) fn piece(id: u64) -> sim_core::burst::Fragment {
     use fx::Fx;
     use sim_core::damage::V3;
     sim_core::burst::Fragment {

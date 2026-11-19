@@ -60,6 +60,13 @@ impl ChassisKind {
 /// подвеска его не читает.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 pub struct Gait {
+    /// Residual drive inertia after active leg balancing, percent.
+    /// Legacy rigs retain their fully stabilised body.
+    #[serde(default)]
+    pub body_sway_pct: u8,
+    /// Maximum stance share when neighbouring feet require a shorter stride.
+    #[serde(default)]
+    pub lane_duty_pct: u8,
     /// Путь корпуса за полный цикл шага, сантиметры.
     pub stride_cm: i32,
     /// Доля цикла, которую ступня стоит на земле, проценты.
@@ -453,6 +460,9 @@ impl Tuning {
             ));
         }
         for c in [&t.tracked, &t.walking] {
+            if c.gait.is_some_and(|g| g.body_sway_pct > 100 || g.lane_duty_pct > 100) {
+                return Err(TuningError::Ron("invalid walking body inertia".into()));
+            }
             if !(0..=1000).contains(&c.contact_cm)
                 || !(1..=300).contains(&c.approach_pct)
                 || !(1..=100).contains(&c.settle_pct)
@@ -524,6 +534,24 @@ pub fn load_tuning(path: &std::path::Path) -> Result<Tuning, TuningError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_inertia_loads_stock_preserves_legacy_and_rejects_invalid_share() {
+        let stock = include_str!("../../../data/sim.ron");
+        assert_eq!(Tuning::from_ron(stock).unwrap().walking.gait.unwrap().lane_duty_pct,50);
+        assert_eq!(Tuning::from_ron(&stock.replace("            lane_duty_pct: 50,", "")).unwrap().walking.gait.unwrap().lane_duty_pct,0);
+        assert!(Tuning::from_ron(&stock.replace("lane_duty_pct: 50","lane_duty_pct: 101")).is_err());
+        assert_eq!(Tuning::from_ron(stock).unwrap().walking.gait.unwrap().body_sway_pct,18);
+        let legacy = stock.replace("            body_sway_pct: 18,", "");
+        assert_ne!(legacy,stock);
+        assert_eq!(Tuning::from_ron(&legacy).unwrap().walking.gait.unwrap().body_sway_pct,0);
+        for invalid in ["body_sway_pct: 101", "body_sway_pct: -1", "body_sway_pct: 256"] {
+            assert!(Tuning::from_ron(&stock.replace("body_sway_pct: 18",invalid)).is_err());
+        }
+        let spider = include_str!("../../../data/spider.ron");
+        assert_eq!(crate::spider::Tuning::from_ron(spider).unwrap().chassis.gait.unwrap().body_sway_pct,12);
+        assert!(crate::spider::Tuning::from_ron(&spider.replace("body_sway_pct: 12","body_sway_pct: 101")).is_err());
+    }
 
     /// **Пропущенное поле — ошибка, а не ноль.** Значение по умолчанию
     /// у числа тика означало бы, что оно всё-таки живёт в коде.

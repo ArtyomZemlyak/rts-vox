@@ -17,10 +17,15 @@ pub struct SoloLoadout;
 pub struct BattleButton;
 #[derive(Component)]
 pub struct BriefingCard;
+#[derive(Component)]pub struct HeaderIsland;
 #[derive(Component)]
 pub struct RosterStrip;
 #[derive(Component)]
 pub struct CommandDeck;
+#[derive(Component)]
+pub struct FixedCommand;
+#[derive(Component,Clone,Copy,PartialEq,Eq)]
+pub enum LowerIsland { Navigation, Commands }
 #[derive(Component)]
 pub struct HeaderBrand;
 #[derive(Component)]
@@ -37,8 +42,12 @@ pub fn roster_page_size(window_width: f32) -> usize {
 }
 /// The compact layout handles the supported 960×540 window without shrinking
 /// labels and click targets along with the rest of the interface.
-pub fn scale(_size: Vec2) -> f32 {
-    1.0
+pub fn scale(size: Vec2) -> f32 {
+    (size.x/1920.).min(size.y/1080.).clamp(1.,2.)
+}
+fn notice_layout(viewport:Vec2,header_width:f32,_compact:bool)->(Vec2,f32,f32){
+    let left=32.+header_width.max(132.);
+    (Vec2::new(left,12.),(viewport.x-472.-left).clamp(120.,380.),88.)
 }
 
 pub fn section(editor: bool, a: Action) -> u8 {
@@ -56,6 +65,8 @@ pub fn section(editor: bool, a: Action) -> u8 {
         | Action::BattleReplay
         | Action::BattleChoose
         | Action::SelectAllOwn
+        | Action::MissionTarget
+        | Action::MissionParticipants
         | Action::RangeMode => 1,
         Action::Overview
         | Action::WholeMap
@@ -67,7 +78,7 @@ pub fn section(editor: bool, a: Action) -> u8 {
         | Action::Orbit(_)
         | Action::Pitch(_)
         | Action::ProjectileMarkers => 3,
-        Action::Play | Action::Edit | Action::Reset => 4,
+        Action::Play | Action::Edit | Action::FreePlacement | Action::Reset => 4,
         Action::ScenarioMenu
         | Action::Scenario(_)
         | Action::Chassis(_)
@@ -89,7 +100,7 @@ fn label(
     p.spawn((
         Text::new(text),
         TextFont {
-            font_size: FontSize::Px(size),
+            font_size: FontSize::Px(size.max(theme::TYPE_SCALE[2])),
             ..font.clone()
         },
         TextColor(color),
@@ -99,14 +110,15 @@ fn label(
 fn button(p: &mut ChildSpawnerCommands, font: &TextFont, text: &str, action: Action) -> Entity {
     let mut b = p.spawn((
         Button,
+        theme::Style::Pixel,
         action,
         Node {
-            min_height: px(38),
-            padding: UiRect::axes(px(8), px(7)),
+        min_height: px(32),
+            padding: UiRect::axes(px(theme::SPACE), px(theme::SPACE)),
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
-            border: UiRect::all(px(1)),
-            border_radius: BorderRadius::all(px(1)),
+            border: UiRect::bottom(px(theme::HAIRLINE)),
+            border_radius: BorderRadius::ZERO,
             ..default()
         },
         BackgroundColor(theme::BUTTON),
@@ -140,6 +152,7 @@ fn row() -> Node {
 fn chrome(node: Node, camera: Entity) -> impl Bundle {
     (
         PanelRoot,
+        theme::Style::Pixel,
         bevy::ui::RelativeCursorPosition::default(),
         node,
         BackgroundColor(theme::PANEL),
@@ -148,54 +161,45 @@ fn chrome(node: Node, camera: Entity) -> impl Bundle {
     )
 }
 pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
-    commands
-        .spawn(chrome(
-            Node {
-                position_type: PositionType::Absolute,
-                left: px(16),
-                right: px(16),
-                top: px(12),
-                height: px(56),
-                padding: UiRect::axes(px(16), px(7)),
-                border: UiRect::bottom(px(2)),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::SpaceBetween,
-                column_gap: px(12),
-                ..default()
-            },
-            camera,
-        ))
-        .with_children(|p| {
-            frontend::entry(p, font);
-            let brand = label(p, font, "RTS / ПОЛИГОН", 19.0, theme::TEXT);
-            p.commands()
-                .entity(brand)
-                .insert((HeaderBrand, Visibility::Visible));
-            p.spawn((
-                Text::new(""),
-                font.clone(),
-                TextColor(theme::MUTED),
-                HudText(0),
-            ));
-            let mut header_row = row();
-            header_row.flex_wrap = FlexWrap::NoWrap;
-            p.spawn(header_row).with_children(|p| {
-                spatial_ui::entry(p, font);
-                for (name, action) in [
-                    ("Сражения", Action::Drawer(1)),
-                    ("Испытания", Action::Drawer(2)),
-                    ("Лаборатория", Action::Laboratory),
-                    ("Редактор", Action::Drawer(4)),
-                    ("Камера", Action::Drawer(3)),
-                    ("Расстановка +", Action::FreePlacement),
-                    ("Настройки", Action::Settings),
-                    ("Сброс", Action::Reset),
-                    ("Пауза", Action::Pause),
-                ] {
-                    button(p, font, name, action);
-                }
+    // Two small islands keep navigation and readouts off the centre of the map.
+    commands.spawn(chrome(Node {
+        position_type: PositionType::Absolute, left: px(16), top: px(10),
+        padding: UiRect::axes(px(10), px(5)), flex_direction: FlexDirection::Column,
+        row_gap: px(2), max_width: percent(44), border: UiRect::bottom(px(1)), ..default()
+    }, camera)).insert((HeaderIsland,optical_ui::Rail,BackgroundColor(Color::srgba(0.02,0.04,0.06,0.58)))).with_children(|p| {
+        p.spawn(Node { align_items: AlignItems::Center, column_gap: px(14), ..default() })
+            .with_children(|p| {
+
+                let brand = label(p, font, "ПЕРИМЕТР / ПОЛИГОН", 14., theme::TEXT);
+                p.commands().entity(brand).insert((HeaderBrand, Visibility::Visible));
             });
-        });
+        let status = label(p, font, "", 12., theme::MUTED);
+        p.commands().entity(status).insert(HudText(0));
+        let resources = label(p, &theme::data_font(font), "", 14., theme::AMBER);
+        p.commands().entity(resources).insert(HudText(9));
+    });
+    commands.spawn(chrome(Node {
+        position_type: PositionType::Absolute, left:px(186), bottom:px(16),
+        max_width:px(450), flex_wrap:FlexWrap::Wrap,
+        padding: UiRect::axes(px(theme::SPACE), px(theme::SPACE)), column_gap: px(theme::SPACE),
+        align_items: AlignItems::Center, ..default()
+    }, camera)).insert((LowerIsland::Navigation,optical_ui::Rail,LayoutOnly,Pickable::IGNORE,BackgroundColor(Color::NONE))).with_children(|p| {
+        p.spawn((HitIsland,bevy::ui::RelativeCursorPosition::default(),Node::default())).with_children(|p|frontend::entry(p,font));
+        p.spawn((HitIsland,bevy::ui::RelativeCursorPosition::default(),Node::default())).with_children(|p|spatial_ui::entry(p,font));
+        for (name, action) in [
+            ("Системы", Action::Drawer(6)),
+            ("Пауза", Action::Pause),
+        ] { let id=button(p,font,name,action); p.commands().entity(id).insert((HitIsland,bevy::ui::RelativeCursorPosition::default())); }
+    });
+    commands.spawn(chrome(Node {position_type:PositionType::Absolute,right:px(16),bottom:px(16),
+        padding:UiRect::all(px(4)),column_gap:px(4),border:UiRect::all(px(1)),..default()},camera))
+        .insert((LowerIsland::Commands,optical_ui::Rail)).with_children(|p| {
+        theme::corners(p);
+        for (name,action) in [("Стоп",Action::Stop),("Авто",Action::AutoAttack),
+            ("Атака",Action::Fire),("Ещё",Action::Drawer(5))] {
+            let id=button(p,font,name,action);p.commands().entity(id).insert(FixedCommand);
+        }
+    });
     commands
         .spawn(chrome(
             Node {
@@ -345,18 +349,18 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
         .spawn(chrome(
             Node {
                 position_type: PositionType::Absolute,
-                left: px(182),
-                right: px(16),
-                bottom: px(184),
+                left: px(186),
+                right: Val::Auto,
+                bottom: px(112),
                 padding: UiRect::all(px(6)),
-                column_gap: px(5),
-                max_width: percent(96),
+                column_gap: px(theme::SPACE),
+                max_width: px(960),
                 flex_wrap: FlexWrap::Wrap,
                 ..default()
             },
             camera,
         ))
-        .insert(RosterStrip)
+        .insert((RosterStrip, optical_ui::Rail))
         .with_children(|p| {
             button(p, font, "Назад", Action::RosterPage(-1));
             let label = label(p, font, "", 13.0, theme::TEXT);
@@ -373,7 +377,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
             Node {
                 position_type: PositionType::Absolute,
                 left: px(16),
-                top: px(76),
+                top: px(132),
                 width: percent(47),
                 padding: UiRect::all(px(10)),
                 border: UiRect::left(px(2)),
@@ -405,7 +409,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
         Node {
             position_type: PositionType::Absolute,
             display: Display::None,
-            border: UiRect::all(px(1)),
+            border: UiRect::all(px(theme::PIXEL_LINE)),
             ..default()
         },
         BackgroundColor(Color::srgba(0.24, 0.68, 0.9, 0.0)),
@@ -416,12 +420,13 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
     commands
         .spawn((
             BriefingCard,
+            ScrollPanel,ScrollPosition::default(),
             PanelRoot,
             bevy::ui::RelativeCursorPosition::default(),
             Node {
                 position_type: PositionType::Absolute,
                 left: px(16),
-                top: px(76),
+                top: px(132),
                 width: percent(47),
                 padding: UiRect::all(px(10)),
                 border: UiRect::left(px(2)),
@@ -464,8 +469,9 @@ pub fn refresh(
     scene: Res<super::super::ui_snapshot::UiSnapshot>,
     edit: Res<Workshop>,
     panel: Res<Panel>,
+    _spatial: Option<Res<spatial_ui::State>>,
     windows: Query<&Window>,
-    battle_bar: Query<&ComputedNode, With<BattleControls>>,
+    (_battle_bar,header_nodes): (Query<&ComputedNode, With<BattleControls>>,Query<&ComputedNode,With<HeaderIsland>>),
     mut text: Query<(&HudText, &mut Text)>,
     mut nodes: Query<(
         &mut Node,
@@ -480,6 +486,7 @@ pub fn refresh(
         Option<&CommandDeck>,
         Option<&HeaderBrand>,
         Option<&BattleControls>,
+        Option<&FixedCommand>,
     )>,
 ) {
     let Some(view) = &scene.view else { return };
@@ -487,6 +494,9 @@ pub fn refresh(
     let (compact, hide_brand) = windows.single().map_or((false, false), |w| {
         (w.width() < 1280.0 || w.height() < 760.0, w.width() < 1280.0)
     });
+    let viewport=windows.single().map_or(Vec2::new(1920.,1080.),|w|w.size()/scale(w.size()));
+    let header_width=header_nodes.iter().map(|n|n.size().x*n.inverse_scale_factor()).fold(0.,f32::max);
+    let (notice_at,notice_width,notice_height)=notice_layout(viewport,header_width,compact);
     let selected = if battle {
         edit.controlled
             .and_then(|i| view.units.get(i).map(|u| (i, u)))
@@ -531,6 +541,7 @@ pub fn refresh(
         deck,
         brand,
         battle_controls,
+        fixed,
     ) in &mut nodes
     {
         if deck.is_some() {
@@ -546,16 +557,9 @@ pub fn refresh(
             }
         }
         if briefing.is_some() {
-            let width = if compact { Val::Auto } else { percent(47) };
-            if node.width != width {
-                node.width = width;
-            }
-            node.left = px(if compact { 182 } else { 16 });
-            node.right = if compact { px(16) } else { Val::Auto };
-            node.top = px(84.0
-                + battle_bar
-                    .single()
-                    .map_or(108.0, |n| n.size().y * n.inverse_scale_factor()));
+            node.width=px(notice_width);node.max_width=percent(42);
+            node.left=px(notice_at.x);node.right=Val::Auto;node.top=px(notice_at.y);
+            node.max_height=if notice_height.is_finite(){px(notice_height)}else{Val::Auto};node.overflow=Overflow::scroll_y();
         }
         if battle_controls.is_some() {
             // Minimap ends at x=170 in the compact layout. The drawer
@@ -566,24 +570,20 @@ pub fn refresh(
             } else {
                 Val::Auto
             };
+            node.top = px(132);
             node.width = if !battle {
                 px(230)
             } else if compact {
                 Val::Auto
             } else {
-                percent(47)
+                px(420)
             };
         }
-        if strip.is_some() {
-            let bottom = px(if compact { 234 } else { 184 });
-            if node.bottom != bottom {
-                node.bottom = bottom;
-            }
-        }
-        let visible = if brand.is_some() {
+        if strip.is_some() {node.bottom=px(112);node.right=Val::Auto;node.max_width=px(windows.single().map_or(960.,|w|(w.width()-202.).min(960.)));}
+        let visible = if fixed.is_some() {Some(true)} else if deck.is_some() {Some(false)} else if brand.is_some() {
             Some(!hide_brand)
         } else if battle_controls.is_some() {
-            Some(true)
+            Some(false)
         } else if drawer.is_some() {
             Some(panel.drawer != 0)
         } else if let Some(Roster(i)) = roster_button {
@@ -708,6 +708,14 @@ pub fn refresh(
     }
     for (id, mut t) in &mut text {
         let value = match id.0 {
+            9 => {
+                if battle {
+                    let (generation, demand) = scene.energy_total;
+                    let matter = scene.matter_total.map_or_else(|| "—".into(), |v| economy_display::mass(v.0));
+                    format!("М {matter}  /  Э +{} · −{}",
+                        economy_display::energy(generation), economy_display::energy(demand))
+                } else { String::new() }
+            }
             5 => format!("{}/{}", page + 1, pages),
             7 => format!(
                 "Метки снарядов: {}",
@@ -830,8 +838,7 @@ pub fn refresh(
                         } else {
                             format!("{name} · СВОИ {a} / ВРАГИ {b} · {phase}")
                         };
-                        let (generation, demand) = scene.energy_total;
-                        format!("{headline} · СЕТИ: +{} / −{}", super::super::economy_display::energy(generation), super::super::economy_display::energy(demand))
+                        headline
                     }
                 } else {
                     format!(
@@ -1171,9 +1178,37 @@ mod selection_render_tests;
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    fn optical_app() -> App {
+        // UI readout checks need a publication, not the full battle preset.
+        let mut layout = RangeLayout::from_ron(include_str!("../../../../../../data/fixture-drive.ron")).unwrap();
+        layout.size = [128, 128, 128];
+        layout.gun = [32, 16, 32];
+        layout.gun_point = true;
+        layout.target = [84, 16, 84];
+        layout.clear_min = [1, 1];
+        layout.clear_max = [127, 127];
+        layout.units.clear();
+        let mut economy = modding::range_economy::RangeEconomy::stock();
+        economy.production = None;
+        layout.economy = Some(economy);
+        let sim = BlastRange::with_layout(config(false, false), layout.clone()).unwrap();
+        app_with_scene(sim, Workshop::new(Some(layout), false))
+    }
+    #[test]
+    fn optical_resource_rail_reads_allied_store_and_keeps_network_totals_separate() {
+        let mut app = optical_app();
+        app.add_systems(PostUpdate, refresh.after(super::super::super::ui_snapshot::publish));
+        let text = app.world_mut().spawn((HudText(9), Text::new(""))).id();
+        app.update();
+        let scene = app.world().resource::<Scene>();
+        let matter = scene.sim.side_store(true).map_or_else(|| "—".into(), |v| economy_display::mass(v.0));
+        let (generation, demand) = scene.sim.construction_energy(true);
+        assert_eq!(app.world().get::<Text>(text).unwrap().0,
+            format!("М {matter}  /  Э +{} · −{}", economy_display::energy(generation), economy_display::energy(demand)));
+    }
     #[test]
     fn compact_battle_header_keeps_long_scenario_titles_out_of_navigation() {
-        let mut app = app();
+        let mut app = optical_app();
         app.world_mut().resource_mut::<Panel>().battle_name =
             "Гребень: хранилище и снабжение · очень длинное название сценария".into();
         app.world_mut().spawn(Window {
@@ -1204,6 +1239,13 @@ pub(crate) mod tests {
             .unwrap()
             .0
             .contains("Гребень:"));
+    }
+    #[test]fn compact_notice_stays_between_header_and_queue_above_the_projection(){
+        for width in [960.,1280.] {
+            let (at,w,h)=notice_layout(Vec2::new(width,540.),132.,true);
+            assert!(at.x>=16.+132.+16.);assert!(at.x+w<=width-456.-16.);
+            assert!(at.y+h<=104.,"the projection's first safe row stays free");
+        }
     }
     #[test]
     fn inspection_is_published_only_for_an_open_populated_drawer() {
@@ -1494,6 +1536,20 @@ pub(crate) mod tests {
         let (c, layout) = workshop.pending.take().unwrap();
         let sim = BlastRange::with_layout(c, layout).unwrap();
         app_with_scene(sim, workshop)
+    }
+    #[test]
+    fn actual_lower_builder_separates_command_islands_and_discloses_debug_tools() {
+        let mut app=App::new();let camera=app.world_mut().spawn_empty().id();
+        build(&mut app.world_mut().commands(),camera,&TextFont::default());app.world_mut().flush();
+        let islands:Vec<_>=app.world_mut().query::<(&LowerIsland,&Node,Has<LayoutOnly>)>().iter(app.world())
+            .map(|(kind,node,layout)|(*kind,node.left,node.right,node.bottom,layout)).collect();
+        assert_eq!(islands.len(),2);
+        assert!(islands.contains(&(LowerIsland::Navigation,px(186),Val::Auto,px(16),true)));
+        assert!(islands.contains(&(LowerIsland::Commands,Val::Auto,px(16),px(16),false)));
+        let actions:Vec<_>=app.world_mut().query::<&Action>().iter(app.world()).copied().collect();
+        assert_eq!(actions.iter().filter(|a|**a==Action::Drawer(6)).count(),1);
+        assert!(!actions.iter().any(|a|matches!(a,Action::Laboratory|Action::Drawer(1|2|3|4))));
+        assert!(actions.contains(&Action::Stop) && actions.contains(&Action::Fire));
     }
     pub(crate) fn app_with_scene(sim: BlastRange, workshop: Workshop) -> App {
         let scene = Scene {

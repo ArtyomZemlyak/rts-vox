@@ -1,13 +1,14 @@
 //! Optical command deck: one baked backdrop, live native controls, no world work.
 use super::*;
+use panel::theme as tokens;
 use bevy::asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::text::{FontWeight, LetterSpacing};
+use bevy::text::LetterSpacing;
 
-const INK: Color = Color::srgb(0.88, 0.93, 0.93);
-const DIM: Color = Color::srgb(0.43, 0.59, 0.63);
-const FRAME: Color = Color::srgba(0.51, 0.65, 0.68, 0.38);
-const LIGHT: Color = Color::srgb(0.91, 0.93, 0.74);
+const INK: Color = tokens::TEXT;
+const DIM: Color = tokens::MUTED;
+const FRAME: Color = tokens::OPTICAL.frame;
+const LIGHT: Color = tokens::AMBER;
 const CLEAR: Color = Color::srgba(0.0, 0.0, 0.0, 0.0);
 
 pub(super) const ITEMS: [(Action, &str, &str); 8] = [
@@ -27,10 +28,10 @@ pub(super) fn step_focus(index: usize, direction: i32, session: bool) -> usize {
     first + ((index.max(first) - first) as i32 + direction).rem_euclid(count as i32) as usize
 }
 
-pub(super) struct DeckAssets { font: TextFont, background: Handle<Image>, cross: Handle<Image>, arrow: Handle<Image> }
+pub(super) struct DeckAssets { font: TextFont, pub(super) pixel: TextFont, background: Handle<Image>, cross: Handle<Image>, arrow: Handle<Image> }
 impl DeckAssets {
     pub(super) fn new(fonts: &mut Assets<Font>, images: &mut Assets<Image>) -> Self {
-        let font = fonts.add(Font::from_bytes(include_bytes!("../../../../../data/ui/menu/Oswald.ttf").to_vec()));
+        let faces=tokens::Fonts::load(fonts);
         let background = images.add(Image::new(Extent3d {width:1672,height:941,depth_or_array_layers:1},
             TextureDimension::D2,include_bytes!("../../../../../data/ui/menu/perimeter.rgba").to_vec(),
             TextureFormat::Rgba8UnormSrgb,RenderAssetUsages::RENDER_WORLD));
@@ -38,19 +39,33 @@ impl DeckAssets {
             TextureDimension::D2,bytes.to_vec(),TextureFormat::Rgba8UnormSrgb,RenderAssetUsages::RENDER_WORLD);
         let cross=images.add(icon(include_bytes!("../../../../../data/ui/icons/plus.rgba")));
         let arrow=images.add(icon(include_bytes!("../../../../../data/ui/icons/chevron-right.rgba")));
-        Self {font:TextFont{font:font.into(),weight:FontWeight::LIGHT,..default()},background,cross,arrow}
+        Self {font:faces.optical,pixel:faces.pixel,background,cross,arrow}
     }
 }
 
 #[derive(Component)] pub struct Backdrop;
+#[derive(Component)] pub struct CrtBand;
+#[derive(Component)] pub struct SyncPulse;
 #[derive(Component)] pub struct HomeRow(usize);
 #[derive(Component)] pub struct HomeLabel(usize);
 #[derive(Component)] pub struct HomeMarker(usize);
 #[derive(Component)] pub struct Description;
 #[derive(Component)] pub struct HomeArrow(usize);
+#[derive(Component)] pub(crate) struct ReadableInk(pub f32);
+
+pub fn readability(menu:Res<Menu>,scale:Res<UiScale>,mut fonts:Query<(&ReadableInk,&mut TextFont)>,mut active:Local<bool>) {
+    let shown=menu.shown();
+    if !shown && !*active{return;}
+    let floor=if shown {12.0/scale.0.max(0.1)}else{0.0};
+    for (ReadableInk(base),mut font) in &mut fonts {
+        let size=base.max(floor);
+        if font.font_size!=FontSize::Px(size){font.font_size=FontSize::Px(size);}
+    }
+    *active=shown;
+}
 
 fn label(p: &mut ChildSpawnerCommands, f: &TextFont, value: &str, size: f32, spacing: f32, color: Color) -> Entity {
-    p.spawn((Text::new(value),TextFont{font_size:FontSize::Px(size),..f.clone()},
+    p.spawn((ReadableInk(size),Text::new(value),TextFont{font_size:FontSize::Px(size),..f.clone()},
         LetterSpacing::Px(spacing),TextColor(color))).id()
 }
 fn positioned(left:f32, top:f32) -> Node {
@@ -62,12 +77,15 @@ pub(super) fn backdrop(p: &mut ChildSpawnerCommands, assets: &DeckAssets) {
         overflow:Overflow::clip(),..default()},Pickable::IGNORE)).with_children(|p|{
             p.spawn((Backdrop,ImageNode{image:assets.background.clone(),color:Color::srgb(0.68,0.78,0.82),..default()},
                 Node{position_type:PositionType::Absolute,width:percent(100),height:percent(100),..default()},Pickable::IGNORE));
+            p.spawn((SyncPulse,Node{position_type:PositionType::Absolute,left:px(12),width:px(260),top:px(8),height:px(tokens::PIXEL_LINE),..default()},BackgroundColor(tokens::AMBER.with_alpha(0.0)),Pickable::IGNORE));
+            // Local event insert; no constant scan/noise filter over the menu artwork.
+            p.spawn((CrtBand,optical_ui::Finish::crt(),Node{position_type:PositionType::Absolute,right:px(16),top:px(16),width:px(360),height:px(48),..default()},BackgroundColor(CLEAR),Pickable::IGNORE));
         });
 }
 
 fn row(p:&mut ChildSpawnerCommands,a:&DeckAssets,index:usize,primary:bool) {
     let (action,name,_)=ITEMS[index];
-    p.spawn((Button,action,HomeRow(index),Node{
+    p.spawn((Button,action,HomeRow(index),ui_motion::Target::tab(7),Node{
         width:if primary {px(580)}else{Val::Auto},height:px(if primary {62.}else{42.}),
         align_items:AlignItems::Center,padding:UiRect{left:px(if primary {48.}else{24.}),right:px(22.),..default()},
         ..default()},BackgroundColor(CLEAR),BackgroundGradient::default())).with_children(|p|{
@@ -82,7 +100,7 @@ fn row(p:&mut ChildSpawnerCommands,a:&DeckAssets,index:usize,primary:bool) {
 
 pub(super) fn home(p: &mut ChildSpawnerCommands, a: &DeckAssets, fallback: &TextFont) {
     let f=&a.font;
-    p.spawn((Part(Page::Home),Node{position_type:PositionType::Absolute,left:px(42),right:px(42),
+    p.spawn((Part(Page::Home),tokens::Style::Crt,ui_motion::Target::panel(ui_motion::Role::Menu),Node{position_type:PositionType::Absolute,left:px(42),right:px(42),
         top:px(170),bottom:px(70),border:UiRect::all(px(1)),..default()},BorderColor::all(FRAME)))
     .with_children(|p| {
         // Native frame affordances and shared icon atlas marks, not baked text.
@@ -119,7 +137,7 @@ pub(super) fn home(p: &mut ChildSpawnerCommands, a: &DeckAssets, fallback: &Text
             });
         p.spawn(Node{position_type:PositionType::Absolute,left:px(160),top:px(626),width:px(590),..default()})
             .with_children(|p|{let e=label(p,f,"",18.,0.8,DIM);p.commands().entity(e).insert(Description);});
-        p.spawn((Notice,Text::new(""),TextFont{font_size:FontSize::Px(15.),..fallback.clone()},
+        p.spawn((Notice,ReadableInk(15.),Text::new(""),TextFont{font_size:FontSize::Px(15.),..fallback.clone()},
             TextColor(LIGHT),Node{position_type:PositionType::Absolute,left:px(160),bottom:px(132),max_width:px(680),..default()}));
         p.spawn(Node{position_type:PositionType::Absolute,left:px(78),bottom:px(38),
             flex_direction:FlexDirection::Column,row_gap:px(10),..default()}).with_children(|p|{
@@ -148,27 +166,42 @@ pub(super) fn home(p: &mut ChildSpawnerCommands, a: &DeckAssets, fallback: &Text
 }
 
 pub fn sync(menu:Res<Menu>,scale:Res<UiScale>,windows:Query<&Window>,
-    mut background:Query<&mut Node,With<Backdrop>>,
-    mut rows:Query<(&HomeRow,&Interaction,&mut BackgroundColor,&mut BackgroundGradient),Without<HomeMarker>>,
+    mut background:Query<&mut Node,(With<Backdrop>,Without<CrtBand>)>,
+    mut band:Query<&mut Node,(With<CrtBand>,Without<Backdrop>)>,
+    mut rows:Query<(&HomeRow,&Interaction,&mut BackgroundColor,&mut BackgroundGradient,&mut ui_motion::Target),Without<HomeMarker>>,
     mut markers:Query<(&HomeMarker,&mut BackgroundColor),Without<HomeRow>>,
     mut arrows:Query<(&HomeArrow,&mut ImageNode)>,
-    mut labels:Query<(&HomeLabel,&mut TextColor)>,mut description:Query<&mut Text,With<Description>>) {
-    if !menu.shown(){return;}
+    mut labels:Query<(&HomeLabel,&mut TextColor)>,mut description:Query<&mut Text,With<Description>>,
+    time:Res<Time>,mut focus:Local<[f32;8]>,
+    mut pulses:Query<&mut BackgroundColor,(With<SyncPulse>,Without<HomeRow>,Without<HomeMarker>)>,
+    mut transition:Local<(Option<Page>,bool,f32)>,effects:Option<Res<ui_motion::Settings>>) {
+    if !menu.shown(){transition.1=false;return;}
+    let changed=!transition.1||transition.0!=Some(menu.page);
+    transition.2=if changed {0.}else{transition.2+time.delta_secs().min(0.1)};
+    transition.0=Some(menu.page);transition.1=true;
+    let reveal=(1.-transition.2/tokens::TRANSITION_SECONDS).clamp(0.,1.);
+    for mut color in &mut pulses {color.0=tokens::AMBER.with_alpha(reveal*0.45*effects.as_ref().map_or(1.,|e|e.strength()));}
+    for mut n in &mut band {n.top=px(16);}
     let viewport=windows.single().map_or(Vec2::new(1920.,1080.),|w|Vec2::new(w.width(),w.height()))/scale.0;
     let framed=Vec2::new((viewport.x-84.).max(1.),(viewport.y-240.).max(1.));
     let width=framed.x.max(framed.y*1672./941.);let height=width*941./1672.;
     for mut n in &mut background {n.width=px(width);n.height=px(height);n.left=px((framed.x-width)*0.5);n.top=px((framed.y-height)*0.5);}
-    for (row,interaction,mut color,mut gradient) in &mut rows {
+    for (row,interaction,mut color,mut gradient,mut motion) in &mut rows {
         let selected=row.0==menu.focus && (row.0>0 || menu.has_session);
+        motion.active=Some(selected);
+        let old=focus[row.0];
+        let target=if selected {1.}else{0.};
+        let value=old+(target-old)*(time.delta_secs().min(0.1)/tokens::HOVER_SECONDS).min(1.);
+        focus[row.0]=if (value-target).abs()<0.002 {target}else{value};
         color.0=if selected && *interaction==Interaction::Pressed {Color::srgba(0.72,0.82,0.81,0.07)}else{CLEAR};
-        if selected && gradient.0.is_empty() {
+        if focus[row.0]>0. && (gradient.0.is_empty() || (old-focus[row.0]).abs()>0.001) {
             *gradient=BackgroundGradient::from(LinearGradient {
                 angle:std::f32::consts::FRAC_PI_2,
-                stops:vec![ColorStop::percent(Color::srgba(0.74,0.84,0.81,0.13),0.),
-                    ColorStop::percent(Color::srgba(0.56,0.73,0.73,0.025),45.),ColorStop::percent(CLEAR,100.)],
+                stops:vec![ColorStop::percent(tokens::AMBER.with_alpha(0.16*focus[row.0]),0.),
+                    ColorStop::percent(tokens::AMBER.with_alpha(0.025*focus[row.0]),45.),ColorStop::percent(CLEAR,100.)],
                 ..default()
             });
-        } else if !selected && !gradient.0.is_empty() {gradient.0.clear();}
+        } else if focus[row.0]==0. && !gradient.0.is_empty() {gradient.0.clear();}
     }
     for (marker,mut color) in &mut markers {color.0=if marker.0==menu.focus {LIGHT}else{CLEAR};}
     for (arrow,mut image) in &mut arrows {image.color=if arrow.0==menu.focus {LIGHT}else{CLEAR};}

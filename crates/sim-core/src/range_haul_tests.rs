@@ -134,12 +134,12 @@ fn greben_unloads_large_load_over_multiple_ticks_without_losing_matter() {
     let mut l = layout(100_000, 50_000, 1_000_000);
     l.size[1] = 512;
     l.units = vec![
-        RangeUnitDef { kind: RangeUnitKind::Crawler, allied: true, at: [200, 16, 400], weapon: None },
+        RangeUnitDef { kind: RangeUnitKind::Crawler, allied: true, at: [200, 16, 600], weapon: None },
         RangeUnitDef { kind: RangeUnitKind::GrebenStorage, allied: true, at: [500, 16, 400], weapon: None },
     ];
     l.economy = Some(RangeEconomy::stock());
     let mut r = range(l);
-    assert!(r.battle_order(0, Order::Reclaim([200, 16, 400]), None));
+    assert!(r.battle_order(0, Order::Reclaim([200, 16, 600]), None));
     let tank = r.mining().unwrap().tank(0).unwrap();
     let cargo = r.matter.economy.ledger.get(tank).cap / 2;
     let ground = r.matter.economy.ground;
@@ -157,8 +157,8 @@ fn greben_unloads_large_load_over_multiple_ticks_without_losing_matter() {
     for _ in 0..50 { r.haul_phase(); }
     assert_eq!(r.tank_held(0), Some(0));
     assert!(!r.hauling(0), "crawler stayed in its hauling leg");
-    assert_eq!(r.units[0].motion.destination, Some([200, 400]), "crawler did not resume the collection order");
-    assert!(matches!(r.battle.actors[0].order, Order::Reclaim([200, 16, 400])));
+    assert_eq!(r.units[0].motion.destination, Some([200, 600]), "crawler did not resume the collection order");
+    assert!(matches!(r.battle.actors[0].order, Order::Reclaim([200, 16, 600])));
     assert!(r.matter.economy.ledger.balanced());
 }
 

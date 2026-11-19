@@ -103,7 +103,7 @@ pub fn emitters(
     let body = &scene.sim.gun.body;
     // The articulated laser arms carry their emitters in the real segment
     // geometry. Root-feed collars would be detached glowing duplicate rails.
-    if scene.sim.gun.kind == RangeUnitKind::Walker04 { return; }
+    if scene.sim.gun.kind == RangeUnitKind::Walker04 || scene.sim.gun.articulated_siege() { return; }
     let scale = body.mm as f32 / voxel::unit::WORLD_MM as f32;
     let centre = render::model::root_centre(body);
     let origin = Vec3::from(GUN.map(|v| v as f32));

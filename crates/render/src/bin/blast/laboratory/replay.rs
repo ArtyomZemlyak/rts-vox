@@ -526,7 +526,13 @@ impl Replay {
             (current as i64 + i64::from(delta)).clamp(0, (paths.len() - 1) as i64) as usize
         };
         let path = paths.swap_remove(index);
-        if std::fs::metadata(&path).map_err(|e| e.to_string())?.len() > MAX_FILE as u64 {
+        self.open_file(&path)
+    }
+    fn open_file(&mut self, path: &std::path::Path) -> Result<String, String> {
+        if self.recording {
+            return Err("Сначала остановите запись".into());
+        }
+        if std::fs::metadata(path).map_err(|e| e.to_string())?.len() > MAX_FILE as u64 {
             return Err("Файл записи слишком велик".into());
         }
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
@@ -538,8 +544,20 @@ impl Replay {
         self.playing = false;
         self.position = None;
         self.target = None;
-        self.opened = Some(path.clone());
+        self.opened = Some(path.to_owned());
         Ok(path.display().to_string())
+    }
+    /// Play the existing tape on a matching loaded world, using the normal
+    /// before_tick/after_tick command and final-hash checks.
+    pub(super) fn play_loaded(&mut self, path: &std::path::Path, sim: &BlastRange) -> Result<(), String> {
+        self.open_file(path)?;
+        let tape = self.tape.as_ref().ok_or("Нет записи")?;
+        let initial = BlastRange::restore(tape.config, &tape.snapshot).ok_or("Не удалось восстановить снимок записи")?;
+        if initial.state_hash() != sim.state_hash() || initial.tick != sim.tick {
+            return Err("Загруженный мир не совпадает с началом записи".into());
+        }
+        self.position = Some(sim.tick);
+        self.play(sim)
     }
     pub fn text(&self, tick: u32) -> String {
         if self.recording {
@@ -775,6 +793,44 @@ mod tests {
         assert!(r.seek(0).is_err());
         r.stop(&mut sim).unwrap();
         assert_eq!(r.bounds(), Some((0, 0)));
+    }
+
+    #[test]
+    fn loaded_recording_requires_matching_snapshot_and_replays_real_commands() {
+        let mut original = sim();
+        let initial = original.snapshot();
+        let mut recorded = Replay::default();
+        recorded.start(&mut original).unwrap();
+        for tick in 0..8 {
+            if tick == 3 {
+                assert!(original.execute_command(Command::Sculpt {
+                    at: [105, 25, 102], edge: 1, material: 10, erase: false,
+                }).accepted());
+            }
+            original.step();
+        }
+        recorded.stop(&mut original).unwrap();
+        let bytes = recorded.tape.as_ref().unwrap().encode();
+        let path = std::env::temp_dir().join(format!("rts-loaded-replay-{}.rtsr", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let mut replay = Replay::default();
+        assert!(replay.play_loaded(&path, &original).is_err(), "a different tick/world must be rejected");
+        let mut loaded = BlastRange::restore(original.config, &initial).unwrap();
+        loaded.set_navigation_workers(2);
+        loaded.set_physics_workers(2);
+        replay.play_loaded(&path, &loaded).unwrap();
+        while replay.playing {
+            replay.before_tick(&mut loaded).unwrap();
+            loaded.step();
+            replay.after_tick(&mut loaded).unwrap();
+        }
+        assert_eq!(loaded.state_hash(), original.state_hash());
+        assert_eq!(loaded.tick, 8);
+        let mut broken = bytes;
+        broken[20] ^= 1;
+        std::fs::write(&path, broken).unwrap();
+        assert!(replay.play_loaded(&path, &loaded).is_err(), "checksum is mandatory");
+        std::fs::remove_file(path).unwrap();
     }
     #[test]
     fn replay_preserves_weapon_changes_and_live_stream_commands() {

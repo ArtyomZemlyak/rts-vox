@@ -96,6 +96,32 @@ fn assert_separate(s: &BlastRange) {
         }
     }
 }
+
+fn assert_gate_clear(s: &BlastRange) {
+    for (centre, half) in [(320,320),(1180,420)] {
+        let wall = motion::Obstacle { moving:false, pos:[Fx::from_int(780),Fx::from_int(16),Fx::from_int(centre)],
+            height:Fx::from_int(48),head:0,half:[Fx::from_int(20),Fx::from_int(half)] };
+        for (id,u) in s.units.iter().enumerate() {
+            assert!(motion::Obstacle::of(&u.motion,&u.body).penetration(&wall) <= Fx::from_int(4),
+                "actor {id} crossed a gate wall at {}",s.tick);
+        }
+    }
+}
+
+fn assert_at_gate_destinations(s: &BlastRange, destinations: &[(usize,[i32;2])]) {
+    for &(id,goal) in destinations {
+        let m=&s.units[id].motion;
+        let dx=m.pos[0].sub(Fx::from_int(goal[0]));
+        let dz=m.pos[2].sub(Fx::from_int(goal[1]));
+        // Arrival is detected before this tick's integration; normal braking
+        // can carry the hull a little farther. Bound that by one full-speed
+        // tick, rather than mistaking the ordinary rollout for cancellation.
+        let arrival=Fx::from_int(m.arrival+1).add(Fx::from_ratio(m.speed,crate::TICKS_PER_SECOND));
+        assert!(m.destination.is_none() && dx.mul(dx).add(dz.mul(dz)) <= arrival.mul(arrival),
+            "actor {id} did not reach the far-side goal {goal:?}: {:?}",m.pos);
+        assert!(s.units[id].status.alive && s.units[id].status.engine);
+    }
+}
 #[test]
 fn small_group_advances_without_deep_hull_overlap() {
     let mut s = arena(3, false);
@@ -316,12 +342,17 @@ fn gate_convoy_remains_collision_free_and_all_orders_finish() {
     let mut replica: Option<BlastRange> = None;
     let mut searching = 0;
     let mut finished = None;
+    let mut waiting = [0;10];
+    let mut longest_wait = [0;10];
     for tick in 0..1200 {
         s.step();
         assert_separate(&s);
+        assert_gate_clear(&s);
         searching += s.units.iter().filter(|u| u.motion.searching()).count();
-        for u in &s.units {
+        for (id,u) in s.units.iter().enumerate() {
             assert!(u.motion.drive.vel.abs() <= Fx::from_int(u.motion.speed));
+            waiting[id] = if u.motion.destination.is_some() && u.motion.drive.vel.abs()<Fx::ONE {waiting[id]+1}else{0};
+            longest_wait[id] = longest_wait[id].max(waiting[id]);
         }
         if let Some(other) = replica.as_mut() {
             other.step();
@@ -337,10 +368,18 @@ fn gate_convoy_remains_collision_free_and_all_orders_finish() {
             break;
         }
     }
+    if finished.is_none() {
+        for (id,u) in s.units.iter().enumerate() {
+            eprintln!("gate actor={id} pos={:?} vel={:?} head={} blocked={} dest={:?} path={:?} cursor={} recovery={:?}",
+                u.motion.pos,u.motion.drive.vel,u.motion.drive.head,u.motion.blocked,
+                u.motion.destination,u.motion.path,u.motion.cursor,u.motion.recovery_state());
+        }
+    }
     assert!(finished.is_some(), "gate convoy stalled");
+    assert_at_gate_destinations(&s,&dest);
     assert!(searching < 1000, "local search churn: {searching}");
     assert_eq!(s.snapshot(), replica.unwrap().snapshot());
-    eprintln!("gate convoy finished at {} ticks; searching {searching}", finished.unwrap());
+    eprintln!("gate convoy finished at {} ticks; searching {searching}; longest waits {longest_wait:?}", finished.unwrap());
     assert!(s.matter.economy.ledger.balanced());
 }
 
@@ -360,7 +399,7 @@ fn gate_search_admission_keeps_shared_work_and_immediate_response() {
         let mut got_route = [false; 10];
         for tick in 0..2000 {
             let work = sim.coarse_work;
-            sim.step(); assert_separate(&sim);
+            sim.step(); assert_separate(&sim); assert_gate_clear(&sim);
             assert!(sim.coarse_work.wrapping_sub(work) <= sim.navigation.global_work_per_tick);
             searching += sim.units.iter().filter(|u| u.motion.searching()).count();
             for (id, u) in sim.units.iter().enumerate() {
@@ -373,7 +412,30 @@ fn gate_search_admission_keeps_shared_work_and_immediate_response() {
         }
         eprintln!("gate starts={starts}: finish={finished:?}, initial_routes={last_initial_route}, searching={searching}");
         assert!(finished.is_some()); assert!(got_route.iter().all(|v| *v));
+        assert_at_gate_destinations(&sim,&destinations);
     }
+}
+
+#[test]
+fn reverse_gate_convoy_reaches_every_far_side_slot() {
+    let mut s=arena(10,true);
+    s.set_navigation_workers(2);s.set_physics_workers(1);
+    for u in &mut s.units {
+        u.motion.pos[0]=Fx::from_int(1600).sub(u.motion.pos[0]);
+        u.motion.drive.head=fx::angle::HALF;
+    }
+    let dest:Vec<_>=s.units.iter().enumerate().map(|(id,u)|
+        (id,[u.motion.pos[0].to_int_trunc()-700,u.motion.pos[2].to_int_trunc()])).collect();
+    assert_eq!(s.battle_group_move(&dest,[500,700]),10);
+    let mut finished=None;
+    for tick in 1..=1200 {
+        s.step();assert_separate(&s);assert_gate_clear(&s);
+        if s.units.iter().all(|u|u.motion.destination.is_none()) {finished=Some(tick);break;}
+    }
+    assert!(finished.is_some(),"reverse gate convoy stalled");
+    assert_at_gate_destinations(&s,&dest);
+    assert!(s.matter.economy.ledger.balanced());
+    eprintln!("reverse gate convoy finished at {} ticks",finished.unwrap());
 }
 
 #[test]

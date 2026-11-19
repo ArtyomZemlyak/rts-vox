@@ -3,7 +3,7 @@
 use super::*;
 use modding::laboratory::{Definition, Recipe};
 use modding::range::RangeBlock;
-use panel::theme;
+use panel::theme::service as theme;
 use sim_core::blast::battle::commands::{Command, GunCommand, MaterialField};
 #[path = "laboratory/collectors.rs"]
 mod collectors;
@@ -62,10 +62,12 @@ pub fn finish_replay_tick(lab: &mut Laboratory, scene: &mut Scene) -> bool {
         Ok(true) => {
             scene.paused = true;
             lab.notice = "Воспроизведение завершено".into();
+            println!("REPLAY_COMPLETE tick={} state_hash={}", scene.sim.tick, scene.sim.state_hash());
             true
         }
         Ok(false) => false,
         Err(e) => {
+            eprintln!("REPLAY_ERROR tick={}: {e}", scene.sim.tick);
             scene.paused = true;
             lab.replay.playing = false;
             lab.notice = e;
@@ -83,13 +85,16 @@ mod metrics;
 mod replay;
 #[path = "laboratory/section.rs"]
 mod section;
-pub use metric_fragments::draw as metric_fragments_draw;
-pub use metrics::{draw as metrics_draw, terrain_offset as metrics_terrain_offset};
+pub(crate) use metric_fragments::{colour as fragment_metric_colour, quantize as metric_quantize, material as fragment_metric_material};
+pub use metrics::terrain_offset as metrics_terrain_offset;
 pub(crate) use metrics::{scale as metric_colour, UNKNOWN as METRIC_UNKNOWN};
 pub use replay::input as replay_input;
 pub use section::camera as section_camera;
 pub use section::clip_units as section_clip_units;
 pub use section::unit_caps as section_unit_caps;
+#[path = "laboratory/section_debris.rs"]
+mod section_debris;
+pub use section_debris::draw as section_debris_draw;
 pub fn section_effect_mesh(source: Mesh, cut: Option<(usize, i32, bool)>) -> Mesh {
     let Some((axis, at, positive)) = cut else {
         return source;
@@ -111,6 +116,8 @@ pub use scenario::sync as sync_scenario;
 pub use scrolling::update as scroll_ui;
 pub use tools::input as tools_input;
 pub use ui::{capture_ready, sync as sync_ui};
+pub(super) use ui::{responsive as responsive_ui,Dock,LibraryHeader};
+pub(super) use ui::selected as motion_selected;
 #[cfg(test)]
 #[path = "laboratory/tests.rs"]
 mod integration_tests;
@@ -134,6 +141,7 @@ pub enum LabAction {
     SectionAxis(u8),
     SectionSide,
     Metric(u8),
+    #[allow(dead_code)]
     MetricScale,
     ReplayStart,
     ReplayStop,
@@ -363,6 +371,9 @@ impl Laboratory {
     }
     pub fn active(&self) -> bool {
         self.saved.is_some()
+    }
+    pub fn play_loaded_recording(&mut self, path: &str, sim: &BlastRange) -> Result<(), String> {
+        self.replay.play_loaded(std::path::Path::new(path), sim)
     }
     pub fn limit_steps(&self, tick: u32, steps: u32) -> u32 {
         if !self.active() || !self.observing || !self.launch.is_empty() {
@@ -1182,6 +1193,19 @@ pub fn actions(
                         scene.sim.matter.debris.fragments[0].material,
                         lab.tools.probe.contains("Сталь · ID 3")
                     );
+                }
+                // Explicit native QA options apply to every stock capture fixture.
+                if capture_fixture {
+                    if let Some(mode)=std::env::var("RTS_LAB_CAPTURE_METRIC").ok().and_then(|v|v.parse::<u8>().ok()).filter(|m|*m<=10) { lab.tools.metric=mode; lab.ui.tab=30; }
+                    if let Some(axis)=std::env::var("RTS_LAB_CAPTURE_SECTION_AXIS").ok().and_then(|v|v.parse::<u8>().ok()).filter(|a|*a<3) {
+                        lab.tools.section.enabled=true;lab.tools.section.axis=axis;lab.tools.section.offset=0;
+                        if let Some(at)=std::env::var("RTS_LAB_CAPTURE_SECTION_AT").ok().and_then(|v|v.parse::<i32>().ok()) {lab.tools.section.anchor[axis as usize]=at;}
+                    }
+                    if std::env::var("RTS_LAB_CAPTURE_LIVE").as_deref()==Ok("1") {lab.tools.live=true;}
+                    if std::env::var("RTS_LAB_CAPTURE_ACTIVE").as_deref()==Ok("1") {
+                        scene.paused=false;scene.realtime=true;
+                        println!("METRIC_ACTIVE_START tick={} mode={} live={}",scene.sim.tick,lab.tools.metric,lab.tools.live);
+                    }
                 }
                 transition = true;
             }
@@ -2447,7 +2471,7 @@ pub fn refresh(
         let value = if ui::enabled(&lab, *action) {
             theme::button_background(*interaction, ui::selected(&lab, *action))
         } else {
-            Color::srgb(0.04, 0.055, 0.08)
+            theme::DISABLED
         };
         if background.0 != value {
             background.0 = value;

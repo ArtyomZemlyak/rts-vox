@@ -29,6 +29,7 @@ fn policy() -> Felling {
     .unwrap()
     .fell;
     f.cells_per_tick = 32;
+    f.dust_materials = [0]; // This fixture proves physical crown/pool semantics.
     f
 }
 
@@ -106,4 +107,68 @@ fn nuclear_crown_release_ignores_leaves_outside_cuts_and_repaired_stems() {
     let mut m = Matter::new(&[]);
     m.release_nuclear_crowns(&w, &policy(), &[([8, 0, 8], [64, 96, 64])]);
     assert_eq!(m.felling_pending(), 0);
+}
+
+
+#[test]
+fn nuclear_trunk_cuts_group_and_resume_as_bounded_foliage_dust() {
+    let mut w = world();
+    let mut m = Matter::new(&[]);
+    m.begin(1_000_000, 1);
+    let mut f = policy();
+    f.dust_materials = [4];
+    for y in 32..36 {
+        for z in 24..26 {
+            for x in 24..26 {
+                assert!(matches!(
+                    m.ground(&mut w, [x, y, z], [0, 16, 24]),
+                    ClaimResult::Applied
+                ));
+            }
+        }
+    }
+    w.flush();
+    m.debris.confirm(w.completed(), &mut m.economy, &m.tuning);
+    let paid = m.spent_mj;
+    let supplied = m.supplied_mj;
+    m.release_nuclear_crowns(&w, &f, &[([8, 0, 8], [64, 96, 64])]);
+    assert_eq!(m.felling_pending(), 5, "one shared seed, not sixteen");
+    m.tuning.max_flying = 0;
+    m.step_felling(&mut w, &f);
+    assert!(m.felling_pending() > 0, "full pool discarded the frontier");
+    assert!(m.debris.fragments.iter().all(|piece| piece.material == 5));
+    let mut bytes = Blob::new();
+    m.save(&mut bytes);
+    let mut restored = Matter::new(&[]);
+    restored.load(&mut Scan::new(&bytes.v), &w, &[]).unwrap();
+    restored.tuning.max_flying = 4096;
+    restored.tuning.max_fragments = 4096;
+    restored.tuning.max_claims = 4096;
+    for _ in 0..200 {
+        let visits = restored.admission.felling[1];
+        restored.step_felling(&mut w, &f);
+        assert!(restored.admission.felling[1] - visits <= 32);
+        w.flush();
+        restored.flush(&w, true, 98, 1, &[], &f.materials);
+        assert!(restored.economy.ledger.balanced());
+        if restored.felling_pending() == 0 {
+            break;
+        }
+    }
+    assert_eq!(restored.felling_pending(), 0);
+    assert_eq!(restored.spent_mj, paid, "crown charged as another blast");
+    assert_eq!(restored.supplied_mj, supplied);
+    for z in 20..30 {
+        for y in 40..44 {
+            for x in 20..30 {
+                assert_eq!(w.material(x, y, z), 0, "near crown stayed hanging");
+                assert_eq!(w.material(x + 64, y, z), 4, "remote tree was touched");
+            }
+        }
+    }
+    assert_eq!(restored.economy.sunk(crate::matter::Sink::Annihilation), 0);
+    assert_eq!(
+        restored.economy.sunk(crate::matter::Sink::Pulverised),
+        400 * restored.economy.per_voxel(4)
+    );
 }

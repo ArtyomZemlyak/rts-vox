@@ -235,13 +235,27 @@ pub struct Move {
 /// Includes this tick's movement, then v-b, v-2b, ... until rest. Inverting
 /// that sum avoids both a square root and a proportional crawl near a goal.
 pub(crate) fn stopping_speed(distance: Fx, brake: Fx, tps: i32, limit: Fx) -> Fx {
-    if distance <= Fx::ZERO || brake <= Fx::ZERO || tps <= 0 || limit <= Fx::ZERO {
+    stopping_speed_to(distance, brake, tps, limit, Fx::ZERO)
+}
+
+/// Largest current-step speed whose discrete braking sequence reaches at most
+/// `exit` within `distance`. When `exit == 0`, this brakes to a full stop.
+pub(crate) fn stopping_speed_to(distance: Fx, brake: Fx, tps: i32, limit: Fx, exit: Fx) -> Fx {
+    if limit <= Fx::ZERO {
         return Fx::ZERO;
+    }
+    let e = exit.max(Fx::ZERO).min(limit);
+    if distance <= Fx::ZERO || brake <= Fx::ZERO || tps <= 0 {
+        return e;
     }
     let budget = distance.raw() as u128 * tps as u128;
     let b = brake.raw() as u128;
     let cap = limit.raw() as u128;
-    let steps = cap.div_ceil(b);
+    let exit_raw = e.raw() as u128;
+    if cap <= exit_raw {
+        return limit;
+    }
+    let steps = (cap - exit_raw).div_ceil(b);
     let tail = |n: u128| b * (n * (n - 1) / 2);
     if steps * cap - tail(steps) <= budget {
         return limit;
@@ -251,13 +265,15 @@ pub(crate) fn stopping_speed(distance: Fx, brake: Fx, tps: i32, limit: Fx) -> Fx
     let (mut lo, mut hi) = (1, steps);
     while lo < hi {
         let mid = (lo + hi) / 2;
-        if b * (mid * (mid + 1) / 2) < budget {
+        if mid * exit_raw + b * (mid * (mid + 1) / 2) < budget {
             lo = mid + 1;
         } else {
             hi = mid;
         }
     }
-    Fx(((budget + tail(lo)) / lo).min(cap) as i64)
+    Fx(((budget + tail(lo)) / lo)
+        .max(exit_raw + (lo - 1) * b)
+        .min(cap) as i64)
 }
 
 /// Pure-pursuit curvature is 2 sin(error) / target distance. Use an
@@ -537,6 +553,36 @@ mod tests {
         let budget = i64::MAX as u128 * 30;
         assert!(v * (v + 1) / 2 <= budget);
         assert!((v + 1) * (v + 2) / 2 > budget);
+    }
+
+    #[test]
+    fn stopping_speed_to_matches_exhaustive_discrete_braking() {
+        for exit in [5, 19, 45] {
+            for b in [2, 7, 19] {
+                for cap in [exit, exit + 15, exit + 60] {
+                    for tps in [1, 10, 20] {
+                        for distance in [0, 1, 5, 18, 45, 120] {
+                            let mut expected = exit.min(cap);
+                            for speed in (exit + 1)..=cap {
+                                let (mut v, mut sum) = (speed, 0);
+                                while v > exit {
+                                    sum += v;
+                                    v -= b;
+                                }
+                                if sum <= distance * tps {
+                                    expected = speed;
+                                }
+                            }
+                            assert_eq!(
+                                stopping_speed_to(Fx(distance), Fx(b), tps as i32, Fx(cap), Fx(exit)),
+                                Fx(expected),
+                                "distance={distance}, brake={b}, tps={tps}, cap={cap}, exit={exit}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

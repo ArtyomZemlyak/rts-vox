@@ -40,14 +40,6 @@ impl BlastRange {
             }
             last = Some(id);
             let targets: [[i32; 3]; 4] = std::array::from_fn(|_| std::array::from_fn(|_| s.i32()));
-            if targets.iter().any(|p| {
-                (0..3).any(|a| {
-                    i64::from(p[a]) < -i64::from(self.size[a])
-                        || i64::from(p[a]) > i64::from(self.size[a]) * 2
-                })
-            }) {
-                return None;
-            }
             let (unit, yaw) = if id == self.units.len() {
                 (&mut self.gun, self.turret.angle)
             } else {
@@ -56,6 +48,25 @@ impl BlastRange {
             if !matches!(unit.kind, RangeUnitKind::Walker04 | RangeUnitKind::Commander)
                 || unit.kind == RangeUnitKind::Commander && !matches!(targets[2], [0 | 1, 0, 0])
             {
+                return None;
+            }
+            // Servo points are not world orders. During angular slew a
+            // horizontal reach can rotate below a shallow map's Y extent.
+            // Bound that reach by the world diagonal's L1 upper bound and
+            // the data-defined idle reach, without changing the live pose.
+            let commander_margin = self.size.iter().map(|v| i64::from(*v)).sum::<i64>()
+                + i64::from(super::commander::tuning().rest_lookahead_cm);
+            if targets.iter().any(|p| {
+                (0..3).any(|a| {
+                    let margin = if unit.kind == RangeUnitKind::Commander {
+                        commander_margin
+                    } else {
+                        i64::from(self.size[a])
+                    };
+                    i64::from(p[a]) < -margin
+                        || i64::from(p[a]) > i64::from(self.size[a]) + margin
+                })
+            }) {
                 return None;
             }
             // The saved point already is the interpolated physical pose.

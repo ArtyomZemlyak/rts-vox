@@ -19,20 +19,20 @@ pub struct ViewEdge {
 }
 const SIDE: u32 = 96;
 const MAP_PIXELS: f32 = 142.0;
-pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
+pub fn build(commands: &mut Commands, camera: Entity, _font: &TextFont) {
     commands
         .spawn((
             MiniRoot,
+            optical_ui::Rail,
             PanelRoot,
             bevy::ui::RelativeCursorPosition::default(),
             Node {
                 position_type: PositionType::Absolute,
                 left: px(16),
-                bottom: px(234),
+                bottom: px(16),
                 width: px(154),
-                height: px(176),
+                height: px(154),
                 padding: UiRect::all(px(5)),
-                row_gap: px(4),
                 flex_direction: FlexDirection::Column,
                 border: UiRect::all(px(1)),
                 ..default()
@@ -42,14 +42,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
             UiTargetCamera(camera),
         ))
         .with_children(|p| {
-            p.spawn((
-                Text::new("ТАКТИЧЕСКАЯ КАРТА"),
-                TextFont {
-                    font_size: FontSize::Px(10.0),
-                    ..font.clone()
-                },
-                TextColor(theme::MUTED),
-            ));
+            theme::corners(p);
             p.spawn((
                 Button,
                 ImageNode::default(),
@@ -68,7 +61,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 for index in 0..8 {
                     for (thickness, color) in [
                         (4.0, Color::srgba(0.015, 0.04, 0.05, 0.95)),
-                        (2.0, Color::srgb(1.0, 0.87, 0.41)),
+                        (1.0, Color::srgb(0.70, 0.88, 0.96)),
                     ] {
                         p.spawn((
                             ViewEdge { index, thickness },
@@ -254,12 +247,12 @@ pub fn update_terrain(
                     let m =
                         sim_core::blast::material(&scene.sim.world, [x as i32, y as i32, z as i32]);
                     let base: [u8; 3] = match m {
-                        2 => [118, 125, 116],
-                        3 => [82, 103, 112],
-                        4 | 5 => [37, 67, 47],
-                        7 => [118, 106, 76],
-                        8 => [85, 105, 65],
-                        _ => [65, 82, 54],
+                        2 => [83, 101, 113],
+                        3 => [62, 90, 109],
+                        4 | 5 => [32, 62, 69],
+                        7 => [83, 93, 103],
+                        8 => [58, 82, 91],
+                        _ => [45, 67, 81],
                     };
                     let shade = (y / 4).min(20) as u8;
                     pixels.extend(base.map(|v| v.saturating_add(shade)));

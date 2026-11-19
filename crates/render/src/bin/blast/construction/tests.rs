@@ -2,6 +2,30 @@ use super::*;
 use modding::range::{RangeBlock, RangeLayout, RangeUnitDef};
 
 #[test]
+fn fixed_catalogue_has_one_owner_independent_of_projection() {
+    let mut app = App::new();
+    app.init_resource::<Catalog>()
+        .init_resource::<spatial_ui::State>()
+        .add_systems(Update, sync_visibility);
+    let root = app.world_mut().spawn((Root, Node::default())).id();
+    let unrelated = app.world_mut().spawn(Node::default()).id();
+    // Sandbox fallback is requested even for non-producing selected units.
+    app.world_mut().resource_mut::<Catalog>().legacy_requested = true;
+    for projected in [true, true, false, true, false] {
+        app.world_mut().resource_mut::<spatial_ui::State>().visible = projected;
+        app.update();
+        assert_eq!(app.world().get::<Node>(root).unwrap().display,
+            Display::Flex);
+        assert_eq!(app.world().get::<Node>(unrelated).unwrap().display, Display::Flex);
+    }
+    // Closing the catalogue (menu/lab/placement/hidden context) must not reopen
+    // it when the projection disappears in the same frame.
+    app.world_mut().resource_mut::<Catalog>().legacy_requested = false;
+    app.update();
+    assert_eq!(app.world().get::<Node>(root).unwrap().display, Display::None);
+}
+
+#[test]
 fn greben_preview_distinguishes_headroom_from_real_terrain() {
     let at = [900, 16, 700];
     for height in [192, 512] {
@@ -56,8 +80,11 @@ fn fixture() -> (BlastRange, Workshop) {
         (RangeUnitKind::GrebenStorage, true, [900, 16, 900]),
         (RangeUnitKind::KilFactoryT1, true, [2600, 16, 900]),
         (RangeUnitKind::SkobaDrone, true, [1700, 80, 1300]),
-        (RangeUnitKind::Tank, true, [2600, 16, 2800]),
+        (RangeUnitKind::Tank, true, [1200, 16, 2800]),
         (RangeUnitKind::Tank, false, [3600, 16, 2800]),
+        (RangeUnitKind::PowerPlantT1, true, [2500, 16, 1600]),
+        (RangeUnitKind::PowerPlantT1, true, [2700, 16, 1800]),
+        (RangeUnitKind::PowerPlantT1, true, [900, 16, 1500]),
     ]
     .map(|(kind, allied, at)| RangeUnitDef {
         kind,
@@ -70,16 +97,17 @@ fn fixture() -> (BlastRange, Workshop) {
     economy.bank.as_mut().unwrap().base_store = 1 << 40;
     layout.economy = Some(economy);
     layout.ready = Some(modding::range::RangeReady {
-        store: 1 << 30,
+        store: 1 << 36, // Covers the complete current T1→T4 physical body quotes.
         ..default()
     });
     let mut sim = BlastRange::with_layout(config(false, false), layout.clone()).unwrap();
+    assert!(sim.economic_rules().timed_upgrades, "UI fixture must retain stock timed upgrades");
     sim.set_physics_workers(1);
     sim.set_navigation_workers(1);
     sim.start_battle().unwrap();
     (sim, Workshop::new(Some(layout), false))
 }
-fn app() -> App {
+pub(crate) fn app() -> App {
     let (sim, edit) = fixture();
     let mut app = panel::hud::tests::app_with_scene(sim, edit);
     app.init_resource::<Catalog>()
@@ -99,6 +127,48 @@ fn select(app: &mut App, id: usize) {
     app.world_mut().resource_mut::<Workshop>().controlled = Some(id);
     app.world_mut().resource_mut::<Workshop>().selected_units = vec![id];
     app.update();
+}
+
+fn finish_timed_factory_upgrade(sim: &mut BlastRange, next: RangeUnitKind) {
+    let previous = sim.units[1].kind;
+    let body_matter = sim.matter.economy.ledger.held(sim.matter.body_container(1));
+    assert!(sim.upgrade_kil(1));
+    assert_eq!(sim.units[1].kind, previous, "upgrade must wait in the real queue");
+    assert_eq!(sim.production_queue(1), Some(vec![next]));
+    let required = sim.production_progress(1).expect("queued timed upgrade").1;
+    assert!(required > 1);
+    assert!(sim.production_power(1) > 0);
+    assert!(sim.construction_power_networks()[1].is_some_and(|(supply, _)| supply >= sim.production_power(1)));
+    let mut checked_partial = false;
+    for _ in 0..required + 2 {
+        if sim.units[1].kind == next {
+            break;
+        }
+        sim.step();
+        if let Some((elapsed, ticks, paid, price)) = sim.production_progress(1) {
+            if !checked_partial && elapsed >= ticks / 2 && elapsed < ticks {
+                assert!(paid > 0 && price > paid, "partial upgrade must pay real matter");
+                let mut restored = BlastRange::restore(sim.config, &sim.snapshot())
+                    .expect("partially paid timed upgrade restores");
+                assert_eq!(restored.state_hash(), sim.state_hash());
+                restored.set_physics_workers(1);
+                restored.set_navigation_workers(1);
+                sim.step();
+                restored.step();
+                assert_eq!(restored.state_hash(), sim.state_hash(), "timed upgrade continues identically after restore");
+                *sim = restored;
+                checked_partial = true;
+            }
+        }
+    }
+    assert_eq!(sim.units[1].kind, next,
+        "factory upgrade stalled: queue={:?} progress={:?} power={} network={:?} store={:?} phase={:?}",
+        sim.production_queue(1), sim.production_progress(1), sim.production_power(1),
+        sim.construction_power_networks()[1], sim.side_store(true), sim.battle.phase);
+    assert!(checked_partial, "must exercise an unfinished paid upgrade and restore");
+    assert!(sim.production_queue(1).unwrap_or_default().is_empty());
+    assert!(sim.matter.economy.ledger.held(sim.matter.body_container(1)) > body_matter);
+    assert!(sim.matter.economy.ledger.balanced());
 }
 
 #[test]
@@ -135,6 +205,10 @@ fn blueprint_catalogue_queue_cancel_and_preview_fixture() {
     assert_eq!(sim.order_queue(0).len(),3);assert_eq!(sim.battle.actors[0].order,sim_core::blast::battle::Order::Build(first));
     let tank=sim.mining().unwrap().tank(0).unwrap();sim.matter.economy.ledger.generate(tank,2_000_000);
     for _ in 0..24 {sim.step();}
+    let upper=production_hud::collect(&sim);
+    let plan=upper.iter().find(|l|l.actor==0).expect("queued construction remains globally visible");
+    assert_eq!(plan.queue.len(),3);
+    assert_eq!(plan.queue[0],RangeUnitKind::TurretT1);
     let bytes=sim.snapshot();assert_eq!(BlastRange::restore(sim.config,&bytes).unwrap().state_hash(),sim.state_hash());
     let fixture_dir=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out/build-plans-539");
     std::fs::create_dir_all(&fixture_dir).unwrap();
@@ -250,6 +324,9 @@ fn free_placement_in_battle_can_be_toggled_without_changing_battle_mode() {
 #[test]
 fn all_tiers_filter_real_recipes_and_factory_clicks_queue_and_refund() {
     let mut app = app();
+    assert!(app.world_mut().resource_mut::<Scene>().sim.battle_order(
+        3, sim_core::blast::battle::Order::Hold, None,
+    ));
     select(&mut app, 1);
     click(&mut app, Action::Choose(0));
     assert_eq!(
@@ -271,8 +348,9 @@ fn all_tiers_filter_real_recipes_and_factory_clicks_queue_and_refund() {
     assert!(!app.world().resource::<Catalog>().placing());
     {
         let mut scene = app.world_mut().resource_mut::<Scene>();
-        assert!(scene.sim.upgrade_kil(1));
-        assert!(scene.sim.upgrade_kil(1));
+        for next in [RangeUnitKind::KilFactoryT2, RangeUnitKind::KilFactoryT3] {
+            finish_timed_factory_upgrade(&mut scene.sim, next);
+        }
     }
     click(&mut app, Action::Tier(3));
     let kinds = choices(
@@ -309,6 +387,10 @@ fn placement_cancels_on_selection_generation_and_escape() {
     select(&mut app, 2);
     click(&mut app, Action::Choose(0));
     assert!(app.world().resource::<Catalog>().placing());
+    click(&mut app, Action::DismissPlacement);
+    assert!(!app.world().resource::<Catalog>().placing());
+    click(&mut app, Action::Choose(0));
+    assert!(app.world().resource::<Catalog>().placing());
     app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()
         .press(KeyCode::Escape);
@@ -332,12 +414,11 @@ fn placement_cancels_on_selection_generation_and_escape() {
 fn a_card_from_the_previous_selection_cannot_order_for_another_factory() {
     let mut app = app();
     select(&mut app, 1);
-    // The old first card is a tank. The storage's first recipe is a drone.
     app.world_mut().resource_mut::<Workshop>().controlled = Some(0);
     click(&mut app, Action::Choose(0));
     assert_eq!(
         app.world().resource::<Catalog>().context,
-        Context::Factory(0)
+        Context::Engineer(0)
     );
     assert!(app
         .world()
@@ -345,6 +426,9 @@ fn a_card_from_the_previous_selection_cannot_order_for_another_factory() {
         .sim
         .production_queue(0)
         .is_none());
+    click(&mut app, Action::GrebenMode);
+    app.update();
+    assert_eq!(app.world().resource::<Catalog>().context, Context::Factory(0));
     click(&mut app, Action::Choose(0));
     assert_eq!(
         app.world().resource::<Scene>().sim.production_queue(0),
@@ -463,7 +547,8 @@ fn catalogue_refresh_tracks_recipes_costs_upgrade_controls_and_hidden_modes() {
     app.insert_resource(Assets::<Image>::default())
         .insert_resource(Templates::default())
         .insert_resource(frontend::Menu::new(false))
-        .add_systems(PostUpdate, (panel::hud::refresh, refresh).chain());
+        .init_resource::<spatial_ui::State>()
+        .add_systems(PostUpdate, (panel::hud::refresh, refresh, sync_visibility).chain());
     app.world_mut().spawn(Window {
         resolution: (960, 540).into(),
         ..default()
@@ -486,7 +571,7 @@ fn catalogue_refresh_tracks_recipes_costs_upgrade_controls_and_hidden_modes() {
         .id();
     let map = app
         .world_mut()
-        .spawn((panel::minimap::MiniRoot, Node::default()))
+        .spawn((panel::minimap::MiniRoot, Node {left:px(16),bottom:px(16),..default()}))
         .id();
     let upgrade = app
         .world_mut()
@@ -514,7 +599,8 @@ fn catalogue_refresh_tracks_recipes_costs_upgrade_controls_and_hidden_modes() {
         app.world().get::<Node>(deck).unwrap().display,
         Display::None
     );
-    assert_eq!(app.world().get::<Node>(map).unwrap().display, Display::None);
+    assert_eq!(app.world().get::<Node>(map).unwrap().display, Display::Flex);
+    assert_eq!(app.world().get::<Node>(map).unwrap().bottom,px(16));
     assert_eq!(
         app.world().get::<Node>(briefing).unwrap().display,
         Display::None
@@ -523,8 +609,20 @@ fn catalogue_refresh_tracks_recipes_costs_upgrade_controls_and_hidden_modes() {
         app.world().get::<Node>(upgrade).unwrap().display,
         Display::Flex
     );
-    assert!(app.world().get::<Text>(caption).unwrap().0.contains("мат."));
-    assert_eq!(app.world().get::<Node>(queue_row).unwrap().display, Display::Flex);
+    let recipe = choices(app.world().resource::<Catalog>(), &app.world().resource::<Scene>().sim)[0];
+    assert_eq!(app.world().get::<Text>(caption).unwrap().0, name(recipe));
+    let details = recipe_details(app.world().resource::<Catalog>(), &app.world().resource::<Scene>().sim, recipe);
+    assert!(details.contains("Масса") && details.contains("Энергия"),
+        "live quotes stay in hover details, not recipe cells");
+    let mass = app.world().resource::<Scene>().sim.production_quote(1, recipe)
+        .map(|(mass, _, _)| economy_display::mass(mass)).expect("live recipe quote");
+    assert!(details.contains(&format!("Масса {mass}")));
+    let projected = spatial_catalog(app.world().resource::<Catalog>(),
+        &app.world().resource::<Scene>().sim, app.world().resource::<Scene>().generation, 1)
+        .expect("selected factory projection");
+    assert_eq!(projected.recipes.first().map(|r| r.kind), Some(recipe));
+    assert!(!projected.has_work);
+    assert_eq!(app.world().get::<Node>(queue_row).unwrap().display, Display::None);
     assert_eq!(app.world().get::<Node>(queue_card).unwrap().display, Display::None);
     assert!(app.world().get::<Text>(queue_header).unwrap().0.contains("пусто"));
     click(&mut app, Action::Choose(0));
@@ -544,8 +642,15 @@ fn catalogue_refresh_tracks_recipes_costs_upgrade_controls_and_hidden_modes() {
         .unwrap()
         .0
         .contains("заказов: 1"));
-    for _ in 0..3 {
-        assert!(app.world_mut().resource_mut::<Scene>().sim.upgrade_kil(1));
+    click(&mut app, Action::Cancel);
+    assert!(app.world_mut().resource_mut::<Scene>().sim.battle_order(
+        3, sim_core::blast::battle::Order::Hold, None,
+    ));
+    {
+        let mut scene = app.world_mut().resource_mut::<Scene>();
+        for next in [RangeUnitKind::KilFactoryT2, RangeUnitKind::KilFactoryT3, RangeUnitKind::KilFactoryT4] {
+            finish_timed_factory_upgrade(&mut scene.sim, next);
+        }
     }
     app.update();
     assert_eq!(
@@ -553,7 +658,8 @@ fn catalogue_refresh_tracks_recipes_costs_upgrade_controls_and_hidden_modes() {
         Display::None
     );
     select(&mut app, 0);
-    assert_eq!(app.world().get::<Node>(queue_row).unwrap().display, Display::None);
+    assert_eq!(app.world().get::<Node>(queue_row).unwrap().display, Display::None,
+        "Greben crew queue is owned by the upper global island");
     assert_eq!(
         app.world().get::<Node>(upgrade).unwrap().display,
         Display::None,
@@ -566,10 +672,9 @@ fn catalogue_refresh_tracks_recipes_costs_upgrade_controls_and_hidden_modes() {
     assert!(app.world().get::<Text>(caption).unwrap().0.contains(name(first_building)),
         "Greben's engineer catalogue must show its selected building");
     select(&mut app, 2);
-    assert!(
-        app.world().get::<Text>(caption).unwrap().0.contains("мат."),
-        "buildings need their actual price too"
-    );
+    let recipe = choices(app.world().resource::<Catalog>(), &app.world().resource::<Scene>().sim)[0];
+    assert_eq!(app.world().get::<Text>(caption).unwrap().0, name(recipe),
+        "recipe cells keep the name only; the real quote belongs in the tooltip");
     app.insert_resource(frontend::Menu::new(true));
     app.update();
     assert_eq!(
@@ -587,7 +692,7 @@ fn catalogue_refresh_tracks_recipes_costs_upgrade_controls_and_hidden_modes() {
     select(&mut app, 3);
     assert_eq!(
         app.world().get::<Node>(deck).unwrap().display,
-        Display::Flex
+        Display::None
     );
     assert_eq!(app.world().get::<Node>(map).unwrap().display, Display::Flex);
     assert_eq!(
@@ -599,7 +704,10 @@ fn catalogue_refresh_tracks_recipes_costs_upgrade_controls_and_hidden_modes() {
     app.update();
     assert_eq!(app.world().resource::<Catalog>().per_page, 4);
     click(&mut app, Action::Page(100));
-    assert_eq!(app.world().resource::<Catalog>().page, 5);
+    let c = app.world().resource::<Catalog>();
+    let real_recipes = choices(c, &app.world().resource::<Scene>().sim);
+    assert_eq!(c.page, (real_recipes.len() - 1) / c.per_page,
+        "large page increments stop on the last page of the actual recipe inventory");
     click(&mut app, Action::Tier(4));
     let c = app.world().resource::<Catalog>();
     assert_eq!(
@@ -706,4 +814,176 @@ fn higher_tier_sites_reserve_space_and_survive_save_and_completion() {
     assert!(sim.matter.economy.ledger.balanced());
     let restored = BlastRange::restore(sim.config, &sim.snapshot()).unwrap();
     assert_eq!(sim.state_hash(), restored.state_hash());
+}
+
+
+#[test]
+fn actual_hover_and_capture_preview_share_the_real_quote_island() {
+    let mut app=app();
+    app.insert_resource(frontend::Menu::new(false)).init_resource::<Time>().init_resource::<UiScale>()
+        .init_resource::<spatial_ui::State>().add_systems(PostUpdate,tooltip);
+    app.world_mut().spawn(Window{resolution:(960,540).into(),..default()});
+    {let mut c=app.world_mut().resource_mut::<Catalog>();c.context=Context::Factory(1);c.per_page=5;}
+    app.world_mut().resource_mut::<Workshop>().controlled=Some(1);
+    app.world_mut().spawn((Root,Node::default()));
+    let card=app.world_mut().spawn((Slot(0),Interaction::Hovered)).id();
+    let tip=app.world_mut().spawn((RecipeTooltip,Node::default())).id();
+    let label=app.world_mut().spawn((RecipeTooltipText,Text::new(""))).id();
+    for _ in 0..4 {app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(100));app.update();}
+    assert_eq!(app.world().get::<Node>(tip).unwrap().display,Display::Flex);
+    let hover=app.world().get::<Text>(label).unwrap().0.clone();
+    let quote=app.world().resource::<Scene>().sim.production_quote(1,RangeUnitKind::Tank).unwrap();
+    assert!(hover.contains(&economy_display::mass(quote.0))&&hover.contains("Пит."));
+    let node=app.world().get::<Node>(tip).unwrap();
+    let placement=(node.left,node.top,node.bottom,node.width);
+    assert_eq!(placement,(px(16),Val::Auto,px(200),px(160)));
+    *app.world_mut().get_mut::<Interaction>(card).unwrap()=Interaction::None;
+    app.insert_resource(spatial_ui::State::default().with_tooltip_preview(Some(0)));
+    app.update();
+    assert_eq!(app.world().get::<Node>(tip).unwrap().display,Display::Flex);
+    assert_eq!(app.world().get::<Text>(label).unwrap().0,hover);
+    let node=app.world().get::<Node>(tip).unwrap();
+    assert_eq!((node.left,node.top,node.bottom,node.width),placement);
+}
+
+
+#[test]
+fn hidden_combat_context_hides_filters_and_deselection_preserves_projection_toggles() {
+    let mut layout = RangeLayout::from_ron(include_str!("../../../../../../data/fixture-drive.ron")).unwrap();
+    layout.size = [1600, 384, 1600];
+    layout.battle = true;
+    layout.idle_enemies = true;
+    layout.course = None;
+    layout.ready = None;
+    layout.shields.clear();
+    layout.unit_yaws.clear();
+    layout.gun = [250, 24, 400];
+    layout.target = [1250, 16, 1250];
+    layout.clear_min = [1, 1];
+    layout.clear_max = [1599, 1599];
+    layout.blocks = vec![
+        RangeBlock { min: [0; 3], max: [1600, 384, 1600], material: 0 },
+        RangeBlock { min: [0; 3], max: [1600, 16, 1600], material: 1 },
+    ];
+    layout.units = vec![
+        RangeUnitDef { kind: RangeUnitKind::KilFactoryT1, allied: true, at: [550, 16, 750], weapon: None },
+        RangeUnitDef { kind: RangeUnitKind::Tank, allied: true, at: [1150, 16, 650], weapon: None },
+        RangeUnitDef { kind: RangeUnitKind::Tank, allied: false, at: [1420, 16, 1420], weapon: None },
+        RangeUnitDef { kind: RangeUnitKind::Spider, allied: true, at: [550, 16, 1100], weapon: None },
+    ];
+    layout.economy = Some(modding::range_economy::RangeEconomy::stock());
+    let mut sim = BlastRange::with_layout(config(false, false), layout.clone()).unwrap();
+    sim.set_physics_workers(1);
+    sim.set_navigation_workers(1);
+    sim.start_battle().unwrap();
+    let edit = Workshop::new(Some(layout), false);
+    let mut app = panel::hud::tests::app_with_scene(sim, edit);
+    let mut fonts = Assets::<Font>::default();
+    let mut images = Assets::<Image>::default();
+    let mut gizmo_config = bevy::gizmos::config::GizmoConfigStore::default();
+    gizmo_config.insert(bevy::gizmos::config::GizmoConfig::default(), bevy::gizmos::config::DefaultGizmoConfigGroup);
+    let camera = app.world_mut().spawn(Camera2d).id();
+    if app.world_mut().query_filtered::<Entity, With<CatalogPart>>().iter(app.world()).next().is_none() {
+        build(&mut app.world_mut().commands(), camera, &TextFont::default());
+    }
+    if app.world_mut().query_filtered::<Entity, With<production_hud::Root>>().iter(app.world()).next().is_none() {
+        production_hud::build(&mut app.world_mut().commands(), camera, &TextFont::default());
+    }
+    spatial_ui::build(&mut app.world_mut().commands(), camera, &TextFont::default(), &mut fonts, &mut images);
+    let mut camera3d = Camera::default();
+    camera3d.computed.target_info = Some(bevy::camera::RenderTargetInfo { physical_size: UVec2::new(960, 540), scale_factor: 1. });
+    camera3d.computed.clip_from_view = Mat4::orthographic_rh(-2200., 2200., -1237.5, 1237.5, 0.1, 10000.);
+    app.world_mut().spawn((workbench::EditorCamera, camera3d, Transform::from_xyz(1550., 1500., 1950.).looking_at(Vec3::new(550., 100., 550.), Vec3::Y)));
+    app.init_resource::<Catalog>()
+        .insert_resource(laboratory::Laboratory::new(false))
+        .init_resource::<pilot::Pilot>()
+        .init_resource::<ButtonInput<MouseButton>>()
+        .insert_resource(frontend::Menu::new(false))
+        .insert_resource(Templates::default())
+        .insert_resource(images)
+        .insert_resource(gizmo_config)
+        .init_resource::<Time>()
+        .init_resource::<UiScale>()
+        .init_resource::<spatial_ui::State>()
+        .init_resource::<production_hud::State>()
+        .add_systems(Update, input.after(panel::actions))
+        .add_systems(Update, spatial_ui::input.after(input))
+        .add_systems(PostUpdate, (responsive, refresh, sync_visibility, production_hud::refresh, spatial_ui::update).chain().after(ui_snapshot::publish));
+    app.world_mut().resource_mut::<panel::Panel>().sandbox = false;
+    app.world_mut().spawn(Window { resolution: (960, 540).into(), ..default() });
+
+    // Frame with no unit selected (projection == None), then select combat Tank (Context::Hidden).
+    app.update();
+    select(&mut app, 1);
+    for _ in 0..4 {
+        app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(100));
+        app.update();
+    }
+    let mut parts = app.world_mut().query::<(&CatalogPart, &Node)>();
+    assert!(
+        parts.iter(app.world()).all(|(_, n)| n.display == Display::None),
+        "combat unit without build/produce capability must hide both Filters and Row"
+    );
+    // FoldToggle and ToolsToggle must remain Display::Flex after projection == None frames!
+    for required in [spatial_ui::Part::FoldToggle, spatial_ui::Part::ToolsToggle] {
+        let d = app.world_mut().query::<(&spatial_ui::Part, &Node)>().iter(app.world())
+            .find_map(|(p, n)| (*p == required).then_some(n.display)).unwrap();
+        assert_eq!(d, Display::Flex, "projection toggle must survive projection == None frames");
+    }
+    let qroot = app.world_mut().query_filtered::<Entity, With<production_hud::Root>>().iter(app.world()).next().unwrap();
+    assert_eq!(app.world().get::<Node>(qroot).unwrap().width, px(960. * 0.28));
+
+    fn settle(app: &mut App) {
+        for _ in 0..5 {app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(100));app.update();}
+    }
+    fn catalog_display(app: &mut App, filters: Display, row: Display) {
+        let mut parts = app.world_mut().query::<(&CatalogPart, &Node)>();
+        assert_eq!(parts.iter(app.world()).count(), 2);
+        for (part, node) in parts.iter(app.world()) {
+            assert_eq!(node.display, match part {CatalogPart::Filters=>filters,CatalogPart::Row=>row});
+        }
+    }
+    fn part(app: &mut App, want: spatial_ui::Part) -> Entity {
+        app.world_mut().query::<(Entity,&spatial_ui::Part)>().iter(app.world()).find_map(|(e,p)|(*p==want).then_some(e)).unwrap()
+    }
+    fn press(app: &mut App, want: spatial_ui::Part) {
+        let e=part(app,want);assert_eq!(app.world().get::<Node>(e).unwrap().display,Display::Flex);
+        *app.world_mut().get_mut::<Interaction>(e).unwrap()=Interaction::Pressed;app.update();
+        *app.world_mut().get_mut::<Interaction>(e).unwrap()=Interaction::None;settle(app);
+    }
+    for (width,height,scale) in [(960,540,1.),(1920,1080,1.),(3840,2160,2.)] {
+        app.world_mut().query::<&mut Window>().single_mut(app.world_mut()).unwrap().resolution=(width,height).into();
+        app.world_mut().resource_mut::<UiScale>().0=scale;
+        app.world_mut().query_filtered::<&mut Camera,With<workbench::EditorCamera>>().single_mut(app.world_mut()).unwrap()
+            .computed.target_info=Some(bevy::camera::RenderTargetInfo{physical_size:UVec2::new(width,height),scale_factor:1.});
+        for selected in [Some(1),None,Some(3),None] {
+            {let mut edit=app.world_mut().resource_mut::<Workshop>();edit.controlled=selected;edit.selected_units=selected.into_iter().collect();}
+            settle(&mut app);catalog_display(&mut app,Display::None,Display::None);
+            for want in [spatial_ui::Part::FoldToggle,spatial_ui::Part::ToolsToggle] {
+                let e=part(&mut app,want);assert_eq!(app.world().get::<Node>(e).unwrap().display,Display::Flex);
+            }
+        }
+        select(&mut app,0);settle(&mut app);
+        assert!(app.world().resource::<spatial_ui::State>().visible,"factory projection must actually open");
+        let compact=height as f32/scale<780.;
+        catalog_display(&mut app,if compact {Display::None}else{Display::Flex},if compact {Display::None}else{Display::Flex});
+        press(&mut app,spatial_ui::Part::ToolsToggle);assert!(app.world().resource::<spatial_ui::State>().tools_open);
+        press(&mut app,spatial_ui::Part::ToolsToggle);assert!(!app.world().resource::<spatial_ui::State>().tools_open);
+        press(&mut app,spatial_ui::Part::CatalogToggle);
+        assert!(app.world().resource::<spatial_ui::State>().catalog_open);
+        catalog_display(&mut app,Display::Flex,if compact {Display::Flex}else{Display::None});
+        let ticks:Vec<_>=app.world_mut().query_filtered::<Entity,With<CatalogPart>>().iter(app.world())
+            .map(|e|(e,app.world().entity(e).get_ref::<Node>().unwrap().last_changed())).collect();
+        settle(&mut app);
+        for (e,tick) in ticks {assert_eq!(app.world().entity(e).get_ref::<Node>().unwrap().last_changed(),tick,"catalogue visibility must have one owner");}
+        press(&mut app,spatial_ui::Part::CatalogToggle);
+        press(&mut app,spatial_ui::Part::FoldToggle);
+        let deck=part(&mut app,spatial_ui::Part::Deck);assert_eq!(app.world().get::<Node>(deck).unwrap().display,Display::None);
+        press(&mut app,spatial_ui::Part::Restore);assert!(app.world().resource::<spatial_ui::State>().visible);
+        app.insert_resource(frontend::Menu::new(true));settle(&mut app);catalog_display(&mut app,Display::None,Display::None);
+        app.insert_resource(frontend::Menu::new(false));settle(&mut app);
+        assert!(app.world().resource::<spatial_ui::State>().visible);
+        press(&mut app,spatial_ui::Part::ToolsToggle);assert!(app.world().resource::<spatial_ui::State>().tools_open);
+        press(&mut app,spatial_ui::Part::ToolsToggle);
+    }
 }

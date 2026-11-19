@@ -291,11 +291,27 @@ impl LocalMap {
 /// pose. Damage is read live; only transforms and enclosing boxes are cached.
 struct HitFrames {
     root: LocalMap,
+    root_box: ([i32; 3], [i32; 3]),
     turret: crate::damage::Frame,
     turret_map: LocalMap,
     shared_root: bool,
     segments: Vec<LocalMap>,
     boxes: Vec<([i32; 3], [i32; 3])>,
+}
+fn frame_world_bounds(frame: &crate::damage::Frame, dims: [u8; 3]) -> ([i32; 3], [i32; 3]) {
+    let mut lo = [i32::MAX; 3];
+    let mut hi = [i32::MIN; 3];
+    for k in 0..8 {
+        let p = frame.world(std::array::from_fn(|a| {
+            Fx::from_int(if k & (1 << a) == 0 { 0 } else { dims[a] as i32 })
+        }));
+        for (a, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+            let cell = (v.raw() >> 32) as i32;
+            lo[a] = lo[a].min(cell - 1);
+            hi[a] = hi[a].max(cell + 2);
+        }
+    }
+    (lo, hi)
 }
 impl HitFrames {
     fn new(
@@ -310,28 +326,25 @@ impl HitFrames {
             .segments
             .iter()
             .zip(segments)
-            .map(|(s, frame)| {
-                let mut lo = [i32::MAX; 3];
-                let mut hi = [i32::MIN; 3];
-                let dims = [s.body.vol.nx, s.body.vol.ny, s.body.vol.nz];
-                for k in 0..8 {
-                    let p = frame.world(std::array::from_fn(|a| {
-                        Fx::from_int(if k & (1 << a) == 0 { 0 } else { dims[a] as i32 })
-                    }));
-                    for (a, v) in [p.x, p.y, p.z].into_iter().enumerate() {
-                        lo[a] = lo[a].min(v.to_int_trunc() - 1);
-                        hi[a] = hi[a].max(v.to_int_trunc() + 1);
-                    }
-                }
-                (lo, hi)
-            })
+            .map(|(s, frame)| frame_world_bounds(frame, [s.body.vol.nx, s.body.vol.ny, s.body.vol.nz]))
             .collect();
         let turret = u.aimed_frame(&root, delta, pitch);
+        let shared_root = delta == 0 && pitch == 0;
+        let root_dims = [u.body.vol.nx, u.body.vol.ny, u.body.vol.nz];
+        let mut root_box = frame_world_bounds(&root, root_dims);
+        if !shared_root {
+            let t_box = frame_world_bounds(&turret, root_dims);
+            for a in 0..3 {
+                root_box.0[a] = root_box.0[a].min(t_box.0[a]);
+                root_box.1[a] = root_box.1[a].max(t_box.1[a]);
+            }
+        }
         Self {
             root: LocalMap::new(&root, &u.body),
+            root_box,
             turret,
             turret_map: LocalMap::new(&turret, &u.body),
-            shared_root: delta == 0 && pitch == 0,
+            shared_root,
             segments: segments
                 .iter()
                 .zip(&u.body.segments)
@@ -339,6 +352,80 @@ impl HitFrames {
                 .collect(),
             boxes,
         }
+    }
+    fn overlaps_box(&self, u: &RangeUnit, lo: [i32; 3], hi: [i32; 3]) -> bool {
+        if (0..3).all(|a| hi[a] >= self.root_box.0[a] && lo[a] <= self.root_box.1[a]) {
+            return true;
+        }
+        self.boxes
+            .iter()
+            .take(u.body.segments.len())
+            .enumerate()
+            .any(|(i, (b_lo, b_hi))| {
+                !u.seg_gone.get(i).copied().unwrap_or(false)
+                    && (0..3).all(|a| hi[a] >= b_lo[a] && lo[a] <= b_hi[a])
+            })
+    }
+    fn overlap_bounds(
+        &self,
+        u: &RangeUnit,
+        lo: [i32; 3],
+        hi: [i32; 3],
+    ) -> Option<([i32; 3], [i32; 3])> {
+        let mut min_p = [i32::MAX; 3];
+        let mut max_p = [i32::MIN; 3];
+        let mut any = false;
+        if (0..3).all(|a| hi[a] >= self.root_box.0[a] && lo[a] <= self.root_box.1[a]) {
+            any = true;
+            for a in 0..3 {
+                min_p[a] = lo[a].max(self.root_box.0[a]);
+                max_p[a] = hi[a].min(self.root_box.1[a]);
+            }
+        }
+        for (i, &(b_lo, b_hi)) in self.boxes.iter().take(u.body.segments.len()).enumerate() {
+            if !u.seg_gone.get(i).copied().unwrap_or(false)
+                && (0..3).all(|a| hi[a] >= b_lo[a] && lo[a] <= b_hi[a])
+            {
+                any = true;
+                for a in 0..3 {
+                    min_p[a] = min_p[a].min(lo[a].max(b_lo[a]));
+                    max_p[a] = max_p[a].max(hi[a].min(b_hi[a]));
+                }
+            }
+        }
+        any.then_some((min_p, max_p))
+    }
+    fn column_span(&self, u: &RangeUnit, x: i32, z: i32, base: i32, end: i32) -> Option<(i32, i32)> {
+        if base >= end {
+            return None;
+        }
+        let mut min_y = i32::MAX;
+        let mut max_y = i32::MIN;
+        if x >= self.root_box.0[0]
+            && x <= self.root_box.1[0]
+            && z >= self.root_box.0[2]
+            && z <= self.root_box.1[2]
+        {
+            min_y = min_y.min(self.root_box.0[1]);
+            max_y = max_y.max(self.root_box.1[1]);
+        }
+        for (i, &(b_lo, b_hi)) in self.boxes.iter().take(u.body.segments.len()).enumerate() {
+            if !u.seg_gone.get(i).copied().unwrap_or(false)
+                && x >= b_lo[0]
+                && x <= b_hi[0]
+                && z >= b_lo[2]
+                && z <= b_hi[2]
+            {
+                min_y = min_y.min(b_lo[1]);
+                max_y = max_y.max(b_hi[1]);
+            }
+        }
+        if min_y > max_y {
+            return None;
+        }
+        let y0 = base.max(min_y);
+        let y1 = end.min(max_y.saturating_add(1));
+        (y0 < y1).then_some((y0, y1))
     }
     fn hit(&self, u: &RangeUnit, p: [i32; 3]) -> Option<(usize, [usize; 3])> {
         self.hit_parts(u, p, 0..self.boxes.len().min(u.body.segments.len()))
@@ -365,20 +452,22 @@ impl HitFrames {
         p: [i32; 3],
         parts: impl IntoIterator<Item = usize>,
     ) -> Option<(usize, [usize; 3])> {
-        let cell = self.root.local_in(&u.body, p);
-        let cell = if self.shared_root {
-            cell
-        } else {
-            cell.filter(|c| c[1] < usize::from(u.body.turret_y))
-                .or_else(|| {
-                    self.turret_map
-                        .local_in(&u.body, p)
-                        .filter(|c| c[1] >= usize::from(u.body.turret_y))
-                })
-        };
-        if let Some(c) = cell {
-            if u.body.vol.get(c[0], c[1], c[2]) {
-                return Some((0, c));
+        if (0..3).all(|a| p[a] >= self.root_box.0[a] && p[a] <= self.root_box.1[a]) {
+            let cell = self.root.local_in(&u.body, p);
+            let cell = if self.shared_root {
+                cell
+            } else {
+                cell.filter(|c| c[1] < usize::from(u.body.turret_y))
+                    .or_else(|| {
+                        self.turret_map
+                            .local_in(&u.body, p)
+                            .filter(|c| c[1] >= usize::from(u.body.turret_y))
+                    })
+            };
+            if let Some(c) = cell {
+                if u.body.vol.get(c[0], c[1], c[2]) {
+                    return Some((0, c));
+                }
             }
         }
         for i in parts {
@@ -414,12 +503,14 @@ struct UnitVoxels<'a> {
 /// Questions a unit's voxels answer directly in a step before its cells
 /// are remembered (ADR-469): remembering costs the box's bits.
 const ASKED_BEFORE_KNOWN: u32 = 256;
-/// The cells of a unit's box asked this step: two bits a cell, asked and
-/// solid, over the box `lo`, `size` (ADR-469).
+/// Sparse `16³`-paged cache of asked cells (two bits per cell: asked and solid).
+/// Giant articulated walkers span tens of millions of world cells in `bounds()`
+/// while debris only touches ground-level pages around the feet.
 struct KnownCells {
     lo: [i32; 3],
     size: [i64; 3],
-    bits: Vec<AtomicU64>,
+    pages_dims: [usize; 3],
+    pages: Vec<OnceLock<Box<[AtomicU64; 128]>>>,
 }
 impl<'a> UnitVoxels<'a> {
     fn of(unit: &'a RangeUnit) -> Self {
@@ -429,6 +520,12 @@ impl<'a> UnitVoxels<'a> {
             asked: AtomicU32::new(0),
             known: OnceLock::new(),
         }
+    }
+    fn frames(&self) -> &HitFrames {
+        let u = self.unit;
+        self.frames.get_or_init(|| {
+            HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta, u.turret_pitch)
+        })
     }
     /// The unit's hull for the pieces (ADR-293): its motion box, how far
     /// it moved this tick from `was`, and these voxels.
@@ -450,6 +547,22 @@ impl<'a> UnitVoxels<'a> {
     }
 }
 impl crate::burst::Voxels for UnitVoxels<'_> {
+    fn may_overlap_box(&self, lo: [i32; 3], hi: [i32; 3]) -> bool {
+        self.frames().overlaps_box(self.unit, lo, hi)
+    }
+    fn any_solid_box(&self, lo: [i32; 3], hi: [i32; 3]) -> bool {
+        let Some((lo, hi)) = self.frames().overlap_bounds(self.unit, lo, hi) else {
+            return false;
+        };
+        (lo[1]..=hi[1])
+            .any(|y| (lo[2]..=hi[2]).any(|z| (lo[0]..=hi[0]).any(|x| self.solid([x, y, z]))))
+    }
+
+    fn lowest_in(&self, x: i32, z: i32, base: i32, end: i32) -> Option<i32> {
+        let (y0, y1) = self.frames().column_span(self.unit, x, z, base, end)?;
+        (y0..y1).find(|&y| self.solid([x, y, z]))
+    }
+
     fn solid(&self, p: [i32; 3]) -> bool {
         let u = self.unit;
         let known = if let Some(known) = self.known.get() {
@@ -459,23 +572,20 @@ impl crate::burst::Voxels for UnitVoxels<'_> {
             // published, readers need no shared read-modify-write counter.
             let asked = self.asked.fetch_add(1, Ordering::Relaxed);
             if asked < ASKED_BEFORE_KNOWN {
-                return self
-                    .frames
-                    .get_or_init(|| {
-                        HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta, u.turret_pitch)
-                    })
-                    .hit(u, p)
-                    .is_some();
+                return self.frames().hit(u, p).is_some();
             }
             self.known.get_or_init(|| {
                 let (lo, hi) = u.bounds();
                 let size: [i64; 3] =
-                    std::array::from_fn(|a| i64::from(hi[a]) - i64::from(lo[a]) + 1);
-                let cells = size.iter().product::<i64>() as usize;
+                    std::array::from_fn(|a| (i64::from(hi[a]) - i64::from(lo[a]) + 1).max(0));
+                let pages_dims: [usize; 3] =
+                    std::array::from_fn(|a| ((size[a] as usize) + 15) / 16);
+                let page_count = pages_dims[0] * pages_dims[1] * pages_dims[2];
                 KnownCells {
                     lo,
                     size,
-                    bits: (0..cells.div_ceil(32)).map(|_| AtomicU64::new(0)).collect(),
+                    pages_dims,
+                    pages: (0..page_count).map(|_| OnceLock::new()).collect(),
                 }
             })
         };
@@ -483,29 +593,64 @@ impl crate::burst::Voxels for UnitVoxels<'_> {
         if (0..3).any(|a| q[a] < 0 || q[a] >= known.size[a]) {
             return false;
         }
-        let i = ((q[1] * known.size[2] + q[2]) * known.size[0] + q[0]) as usize;
-        let (word, shift) = (i / 32, 2 * (i % 32));
-        let cell = known.bits[word].load(Ordering::Relaxed) >> shift & 3;
+        let px = (q[0] as usize) >> 4;
+        let py = (q[1] as usize) >> 4;
+        let pz = (q[2] as usize) >> 4;
+        let page_idx = (py * known.pages_dims[2] + pz) * known.pages_dims[0] + px;
+        let page = known.pages[page_idx]
+            .get_or_init(|| Box::new(std::array::from_fn(|_| AtomicU64::new(0))));
+        let local = (((q[1] as usize) & 15) << 8)
+            | (((q[2] as usize) & 15) << 4)
+            | ((q[0] as usize) & 15);
+        let (word, shift) = (local >> 5, (local & 31) << 1);
+        let cell = (page[word].load(Ordering::Relaxed) >> shift) & 3;
         if cell & 1 != 0 {
             return cell & 2 != 0;
         }
-        let solid = self
-            .frames
-            .get_or_init(|| {
-                HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta, u.turret_pitch)
-            })
-            .hit(u, p)
-            .is_some();
-        known.bits[word].fetch_or((1 | u64::from(solid) << 1) << shift, Ordering::Relaxed);
+        let solid = self.frames().hit(u, p).is_some();
+        page[word].fetch_or((1 | u64::from(solid) << 1) << shift, Ordering::Relaxed);
         solid
     }
 }
 impl RangeUnit {
+    pub fn full_greben(&self) -> bool {
+        self.kind == RangeUnitKind::GrebenStorage && self.body.vol.nx == 176
+    }
+    pub fn articulated_siege(&self) -> bool {
+        self.kind == RangeUnitKind::ArtilleryTurretT3 && !self.body.segments.is_empty()
+    }
+    pub fn weapon_path(&self, index: usize) -> Option<&voxel::unit::WeaponPath> {
+        if self.articulated_siege() {
+            self.body.segments[0].body.weapon_paths().get(index)
+        } else {
+            self.body.weapon_paths().get(index)
+        }
+    }
     pub fn barrel_connected(&self, index: usize) -> bool {
-        self.body.weapon_paths().get(index).is_some_and(|path| {
-            self.body
-                .barrel_connected(path, self.connectivity.reached_cols())
-        })
+        let feed = self.body.weapon_paths().get(index).is_some_and(|path| {
+            self.body.barrel_connected(path, self.connectivity.reached_cols())
+        });
+        if !feed || !self.articulated_siege() { return feed; }
+        if self.seg_gone[0] { return false; }
+        let b = &self.body.segments[0].body;
+        if !self.seg_removed.iter().any(|(part, _)| *part == 0) {
+            return b.weapon_paths().get(index).is_some_and(|p| b.barrel_connected(p, &b.vol.cols));
+        }
+        let loose = self.segment_loose_mask(0);
+        let reached: Vec<u64> = b.vol.cols.iter().zip(&loose.cols).map(|(w, l)| w & !l).collect();
+        b.weapon_paths().get(index).is_some_and(|p| b.barrel_connected(p, &reached))
+    }
+    /// Physical muzzle frame: the siege head traverses, its barrel elevates.
+    pub fn muzzle_frame(&self, pose: &crate::damage::Frame, delta: i32, pitch: i32) -> crate::damage::Frame {
+        if !self.articulated_siege() { return self.aimed_frame(pose, delta, pitch); }
+        let a = self.body.segments[0].attach;
+        let parent = crate::damage::turned(pose, delta, 0);
+        let frame = crate::damage::Frame {
+            base: parent.world([a.at.0, a.at.1, a.at.2].map(|v| Fx::from_int(i32::from(v)))),
+            centre: [a.pivot.0, a.pivot.1, a.pivot.2].map(|v| Fx::from_int(i32::from(v))),
+            ..parent
+        };
+        crate::damage::elevated(&frame, pitch, Fx::ZERO)
     }
     pub fn new(at: [i32; 3]) -> Self {
         Self::of_kind(RangeUnitKind::Tank, at)
@@ -513,7 +658,10 @@ impl RangeUnit {
     /// A unit as a layout places it: an enemy of a battle faces the other
     /// way. A produced unit is placed the same way (ADR-675).
     pub(crate) fn placed(kind: RangeUnitKind, allied: bool, at: [i32; 3], battle: bool) -> Self {
-        let mut u = Self::of_kind(kind, at);
+        Self::placed_geometry(kind, allied, at, battle, true)
+    }
+    pub(crate) fn placed_geometry(kind: RangeUnitKind, allied: bool, at: [i32; 3], battle: bool, full_greben: bool) -> Self {
+        let mut u = Self::of_kind_geometry(kind, at, true, full_greben);
         if battle && !allied {
             u.motion.drive.head = fx::angle::FULL / 2;
             u.update_pose(u.motion.drive.head);
@@ -531,19 +679,7 @@ impl RangeUnit {
                 | RangeUnitKind::Artillery
                 | RangeUnitKind::ArtilleryT2
         );
-        self.motion.speed = if self.kind.emplacement() {
-            0
-        } else if self.kind == RangeUnitKind::Spider {
-            motion::spider_tuning().speed
-        } else if self.kind == RangeUnitKind::Commander {
-            ((c.walker_speed * 9 / 10).max(1) / 3).max(1)
-        } else if self.kind == RangeUnitKind::Walker04 {
-            (c.walker_speed * 9 / 10).max(1)
-        } else if tracked {
-            c.tank_speed
-        } else {
-            c.walker_speed
-        };
+        self.motion.speed = motion::course_speed(self.kind,c);
         self.motion.step = if self.kind.emplacement() {
             0
         } else if self.kind == RangeUnitKind::Spider {
@@ -556,8 +692,15 @@ impl RangeUnit {
         self.motion.arrival = c.arrival;
         self.motion.alignment = c.turn_alignment_pct;
         self.motion.replan = c.replan_ticks;
+        self.motion.apply_walking_terrain(c);
     }
     pub fn of_kind(kind: RangeUnitKind, at: [i32; 3]) -> Self {
+        Self::of_kind_model(kind, at, true)
+    }
+    fn of_kind_model(kind: RangeUnitKind, at: [i32; 3], articulated_siege: bool) -> Self {
+        Self::of_kind_geometry(kind, at, articulated_siege, true)
+    }
+    fn of_kind_geometry(kind: RangeUnitKind, at: [i32; 3], articulated_siege: bool, full_greben: bool) -> Self {
         // Stock range bodies are immutable templates until a shot damages an
         // instance. Copy their prepared voxel data instead of redrawing the
         // same shapes for every placement and battle reset.
@@ -589,6 +732,7 @@ impl RangeUnit {
         static KIL_T4: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static SKOBA: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         let mut body = match kind {
+            RangeUnitKind::ArtilleryTurretT3 if !articulated_siege => voxel::unit::artillery_turret_t3_legacy(),
             RangeUnitKind::Tank => TANK.get_or_init(voxel::unit::tank).clone(),
             RangeUnitKind::LightningTank => LIGHTNING_TANK
                 .get_or_init(voxel::unit::lightning_tank)
@@ -615,6 +759,7 @@ impl RangeUnit {
             RangeUnitKind::Spider => SPIDER.get_or_init(voxel::unit::spider).clone(),
             RangeUnitKind::Walker04 => WALKER04.get_or_init(voxel::unit::walker04).clone(),
             RangeUnitKind::RazlomT3 => RAZLOM.get_or_init(voxel::unit::razlom_t3).clone(),
+            RangeUnitKind::GrebenStorage if !full_greben => voxel::unit::greben_storage_legacy(),
             RangeUnitKind::GrebenStorage => GREBEN.get_or_init(voxel::unit::greben_storage).clone(),
             RangeUnitKind::KilFactoryT1 => {
                 KIL_T1.get_or_init(|| voxel::unit::kil_factory(1)).clone()
@@ -757,6 +902,7 @@ impl RangeUnit {
         (self.status, self.integrity) = self
             .integrity_model
             .evaluate(&self.body, &mut self.connectivity);
+        if self.articulated_siege() && !self.barrel_connected(0) { self.status.weapon = false; }
         let engine = if self.status.alive && self.status.engine {
             self.integrity.engine
         } else {
@@ -830,6 +976,9 @@ impl RangeUnit {
             }
         }
         self.aim_walker_arms(turret_yaw);
+        if self.articulated_siege() {
+            self.seg_frames[0] = self.muzzle_frame(&self.pose, self.turret_delta, self.turret_pitch);
+        }
     }
     pub fn set_arm_targets(&mut self, mut targets: [[i32; 3]; 4], turret_yaw: i32) {
         if self.kind == RangeUnitKind::Commander {
@@ -855,30 +1004,7 @@ impl RangeUnit {
                         .add(tip.x.scale(Fx::from_int(300)));
                     [p.x.to_int_trunc(), p.y.to_int_trunc(), p.z.to_int_trunc()]
                 });
-                let origin = self.pose.base;
-                let px = Fx::from_int(prior[0]).sub(origin.x);
-                let pz = Fx::from_int(prior[2]).sub(origin.z);
-                let dx = Fx::from_int(targets[arm][0]).sub(origin.x);
-                let dz = Fx::from_int(targets[arm][2]).sub(origin.z);
-                let before = fx::angle::atan2(pz.raw(), px.raw());
-                let desired = fx::angle::atan2(dz.raw(), dx.raw());
-                let limit = walker::tuning().arm_turn_deg_s * fx::angle::FULL / (360 * crate::TICKS_PER_SECOND);
-                let delta = fx::angle::diff(desired, before);
-                // The drive's 1024-entry trig table is too coarse to converge
-                // a distant laser point. Finish exactly once within one servo
-                // step; outside it advance by at least one table sample.
-                let step = (delta / 6).abs().max(fx::angle::FULL / 1024).min(limit) * delta.signum();
-                let yaw = fx::angle::norm(before + if step == 0 { delta.signum() } else { step });
-                let radius = dx.mul(dx).add(dz.mul(dz)).sqrt().max(Fx::ONE);
-                for axis in 1..2 {
-                    let delta = i64::from(targets[arm][axis]) - i64::from(prior[axis]);
-                    let step = (delta / 10).clamp(-40, 40);
-                    targets[arm][axis] = (i64::from(prior[axis]) + if step == 0 { delta.signum() } else { step }) as i32;
-                }
-                if delta.abs() > limit {
-                    targets[arm][0] = origin.x.add(fx::angle::cos(yaw).mul(radius)).to_int_trunc();
-                    targets[arm][2] = origin.z.add(fx::angle::sin(yaw).mul(radius)).to_int_trunc();
-                }
+                targets[arm] = self.walker_servo_target(arm, prior, targets[arm]);
             }
         }
         self.arm_targets = Some(targets);
@@ -1000,6 +1126,7 @@ impl RangeUnit {
         delta: i32,
         pitch: i32,
     ) -> crate::damage::Frame {
+        if self.articulated_siege() { return crate::damage::turned(pose, delta, 0); }
         crate::damage::elevated(
             &crate::damage::turned(pose, delta, 0),
             pitch,
@@ -1081,13 +1208,11 @@ impl RangeUnit {
             ]
         };
         if let Some(pose) = pose {
+            let aimed=(delta != 0 || pitch != 0).then(||self.aimed_frame(pose,delta,pitch));
             for l in corners(size(&self.body)) {
                 take(pose.world(l.map(Fx::from_int)));
-                if delta != 0 || pitch != 0 {
-                    take(
-                        self.aimed_frame(pose, delta, pitch)
-                            .world(l.map(Fx::from_int)),
-                    );
+                if let Some(aimed)=aimed {
+                    take(aimed.world(l.map(Fx::from_int)));
                 }
             }
         } else {
@@ -1434,13 +1559,17 @@ const STOCK_SIDE: i32 = 640;
 fn far_ridge(x: u32, z: u32) -> u32 {
     const CELL: i32 = 320;
     let mut ridge = 0;
-    let (gx, gz) = ((x as i32) / CELL, (z as i32) / CELL);
-    for ox in -1..=1 {
-        for oz in -1..=1 {
+    let (xi, zi) = (x as i32, z as i32);
+    let (gx, gz) = (xi / CELL, zi / CELL);
+    let (ux, uz) = (xi - gx * CELL, zi - gz * CELL);
+    // Hill radius is at most 191, so strict d^2 < r^2 requires |dx|, |dz| <= 190.
+    let ox_lo = if ux < 190 && gx > 0 { -1 } else { 0 };
+    let ox_hi = if ux >= CELL - 190 { 1 } else { 0 };
+    let oz_lo = if uz < 190 && gz > 0 { -1 } else { 0 };
+    let oz_hi = if uz >= CELL - 190 { 1 } else { 0 };
+    for ox in ox_lo..=ox_hi {
+        for oz in oz_lo..=oz_hi {
             let (cx, cz) = (gx + ox, gz + oz);
-            if cx < 0 || cz < 0 {
-                continue;
-            }
             let seed =
                 (cx as u32).wrapping_mul(2_654_435_761) ^ ((cz as u32).wrapping_mul(2_246_822_519));
             if seed.is_multiple_of(5) {
@@ -1452,10 +1581,13 @@ fn far_ridge(x: u32, z: u32) -> u32 {
             if hx - radius < STOCK_SIDE && hz - radius < STOCK_SIDE {
                 continue;
             }
-            let (dx, dz) = (x as i32 - hx, z as i32 - hz);
+            let (dx, dz) = (xi - hx, zi - hz);
             let r2 = radius * radius;
-            let height = 10 + (seed >> 27) as i32 % 22;
-            ridge = ridge.max(((r2 - dx * dx - dz * dz).max(0) * height / r2) as u32);
+            let d2 = dx * dx + dz * dz;
+            if d2 < r2 {
+                let height = 10 + (seed >> 27) as i32 % 22;
+                ridge = ridge.max(((r2 - d2) * height / r2) as u32);
+            }
         }
     }
     ridge
@@ -1464,19 +1596,24 @@ fn far_ridge(x: u32, z: u32) -> u32 {
 /// A flat firing lane surrounded by terraced woodland. Integer-only world data.
 pub fn range_height(x: u32, z: u32) -> u32 {
     let mut ridge = 0;
-    for (cx, cz, radius, height) in [
-        (65, 65, 108, 25),
-        (181, 36, 112, 32),
-        (322, 100, 111, 29),
-        (363, 319, 89, 18),
-    ] {
-        let dx = x as i32 - cx;
-        let dz = z as i32 - (cz + 128);
-        let r2 = radius * radius;
-        ridge = ridge.max(((r2 - dx * dx - dz * dz).max(0) * height / r2) as u32);
+    if x < 452 && z < 536 {
+        for (cx, cz, radius, height) in [
+            (65, 65, 108, 25),
+            (181, 36, 112, 32),
+            (322, 100, 111, 29),
+            (363, 319, 89, 18),
+        ] {
+            let dx = x as i32 - cx;
+            let dz = z as i32 - (cz + 128);
+            let r2 = radius * radius;
+            let d2 = dx * dx + dz * dz;
+            if d2 < r2 {
+                ridge = ridge.max(((r2 - d2) * height / r2) as u32);
+            }
+        }
+        // Blend the wooded hills into the level range without a straight escarpment.
+        ridge = ridge * (302u32.saturating_sub(z) + x.saturating_sub(285)).min(48) / 48;
     }
-    // Blend the wooded hills into the level range without a straight escarpment.
-    ridge = ridge * (302u32.saturating_sub(z) + x.saturating_sub(285)).min(48) / 48;
     ridge = ridge.max(far_ridge(x, z));
     let relief = if ridge > 0 {
         let a = (x / 48).wrapping_mul(17) ^ (z / 48).wrapping_mul(31);
@@ -1649,13 +1786,11 @@ impl RangeTerrain {
     // A road must be a drivable cut through procedural hills, including at
     // the edge of an authored flat zone. Fade the cut into the surrounding
     // terrain so it does not create a vertical wall along the verge.
-    fn mound_ground(&self, x: u32, z: u32) -> u32 {
+    fn mound_ground_bin(&self, bin: &range_index::Bin, x: u32, z: u32) -> u32 {
         self.layout
             .as_ref()
             .map_or(self.ground_level() as u32, |r| {
-                self.index
-                    .at(x, z)
-                    .mounds
+                bin.mounds
                     .iter()
                     .filter_map(|&i| r.mounds[i].height(x as i32, z as i32))
                     .max()
@@ -1663,10 +1798,17 @@ impl RangeTerrain {
                     .max(self.ground_level()) as u32
             })
     }
-    fn relief_ground(&self, x: u32, z: u32) -> u32 {
-        (range_height(x, z) + (self.ground_level() - FLOOR) as u32).max(self.mound_ground(x, z))
+    fn mound_ground(&self, x: u32, z: u32) -> u32 {
+        self.mound_ground_bin(self.index.at(x, z), x, z)
     }
-    fn road_ground(&self, x: u32, z: u32, natural: u32) -> u32 {
+    fn relief_ground_bin(&self, bin: &range_index::Bin, x: u32, z: u32) -> u32 {
+        (range_height(x, z) + (self.ground_level() - FLOOR) as u32)
+            .max(self.mound_ground_bin(bin, x, z))
+    }
+    fn relief_ground(&self, x: u32, z: u32) -> u32 {
+        self.relief_ground_bin(self.index.at(x, z), x, z)
+    }
+    fn road_ground_bin(&self, bin: &range_index::Bin, x: u32, z: u32, natural: u32) -> u32 {
         if natural <= self.ground_level() as u32 {
             return natural;
         }
@@ -1677,7 +1819,7 @@ impl RangeTerrain {
         // nearest segment decides and each one can be graded on its own.
         let rise = natural - self.ground_level() as u32;
         let mut grade = rise;
-        for &(i, segment) in &self.index.at(x, z).roads {
+        for &(i, segment) in &bin.roads {
             let road = &layout.roads[i];
             let (a, b) = (road.points[segment], road.points[segment + 1]);
             if let Some(g) = road_grade(x as i32, z as i32, a, b, road.width / 2, rise) {
@@ -1686,12 +1828,15 @@ impl RangeTerrain {
         }
         self.ground_level() as u32 + grade
     }
+    fn road_ground(&self, x: u32, z: u32, natural: u32) -> u32 {
+        self.road_ground_bin(self.index.at(x, z), x, z, natural)
+    }
 
-    fn road_at(&self, x: u32, z: u32, margin: i32) -> bool {
+    fn road_at_bin(&self, bin: &range_index::Bin, x: u32, z: u32, margin: i32) -> bool {
         let Some(layout) = &self.layout else {
             return false;
         };
-        self.index.at(x, z).roads.iter().any(|&(i, segment)| {
+        bin.roads.iter().any(|&(i, segment)| {
             let road = &layout.roads[i];
             road_contains(
                 x,
@@ -1701,6 +1846,9 @@ impl RangeTerrain {
                 (road.width / 2 + margin) as i128,
             )
         })
+    }
+    fn road_at(&self, x: u32, z: u32, margin: i32) -> bool {
+        self.road_at_bin(self.index.at(x, z), x, z, margin)
     }
     /// Conservative XZ domains of changes to terrain, including footings
     /// derived from stationary placements. Mobile rosters do not generate terrain.
@@ -2057,23 +2205,96 @@ impl RangeTerrain {
 
 impl Generator for RangeTerrain {
     fn material_candidates(&self, min: [u32; 3], max: [u32; 3]) -> Option<Vec<u16>> {
-        let mut materials = vec![0, 1, 4, 5, 7, 8];
-        let padded = self.layout.as_ref().is_some_and(|l| {
-            let inside = |lo: [i32; 2], hi: [i32; 2]| {
-                min[0] as i32 >= lo[0]
-                    && max[0] as i32 <= hi[0]
-                    && min[2] as i32 >= lo[1]
-                    && max[2] as i32 <= hi[1]
-            };
-            inside(l.clear_min, l.clear_max)
-                || l.zones.iter().any(|z| inside(z.min, z.max))
+        let gl = self.ground_level().max(0) as u32;
+        let mut materials = vec![0, 1];
+        if max[1] > gl.saturating_sub(1) {
+            materials.extend([7, 8]);
+        }
+        let inside = |lo: [i32; 2], hi: [i32; 2]| {
+            min[0] as i32 >= lo[0]
+                && max[0] as i32 <= hi[0]
+                && min[2] as i32 >= lo[1]
+                && max[2] as i32 <= hi[1]
+        };
+        let course_or_zone = self.layout.as_ref().is_some_and(|l| {
+            l.zones.iter().any(|z| inside(z.min, z.max))
                 || l.course.as_ref().is_some_and(|c| inside(c.min, c.max))
         });
-        if !padded {
-            materials.push(6);
-        }
-        if self.layout.is_none() {
-            materials.extend([2, 3]);
+        let padded = course_or_zone
+            || self
+                .layout
+                .as_ref()
+                .is_some_and(|l| inside(l.clear_min, l.clear_max));
+        if max[1] > gl {
+            if !course_or_zone {
+                let mut any_tree = false;
+                'trees: for cz in min[2] / 28..=(max[2] - 1) / 28 {
+                    for cx in min[0] / 28..=(max[0] - 1) / 28 {
+                        let cell = if let Some(cache) = &self.tree_cache {
+                            // A flattened in-bounds index can alias the next
+                            // row when X is outside a partial tree cache.
+                            if (cx as usize) < cache.width {
+                                let idx = cz as usize * cache.width + cx as usize;
+                                cache.cells.get(idx).copied()
+                                    .unwrap_or_else(|| self.tree_cell(cx, cz))
+                            } else {
+                                self.tree_cell(cx, cz)
+                            }
+                        } else {
+                            self.tree_cell(cx, cz)
+                        };
+                        if let Some((base, tall, tx, tz)) = cell {
+                            if max[1] > base
+                                && min[1] < base + tall
+                                && (min[0] as i32) < tx as i32 + 9
+                                && (max[0] as i32) > tx as i32 - 9
+                                && (min[2] as i32) < tz as i32 + 9
+                                && (max[2] as i32) > tz as i32 - 9
+                            {
+                                any_tree = true;
+                                break 'trees;
+                            }
+                        }
+                    }
+                }
+                if any_tree {
+                    materials.extend([4, 5]);
+                }
+            }
+            if !padded {
+                let mut any_rock = false;
+                'rocks: for rz in min[2] / 13..=(max[2] - 1) / 13 {
+                    for rx in min[0] / 13..=(max[0] - 1) / 13 {
+                        let stone = rx.wrapping_mul(9173) ^ rz.wrapping_mul(6151);
+                        if stone.is_multiple_of(7) {
+                            any_rock = true;
+                            break 'rocks;
+                        }
+                    }
+                }
+                if any_rock {
+                    materials.push(6);
+                }
+            }
+            if self.layout.is_none() {
+                let shift = if self.extended { 160 } else { 0 };
+                if min[1] < 66
+                    && max[0] > 256 + shift
+                    && min[0] < 264 + shift
+                    && max[2] > 291
+                    && min[2] < 383
+                {
+                    materials.push(3);
+                }
+                if min[1] < 45
+                    && max[0] > 232 + shift
+                    && min[0] < 250 + shift
+                    && max[2] > 321
+                    && min[2] < 352
+                {
+                    materials.push(2);
+                }
+            }
         }
         let overlaps = |b: &modding::range::RangeBlock| {
             (0..3).all(|a| (min[a] as i32) < b.max[a] && (max[a] as i32) > b.min[a])
@@ -2082,7 +2303,7 @@ impl Generator for RangeTerrain {
         for z in min[2] / tile..=(max[2] - 1) / tile {
             for x in min[0] / tile..=(max[0] - 1) / tile {
                 let bin = self.index.at(x * tile, z * tile);
-                if !bin.roads.is_empty() {
+                if max[1] > gl.saturating_sub(1) && !bin.roads.is_empty() {
                     materials.push(6);
                 }
                 materials.extend(
@@ -2147,14 +2368,109 @@ impl Generator for RangeTerrain {
     /// `(x, z)` is worked out once instead of once a voxel. Building a
     /// world asks for every voxel of it, and that is where the time goes.
     fn column(&self, x: u32, z: u32, y0: u32, out: &mut [u16]) {
-        let c = self.column_of(x, z);
-        // Large overlap lists keep the finite-top/first-match reader below:
-        // their front blocks may hide every lower-priority span. Both paths
-        // omit natural preparation already replaced by the course.
-        if let Some(height) = c.course.filter(|_| c.blocks.len() <= 2) {
-            // Fill exact constant runs, then overlay lower-priority blocks
-            // first. This is the same first-match precedence as at(), also
-            // for authored air cuts and foundations over later layout solids.
+        if out.is_empty() {
+            return;
+        }
+        let y_end = y0.saturating_add(out.len() as u32);
+        let bin = self.index.at(x, z);
+        let (xi, zi) = (x as i32, z as i32);
+        let mut inline_blocks = [(0i32, 0i32, 0u16); 8];
+        let mut block_len = 0usize;
+        let mut spill_blocks: Vec<(i32, i32, u16)> = Vec::new();
+        let mut push_block = |span: (i32, i32, u16)| {
+            if spill_blocks.is_empty() {
+                if block_len < inline_blocks.len() {
+                    inline_blocks[block_len] = span;
+                    block_len += 1;
+                } else {
+                    spill_blocks.reserve(inline_blocks.len() + 4);
+                    spill_blocks.extend_from_slice(&inline_blocks);
+                    spill_blocks.push(span);
+                }
+            } else {
+                spill_blocks.push(span);
+            }
+        };
+        for &i in bin.foundations.iter().rev() {
+            let b = &self.index.foundations[i];
+            if xi >= b.min[0] && xi < b.max[0] && zi >= b.min[2] && zi < b.max[2] {
+                push_block((b.min[1], b.max[1], b.material));
+            }
+        }
+        if let Some(r) = &self.layout {
+            for &i in bin.blocks.iter().rev() {
+                let b = &r.blocks[i];
+                if b.material != modding::water::MATERIAL
+                    && xi >= b.min[0]
+                    && xi < b.max[0]
+                    && zi >= b.min[2]
+                    && zi < b.max[2]
+                {
+                    push_block((b.min[1], b.max[1], b.material));
+                }
+            }
+        }
+        let blocks: &[(i32, i32, u16)] = if spill_blocks.is_empty() {
+            &inline_blocks[..block_len]
+        } else {
+            spill_blocks.as_slice()
+        };
+        let overlay_blocks = |buf: &mut [u16], base_y: u32, blocks: &[(i32, i32, u16)]| {
+            for &(lo, hi, mat) in blocks.iter().rev() {
+                let start = (i64::from(lo) - i64::from(base_y)).clamp(0, buf.len() as i64);
+                let end = (i64::from(hi) - i64::from(base_y)).clamp(0, buf.len() as i64);
+                if start < end {
+                    buf[start as usize..end as usize].fill(mat);
+                }
+            }
+        };
+
+        // Deep subsurface below ground_level - 1 is pure soil unless cut by a block.
+        let gl = self.ground_level();
+        if gl >= FLOOR && y_end <= (gl - 1) as u32 {
+            out.fill(1);
+            if !blocks.is_empty() {
+                overlay_blocks(out, y0, blocks);
+            }
+            return;
+        }
+
+        let in_zone = self.layout.as_ref().is_some_and(|r| {
+            bin.zones
+                .iter()
+                .any(|&i| r.zones[i].contains([xi, zi], 0))
+        });
+        let course = self
+            .layout
+            .as_ref()
+            .and_then(|r| r.course.as_ref())
+            .filter(|c| {
+                (xi >= c.min[0] && xi < c.max[0] && zi >= c.min[1] && zi < c.max[1]) || in_zone
+            })
+            .map(|c| {
+                let mut h = self.road_ground_bin(bin, x, z, self.mound_ground_bin(bin, x, z)) as i32;
+                for &i in &bin.ramps {
+                    let r = &c.ramps[i];
+                    if xi >= r.min[0] && xi < r.max[0] && zi >= r.min[2] && zi < r.max[2] {
+                        let v = if r.axis == 0 { xi } else { zi };
+                        let n = r.max[r.axis] - r.min[r.axis];
+                        let along = if r.reverse {
+                            r.max[r.axis] - v
+                        } else {
+                            v - r.min[r.axis]
+                        };
+                        h = h.max(r.min[1] + along * (r.max[1] - r.min[1]) / n);
+                    }
+                }
+                h
+            })
+            .or_else(|| {
+                in_zone.then(|| {
+                    self.road_ground_bin(bin, x, z, self.mound_ground_bin(bin, x, z)) as i32
+                })
+            });
+
+        if let Some(height) = course {
             let live = (height.max(0) as u32)
                 .saturating_sub(y0)
                 .min(out.len() as u32) as usize;
@@ -2163,58 +2479,115 @@ impl Generator for RangeTerrain {
             if height > 0 {
                 if let Some(top) = (height as u32 - 1).checked_sub(y0) {
                     if (top as usize) < out.len() {
-                        out[top as usize] = c.pad_surface;
+                        let road = self.road_at_bin(bin, x, z, 0);
+                        out[top as usize] = range_pad_surface(x, z, road);
                     }
                 }
             }
-            for &(lo, hi, material) in c.blocks.iter().rev() {
-                let start = (i64::from(lo) - i64::from(y0)).clamp(0, out.len() as i64);
-                let end = (i64::from(hi) - i64::from(y0)).clamp(0, out.len() as i64);
-                if start < end {
-                    out[start as usize..end as usize].fill(material);
-                }
+            if !blocks.is_empty() {
+                overlay_blocks(out, y0, blocks);
             }
             return;
         }
-        // All authored and procedural solids have a finite top. The world
-        // builder requests the full 192-cell column, although most terrain
-        // ends below 60; do not run material precedence for empty sky.
-        let mut top = c.ground;
-        if let Some(h) = c.course {
-            top = top.max(h.max(0) as u32);
+
+        let shift = if self.extended { 160 } else { 0 };
+        let layout_pad = self.layout.as_ref().is_some_and(|r| {
+            xi >= r.clear_min[0]
+                && xi < r.clear_max[0]
+                && zi >= r.clear_min[1]
+                && zi < r.clear_max[1]
+        });
+        let unit_pad = self.extended && (337..415).contains(&x) && (282..322).contains(&z);
+        let ground = if layout_pad || unit_pad || (self.extended && x < 448 && (298..387).contains(&z))
+        {
+            gl as u32
+        } else {
+            self.road_ground_bin(bin, x, z, self.relief_ground_bin(bin, x, z))
+        };
+
+        // Below or ending at natural ground, neither trees, rocks, walls nor targets apply.
+        if y_end < ground {
+            out.fill(1);
+            if !blocks.is_empty() {
+                overlay_blocks(out, y0, blocks);
+            }
+            return;
         }
-        for &(_, hi, _) in &c.blocks {
+        let lane = (322..351).contains(&z) && x < 254 + shift;
+        if y_end == ground {
+            let soil = (ground - 1 - y0) as usize;
+            out[..soil].fill(1);
+            let road = !lane && self.road_at_bin(bin, x, z, 0);
+            out[soil] = if lane || road { 8 } else { 7 };
+            if !blocks.is_empty() {
+                overlay_blocks(out, y0, blocks);
+            }
+            return;
+        }
+
+        let road = self.road_at_bin(bin, x, z, 0);
+        let wall = self.layout.is_none()
+            && (256 + shift..264 + shift).contains(&x)
+            && (291..383).contains(&z)
+            && (x > 257 + shift || z % 12 < 3);
+        let target = self.layout.is_none()
+            && (232 + shift..250 + shift).contains(&x)
+            && (321..352).contains(&z);
+        let tree_cell = if let Some(cache) = &self.tree_cache {
+            cache.cells[(z / 28) as usize * cache.width + (x / 28) as usize]
+        } else {
+            self.tree_cell(x / 28, z / 28)
+        };
+        let tree = tree_cell.map(|(base, height, tx, tz)| {
+            (base, height, xi - tx as i32, zi - tz as i32)
+        });
+        let rock =
+            (!road && !layout_pad && !unit_pad && !(x < 254 + shift && (319..354).contains(&z)))
+                .then(|| {
+                    let stone = (x / 13).wrapping_mul(9173) ^ (z / 13).wrapping_mul(6151);
+                    (stone, xi % 13 - 6, zi % 13 - 6)
+                })
+                .filter(|(stone, _, _)| stone.is_multiple_of(7));
+
+        let mut top = ground;
+        for &(_, hi, _) in blocks {
             top = top.max(hi.max(0) as u32);
         }
-        if c.wall {
+        if wall {
             top = top.max(66);
         }
-        if c.target {
+        if target {
             top = top.max(45);
         }
-        if let Some((base, tall, _, _)) = c.tree {
+        if let Some((base, tall, _, _)) = tree {
             top = top.max(base.saturating_add(tall));
         }
-        if let Some((stone, _, _)) = c.rock {
-            top = top.max(c.ground.saturating_add(2 + stone % 3));
+        if let Some((stone, _, _)) = rock {
+            top = top.max(ground.saturating_add(2 + stone % 3));
         }
         let live = top.saturating_sub(y0).min(out.len() as u32) as usize;
         let (material, sky) = out.split_at_mut(live);
-        // Deep untouched soil is one constant run. Authored cutouts keep
-        // their exact precedence; no per-voxel terrain work is added at depth.
-        let soil = c
-            .ground
+        let soil = ground
             .saturating_sub(1)
             .saturating_sub(y0)
             .min(live as u32) as usize;
         material[..soil].fill(1);
-        for &(lo, hi, mat) in c.blocks.iter().rev() {
-            let a = (i64::from(lo) - i64::from(y0)).clamp(0, soil as i64) as usize;
-            let b = (i64::from(hi) - i64::from(y0)).clamp(0, soil as i64) as usize;
-            if a < b {
-                material[a..b].fill(mat);
-            }
+        if !blocks.is_empty() {
+            overlay_blocks(&mut material[..soil], y0, blocks);
         }
+        let c = Column {
+            shift,
+            blocks: blocks.to_vec(),
+            course: None,
+            ground,
+            road,
+            pad_surface: 8,
+            lane,
+            wall,
+            target,
+            tree,
+            rock,
+        };
         for (i, o) in material.iter_mut().enumerate().skip(soil) {
             *o = self.at(&c, x, y0 + i as u32, z);
         }
@@ -2525,16 +2898,15 @@ impl Explosion {
             .iter()
             .enumerate()
             .map(|(i, u)| {
-                let key = body_sizes(u);
                 let (known, bounds) = &mut memo[i];
-                if *known != key || known.is_empty() {
+                if known.is_empty() || !same_sizes(u,known) {
                     *bounds = u.bounds_aimed(
                         Some(&self.poses[i]),
                         &self.seg_poses[i],
                         self.turret_deltas[i],
                         self.turret_pitches[i],
                     );
-                    *known = key;
+                    *known = body_sizes(u);
                 }
                 *bounds
             })
@@ -2841,18 +3213,25 @@ impl Explosion {
             });
             let chunk = if POLICY == 0 || (POLICY == 1 && !coarse) {
                 READ_CHUNK
+            } else if POLICY == 1 {
+                (16_384 / scale).clamp(1, READ_CHUNK)
             } else {
                 (READ_CHUNK * 8).div_ceil(scale).clamp(1, READ_CHUNK)
             };
             let batch_limit = if POLICY == 1 && coarse {
-                (READ_BATCH * 8 / scale).clamp(4, READ_BATCH)
+                (262_144 / scale).clamp(4, READ_BATCH)
             } else {
                 READ_BATCH
             };
             // Keep a small physical batch parallel even when one coarse cell
             // exceeds the logical budget. Four cells cap the read-ahead at 2 MiB
-            // of material for 64^3 cells, instead of serializing every spent cell.
-            let batch_min = if POLICY == 1 && coarse { 4 } else { chunk };
+            // of material for 64^3 cells, while 9^3 siege cells coalesce into
+            // 256..512 KiB batches instead of ~1300 four-cell fork-joins.
+            let batch_min = if POLICY == 1 && coarse {
+                (131_072 / scale).clamp(4, batch_limit)
+            } else {
+                chunk
+            };
             let mut estimated = if POLICY == 0 || (POLICY == 1 && !coarse) {
                 8
             } else {
@@ -2860,9 +3239,14 @@ impl Explosion {
             };
             // If every registered solid material is unaffordable at the read's
             // conservative energy estimate, sufficiently strong contacts cost only
-            // their visit. Larger batches then contain no discarded material work.
+            // their visit. Skip the whole-domain candidate scan while the live
+            // share can still afford the costliest registered ground material.
             let spent_bounds = if POLICY == 1 && crater.is_none() {
-                spent.and_then(|(m, c, _)| unpaid_bounds(m, c, w, self.domain()))
+                spent.and_then(|(m, c, live)| {
+                    (self.ground_share(live) < economy_max_ground_price(m, c))
+                        .then(|| unpaid_bounds(m, c, w, self.domain()))
+                        .flatten()
+                })
             } else {
                 None
             };
@@ -2870,6 +3254,8 @@ impl Explosion {
             // it, unless the cell is spent.
             let mut left = budget;
             let mut next = 0;
+            let wave_n = self.wave.size();
+            let mut col_ceilings = vec![i32::MIN; wave_n * wave_n];
             'read: while left > 0 && next < visits {
                 observe("physics_wave_read_proofs_begin");
                 if POLICY == 1 {
@@ -2879,9 +3265,29 @@ impl Explosion {
                         let hit = order[next];
                         let p = std::array::from_fn(|a| origin[a] + hit.cell[a] * edge);
                         let confined = spent.is_some_and(|(_, c, _)| {
-                            confined_soil_box(w, p, edge, hit.pressure, soil_y, crater, c)
+                            confined_soil_box_cached(
+                                w,
+                                p,
+                                edge,
+                                hit.cell,
+                                wave_n,
+                                &mut col_ceilings,
+                                hit.pressure,
+                                soil_y,
+                                crater,
+                                c,
+                            )
                         });
-                        if !confined && !cell_is_air(w, p, edge) {
+                        if !confined
+                            && !cell_has_no_solid_cached(
+                                w,
+                                p,
+                                edge,
+                                hit.cell,
+                                wave_n,
+                                &mut col_ceilings,
+                            )
+                        {
                             break;
                         }
                         self.solid.push((
@@ -2965,12 +3371,12 @@ impl Explosion {
                         let mut kinds = Vec::new();
                         for hit in chunk {
                             let start = mats.len();
-                            let terraced = if !unpriced {
+                            let crater_mask = if !unpriced {
                                 spent.and_then(|(_, c, _)| {
-                                    crater.filter(|_| c.soil_depth_cost != 0).and_then(|at| {
+                                    crater.and_then(|at| {
                                         let p =
                                             std::array::from_fn(|a| origin[a] + hit.cell[a] * edge);
-                                        read_terraced_soil(
+                                        read_crater_cell_into(
                                             w,
                                             p,
                                             edge,
@@ -2985,8 +3391,8 @@ impl Explosion {
                             } else {
                                 None
                             };
-                            let direct_soil = terraced.is_some();
-                            let mut mask = if let Some(mask) = terraced {
+                            let direct_soil = crater_mask.is_some();
+                            let mut mask = if let Some(mask) = crater_mask {
                                 mask
                             } else if unpriced {
                                 read_occupancy(w, origin, edge, hit.cell)
@@ -3067,6 +3473,9 @@ impl Explosion {
                 let before = left;
                 let mut k = 0;
                 observe("physics_wave_read_pack_begin");
+                let add_mats: usize = parts.iter().map(|p| p.mats.len()).sum();
+                self.solid.reserve(hits.len());
+                self.solid_mats.reserve(add_mats);
                 for ContactReadPart { masks, mats, kinds } in parts {
                     let mut start = self.solid_mats.len();
                     self.solid_mats.extend_from_slice(&mats);
@@ -3246,26 +3655,24 @@ impl Explosion {
     /// Every voxel of matter in the cell would refuse the wave's claim for
     /// want of energy, and none is a dent: its ground contacts change
     /// nothing, and the wave does not walk them (ADR-681).
-    fn unpaid_contact(
-        &self,
+    fn unpaid_contact_at(
         w: &World,
         c: &ExplosionConfig,
-        m: &matter::Matter,
+        share_opt: Option<(&matter::Matter, u64)>,
         p: [i32; 3],
+        cell_w: i32,
+        soil_y: i32,
         pressure: u32,
         global: Option<(u64, u32)>,
     ) -> bool {
-        // The legacy proof bounds vertical work only. A nuclear bowl can
-        // contain partially loaded soil even at otherwise strong pressure.
-        if self.nuclear_ground {
+        let Some((m, share)) = share_opt else {
             return false;
-        }
+        };
         let enough = |(price, work): (u64, u32)| {
-            self.ground_share(m.remaining_mj) < price
-                && pressure >= work.max(terrain_work(1, p[1].max(0), self.soil_y(), c))
+            share < price && pressure >= work.max(terrain_work(1, p[1].max(0), soil_y, c))
         };
         global.is_some_and(enough)
-            || unpaid_bounds(m, c, w, (p, p.map(|v| v + self.cell))).is_some_and(enough)
+            || unpaid_bounds(m, c, w, (p, p.map(|v| v + cell_w))).is_some_and(enough)
     }
     fn ground_spent(
         &self,
@@ -3315,6 +3722,7 @@ impl Explosion {
     /// The matter of the cell being visited: as read ahead when it is the
     /// next one read (or a few further on, past a cell that yielded before
     /// its ground), else read now.
+    #[cfg(test)]
     fn solid_cell(
         &mut self,
         w: &World,
@@ -3323,12 +3731,24 @@ impl Explosion {
         unpaid: bool,
         confined: bool,
     ) -> (contact_mask::Mask, usize) {
+        self.solid_cell_lazy(w, cell, offsets, || unpaid, || confined)
+    }
+    fn solid_cell_lazy(
+        &mut self,
+        w: &World,
+        cell: [i32; 3],
+        offsets: &[[i32; 3]],
+        unpaid: impl FnOnce() -> bool,
+        confined: impl FnOnce() -> bool,
+    ) -> (contact_mask::Mask, usize) {
         let end = (self.solid_next + 4).min(self.solid.len());
         for k in self.solid_next..end {
             let (c, mask, start) = self.solid[k].clone();
             if c == cell {
                 self.solid_next = k + 1;
-                return if (start == UNPRICED && !unpaid) || (start == CONFINED_SOIL && !confined) {
+                return if (start == UNPRICED && !unpaid())
+                    || (start == CONFINED_SOIL && !confined())
+                {
                     self.read_cell(w, cell, offsets)
                 } else {
                     (mask, start as usize)
@@ -3350,7 +3770,9 @@ impl Explosion {
             let k = self.solid_index[i].1 as usize;
             let (_, mask, start) = self.solid[k].clone();
             self.solid_next = k + 1;
-            return if (start == UNPRICED && !unpaid) || (start == CONFINED_SOIL && !confined) {
+            return if (start == UNPRICED && !unpaid())
+                || (start == CONFINED_SOIL && !confined())
+            {
                 self.read_cell(w, cell, offsets)
             } else {
                 (mask, start as usize)
@@ -3393,13 +3815,59 @@ impl Explosion {
             .into_iter()
             .filter(|(lo, hi)| (0..3).all(|a| domain_lo[a] <= hi[a] && domain_hi[a] > lo[a]))
             .collect();
+        let near_bounds = near.iter().copied().reduce(|(alo, ahi), (blo, bhi)| {
+            (
+                std::array::from_fn(|a| alo[a].min(blo[a])),
+                std::array::from_fn(|a| ahi[a].max(bhi[a])),
+            )
+        });
         let (origin, edge) = (self.origin, self.cell);
+        let wave_n = self.wave.size();
+        let mut col_ceilings = vec![i32::MIN; wave_n * wave_n];
+        if hits.len() >= 1024 && edge >= 16 && wave_n > 0 {
+            let mut wanted = vec![false; wave_n * wave_n];
+            for hit in &hits {
+                let y = origin[1] + hit.cell[1] * edge;
+                if y + edge > 0
+                    && y.max(0) < w.ny as i32
+                    && hit.cell[0] >= 0
+                    && hit.cell[2] >= 0
+                    && (hit.cell[0] as usize) < wave_n
+                    && (hit.cell[2] as usize) < wave_n
+                {
+                    wanted[hit.cell[2] as usize * wave_n + hit.cell[0] as usize] = true;
+                }
+            }
+            col_ceilings
+                .par_chunks_mut(wave_n)
+                .enumerate()
+                .for_each(|(cz, row)| {
+                    let z0 = (origin[2] + cz as i32 * edge).max(0);
+                    let z1 = (origin[2] + (cz as i32 + 1) * edge).min(w.nz as i32);
+                    for (cx, slot) in row.iter_mut().enumerate() {
+                        if !wanted[cz * wave_n + cx] {
+                            continue;
+                        }
+                        let x0 = (origin[0] + cx as i32 * edge).max(0);
+                        let x1 = (origin[0] + (cx as i32 + 1) * edge).min(w.nx as i32);
+                        *slot = if x0 >= x1 || z0 >= z1 {
+                            0
+                        } else {
+                            w.column_box_ceiling([x0 as u32, z0 as u32], [x1 as u32, z1 as u32])
+                                as i32
+                        };
+                    }
+                });
+        }
         self.pending.extend(hits.into_iter().filter(|hit| {
             let p: [i32; 3] = std::array::from_fn(|a| origin[a] + hit.cell[a] * edge);
-            !cell_is_air(w, p, edge)
-                || near
-                    .iter()
-                    .any(|(lo, hi)| (0..3).all(|a| p[a] <= hi[a] && p[a] + edge > lo[a]))
+            !cell_is_air_cached(w, p, edge, hit.cell, wave_n, &mut col_ceilings)
+                || near_bounds.is_some_and(|(ulo, uhi)| {
+                    (0..3).all(|a| p[a] <= uhi[a] && p[a] + edge > ulo[a])
+                        && near
+                            .iter()
+                            .any(|(lo, hi)| (0..3).all(|a| p[a] <= hi[a] && p[a] + edge > lo[a]))
+                })
         }));
         self.frontier_ready = true;
         observe("physics_wave_filter_end");
@@ -3559,9 +4027,14 @@ impl Explosion {
         let offsets = std::mem::take(&mut self.offsets);
         let result = (|| {
             let mut contacts = Vec::new();
-            let unpaid_bounds = matter
+            let max_price = matter
                 .as_deref()
-                .and_then(|m| unpaid_bounds(m, c, w, self.domain()));
+                .map_or(0, |m| economy_max_ground_price(m, c));
+            let unpaid_bounds = matter.as_deref().and_then(|m| {
+                (self.ground_share(m.remaining_mj) < max_price)
+                    .then(|| unpaid_bounds(m, c, w, self.domain()))
+                    .flatten()
+            });
             'contact: while visits > 0 && work > 0 {
                 let Some(hit) = self.pending.front().copied() else {
                     break;
@@ -3570,14 +4043,16 @@ impl Explosion {
                 work -= 1;
                 let p =
                     std::array::from_fn::<_, 3, _>(|a| self.origin[a] + hit.cell[a] * self.cell);
+                let ground = units.len();
                 here.clear();
-                here.extend(near.iter().copied().filter(|&i| {
-                    let (lo, hi) = boxes[i];
-                    (0..3).all(|a| p[a] <= hi[a] && p[a] + self.cell > lo[a])
-                }));
+                if self.point_contacts || self.contact_cursor < ground {
+                    here.extend(near.iter().copied().filter(|&i| {
+                        let (lo, hi) = boxes[i];
+                        (0..3).all(|a| p[a] <= hi[a] && p[a] + self.cell > lo[a])
+                    }));
+                }
                 // The first actor at or after `k` whose box meets this cell;
                 // the ground, numbered after every body, when none does.
-                let ground = units.len();
                 let next_actor =
                     |k: usize| here.iter().copied().find(|&i| i >= k).unwrap_or(ground);
                 while self.contact_cursor < edge.pow(3) * actors {
@@ -3768,22 +4243,34 @@ impl Explosion {
                         // left of it is ground alone, subcell by subcell in the
                         // same order, without walking the bodies again; and an
                         // empty cell has none (ADR-681).
-                        let (mask, start) = self.solid_cell(
+                        let (cell_w, soil_y, crater) = (self.cell, self.soil_y(), self.crater());
+                        let share_opt = (!self.nuclear_ground)
+                            .then(|| matter.as_deref().map(|m| (m, self.ground_share(m.remaining_mj))))
+                            .flatten()
+                            .filter(|&(_, share)| share < max_price);
+                        let unpaid_lazy = || {
+                            Self::unpaid_contact_at(
+                                w,
+                                c,
+                                share_opt,
+                                p,
+                                cell_w,
+                                soil_y,
+                                hit.pressure,
+                                unpaid_bounds,
+                            )
+                        };
+                        let confined_lazy = || {
+                            c.soil_depth_cost != 0
+                                && hit.pressure
+                                    <= soil_box_confinement(p, cell_w, soil_y, crater, c)
+                        };
+                        let (mask, start) = self.solid_cell_lazy(
                             w,
                             hit.cell,
                             &offsets,
-                            matter.as_deref().is_some_and(|m| {
-                                self.unpaid_contact(w, c, m, p, hit.pressure, unpaid_bounds)
-                            }),
-                            c.soil_depth_cost != 0
-                                && hit.pressure
-                                    <= soil_box_confinement(
-                                        p,
-                                        self.cell,
-                                        self.soil_y(),
-                                        self.crater(),
-                                        c,
-                                    ),
+                            unpaid_lazy,
+                            confined_lazy,
                         );
                         if self.ground_silent(c, hit.pressure, &mask, start, p) {
                             self.finish_contact();
@@ -3804,6 +4291,8 @@ impl Explosion {
                             self.finish_contact();
                             continue 'contact;
                         }
+                        let mut z_cols = [None; 64];
+                        let mut cur_oz = i32::MIN;
                         for (rank, s) in mask.ranked_from(subcell) {
                             if self.nuclear_ground && work == 0 {
                                 self.contact_cursor = s * actors + units.len();
@@ -3813,11 +4302,41 @@ impl Explosion {
                             self.contact_cursor = s * actors + units.len();
                             let o = offsets[s];
                             let q = [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
-                            if !self.ground_contact_known(
+                            let eff_pressure =
+                                if c.soil_depth_cost != 0 && matches!(m, 1 | 7 | 8) {
+                                    let load = match crater {
+                                        Some(at) if edge <= 64 => {
+                                            if o[2] != cur_oz {
+                                                z_cols[..edge as usize].fill(None);
+                                                cur_oz = o[2];
+                                            }
+                                            let col = *z_cols[o[0] as usize].get_or_insert_with(
+                                                || nuclear_soil_column(q, at, c),
+                                            );
+                                            if c.soil_crater.is_some() {
+                                                nuclear_column_load(col, q[1], soil_y)
+                                            } else {
+                                                soil_confinement(q[1], soil_y, c)
+                                                    .saturating_add(col.0)
+                                            }
+                                        }
+                                        _ => soil_load(q, soil_y, crater, c),
+                                    };
+                                    soil_contact_pressure(
+                                        hit.pressure,
+                                        load,
+                                        m,
+                                        self.nuclear_ground,
+                                        c,
+                                    )
+                                } else {
+                                    hit.pressure
+                                };
+                            if !self.ground_contact_preloaded(
                                 w,
                                 q,
                                 m,
-                                hit.pressure,
+                                eff_pressure,
                                 dents,
                                 changed,
                                 c,
@@ -3900,9 +4419,14 @@ impl Explosion {
         let actors = count + 1;
         let offsets = std::mem::take(&mut self.offsets);
         let result = (|| {
-            let unpaid_bounds = matter
+            let max_price = matter
                 .as_deref()
-                .and_then(|m| unpaid_bounds(m, c, w, self.domain()));
+                .map_or(0, |m| economy_max_ground_price(m, c));
+            let unpaid_bounds = matter.as_deref().and_then(|m| {
+                (self.ground_share(m.remaining_mj) < max_price)
+                    .then(|| unpaid_bounds(m, c, w, self.domain()))
+                    .flatten()
+            });
             'contact: while visits > 0 && work > 0 {
                 let Some(hit) = self.pending.front().copied() else {
                     break;
@@ -3916,16 +4440,33 @@ impl Explosion {
                 let from = self.contact_cursor / actors;
                 // Only ground is left of this contact: its cells with matter,
                 // read ahead, or read now.
-                let (mask, start) = self.solid_cell(
+                let (cell_w, soil_y, crater) = (self.cell, self.soil_y(), self.crater());
+                let share_opt = (!self.nuclear_ground)
+                    .then(|| matter.as_deref().map(|m| (m, self.ground_share(m.remaining_mj))))
+                    .flatten()
+                    .filter(|&(_, share)| share < max_price);
+                let unpaid_lazy = || {
+                    Self::unpaid_contact_at(
+                        w,
+                        c,
+                        share_opt,
+                        p,
+                        cell_w,
+                        soil_y,
+                        hit.pressure,
+                        unpaid_bounds,
+                    )
+                };
+                let confined_lazy = || {
+                    c.soil_depth_cost != 0
+                        && hit.pressure <= soil_box_confinement(p, cell_w, soil_y, crater, c)
+                };
+                let (mask, start) = self.solid_cell_lazy(
                     w,
                     hit.cell,
                     &offsets,
-                    matter.as_deref().is_some_and(|m| {
-                        self.unpaid_contact(w, c, m, p, hit.pressure, unpaid_bounds)
-                    }),
-                    c.soil_depth_cost != 0
-                        && hit.pressure
-                            <= soil_box_confinement(p, self.cell, self.soil_y(), self.crater(), c),
+                    unpaid_lazy,
+                    confined_lazy,
                 );
                 if self.ground_silent(c, hit.pressure, &mask, start, p) {
                     self.finish_contact();
@@ -3940,6 +4481,8 @@ impl Explosion {
                     self.finish_contact();
                     continue 'contact;
                 }
+                let mut z_cols = [None; 64];
+                let mut cur_oz = i32::MIN;
                 for (rank, subcell) in mask.ranked_from(from) {
                     if self.nuclear_ground && work == 0 {
                         self.contact_cursor = subcell * actors + count;
@@ -3951,11 +4494,32 @@ impl Explosion {
                     self.contact_cursor = subcell * actors + count;
                     let o = offsets[subcell];
                     let q = [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
-                    if !self.ground_contact_known(
+                    let eff_pressure = if c.soil_depth_cost != 0 && matches!(m, 1 | 7 | 8) {
+                        let load = match crater {
+                            Some(at) if cell_w <= 64 => {
+                                if o[2] != cur_oz {
+                                    z_cols[..cell_w as usize].fill(None);
+                                    cur_oz = o[2];
+                                }
+                                let col = *z_cols[o[0] as usize]
+                                    .get_or_insert_with(|| nuclear_soil_column(q, at, c));
+                                if c.soil_crater.is_some() {
+                                    nuclear_column_load(col, q[1], soil_y)
+                                } else {
+                                    soil_confinement(q[1], soil_y, c).saturating_add(col.0)
+                                }
+                            }
+                            _ => soil_load(q, soil_y, crater, c),
+                        };
+                        soil_contact_pressure(hit.pressure, load, m, self.nuclear_ground, c)
+                    } else {
+                        hit.pressure
+                    };
+                    if !self.ground_contact_preloaded(
                         w,
                         q,
                         m,
-                        hit.pressure,
+                        eff_pressure,
                         dents,
                         changed,
                         c,
@@ -4093,7 +4657,7 @@ impl Explosion {
         dents: &mut SurfaceWork,
         changed: &mut Vec<[i32; 3]>,
         c: &ExplosionConfig,
-        mut matter: Option<&mut matter::Matter>,
+        matter: Option<&mut matter::Matter>,
     ) -> bool {
         let pressure = if c.soil_depth_cost != 0 && matches!(mat, 1 | 7 | 8) {
             soil_contact_pressure(
@@ -4106,6 +4670,21 @@ impl Explosion {
         } else {
             pressure
         };
+        self.ground_contact_preloaded(w, q, mat, pressure, dents, changed, c, matter)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ground_contact_preloaded(
+        &mut self,
+        w: &mut World,
+        q: [i32; 3],
+        mat: u16,
+        pressure: u32,
+        dents: &mut SurfaceWork,
+        changed: &mut Vec<[i32; 3]>,
+        c: &ExplosionConfig,
+        mut matter: Option<&mut matter::Matter>,
+    ) -> bool {
         if mat != 0 && pressure > 0 {
             let work = material_work(mat, c);
             // A dent only matters to a pressure that alone would not break
@@ -4384,6 +4963,19 @@ fn blast_ground_price(m: &matter::Matter, c: &ExplosionConfig, mat: u16) -> u64 
     }
 }
 
+fn economy_max_ground_price(m: &matter::Matter, c: &ExplosionConfig) -> u64 {
+    if c.material_energy_j == 0 {
+        return 0;
+    }
+    m.economy
+        .mats
+        .definitions()
+        .filter(|mat| mat.id != 0)
+        .map(|mat| blast_ground_price(m, c, mat.id))
+        .max()
+        .unwrap_or(0)
+}
+
 fn unpaid_bounds(
     m: &matter::Matter,
     c: &ExplosionConfig,
@@ -4537,6 +5129,294 @@ fn read_terraced_soil(
     Some(mask)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn read_crater_cell_into(
+    w: &World,
+    p: [i32; 3],
+    edge: i32,
+    pressure: u32,
+    plane: i32,
+    at: [i32; 3],
+    c: &ExplosionConfig,
+    mats: &mut Vec<u16>,
+) -> Option<contact_mask::Mask> {
+    if let Some(mask) = read_terraced_soil(w, p, edge, pressure, plane, at, c, mats) {
+        return Some(mask);
+    }
+    if c.soil_depth_cost == 0 || !(2..=64).contains(&edge) || !w.batches_material_columns() {
+        return None;
+    }
+    let min = p.map(|v| v.max(0) as u32);
+    let size = [w.nx, w.ny, w.nz];
+    let max = std::array::from_fn(|a| ((p[a] + edge).max(0) as u32).min(size[a]));
+    if (0..3).any(|a| min[a] >= max[a]) || cell_is_air(w, p, edge) {
+        return Some(contact_mask::Mask::default());
+    }
+    if !w.any_solid_box(min, max.map(|v| v - 1)) {
+        return Some(contact_mask::Mask::default());
+    }
+    let cols_len = (edge * edge) as usize;
+    let mut columns = Vec::with_capacity(cols_len);
+    for dz in 0..edge {
+        for dx in 0..edge {
+            columns.push(nuclear_soil_column([p[0] + dx, 0, p[2] + dz], at, c));
+        }
+    }
+    let y0 = min[1] as i32;
+    let y1 = max[1] as i32;
+    let load_at = |col: (u32, u32, u32, u32), y: i32| -> u32 {
+        if c.soil_crater.is_none() {
+            soil_confinement(y, plane, c).saturating_add(col.0)
+        } else {
+            nuclear_column_load(col, y, plane)
+        }
+    };
+    let top_y = y1 - 1;
+    let all_soil_silent = columns.iter().all(|&col| {
+        let load = load_at(col, top_y);
+        [1u16, 7, 8]
+            .into_iter()
+            .all(|m| soil_contact_pressure(pressure, load, m, true, c) == 0)
+    });
+    let live_top = max[1].min(w.column_box_ceiling([min[0], min[2]], [max[0], max[2]]));
+    if min[1] >= live_top {
+        return Some(contact_mask::Mask::default());
+    }
+    if all_soil_silent
+        && w.material_candidates(min, [max[0], live_top, max[2]])
+            .is_some_and(|ids| ids.into_iter().all(|m| matches!(m, 0 | 1 | 7 | 8)))
+    {
+        return Some(contact_mask::Mask::default());
+    }
+    let mut floors_mat1 = Vec::with_capacity(cols_len);
+    if all_soil_silent {
+        floors_mat1.resize(cols_len, y1);
+    } else {
+        for &col in &columns {
+            if soil_contact_pressure(pressure, load_at(col, top_y), 1, true, c) == 0 {
+                floors_mat1.push(y1);
+            } else if soil_contact_pressure(pressure, load_at(col, y0), 1, true, c) != 0 {
+                floors_mat1.push(y0);
+            } else {
+                let (mut lo, mut hi) = (y0 + 1, top_y);
+                while lo < hi {
+                    let mid = (lo + hi) / 2;
+                    if soil_contact_pressure(pressure, load_at(col, mid), 1, true, c) != 0 {
+                        hi = mid;
+                    } else {
+                        lo = mid + 1;
+                    }
+                }
+                floors_mat1.push(lo);
+            }
+        }
+    }
+    let cert_y1 = if w.box_is_material_or_air(min, [max[0], live_top, max[2]], 1) {
+        live_top
+    } else if !w.box_is_material_or_air(min, [max[0], min[1] + 1, max[2]], 1) {
+        min[1]
+    } else {
+        let (mut lo, mut hi) = (min[1] + 1, live_top - 1);
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2;
+            if w.box_is_material_or_air(min, [max[0], mid, max[2]], 1) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo
+    };
+
+    let mut mask = contact_mask::Mask::default();
+    let scale = (edge as usize).pow(3);
+    if edge <= 4 {
+        read_crater_planes(
+            w,
+            p,
+            edge,
+            scale,
+            pressure,
+            plane,
+            c,
+            cert_y1 as i32,
+            &columns,
+            &floors_mat1,
+            &mut mask,
+            mats,
+            &mut [0u16; 4 * 4],
+        );
+    } else if edge <= 16 {
+        read_crater_planes(
+            w,
+            p,
+            edge,
+            scale,
+            pressure,
+            plane,
+            c,
+            cert_y1 as i32,
+            &columns,
+            &floors_mat1,
+            &mut mask,
+            mats,
+            &mut [0u16; 16 * 16],
+        );
+    } else {
+        read_crater_planes(
+            w,
+            p,
+            edge,
+            scale,
+            pressure,
+            plane,
+            c,
+            cert_y1 as i32,
+            &columns,
+            &floors_mat1,
+            &mut mask,
+            mats,
+            &mut [0u16; 64 * 64],
+        );
+    }
+    Some(mask)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_crater_planes(
+    w: &World,
+    p: [i32; 3],
+    edge: i32,
+    scale: usize,
+    pressure: u32,
+    plane_y: i32,
+    c: &ExplosionConfig,
+    cert_y1: i32,
+    columns: &[(u32, u32, u32, u32)],
+    floors_mat1: &[i32],
+    mask: &mut contact_mask::Mask,
+    mats: &mut Vec<u16>,
+    plane_buf: &mut [u16],
+) {
+    let x0 = p[0].max(0);
+    let x1 = (p[0] + edge).min(w.nx as i32);
+    let y0 = p[1].max(0);
+    let y1 = (p[1] + edge).min(w.ny as i32);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let width = (x1 - x0) as u32;
+    let full = u64::MAX >> (64 - width);
+    let x_off = (x0 - p[0]) as usize;
+    let mut row_bits = [0u64; 64];
+    for z in p[2].max(0)..(p[2] + edge).min(w.nz as i32) {
+        let row_top =
+            y1.min(w.column_box_ceiling([x0 as u32, z as u32], [x1 as u32, z as u32 + 1]) as i32);
+        if row_top <= y0 {
+            continue;
+        }
+        let dz = (z - p[2]) as usize;
+        let col_row = &columns[dz * edge as usize..(dz + 1) * edge as usize];
+        let floor_row = &floors_mat1[dz * edge as usize..(dz + 1) * edge as usize];
+        let sub_end = cert_y1.min(row_top);
+        if y0 < sub_end {
+            let active_floors = &floor_row[x_off..x_off + width as usize];
+            let z_min = active_floors.iter().copied().min().unwrap_or(y1);
+            let z_max = active_floors.iter().copied().max().unwrap_or(y1);
+            for y in z_min.max(y0)..sub_end {
+                let allowed = if y >= z_max {
+                    full
+                } else {
+                    let mut m = 0u64;
+                    for (dx, &fl) in active_floors.iter().enumerate() {
+                        if y >= fl {
+                            m |= 1u64 << dx;
+                        }
+                    }
+                    m
+                };
+                if allowed == 0 {
+                    continue;
+                }
+                let bits = w.solid_bits(x0 as u32, y as u32, z as u32, width) & allowed;
+                if bits != 0 {
+                    if scale > 64 && matches!(mask, contact_mask::Mask::Small(0)) {
+                        *mask = contact_mask::Mask::for_voxels(scale);
+                    }
+                    let mask_index = (x0 - p[0] + edge * (y - p[1] + edge * (z - p[2]))) as usize;
+                    mask.insert_bits(mask_index, bits);
+                    mats.resize(mats.len() + bits.count_ones() as usize, 1);
+                }
+            }
+        }
+        let mix_y0 = cert_y1.max(y0);
+        if mix_y0 >= row_top {
+            continue;
+        }
+        let (mut first, mut last) = (usize::MAX, 0usize);
+        for (dy, slot) in row_bits[..(row_top - mix_y0) as usize].iter_mut().enumerate() {
+            let bits = w.solid_bits(x0 as u32, (mix_y0 + dy as i32) as u32, z as u32, width);
+            *slot = bits;
+            if bits != 0 {
+                if first == usize::MAX {
+                    first = dy;
+                }
+                last = dy + 1;
+            }
+        }
+        if first == usize::MAX {
+            continue;
+        }
+        let y_base = mix_y0 + first as i32;
+        w.material_plane(
+            [x0 as u32, y_base as u32, z as u32],
+            width as usize,
+            last - first,
+            edge as usize,
+            plane_buf,
+        );
+        for (local_y, &bits_word) in row_bits[first..last].iter().enumerate() {
+            if bits_word == 0 {
+                continue;
+            }
+            let y = y_base + local_y as i32;
+            let index = local_y * edge as usize;
+            let mut bits = bits_word;
+            let mut kept_bits = 0u64;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let mat = plane_buf[index + bit];
+                let col_x = x_off + bit;
+                let silent = match mat {
+                    1 => y < floor_row[col_x],
+                    7 | 8 => {
+                        let col = col_row[col_x];
+                        let load = if c.soil_crater.is_none() {
+                            soil_confinement(y, plane_y, c).saturating_add(col.0)
+                        } else {
+                            nuclear_column_load(col, y, plane_y)
+                        };
+                        soil_contact_pressure(pressure, load, mat, true, c) == 0
+                    }
+                    _ => false,
+                };
+                if !silent {
+                    kept_bits |= 1u64 << bit;
+                    mats.push(mat);
+                }
+            }
+            if kept_bits != 0 {
+                if scale > 64 && matches!(mask, contact_mask::Mask::Small(0)) {
+                    *mask = contact_mask::Mask::for_voxels(scale);
+                }
+                let mask_index = (x0 - p[0] + edge * (y - p[1] + edge * (z - p[2]))) as usize;
+                mask.insert_bits(mask_index, kept_bits);
+            }
+        }
+    }
+}
+
 fn read_cell_into(
     w: &World,
     origin: [i32; 3],
@@ -4592,6 +5472,8 @@ fn read_cell_into(
             // clearing an 8 KiB plane for a 2x2 or 4x4 read.
             if edge <= 4 {
                 read_cell_planes(w, p, edge, &mut mask, mats, &mut [0u16; 4 * 4]);
+            } else if edge <= 16 {
+                read_cell_planes(w, p, edge, &mut mask, mats, &mut [0u16; 16 * 16]);
             } else {
                 read_cell_planes(w, p, edge, &mut mask, mats, &mut [0u16; 64 * 64]);
             }
@@ -4632,30 +5514,47 @@ fn read_cell_planes(
     let y0 = p[1].max(0);
     let y1 = (p[1] + edge).min(w.ny as i32);
     if x0 < x1 && y0 < y1 {
+        let width = (x1 - x0) as u32;
+        let full = u64::MAX >> (64 - width);
+        let mut row_bits = [0u64; 64];
         for z in p[2].max(0)..(p[2] + edge).min(w.nz as i32) {
             let row_top = y1
                 .min(w.column_box_ceiling([x0 as u32, z as u32], [x1 as u32, z as u32 + 1]) as i32);
             if row_top <= y0 {
                 continue;
             }
+            let (mut first, mut last) = (usize::MAX, 0usize);
+            for (dy, slot) in row_bits[..(row_top - y0) as usize].iter_mut().enumerate() {
+                let bits = w.solid_bits(x0 as u32, (y0 + dy as i32) as u32, z as u32, width);
+                *slot = bits;
+                if bits != 0 {
+                    if first == usize::MAX {
+                        first = dy;
+                    }
+                    last = dy + 1;
+                }
+            }
+            if first == usize::MAX {
+                continue;
+            }
+            let y_base = y0 + first as i32;
             w.material_plane(
-                [x0 as u32, y0 as u32, z as u32],
-                (x1 - x0) as usize,
-                (row_top - y0) as usize,
+                [x0 as u32, y_base as u32, z as u32],
+                width as usize,
+                last - first,
                 edge as usize,
                 plane,
             );
             // The live occupancy word is already the row's contact
             // mask. Copy solid runs at once; do not test and insert
             // every voxel again, or clear air that will never be read.
-            let width = (x1 - x0) as u32;
-            let full = u64::MAX >> (64 - width);
-            for y in y0..row_top {
-                let mut bits = w.solid_bits(x0 as u32, y as u32, z as u32, width);
+            for (local_y, &bits_word) in row_bits[first..last].iter().enumerate() {
+                let mut bits = bits_word;
                 if bits == 0 {
                     continue;
                 }
-                let index = (edge * (y - y0)) as usize;
+                let y = y_base + local_y as i32;
+                let index = local_y * edge as usize;
                 let mask_index = (x0 - p[0] + edge * (y - p[1] + edge * (z - p[2]))) as usize;
                 mask.insert_bits(mask_index, bits);
                 if bits == full {
@@ -4712,6 +5611,62 @@ fn spent_cell(
     true
 }
 
+/// Cached horizontal column ceiling for wave cell `(cell[0], cell[2])`,
+/// computed at most once per `(cx, cz)` column across a wave slice.
+fn cell_ceiling_cached(
+    w: &World,
+    p: [i32; 3],
+    edge: i32,
+    cell: [i32; 3],
+    n: usize,
+    ceilings: &mut [i32],
+) -> i32 {
+    if cell[0] >= 0 && cell[2] >= 0 && (cell[0] as usize) < n && (cell[2] as usize) < n {
+        let (cx, cz) = (cell[0] as usize, cell[2] as usize);
+        let idx = cz * n + cx;
+        let cached = ceilings[idx];
+        if cached != i32::MIN {
+            return cached;
+        }
+        let x0 = p[0].max(0);
+        let z0 = p[2].max(0);
+        let x1 = (p[0] + edge).min(w.nx as i32);
+        let z1 = (p[2] + edge).min(w.nz as i32);
+        let top = if x0 >= x1 || z0 >= z1 {
+            0
+        } else {
+            w.column_box_ceiling([x0 as u32, z0 as u32], [x1 as u32, z1 as u32]) as i32
+        };
+        ceilings[idx] = top;
+        top
+    } else {
+        let x0 = p[0].max(0);
+        let z0 = p[2].max(0);
+        let x1 = (p[0] + edge).min(w.nx as i32);
+        let z1 = (p[2] + edge).min(w.nz as i32);
+        if x0 >= x1 || z0 >= z1 {
+            0
+        } else {
+            w.column_box_ceiling([x0 as u32, z0 as u32], [x1 as u32, z1 as u32]) as i32
+        }
+    }
+}
+
+fn cell_is_air_cached(
+    w: &World,
+    p: [i32; 3],
+    edge: i32,
+    cell: [i32; 3],
+    n: usize,
+    ceilings: &mut [i32],
+) -> bool {
+    let floor = p[1].max(0);
+    if p[1] + edge <= 0 || floor >= w.ny as i32 {
+        return true;
+    }
+    floor >= cell_ceiling_cached(w, p, edge, cell, n, ceilings)
+}
+
 /// No voxel of the wave cell at `p` with edge `edge` holds matter: every
 /// column under it tops out below it (ADR-681). Exact, from the world's
 /// column ceilings; a cell partly outside the world counts only its inside.
@@ -4722,19 +5677,83 @@ fn cell_is_air(w: &World, p: [i32; 3], edge: i32) -> bool {
     if p[1] + edge <= 0 || floor >= w.ny as i32 {
         return true;
     }
-    (p[2]..p[2] + edge).all(|z| {
-        (p[0]..p[0] + edge).all(|x| {
-            x < 0
-                || z < 0
-                || x >= w.nx as i32
-                || z >= w.nz as i32
-                || floor >= w.column_ceiling(x as u32, z as u32) as i32
-        })
-    })
+    let x0 = p[0].max(0);
+    let z0 = p[2].max(0);
+    let x1 = (p[0] + edge).min(w.nx as i32);
+    let z1 = (p[2] + edge).min(w.nz as i32);
+    x0 >= x1
+        || z0 >= z1
+        || floor >= w.column_box_ceiling([x0 as u32, z0 as u32], [x1 as u32, z1 as u32]) as i32
+}
+
+fn cell_has_no_solid_cached(
+    w: &World,
+    p: [i32; 3],
+    edge: i32,
+    cell: [i32; 3],
+    n: usize,
+    ceilings: &mut [i32],
+) -> bool {
+    if cell_is_air_cached(w, p, edge, cell, n, ceilings) {
+        return true;
+    }
+    let size = [w.nx as i32, w.ny as i32, w.nz as i32];
+    let lo = std::array::from_fn(|a| p[a].max(0));
+    let hi = std::array::from_fn(|a| (p[a] + edge).min(size[a]));
+    (0..3).any(|a| lo[a] >= hi[a])
+        || !w.any_solid_box(lo.map(|v| v as u32), hi.map(|v| (v - 1) as u32))
+}
+
+#[cfg(test)]
+fn cell_has_no_solid(w: &World, p: [i32; 3], edge: i32) -> bool {
+    if cell_is_air(w, p, edge) {
+        return true;
+    }
+    let size = [w.nx as i32, w.ny as i32, w.nz as i32];
+    let lo = std::array::from_fn(|a| p[a].max(0));
+    let hi = std::array::from_fn(|a| (p[a] + edge).min(size[a]));
+    (0..3).any(|a| lo[a] >= hi[a])
+        || !w.any_solid_box(lo.map(|v| v as u32), hi.map(|v| (v - 1) as u32))
 }
 
 /// Every solid voxel is soil and even the nearest receives no pressure after
 /// confinement. The exact world certificate includes committed chunk edits.
+#[allow(clippy::too_many_arguments)]
+fn confined_soil_box_cached(
+    w: &World,
+    p: [i32; 3],
+    edge: i32,
+    cell: [i32; 3],
+    n: usize,
+    ceilings: &mut [i32],
+    pressure: u32,
+    plane: i32,
+    crater: Option<[i32; 3]>,
+    c: &ExplosionConfig,
+) -> bool {
+    if c.soil_depth_cost == 0
+        || pressure > soil_box_confinement(p, edge, plane, crater, c)
+        || p.iter().any(|&v| v < 0)
+    {
+        return false;
+    }
+    let min = p.map(|v| v as u32);
+    let max = p.map(|v| (v + edge) as u32);
+    if max[0] > w.nx || max[1] > w.ny || max[2] > w.nz {
+        return false;
+    }
+    let live_top =
+        max[1].min(cell_ceiling_cached(w, p, edge, cell, n, ceilings).max(0) as u32);
+    if min[1] >= live_top {
+        return false;
+    }
+    let live_max = [max[0], live_top, max[2]];
+    w.box_is_material_or_air(min, live_max, 1)
+        || w.material_candidates(min, live_max)
+            .is_some_and(|ids| ids.into_iter().all(|m| matches!(m, 0 | 1 | 7 | 8)))
+}
+
+#[cfg(test)]
 fn confined_soil_box(
     w: &World,
     p: [i32; 3],
@@ -4744,12 +5763,8 @@ fn confined_soil_box(
     crater: Option<[i32; 3]>,
     c: &ExplosionConfig,
 ) -> bool {
-    c.soil_depth_cost != 0
-        && pressure <= soil_box_confinement(p, edge, plane, crater, c)
-        && p.iter().all(|&v| v >= 0)
-        && (w.box_is_material_or_air(p.map(|v| v as u32), p.map(|v| (v + edge) as u32), 1)
-            || w.material_candidates(p.map(|v| v as u32), p.map(|v| (v + edge) as u32))
-                .is_some_and(|ids| ids.into_iter().all(|m| matches!(m, 0 | 1 | 7 | 8))))
+    let mut ceilings = [i32::MIN; 1];
+    confined_soil_box_cached(w, p, edge, [0; 3], 1, &mut ceilings, pressure, plane, crater, c)
 }
 
 /// A dome on the range (ADR-276): geometry from the layout, charge in the
@@ -5762,10 +6777,42 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
+        self.snapshot_into(&mut b);
+        b.v
+    }
+    fn snapshot_into(&self, out: &mut fx::blob::Blob) {
+        let mut b = std::mem::take(out);
+        b.v.clear();
         // The nested layout versions describe geometry; the outer envelope
         // also identifies the clock used by velocities and deadlines.
         b.u32(67);
         b.u32(crate::TICKS_PER_SECOND as u32);
+        let greben_slots: Vec<_> = self.units.iter().chain(std::iter::once(&self.gun))
+            .enumerate().filter(|(_, u)| u.full_greben()).map(|(i, _)| i).collect();
+        let greben_sites = self.full_greben_sites();
+        if !greben_slots.is_empty() || !greben_sites.is_empty() {
+            b.u32(84);
+            b.u32(greben_slots.len() as u32);
+            for id in greben_slots { b.u32(id as u32); }
+            b.u32(greben_sites.len() as u32);
+            for id in greben_sites { b.u32(id as u32); }
+        }
+        if self.units.iter().chain(std::iter::once(&self.gun)).any(|u|!u.motion.feet.is_empty()) {
+            b.u32(83);
+            self.rubble.sources().save_baseline(&mut b);
+        }
+        let siege_slots: Vec<_> = self.units.iter().chain(std::iter::once(&self.gun))
+            .enumerate().filter(|(_, u)| u.articulated_siege()).map(|(i, _)| i).collect();
+        if !siege_slots.is_empty() {
+            b.u32(82);
+            b.u32(siege_slots.len() as u32);
+            for id in siege_slots { b.u32(id as u32); }
+        }
+        if !self.matter.debris.molten.cells.is_empty() {
+            b.u32(81);
+            self.matter.debris.molten.save(&mut b);
+        }
+        if self.units.iter().chain(std::iter::once(&self.gun)).any(|u|!u.motion.feet.is_empty()) {b.u32(80);}
         if self.build_plans.active() || self.construction_history_count()>32 {b.u32(79);self.build_plans.save(&mut b);}
         if self.has_pipes() {
             b.u32(78);
@@ -6043,7 +7090,7 @@ impl BlastRange {
         if walker_poses {
             self.save_walker_poses(&mut b);
         }
-        b.v
+        *out = b;
     }
     /// The sections appended to the snapshot after `version`, in order:
     /// the whole tail after the version-30 layout for a snapshot, and the
@@ -6218,6 +7265,10 @@ impl BlastRange {
             }
         }
         self.battle.load_laser_tracking(s, &self.units)?;
+        self.gun.update_pose(self.turret.angle);
+        for (u, actor) in self.units.iter_mut().zip(&self.battle.actors) {
+            u.update_pose(actor.turret.angle);
+        }
         if let Some(e) = &mut self.explosion {
             for (p, u) in e.turret_pitches.iter_mut().zip(&self.units) {
                 *p = s.i32();
@@ -6270,6 +7321,47 @@ impl BlastRange {
         } else if crate::TICKS_PER_SECOND != modding::clock::STREAM_HZ as i32 {
             return None;
         }
+        let mut greben_slots = std::collections::BTreeSet::new();
+        let mut greben_sites = std::collections::BTreeSet::new();
+        if version == 84 {
+            let count = s.u32() as usize;
+            if count > modding::range::MAX_RANGE_UNITS + 1 || count > s.left() / 4 { return None; }
+            let mut previous = None;
+            for _ in 0..count {
+                let id = s.u32() as usize;
+                if previous.is_some_and(|p| p >= id) || !greben_slots.insert(id) { return None; }
+                previous = Some(id);
+            }
+            let sites = s.u32() as usize;
+            if sites > s.left() / 4 || sites > 1 << 20 || count + sites == 0 { return None; }
+            let mut previous = None;
+            for _ in 0..sites {
+                let id = s.u32() as usize;
+                if previous.is_some_and(|p| p >= id) || !greben_sites.insert(id) { return None; }
+                previous = Some(id);
+            }
+            version = s.u32();
+        }
+        let support_baseline=if version==83 {
+            let baseline=nav::vehicle::support::Sources::load_baseline(&mut s)?;
+            version=s.u32();Some(baseline)
+        } else {None};
+        let mut siege_slots = std::collections::BTreeSet::new();
+        if version == 82 {
+            let count = s.u32() as usize;
+            if count == 0 || count > bytes.len() / 4 { return None; }
+            for _ in 0..count {
+                if !siege_slots.insert(s.u32() as usize) { return None; }
+            }
+            version = s.u32();
+        }
+        let molten = if version == 81 {
+            let state = crate::burst::molten::State::load(&mut s)?;
+            version = s.u32();
+            Some(state)
+        } else { None };
+        let live_support=version==80;
+        if live_support {version=s.u32();}
         let plans=if version==79 {let plans=build_plans::Plans::load(&mut s)?;version=s.u32();plans}else{build_plans::Plans::default()};
         let mut pipes = Vec::new();
         if version == 78 {
@@ -6504,6 +7596,24 @@ impl BlastRange {
             return None;
         }
         let gun_id = r.units.len();
+        for (id, u) in r.units.iter_mut().chain(std::iter::once(&mut r.gun)).enumerate() {
+            if greben_slots.contains(&id) {
+                if u.kind != RangeUnitKind::GrebenStorage { return None; }
+            } else if u.kind == RangeUnitKind::GrebenStorage {
+                *u = RangeUnit::of_kind_geometry(u.kind, u.at, true, false);
+                if id < gun_id { r.matter.replace_body_tables(id, u); }
+                if let Some(c) = r.layout.as_ref().and_then(|l| l.course.as_ref()) { u.apply_course(c); }
+            }
+            if siege_slots.contains(&id) {
+                if u.kind != RangeUnitKind::ArtilleryTurretT3 { return None; }
+            } else if u.kind == RangeUnitKind::ArtilleryTurretT3 {
+                *u = RangeUnit::of_kind_model(u.kind, u.at, false);
+                if id < gun_id { r.matter.replace_body_tables(id, u); }
+                if let Some(c) = r.layout.as_ref().and_then(|l| l.course.as_ref()) { u.apply_course(c); }
+            }
+        }
+        if siege_slots.iter().any(|&id| id > gun_id) { return None; }
+        if greben_slots.iter().any(|&id| id > gun_id) { return None; }
         let turret_angle = r.turret.angle;
         // Choose the saved intact variant before validating dents/removals.
         // Cargo-only cells do not exist in the ordinary open template.
@@ -6526,7 +7636,7 @@ impl BlastRange {
         {
             observe("unit_motion", bytes.len() - s.left(), Some(id));
             let at = std::array::from_fn(|_| s.i32());
-            if !u.motion.load_version(&mut s, version >= 29) {
+            if !u.motion.load_version(&mut s, version >= 29,live_support) {
                 return None;
             }
             let head = u.motion.drive.head;
@@ -6660,6 +7770,7 @@ impl BlastRange {
                 }
             }
             u.seg_detached = s.usize();
+            if u.articulated_siege() { u.update_response(); }
             // A lost leg is a shed thigh, and the motion's own record of it
             // must agree; a buckled leg is one whose links lost the buckling
             // share, unless it is gone altogether.
@@ -6692,6 +7803,11 @@ impl BlastRange {
         observe("matter", bytes.len() - s.left(), None);
         r.matter
             .load_version(&mut s, &r.world, &r.units, version >= 61)?;
+        if let Some(state) = molten {
+            state.validate(&r.matter.debris, &r.heat_tuning)?;
+            r.matter.debris.molten = state;
+        }
+
         observe("surface_validation", bytes.len() - s.left(), None);
         if r.surface_work.iter().any(|(p, work)| {
             let m = material(&r.world, *p);
@@ -6929,18 +8045,23 @@ impl BlastRange {
             }
         }
         if version >= 52 {
+            observe("laser_tracking", bytes.len() - s.left(), None);
             r.load_laser_tracking(&mut s)?;
         }
         if version >= 53 {
+            observe("contact_resumes", bytes.len() - s.left(), None);
             r.load_contact_resumes(&mut s)?;
         }
         if motion_tuned {
+            observe("motion_tuning", bytes.len() - s.left(), None);
             r.load_motion_tuning(&mut s)?;
         }
         if version >= 59 {
+            observe("wave_energy", bytes.len() - s.left(), None);
             r.load_wave_energy(&mut s)?;
         }
         if version >= 60 {
+            observe("wave_sides", bytes.len() - s.left(), None);
             r.battle.load_wave_sides(&mut s)?;
         }
         if version >= 62 {
@@ -6964,6 +8085,7 @@ impl BlastRange {
             observe("construction", bytes.len() - s.left(), None);
             r.load_construction(&mut s, !explicit_skoba_forms)?;
         }
+        r.load_greben_sites(&greben_sites)?;
         if r.battle.actors.iter().enumerate().any(|(id, actor)| {
             matches!(actor.order, battle::Order::Build(site) if !r.valid_commander_site(id, site))
         }) {
@@ -7009,6 +8131,7 @@ impl BlastRange {
             r.water.load_thermal_remainder(&mut s, r.size)?;
         }
         if walker_poses {
+            observe("walker_poses", bytes.len() - s.left(), None);
             r.load_walker_poses(&mut s)?;
         }
         let mut device_containers = std::collections::BTreeSet::new();
@@ -7037,6 +8160,10 @@ impl BlastRange {
         if !s.ok() || s.left() != 0 {
             return None;
         }
+        if let Some(baseline)=support_baseline {
+            if !live_support {return None;}
+            r.rubble.replace_sources(baseline);
+        }
         if r.battle_mode() && r.units.len() >= 16 {
             r.set_navigation_workers(default_navigation_workers(r.units.len()));
         }
@@ -7053,9 +8180,12 @@ impl BlastRange {
         )
     }
     pub fn state_hash(&self) -> u64 {
-        self.snapshot()
-            .into_iter()
-            .fold(0xcbf29ce484222325, |h, v| {
+        self.state_hash_with_scratch(&mut fx::blob::Blob::new())
+    }
+    /// The caller owns derived storage; no global/TLS state or saved scratch.
+    pub fn state_hash_with_scratch(&self, scratch: &mut fx::blob::Blob) -> u64 {
+        self.snapshot_into(scratch);
+        scratch.v.iter().fold(0xcbf29ce484222325, |h, &v| {
                 (h ^ u64::from(v)).wrapping_mul(0x100000001b3)
             })
     }
@@ -7407,7 +8537,7 @@ impl BlastRange {
     ) -> nav::vehicle::Changed {
         let mut scratch = std::mem::take(&mut self.rubble_scratch);
         let cold = nav::vehicle::Changed::everywhere();
-        let rubble = self.current_rubble_cached(
+        let mut rubble = self.current_rubble_cached(
             &mut scratch,
             task,
             Some(if self.rubble_fresh {
@@ -7419,6 +8549,10 @@ impl BlastRange {
         self.rubble_scratch = scratch;
         detail("rubble_print_begin");
         let mut changed = self.world_changed.clone();
+        // Identity, shape and motion can change while every column retains
+        // its height. Publish those local support events independently.
+        let mut support_changed=nav::vehicle::Changed::default();
+        self.rubble.mark_support_changes(&rubble,&mut support_changed);
         self.rubble_print_work = Default::default();
         // The print is a function of the map: an unchanged map has the
         // print it had and changes no page (ADR-465). Most steps leave
@@ -7436,7 +8570,10 @@ impl BlastRange {
                 self.rubble_print_work = work;
             }
             self.rubble = rubble;
+        } else if self.rubble.sources()!=rubble.sources() {
+            self.rubble.replace_sources(rubble.take_sources());
         }
+        self.rubble.set_support_changes(support_changed);
         // Equal columns have equal derived queries. Retain the previous
         // map, including its lazy coarse tiles, across quiet ticks.
         self.rubble_fresh = true;
@@ -9597,6 +10734,10 @@ fn load_collapse_backlog(
 mod collapse_admission_tests;
 
 #[cfg(test)]
+#[path = "range_transition_tests.rs"]
+mod transition_contract_tests;
+
+#[cfg(test)]
 mod tests {
     // Snapshot/frontier regressions deliberately select a suspended fine search.
     // Restore the runtime configuration before saving or advancing either copy.
@@ -11604,7 +12745,7 @@ mod tests {
     /// ground. Through the emitter, so that the piece has an id a save
     /// accepts; the container holds a voxel's worth per cell, as a
     /// snapshot of the range requires.
-    fn drop_heap(a: &mut BlastRange, at: [i32; 3], mm: u16, cells: u64) {
+    pub(super) fn drop_heap(a: &mut BlastRange, at: [i32; 3], mm: u16, cells: u64) {
         let volume = cells * u64::from(mm).pow(3) / u64::from(voxel::unit::WORLD_MM).pow(3);
         let held = a
             .matter
@@ -11655,6 +12796,53 @@ mod tests {
     /// range held none until its next step, and a command given in between
     /// planned over bare ground where the continuing run drove around the
     /// heap.
+    #[test]
+    fn support_identity_events_do_not_invalidate_unchanged_navigation_heights() {
+        let mut a=BlastRange::new(config());a.patrols_running=false;
+        drop_heap(&mut a,[GUN[0]+64,FLOOR,GUN[2]+64],500,32);
+        a.world_changed=nav::vehicle::Changed::default();
+        a.refresh_rubble(&|_,_|{},&mut |_|{});
+        assert!(!a.rubble.is_empty());
+        assert!(a.refresh_rubble(&|_,_|{},&mut |_|{}).is_empty());
+        assert!(a.rubble.support_changes().is_empty());
+        a.matter.debris.fragments[0].id+=1;
+        let nav=a.refresh_rubble(&|_,_|{},&mut |_|{});
+        assert!(nav.is_empty(),"a same-height identity event must not discard route/floor memoization");
+        assert!(!a.rubble.support_changes().is_empty(),"the same event must still reach soles");
+    }
+    #[test]
+    fn support_range_snapshot_preserves_ready_carrier_and_wake_recovery() {
+        let dump=|stage:&str,range:&BlastRange| {
+            if let Ok(folder)=std::env::var("RTS_SUPPORT_CAPTURE_DIR") {
+                let folder=std::path::PathBuf::from(folder);std::fs::create_dir_all(&folder).unwrap();
+                std::fs::write(folder.join(format!("{stage}.bin")),range.snapshot()).unwrap();
+            }
+        };
+        let mut layout=modding::range::RangeLayout::from_ron(include_str!("../../../data/range-motion-yard.ron")).unwrap();
+        layout.size=[2048,512,2048];layout.clear_max=[2048,2048];layout.blocks.clear();
+        let course=layout.course.as_mut().unwrap();course.max=[2008,2008];course.ramps.clear();course.patrols.clear();
+        layout.units=vec![modding::range::RangeUnitDef{kind:modding::range::RangeUnitKind::Commander,at:[1024,56,1024],allied:true,weapon:None}];
+        let mut a=BlastRange::with_layout(config(),layout).unwrap();a.set_physics_workers(1);a.set_navigation_workers(1);
+        a.start_free_control().unwrap();
+        for dx in [-40,0,40] {for dz in [-40,0,40] {drop_heap(&mut a,[1024+dx,16,1024+dz],1000,64);}}
+        for _ in 0..8 {a.step();}
+        assert!(a.units[0].motion.feet.iter().all(|f|f.ready() && f.support.source.is_some_and(|s|s.kind==1)),"the fixture must actually use the resting carrier");
+        dump("carrier-ready",&a);
+        let mut last=("none",0,None);
+        let b=BlastRange::restore_observed(a.config,&a.snapshot(),|stage,offset,n|last=(stage,offset,n));
+        let mut b=b.unwrap_or_else(||panic!("ready-carrier restore stopped at {last:?}"));assert_eq!(a.state_hash(),b.state_hash());
+        for range in [&mut a,&mut b] {
+            for f in &mut range.matter.debris.fragments {f.resting=false;f.velocity.x=Fx::ONE;}
+        }
+        for tick in 0..4 {
+            a.step();b.step();assert_eq!(a.state_hash(),b.state_hash(),"wake restore {tick}");
+        }
+        assert!(a.units[0].motion.feet.iter().any(|f|f.support.reason==crate::gait::SupportReason::Moving && !f.ready()),"wake must reach the actual feet");
+        dump("carrier-wake",&a);
+        let mut c=BlastRange::restore(a.config,&a.snapshot()).unwrap();assert_eq!(a.state_hash(),c.state_hash());
+        for tick in 0..8 {a.step();c.step();assert_eq!(a.state_hash(),c.state_hash(),"recovery restore {tick}");}
+        dump("carrier-recovery",&a);
+    }
     #[test]
     fn a_move_ordered_after_a_restore_sees_the_same_rubble() {
         let mut a = BlastRange::new(config());
@@ -12456,6 +13644,7 @@ mod tests {
             .collect();
         for kind in [
             RangeUnitKind::Tank,
+            RangeUnitKind::Walker04,
             RangeUnitKind::Strider,
             RangeUnitKind::Spider,
             RangeUnitKind::Artillery,
@@ -13197,11 +14386,14 @@ mod tests {
         let mut cut_ticks = 0;
         let mut released = 0;
         let mut blocked_ticks = 0;
+        let mut zero_vel_ticks = 0;
+        let mut max_dv = Fx::ZERO;
         let mut reversed = false;
         let mut travelled = Fx::ZERO;
         let mut arrived = None;
         for tick in 0..1200 {
             let before = a.gun.motion.pos;
+            let prev_vel = a.gun.motion.drive.vel;
             a.step();
             if let Some(r) = b.as_mut() {
                 r.step();
@@ -13212,6 +14404,10 @@ mod tests {
             let dz = m.pos[2].sub(before[2]);
             travelled = travelled.add(dx.mul(dx).add(dz.mul(dz)).sqrt());
             blocked_ticks += usize::from(m.blocked);
+            if m.destination.is_some() && tick > 2 && m.drive.vel == Fx::ZERO {
+                zero_vel_ticks += 1;
+            }
+            max_dv = max_dv.max(m.drive.vel.sub(prev_vel).abs());
             reversed |= m.drive.vel < Fx::ZERO;
             if !m.cut.is_empty() {
                 cut_ticks += 1;
@@ -13246,6 +14442,10 @@ mod tests {
             a.gun.motion.blocked
         );
         assert!(!reversed, "the hull backed off a tree");
+        assert!(
+            zero_vel_ticks <= 4,
+            "tank stalled during forest push: zero_vel_ticks={zero_vel_ticks}, max_dv={max_dv:?}"
+        );
         assert!(
             cut_ticks > 0 && released > 0,
             "cut {cut_ticks} released {released}"
@@ -13620,67 +14820,54 @@ mod tests {
             "the wall must still protect the rear tank"
         );
     }
-    /// Re-qualified for ADR-681. Under the stock policy a ground cell the
-    /// small pool has no slot for is pulverised: the wave never waits, the
-    /// pieces stay within the pool, and every removed cell is a piece or
-    /// pulverised. Under the waiting policy a mod may keep, the wave
-    /// stalls on the pool and discards no matter, as before. Either way
-    /// the crater and the energy spent are those of an ordinary pool.
+    /// Admission-only geometry oracle. A live scene is covered separately:
+    /// waiting advances thermal/collapse time and fair finite-energy allocation.
     #[test]
     fn small_fragment_pool_pulverises_or_defers_without_changing_the_crater() {
-        let mut ordinary = BlastRange::new(config());
-        for _ in 0..500 {
-            ordinary.step();
+        struct Soil;
+        impl Generator for Soil {
+            fn material(&self,_:u32,y:u32,_:u32)->u16 {u16::from(y<64)}
+            fn soil_height(&self,_:u32,_:u32)->Option<u32> {Some(64)}
         }
-        for waits in [false, true] {
-            let mut r = BlastRange::new(config());
-            r.matter.tuning.max_flying = 16;
-            let t = std::sync::Arc::make_mut(&mut r.battle.tuning);
-            t.ground_waits_for_pool = waits;
-            let mut stalled = false;
-            let mut working = 0;
-            for _ in 0..6000 {
-                let before = r.removed;
-                r.step();
-                let m = &r.matter;
-                assert!(m.debris.fragments.iter().filter(|f| !f.resting).count() <= 16);
-                let pieces = m
-                    .debris
-                    .fragments
-                    .iter()
-                    .map(|f| u64::from(f.count))
-                    .sum::<u64>();
-                if waits {
-                    assert_eq!(pieces, r.removed as u64);
-                } else {
-                    assert!(pieces <= r.removed as u64);
-                    assert!(r.removed as u64 - pieces <= m.admission.pulverized);
+        let trial=|capacity:u32,waits:bool| {
+            let mut c=config();c.heat_per_cell=0;c.material_energy_j=4_000_000_000;
+            let mut w=World::new(160,128,160,65536,Box::new(Soil));
+            let mut dents=SurfaceWork::new();
+            let mut e=Explosion::with_damage(&w,[80,63,80],&c,&[],&dents);
+            let mut m=matter::Matter::new(&[]);m.begin(c.material_energy_j,c.fragment_box);
+            m.tuning.max_flying=capacity;m.hull_reserve=0;m.ground_waits=waits;
+            let mut removed=0u64;let mut stalled=false;let mut ticks=0;
+            for tick in 0..512 {
+                // Explicitly release occupied capacity, not simulated landing:
+                // this oracle contains no heat, collapse or moving geometry.
+                if tick%3==2 {for f in &mut m.debris.fragments {f.resting=true;f.velocity=phys::V3::ZERO;}}
+                let before=removed;
+                e.advance_frontier(c.wave_work_per_tick,&w,&[]);
+                e.read_contacts_with(&w,c.wave_work_per_tick,&[],Some((&m,&c,m.remaining_mj)));
+                e.step_with_room::<true>(&mut w,c.wave_work_per_tick,&mut[],&mut dents,&mut Vec::new(),&c,Some(&mut m),None);
+                w.flush();
+                removed+=w.completed().iter().filter(|(e,b)|e.mat==0 && *b!=0).count() as u64;
+                m.debris.confirm(w.completed(),&mut m.economy,&m.tuning);
+                let pieces=m.debris.fragments.iter().map(|f|u64::from(f.count)).sum::<u64>();
+                if w.queued()==0 && m.debris.claims()==0 {
+                    assert_eq!(pieces+m.admission.pulverized,removed,"unowned or duplicate removal: cap={capacity} waits={waits} tick={tick}");
                 }
+                assert!(m.debris.fragments.iter().filter(|f|!f.resting).count()<=capacity as usize);
                 assert!(m.economy.ledger.balanced());
-                stalled |= r.explosion.as_ref().is_some_and(|e| !e.pending.is_empty())
-                    && r.removed == before;
-                working += usize::from(r.explosion.as_ref().is_some_and(|e| e.working()));
-                if r.impact.is_some() && r.ready() {
-                    break;
-                }
+                stalled|=e.working() && removed==before;ticks=tick+1;
+                if !e.working() && w.queued()==0 && m.debris.claims()==0 {break;}
             }
-            assert!(
-                r.ready() && r.removed > 100,
-                "waits={waits} removed={}",
-                r.removed
-            );
-            if waits {
-                assert!(stalled, "the waiting policy no longer waits");
-            } else {
-                assert!(working <= 15, "the pulverising wave worked {working} ticks");
-                assert!(r.matter.admission.pulverized > 0, "nothing was pulverised");
-            }
-            assert_eq!(
-                r.removed_materials, ordinary.removed_materials,
-                "waits={waits}"
-            );
-            assert_eq!(r.matter.spent_mj, ordinary.matter.spent_mj, "waits={waits}");
-        }
+            assert!(!e.working() && w.queued()==0 && m.debris.claims()==0,"admission did not drain");
+            assert!(removed>100);assert_eq!(m.admission.ground[1],0,"fixture exhausted its fracture budget");
+            if waits {assert!(stalled,"waiting policy never waited");}
+            else if capacity==16 {assert!(m.admission.pulverized>0);}
+            let profile:Vec<_>=(48..112).flat_map(|z|(0..64).flat_map(move|y|(48..112).map(move|x|(x,y,z))))
+                .map(|(x,y,z)|w.material(x,y,z)).collect();
+            println!("POOL_CRATER capacity={capacity} waits={waits} ticks={ticks} removed={removed} spent={}",m.spent_mj);
+            (profile,removed,m.spent_mj)
+        };
+        let ordinary=trial(4096,false);
+        for waits in [false,true] {assert_eq!(trial(16,waits),ordinary,"waits={waits}");}
     }
     #[test]
     fn switching_to_annihilation_keeps_existing_physical_debris() {
@@ -13761,14 +14948,12 @@ mod tests {
         let r = BlastRange::with_layout(config(), layout.clone()).unwrap();
         assert_eq!(r.gun.motion.step, course.step_height);
         for (u, def) in r.units.iter().zip(&layout.units) {
-            assert_eq!(
-                u.motion.step,
-                if def.kind == RangeUnitKind::Tank {
-                    course.step_height
-                } else {
-                    course.walker_step_height
-                }
-            );
+            if def.kind==RangeUnitKind::Tank {
+                assert_eq!(u.motion.step,course.step_height);
+            } else {
+                assert!(u.motion.step>course.walker_step_height);
+                assert!(u.motion.step<=10,"course override lost the multiped capability cap");
+            }
         }
         assert!(r.units.iter().any(|u| u.kind == RangeUnitKind::Strider));
     }
@@ -15278,4 +16463,18 @@ mod tests {
             BlastRange::restore(c, &a.snapshot()).unwrap().state_hash()
         );
     }
+
+    #[test]
+    fn state_hash_caller_scratch_is_byte_identical_and_cleared_between_worlds() {
+        let mut a=BlastRange::new(config());
+        let hash=|bytes:&[u8]|bytes.iter().fold(0xcbf29ce484222325u64,|h,&v|(h^u64::from(v)).wrapping_mul(0x100000001b3));
+        let bytes=a.snapshot();let expected=hash(&bytes);
+        let mut scratch=fx::blob::Blob{v:vec![0xa5;64]};
+        assert_eq!(a.state_hash_with_scratch(&mut scratch),expected);assert_eq!(scratch.v,bytes);
+        let capacity=scratch.v.capacity();assert_eq!(a.state_hash(),expected);
+        assert_eq!(a.state_hash_with_scratch(&mut scratch),expected);assert_eq!(scratch.v.capacity(),capacity);
+        a.tick+=1;let changed=a.snapshot();assert_ne!(hash(&changed),expected);
+        assert_eq!(a.state_hash_with_scratch(&mut scratch),hash(&changed));assert_eq!(scratch.v,changed);
+    }
+
 }

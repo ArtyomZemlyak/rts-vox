@@ -448,7 +448,7 @@ fn artillery_solution_matches_the_actual_muzzle_on_slopes_and_at_different_heigh
                 u.turret_pitch = aim.pitch;
                 let from = weapons::muzzles(u, aim.yaw)[0];
                 let [x, y, z] = velocity(from, target, weapon, config, milli);
-                let axis = u.root_frame(usize::from(u.body.turret_y)).x;
+                let axis = u.muzzle_frame(&u.pose, u.turret_delta, u.turret_pitch).x;
                 let error = angle_between(axis, V3::new(x, y, z));
                 assert!(
                     error <= r.turret_limits.tolerance,
@@ -489,9 +489,8 @@ fn artillery_elevates_before_launch_and_replays_during_the_slew_and_flight() {
                 let config = r.battle.config(p.weapon);
                 let mut v = p.velocity;
                 v[1] = v[1].add(Fx::from_ratio(config.gravity, crate::TICKS_PER_SECOND));
-                let axis = r.units[0]
-                    .root_frame(usize::from(r.units[0].body.turret_y))
-                    .x;
+                let u = &r.units[0];
+                let axis = u.muzzle_frame(&u.pose, u.turret_delta, u.turret_pitch).x;
                 assert!(angle_between(axis, V3::new(v[0], v[1], v[2])) <= 12);
                 let muzzle = weapons::muzzles(&r.units[0], r.battle.actors[0].turret.angle)[0];
                 assert_eq!(p.previous, muzzle);

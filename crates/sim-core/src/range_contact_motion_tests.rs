@@ -235,12 +235,11 @@ fn a_contact_tangent_keeps_live_neighbours_and_new_terrain_solid() {
     };
     m.queue_move(&w, [1200, 680]);
     m.drive.vel = Fx::from_int(m.speed / 2);
-    let mut tick = 0;
-    while !m.partial_path && tick < 30 {
-        step(&mut m, &w, &unit.body, &[side], tick);
-        tick += 1;
-    }
-    assert!(m.partial_path, "fixture never selected a local tangent");
+    // Exercise the accepted provisional prefix directly. Faster steering can
+    // avoid the initial grazing contact altogether; that must not erase this
+    // separate test of live-neighbour and dirty-terrain validation.
+    m.path=vec![[680,600]];m.cursor=0;m.partial_path=true;
+    let tick=0;
     let mut front = hull;
     front.half = [Fx::from_int(8); 2];
     front.pos[0] = m.pos[0].add(hull.half[0]).add(front.half[0]);

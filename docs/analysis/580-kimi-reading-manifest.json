@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-13",
+  "scope": "17 identified Kimi reviews and related status/addenda; not every analysis file has Kimi authorship",
+  "total_lines": 9006,
+  "reports": [
+    {
+      "id": 526,
+      "path": "docs/analysis/526-economy-balance-simulation.md",
+      "lines": 1085,
+      "sha256": "e0f83f38c326b623ac4ee841afcae686c97a032441c0795fc0974cdf27094c56",
+      "read_through": 1085
+    },
+    {
+      "id": 527,
+      "path": "docs/analysis/527-implementation-status-20261108.md",
+      "lines": 176,
+      "sha256": "218a6ef83597a4ff84a05adfb573c5f1e3876957ad9299008ab0998e334ed8c2",
+      "read_through": 176
+    },
+    {
+      "id": 557,
+      "path": "docs/analysis/557-universal-locomotion-review-20261111.md",
+      "lines": 906,
+      "sha256": "f2e3f1cd79bc175253fad35a26f23fd82e83bcf8663bfa87249ec7c5ce7c486d",
+      "read_through": 906
+    },
+    {
+      "id": 559,
+      "path": "docs/analysis/559-dynamic-terrain-and-rubble-review-20261111.md",
+      "lines": 714,
+      "sha256": "a70f46702ba6d654d85d4daa0bfae1c9b7b9704ff081fc7f334931ae5dd162a7",
+      "read_through": 714
+    },
+    {
+      "id": 560,
+      "path": "docs/analysis/560-current-motion-engine-review-20261111.md",
+      "lines": 428,
+      "sha256": "cd488b6c2906d343dca3b2b42aa31b10a586d6837bc8282af5e3af2d5e962ebc",
+      "read_through": 428
+    },
+    {
+      "id": 561,
+      "path": "docs/analysis/561-motion-contact-planning-optimization-20261111.md",
+      "lines": 436,
+      "sha256": "249769f8136c661101cda4f81df99b1c5154c095d9757ab560763e50349d55d0",
+      "read_through": 436
+    },
+    {
+      "id": 562,
+      "path": "docs/analysis/562-biped-locomotion-review-20261111.md",
+      "lines": 510,
+      "sha256": "f3cbd449540e91860ee49ccde0fb141fba07f1382e2935ba53627ca94d14d87a",
+      "read_through": 510
+    },
+    {
+      "id": 563,
+      "path": "docs/analysis/563-cross-system-locomotion-review-20261112.md",
+      "lines": 391,
+      "sha256": "bc0851f53ec89e65e1c218c88ad23c9e94ec764e27830dae8e0785244406f608",
+      "read_through": 391
+    },
+    {
+      "id": 564,
+      "path": "docs/analysis/564-locomotion-acceptance-and-evidence-20261112.md",
+      "lines": 303,
+      "sha256": "decce2036106604be9ce7642625fdf2e4ead0468c14166db4fda65968edcb8b2",
+      "read_through": 303
+    },
+    {
+      "id": 570,
+      "path": "docs/analysis/570-biped-gait-implementation-review-20261112.md",
+      "lines": 342,
+      "sha256": "921151e3b02556b074064573a3329bb2ca1be3110b0bba103ad91e73fdb1a90d",
+      "read_through": 342
+    },
+    {
+      "id": 571,
+      "path": "docs/analysis/571-gait-support-coordination-20261112.md",
+      "lines": 270,
+      "sha256": "f4416af678f6441610b02de929ce4fa35348e3afe2f2aad5cad63904c2096143",
+      "read_through": 270
+    },
+    {
+      "id": 572,
+      "path": "docs/analysis/572-ai-architecture-and-optimization-review-20261112.md",
+      "lines": 609,
+      "sha256": "b59b631904eba1054932996665e15157f0633643881bc00aee8c21172cf53bef",
+      "read_through": 609
+    },
+    {
+      "id": 573,
+      "path": "docs/analysis/573-walking-terrain-and-support-review-20261112.md",
+      "lines": 396,
+      "sha256": "b229938167d551f3fd2382e602e6497b7ab23beaf1413f58480899abcf98a19b",
+      "read_through": 396
+    },
+    {
+      "id": 574,
+      "path": "docs/analysis/574-walking-locomotion-directions-20261112.md",
+      "lines": 1293,
+      "sha256": "a720b263efcd12ad5caeefb6066b83c0057517bef51286d4a53b9a4b4f6bb537",
+      "read_through": 1293
+    },
+    {
+      "id": 575,
+      "path": "docs/analysis/575-contact-validity-and-disabled-support-20261112.md",
+      "lines": 383,
+      "sha256": "221c356c3e58f3980133660f397df8eadb4f15a82d6ef5f0009ea5b1c9aca374",
+      "read_through": 383
+    },
+    {
+      "id": 576,
+      "path": "docs/analysis/576-forest-belly-gradient-review-20261112.md",
+      "lines": 301,
+      "sha256": "f677f823f5c0b781c4f1773f807ff94b5c1f8bb8e020d1612e99de5c7671b8a1",
+      "read_through": 301
+    },
+    {
+      "id": 577,
+      "path": "docs/analysis/577-walking-locomotion-final-report-20261112.md",
+      "lines": 463,
+      "sha256": "92163ec1cc30e185bda98a9e95023d1ac90fdaea01c092102b04e2e09350231a",
+      "read_through": 463
+    }
+  ]
+}

@@ -85,3 +85,64 @@ fn walker_bent_pose_native_fixture_roundtrips_through_the_real_snapshot() {
     std::fs::create_dir_all(&out).unwrap();
     std::fs::write(out.join("preview.bin"), saved).unwrap();
 }
+
+#[test]
+fn walker_final_traverse_does_not_snap_faster_than_the_approach() {
+    let mut u = RangeUnit::of_kind(RangeUnitKind::Walker04, [600,16,600]);
+    settle(&mut u, [1600,200,600]);
+    let target = [1500,200,1150];
+    let mut previous_step = [0i32;4];
+    let yaw = |u: &RangeUnit, arm: usize| {
+        let d = u.seg_frames[26+arm].x;
+        fx::angle::atan2(d.z.raw(),d.x.raw())
+    };
+    for tick in 0..140 {
+        let old: [i32;4] = std::array::from_fn(|a|yaw(&u,a));
+        u.set_arm_targets([target;4],0);
+        for arm in 0..4 {
+            let step = fx::angle::diff(yaw(&u,arm),old[arm]).abs();
+            if tick > 1 {
+                assert!(step <= previous_step[arm] * 2 + fx::angle::FULL / 512,
+                    "arm {arm} snapped while settling: tick {tick}, {step} after {}",previous_step[arm]);
+            }
+            previous_step[arm] = step;
+        }
+        joints(&u);
+    }
+    assert_eq!(u.arm_targets,Some([target;4]),"servo did not finish precisely");
+}
+
+#[test]
+fn walker_distance_changes_cannot_instantly_flatten_the_arm() {
+    let mut u = RangeUnit::of_kind(RangeUnitKind::Walker04, [600,16,600]);
+    settle(&mut u,[850,400,600]);
+    let before = u.seg_frames[13].x;
+    u.set_arm_targets([[1800,400,600];4],0);
+    let after = u.seg_frames[13].x;
+    let dot = before.dot(after);
+    assert!(dot >= fx::angle::cos(fx::angle::FULL * 5 / 360),
+        "changing only range snapped the bore: cosine {dot:?}");
+    joints(&u);
+}
+
+#[test]
+fn walker_readiness_tracks_the_bore_instead_of_waiting_for_marker_range() {
+    assert!(bore_ready(V3::new(Fx::ONE,Fx::ZERO,Fx::ZERO),V3::new(Fx::from_int(1000),Fx::ZERO,Fx::ZERO)));
+    assert!(!bore_ready(V3::new(Fx::ONE,Fx::ZERO,Fx::ZERO),V3::new(Fx::from_int(-1000),Fx::ZERO,Fx::ZERO)));
+    assert!(!bore_ready(V3::new(Fx::ONE,Fx::ZERO,Fx::ZERO),V3::new(Fx::from_int(1000),Fx::from_int(2),Fx::ZERO)));
+    let mut u=RangeUnit::of_kind(RangeUnitKind::Walker04,[600,16,600]);
+    settle(&mut u,[1600,200,600]);
+    let mut moving_ready=0;
+    for tick in 0..180 {
+        let target=[1600+tick*2,200,600];u.set_arm_targets([target;4],0);
+        for (arm,from) in super::super::weapons::walker_muzzles(&u) {
+            let delta=V3::new(Fx::from_int(target[0]).sub(from[0]),Fx::from_int(target[1]).sub(from[1]),Fx::from_int(target[2]).sub(from[2]));
+            if bore_ready(u.seg_frames[13+arm*4].x,delta) {
+                moving_ready+=1;
+            }
+        }
+        joints(&u);
+    }
+    assert!(moving_ready>100,"aligned arms never became ready for a receding target");
+    assert_eq!(u.arm_targets,Some([[1958,200,600];4]),"small receding-range updates must not trail indefinitely");
+}

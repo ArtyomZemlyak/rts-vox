@@ -168,8 +168,17 @@ pub(super) fn describe(
     };
     let edge = voxel::unit::WORLD_MM;
     let mut text = format!("КУБ МИРА · {} × {} × {} см\n{name} · ID {material}\nX {} · Y {} · Z {}\nНачало, мм: {} / {} / {}\nОбъём: {} см³\n{owner}\n\nСОСТОЯНИЕ · тик {}\nФаза: {phase}\nНагрев: {heat} ед. тепла\nГорение: {} тиков\nРабота деформации: {work}\nВлажность: {wet}\nВода: {} / {}\nКопка в очереди: {}\nЗарезервировано разрушением: {}\nГраница мира: {}",edge/10,edge/10,edge/10,at[0],at[1],at[2],i64::from(at[0])*i64::from(edge),i64::from(at[1])*i64::from(edge),i64::from(at[2])*i64::from(edge),(edge/10).pow(3),sim.tick,info.heat.burn,info.water,info.water_capacity,yes(info.pending_dig),yes(info.claimed),yes(info.frame));
+    let drop_heat = lab.tools.fragment.and_then(|hit| sim.matter.debris.fragments.iter()
+        .find(|f| f.id == hit.id).and_then(|f| sim.matter.debris.molten_heat(f.id)
+            .map(|energy| (energy, sim_core::blast::thermal::temperature(energy, f.mm)))));
     if separate {
         text=format!("КУБ МИРА · {} × {} × {} см\n{name} · ID {material}\nX {} · Y {} · Z {}\n{owner}\n\nСОСТОЯНИЕ · тик {}\nФаза: {phase}\nНагрев и влажность для этого куска отдельно не отслеживаются. Свойства грунта под ним не используются.",edge/10,edge/10,edge/10,at[0],at[1],at[2],sim.tick);
+    }
+    if separate {
+        if let Some((energy, temperature)) = drop_heat {
+            text = text.replace("Нагрев и влажность для этого куска отдельно не отслеживаются.",
+                &format!("Нагрев капли: {energy} ед. тепла · на объём 100 мм: {temperature}. Влажность отдельно не отслеживается."));
+        }
     }
     if let Some(m) = sim.matter.economy.mats.get(material) {
         text += &format!("\n\nСВОЙСТВА МАТЕРИАЛА\nПлотность: {}\nПрочность: {}\nПролёт опоры: {} клеток\nСыпучий: {}\nВредит при касании: {}\nТепло горения: {}\nПорог воспламенения: {}\nПорог плавления: {}",m.density,m.strength,m.bend_span,yes(m.loose),yes(m.harmful),m.fuel,threshold(m.kindling),threshold(m.melt));

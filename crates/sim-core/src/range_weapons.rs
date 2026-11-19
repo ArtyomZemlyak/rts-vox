@@ -473,6 +473,59 @@ impl BlastRange {
     ) -> Trace {
         self.laser_ray_mode(from, target, owner, tuning, config, true, observers)
     }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn laser_ray_cached(
+        &mut self,
+        from: [Fx; 3],
+        target: [i32; 3],
+        owner: Option<usize>,
+        upto_id: usize,
+        cached_boxes: &mut Option<(usize, Vec<([i32; 3], [i32; 3])>)>,
+        tuning: &Stream,
+        config: &ExplosionConfig,
+        observers: (
+            &mut impl FnMut(&'static str),
+            &(impl Fn(usize, &'static str) + Sync),
+        ),
+    ) -> Trace {
+        let (completed, physics) = observers;
+        let task = |_, event| physics(2, event);
+        let beam_task =
+            PhysicsTask::new(&task, "physics_laser_beam_begin", "physics_laser_beam_end");
+        let boxes_slice: &[([i32; 3], [i32; 3])] = match cached_boxes {
+            Some((last_id, boxes)) if boxes.len() == self.units.len() => {
+                if upto_id > *last_id {
+                    let _task = PhysicsTask::new(
+                        &task,
+                        "physics_laser_boxes_begin",
+                        "physics_laser_boxes_end",
+                    );
+                    for j in (*last_id + 1)..=upto_id.min(self.units.len() - 1) {
+                        boxes[j] = self.units[j].bounds();
+                    }
+                    *last_id = upto_id;
+                }
+                boxes.as_slice()
+            }
+            _ => {
+                let fresh = laser_boxes_observed(&self.units, &task);
+                *cached_boxes = Some((upto_id, fresh));
+                cached_boxes.as_ref().unwrap().1.as_slice()
+            }
+        };
+        self.laser_ray_inner(
+            from,
+            target,
+            owner,
+            tuning,
+            config,
+            true,
+            boxes_slice,
+            beam_task,
+            completed,
+            &task,
+        )
+    }
     pub(super) fn laser_ray_mode(
         &mut self,
         from: [Fx; 3],
@@ -490,6 +543,34 @@ impl BlastRange {
         let task = |_, event| physics(2, event);
         let beam_task =
             PhysicsTask::new(&task, "physics_laser_beam_begin", "physics_laser_beam_end");
+        let boxes = laser_boxes_observed(&self.units, &task);
+        self.laser_ray_inner(
+            from,
+            target,
+            owner,
+            tuning,
+            config,
+            flame,
+            &boxes,
+            beam_task,
+            completed,
+            &task,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn laser_ray_inner<F: Fn(usize, &'static str) + Sync>(
+        &mut self,
+        from: [Fx; 3],
+        target: [i32; 3],
+        owner: Option<usize>,
+        tuning: &Stream,
+        config: &ExplosionConfig,
+        flame: bool,
+        boxes: &[([i32; 3], [i32; 3])],
+        beam_task: PhysicsTask<'_, F>,
+        completed: &mut impl FnMut(&'static str),
+        task: &F,
+    ) -> Trace {
         let delta = std::array::from_fn::<_, 3, _>(|a| Fx::from_int(target[a]).sub(from[a]));
         let length = delta
             .iter()
@@ -506,7 +587,6 @@ impl BlastRange {
                 .add(direction[a].mul(Fx::from_int(tuning.range)))
                 .to_int_trunc()
         });
-        let boxes = laser_boxes_observed(&self.units, &task);
         let near: Vec<_> = boxes
             .iter()
             .enumerate()
@@ -551,6 +631,8 @@ impl BlastRange {
                 };
             }
         }
+        let molten_hits = self.matter.debris.molten_ray_contacts(from, direction, Fx::from_int(tuning.range));
+        let mut molten_hits = molten_hits.into_iter().peekable();
         let mut previous = from.map(Fx::to_int_trunc);
         let (mut end, mut free_end, mut contact, mut hit) = (from, from, None, false);
         for i in 1..=tuning.range * 2 {
@@ -571,6 +653,20 @@ impl BlastRange {
                 hit = true;
                 break;
             }
+            while molten_hits.peek().is_some_and(|(distance, _)| *distance <= Fx::from_ratio(i, 2)) {
+                let (distance, id) = molten_hits.next().unwrap();
+                let (used, vaporised) = self.matter.debris.heat_molten(id, effective.heat,
+                    &self.heat_tuning, &mut self.matter.economy);
+                effective.heat = effective.heat.saturating_sub(used);
+                effective.work = (u64::from(tuning.work) * u64::from(effective.heat)
+                    / u64::from(tuning.heat.max(1))) as u32;
+                if !vaporised || effective.heat == 0 {
+                    end = std::array::from_fn(|a| from[a].add(direction[a].mul(distance)));
+                    completed("orders_laser_query"); completed("orders_laser_contact_world");
+                    hit = true; break;
+                }
+            }
+            if hit { break; }
             // Molten matter absorbs the beam until its remaining vaporisation
             // energy is paid. Only the surplus can reach the next cell.
             let m = material(&self.world, p);
@@ -597,7 +693,7 @@ impl BlastRange {
                     .mats
                     .get(flow.solid)
                     .map_or(flow.freeze, |m| m.melt.max(flow.freeze))
-                    .saturating_mul(3)
+                    .saturating_mul(self.heat_tuning.vapor_heat_multiple)
                     .max(1);
                 let needed = threshold.saturating_sub(self.heat.cell(q).heat);
                 let absorbed = effective.heat.min(needed);
@@ -685,7 +781,7 @@ impl BlastRange {
         completed("orders_laser_beam");
         // Laser contact only deposits heat (or drains a shield); it never
         // edits body geometry. The halo therefore reads these same boxes.
-        self.laser_halo_with_boxes(from, free_end, contact, &effective, owner, (&boxes, &task));
+        self.laser_halo_with_boxes(from, free_end, contact, &effective, owner, (boxes, task));
         completed("orders_laser_halo");
         Trace {
             from,
@@ -1028,7 +1124,7 @@ pub(super) fn muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
             .map(|(_, point)| point)
             .collect();
     }
-    let f = u.aimed_frame(
+    let f = u.muzzle_frame(
         &u.pose,
         fx::angle::diff(angle, u.motion.drive.head),
         u.turret_pitch,
@@ -1036,10 +1132,11 @@ pub(super) fn muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
     u.body
         .weapon_paths()
         .iter()
-        .filter(|p| u.body.barrel_connected(p, u.connectivity.reached_cols()))
+        .enumerate()
+        .filter(|(i, _)| u.barrel_connected(*i))
         .take(2)
-        .map(|p| {
-            let v = f.world(muzzle_cell(p));
+        .map(|(i, _)| {
+            let v = f.world(muzzle_cell(u.weapon_path(i).expect("connected weapon")));
             [v.x, v.y, v.z]
         })
         .collect()
@@ -1251,6 +1348,49 @@ mod tests {
     }
 
     #[test]
+    fn liquid_body_and_world_absorb_identical_heat_before_vaporisation_and_surplus() {
+        let make = || laser_range(vec![modding::range::RangeBlock {
+            min: [240, 100, 336], max: [241, 101, 337], material: 3,
+        }]);
+        let mut world = make();
+        let mut body = make();
+        world.world.queue_transfer(voxel::Edit::put(230, 100, 336, 13));
+        world.world.flush_transfers();
+        world.heat.add(&world.world, [230, 100, 336], 500);
+        world.heat.mark_molten([230, 100, 336]);
+        let mut source = None;
+        for z in 0..body.units[0].body.vol.nz {
+            for y in 0..body.units[0].body.vol.ny {
+                for x in 0..body.units[0].body.vol.nx {
+                    if body.units[0].body.vol.get(x as usize, y as usize, z as usize) {
+                        source.get_or_insert([x as usize, y as usize, z as usize]);
+                    }
+                }
+            }
+        }
+        assert!(body.matter.melt_unit(0, &body.units[0], 0, source.unwrap()));
+        body.matter.liquefy_last_body_fragment(500);
+        let f = body.matter.debris.fragments.last_mut().unwrap();
+        assert_eq!(f.mm, voxel::unit::WORLD_MM);
+        f.position = phys::V3::new(Fx::from_ratio(461, 2), Fx::from_ratio(201, 2), Fx::from_ratio(673, 2));
+        let mut tuning = body.streams.tuning.laser.clone();
+        tuning.heat = 200; tuning.heat_radius = 0;
+        let from = [Fx::from_int(100), Fx::from_ratio(201, 2), Fx::from_ratio(673, 2)];
+        for shot in 0..3 {
+            for sim in [&mut world, &mut body] {
+                let config = sim.config;
+                let trace = sim.laser_ray(from, [250, 100, 336], None, &tuning, &config, (&mut |_| {}, &|_, _| {}));
+                assert!(trace.hit);
+                assert_eq!(sim.heat.cell([240, 100, 336]).heat, if shot < 2 { 0 } else { 20 });
+            }
+        }
+        assert!(body.matter.debris.molten.cells.is_empty());
+        assert!(world.world.has_pending_dig(230, 100, 336));
+        assert!(body.matter.economy.ledger.sunk(crate::matter::Sink::Pulverised) > 0);
+        assert!(body.matter.economy.ledger.balanced());
+    }
+
+    #[test]
     fn sustained_laser_opens_a_hole_and_accounts_for_vaporised_matter() {
         let mut r = laser_range(vec![modding::range::RangeBlock {
             min: [230, 0, 330],
@@ -1263,8 +1403,20 @@ mod tests {
         assert!(r.refire());
         let mut first = None;
         let mut passed = false;
-        for _ in 0..45 {
+        let mut replay = None;
+        for tick in 0..360 {
             r.step();
+            if let Some(copy) = &mut replay {
+                let copy: &mut BlastRange = copy;
+                copy.step();
+                assert_eq!(r.state_hash(), copy.state_hash(), "sustained beam tick {tick}");
+            }
+            if tick == 120 {
+                let mut copy = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+                // This controlled vaporisation fixture pins flow off in both runs.
+                copy.heat_tuning.melt_moves_per_tick = r.heat_tuning.melt_moves_per_tick;
+                replay = Some(copy);
+            }
             if let Some(t) = r.streams.traces.first() {
                 let p = t.to.map(Fx::to_int_trunc);
                 first.get_or_insert(p);
@@ -1410,6 +1562,48 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn cached_laser_boxes_refresh_incrementally_and_match_fresh_laser_ray() {
+        let make = || {
+            let mut r = laser_range(vec![]);
+            r.units.push(RangeUnit::of_kind(RangeUnitKind::Spider, [220, 16, 336]));
+            r.units.push(RangeUnit::of_kind(RangeUnitKind::Strider, [320, 16, 336]));
+            r
+        };
+        let mut a = make();
+        let mut b = make();
+        let cfg = a.config.clone();
+        let stream = a.streams.tuning.laser.clone();
+        let mut cache = None;
+        for step in 0..3usize {
+            a.units[step].motion.drive.head = (step as i32 + 1) * 29;
+            a.units[step].update_pose((step as i32 + 1) * 43);
+            b.units[step].motion.drive.head = (step as i32 + 1) * 29;
+            b.units[step].update_pose((step as i32 + 1) * 43);
+            for sample in 0..2 {
+                let from = [
+                    Fx::from_int(120 + sample * 3),
+                    Fx::from_int(24),
+                    Fx::from_int(336),
+                ];
+                let target = [420, 22 + sample * 2, 336];
+                let t1 = a.laser_ray_cached(
+                    from,
+                    target,
+                    Some(step),
+                    step,
+                    &mut cache,
+                    &stream,
+                    &cfg,
+                    (&mut |_| {}, &|_, _| {}),
+                );
+                let t2 = b.laser_ray(from, target, Some(step), &stream, &cfg, (&mut |_| {}, &|_, _| {}));
+                assert_eq!((t1.from, t1.to, t1.hit, t1.serial), (t2.from, t2.to, t2.hit, t2.serial));
+                assert_eq!(a.state_hash(), b.state_hash(), "cached ray changed heat/shields/matter at step={step} sample={sample}");
+            }
+        }
+    }
+
     #[test]
     fn laser_boxes_preserve_slots_and_fresh_articulated_poses_across_workers() {
         let kinds = [

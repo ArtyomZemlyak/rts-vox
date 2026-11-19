@@ -10,6 +10,8 @@ pub mod coarse;
 mod connection;
 mod profile;
 mod rubble_index;
+pub mod support;
+pub mod transition;
 use connection::Connection;
 use fx::{angle, Fx};
 use std::{
@@ -27,6 +29,12 @@ pub type SweepSamples = (Shape, Vec<([Fx; 2], i32)>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shape {
+    /// Retain continuous belt support when surface detail is enabled.
+    /// Derived from the owner, like detail; not an independent save field.
+    pub continuous: bool,
+    /// Derived torso-ground detail radius. Zero preserves exact terrain.
+    /// The owner restores this from its body/profile, not from saved state.
+    pub detail: i32,
     pub half: [i32; 2],
     pub support: [i32; 2],
     pub clearance: Fx,
@@ -38,11 +46,36 @@ pub struct Shape {
     /// Contact length of a support along the heading, both ways, in world
     /// units. A track bridges a gap shorter than this; zero is a point.
     pub span: i32,
+    /// Extra planner approach lookahead beyond `span`, world units. Extends
+    /// slope/step probing without widening the belt bridge (`2*k <= span`).
+    pub reach: i32,
+    /// Hysteresis allowance for monotonic grade-exit transitions.
+    pub grade_slack: Fx,
     /// Approach slope: a rise seen `k` units along the span counts as
     /// `rise - ramp * k`, so the hull climbs a step over its run-up instead
     /// of snapping onto it, and settles off a ledge the same way.
     pub ramp: Fx,
 }
+impl Shape {
+    /// Outer raw samples consulted by the derived support grid.
+    pub fn detail_halo(self)->i32 {
+        let d=self.detail.max(0).min(self.step.max(0)).min(32);
+        if d==0 {0} else {(d as u32*2).next_power_of_two() as i32+d}
+    }
+    /// A tall body may overhang articulated supports by several support
+    /// spans. A pebble at one support must not extrapolate that small height
+    /// difference through the whole overhang into a fictitious buried belly.
+    /// Keep the full terrain grade for admission; only fit the belly plane.
+    fn wide_high_belly(self)->bool {
+        self.clearance>Fx::from_int(self.step.saturating_mul(2))
+            && self.half[0]>self.support[0].saturating_mul(3)
+            && self.half[1]>self.support[1].saturating_mul(3)
+    }
+}
+
+#[cfg(test)]
+#[path = "vehicle_walking_tests.rs"]
+mod walking_detail_tests;
 #[derive(Clone, Copy, Debug)]
 pub struct Pose {
     pub height: Fx,
@@ -51,6 +84,8 @@ pub struct Pose {
     pub blocked: usize,
     /// A support's contact sees a rise its belt cannot grip.
     pub steep: bool,
+    /// Amount by which the steepest grade or corner step exceeds its limit.
+    pub excess: Fx,
     /// The hull would lean past its tilt limit.
     pub tilt: bool,
     /// Footprint columns holding yielding matter inside the hull height.
@@ -80,6 +115,8 @@ pub struct Rubble(
     Vec<([i32; 2], u16)>,
     std::sync::OnceLock<rubble_index::Index>,
     std::sync::OnceLock<([u32; 2], std::sync::Arc<coarse::DebrisTiles>)>,
+    support::Sources,
+    Changed,
 );
 impl Rubble {
     pub fn new() -> Self {
@@ -89,7 +126,7 @@ impl Rubble {
     /// gather gives them.
     pub fn from_sorted(columns: Vec<([i32; 2], u16)>) -> Self {
         debug_assert!(columns.windows(2).all(|p| p[0].0 < p[1].0));
-        Self(columns, Default::default(), Default::default())
+        Self(columns, Default::default(), Default::default(), Default::default(), Default::default())
     }
     /// Only rectangle readers need the derived tree. A freshly gathered map
     /// may compare equal to the previous map and be discarded without any
@@ -249,6 +286,10 @@ impl Changed {
     pub fn is_empty(&self) -> bool {
         !self.all && self.pages.is_empty()
     }
+    /// Side length of one dirty-page cell in world units.
+    pub const fn page_side() -> i32 {
+        PAGE_SIDE as i32
+    }
     /// The page holding column `(x, z)` changed.
     pub fn column(&mut self, x: i32, z: i32) {
         self.pages.insert(page_of(x, z));
@@ -286,6 +327,14 @@ impl Changed {
     /// The segment/rectangle separating axes reject distant edits inside a
     /// diagonal leg's large bounding box without probing any terrain.
     pub fn touches_segment(&self, from: [i32; 2], to: [i32; 2], radius: i32) -> bool {
+        self.touches_segment_after(from,to,radius,None)
+    }
+    /// Route changes beyond the walker's currently owned support region.
+    /// Current soles still consume every local dirty event before root commit.
+    pub fn touches_segment_beyond(&self,from:[i32;2],to:[i32;2],radius:i32,near:[i32;2])->bool {
+        self.touches_segment_after(from,to,radius,Some(near))
+    }
+    fn touches_segment_after(&self,from:[i32;2],to:[i32;2],radius:i32,near:Option<[i32;2]>)->bool {
         if self.all {
             return true;
         }
@@ -307,6 +356,16 @@ impl Changed {
             .any(|p| {
                 if !(a[1]..=b[1]).contains(&p[1]) {
                     return false;
+                }
+                if let Some(near)=near {
+                    let edge=[0,1].map(|a| {
+                        let q=i128::from(p[a])+i128::from(d[a]>=0);
+                        q*PAGE_SIDE as i128-i128::from(from[a])
+                    });
+                    let forward=d[0]*edge[0]+d[1]*edge[1];
+                    let owned=d[0].abs()*i128::from(near[0].max(0))
+                        +d[1].abs()*i128::from(near[1].max(0));
+                    if forward<owned {return false;}
                 }
                 let low = p.map(|q| i128::from(q) * PAGE_SIDE as i128 - i128::from(radius));
                 let high = p.map(|q| (i128::from(q) + 1) * PAGE_SIDE as i128 + i128::from(radius));
@@ -349,6 +408,28 @@ impl Changed {
         s.ok().then_some(Self { all, pages })
     }
 }
+#[cfg(test)]
+mod support_route_change_tests {
+    use super::Changed;
+    #[test]
+    fn owned_support_region_keeps_ahead_reverse_and_cold_changes_visible() {
+        let from=[128,128];let to=[512,128];
+        let mut near=Changed::default();near.column(144,128);
+        assert!(near.touches_segment(from,to,96));
+        assert!(!near.touches_segment_beyond(from,to,96,[64,64]));
+        let mut ahead=near.clone();ahead.column(240,128);
+        assert!(ahead.touches_segment_beyond(from,to,96,[64,64]));
+        let mut rear=Changed::default();rear.column(80,128);
+        assert!(!rear.touches_segment_beyond(from,to,96,[64,64]));
+        let mut reverse=Changed::default();reverse.column(16,128);
+        assert!(reverse.touches_segment_beyond(from,[-256,128],96,[64,64]));
+        assert!(!near.touches_segment_beyond(from,[-256,128],96,[64,64]));
+        assert!(near.touches_segment_beyond(from,from,96,[64,64]));
+        assert!(Changed::everywhere().touches_segment_beyond(from,to,96,[4096,4096]));
+        assert!(!Changed::default().touches_segment_beyond(from,to,96,[64,64]));
+    }
+}
+
 /// Prints of a rubble map by cache page (ADR-427): FNV-1a over the page's
 /// columns in key order. Two maps whose prints differ on a page differ
 /// there; equal prints are equal columns but for a collision, which reads
@@ -608,7 +689,7 @@ fn pages_across(size: [u32; 2]) -> [i32; 2] {
 /// run along the heading, the corner patch (no wider than the step) and
 /// the neighbour a surface sample blends in.
 fn reach(s: Shape) -> i32 {
-    s.half[0].max(s.support[0]) + s.half[1].max(s.support[1]) + s.span.max(0) + s.step.max(0) + 2
+    s.half[0].max(s.support[0]) + s.half[1].max(s.support[1]) + s.span.max(0) + s.step.max(0) + s.detail_halo() + 2
 }
 /// Cached column answers for a suspended search. Pages are bounded and moved
 /// into the next probe; none survives a change on it or enters a save.
@@ -616,6 +697,23 @@ fn reach(s: Shape) -> i32 {
 pub struct Columns {
     pages: Vec<Option<Arc<ColumnPage>>>,
     replacement: Vec<u8>,
+    ground_cells: Option<Arc<GroundCells>>,
+}
+const GROUND_CELL_BUCKETS: usize = 256;
+#[derive(Clone, Debug)]
+struct GroundCells {
+    slots: [[(i32, i32, i32, Fx); 4]; GROUND_CELL_BUCKETS],
+    replacement: [u8; GROUND_CELL_BUCKETS],
+    bounds: Option<([i32; 2], [i32; 2])>,
+}
+impl GroundCells {
+    fn new() -> Self {
+        Self {
+            slots: [[(0, 0, 0, Fx::ZERO); 4]; GROUND_CELL_BUCKETS],
+            replacement: [0; GROUND_CELL_BUCKETS],
+            bounds: None,
+        }
+    }
 }
 /// Transient exact geometry, with worker reads accounted separately from
 /// logical search work. No answers or cache pages enter a saved search.
@@ -630,6 +728,7 @@ pub struct PreparedSweep {
 pub struct StartSweep {
     pub shape: Shape,
     pub samples: Vec<([Fx; 2], i32)>,
+    pub count_crush: bool,
     height: Fx,
     initial: bool,
 }
@@ -640,10 +739,9 @@ impl StartSweep {
         let mut steep = None;
         for (i, pose) in poses.iter().enumerate() {
             if !(i == 0 && self.initial)
-                && (pose.blocked != 0
-                    || pose.tilt
-                    || pose.steep && steep == Some(false)
-                    || pose.height.sub(height).abs() > Fx::from_int(self.shape.step))
+                && (!transition::TransitionProof::geometry([Fx::ZERO;2],[Fx::ZERO;2],
+                        Pose {height,steep:steep.unwrap_or(true),..*pose},*pose,self.shape,
+                        transition::Policy::fine(self.shape,steep!=Some(false))).accepted())
             {
                 return false;
             }
@@ -657,6 +755,31 @@ impl Columns {
     /// Drop the pages a change touched; the rest still answer for the
     /// world as it is (ADR-427).
     fn forget(&mut self, changed: &Changed) {
+        if changed.is_empty() {
+            return;
+        }
+        if self
+            .ground_cells
+            .as_ref()
+            .and_then(|c| c.bounds)
+            .is_some_and(|(lo, hi)| changed.touches(lo, hi))
+        {
+            let cache = Arc::make_mut(self.ground_cells.as_mut().unwrap());
+            for bucket in &mut cache.slots {
+                for entry in bucket {
+                    let r = entry.0;
+                    if r <= 0 {
+                        continue;
+                    }
+                    let side = (r as u32 * 2).next_power_of_two() as i32;
+                    let cx = entry.1 * side + r;
+                    let cz = entry.2 * side + r;
+                    if changed.touches([cx - r, cz - r], [cx + r, cz + r]) {
+                        *entry = (0, 0, 0, Fx::ZERO);
+                    }
+                }
+            }
+        }
         for slot in &mut self.pages {
             if slot.as_ref().is_some_and(|p| changed.page(p.key)) {
                 *slot = None;
@@ -667,7 +790,7 @@ impl Columns {
 // Four-way set-associative pages bound a search cache independently of map or route size.
 // Eviction only repeats a pure query, never changes the search's work allowance.
 const PAGE_SIDE: usize = 32;
-const PAGE_SLOTS: usize = 128;
+const PAGE_SLOTS: usize = 512;
 #[derive(Clone, Debug)]
 struct ColumnPage {
     key: [i32; 2],
@@ -685,6 +808,7 @@ struct ColumnRow {
     yield_upper: u16,
 }
 pub struct Probe<'a> {
+    ground_cells: Option<Arc<GroundCells>>,
     world: &'a World,
     pages: Vec<Option<Arc<ColumnPage>>>,
     replacement: Vec<u8>,
@@ -706,12 +830,21 @@ pub struct Probe<'a> {
     prepared_routes: BTreeMap<(Fx, Fx, i32), Pose>,
     yielding: profile::Yielding,
     rubble: Option<&'a Rubble>,
+    support_page: support::PageCursor<'a>,
     /// Columns scanned, columns answered and surface samples taken since
     /// this probe was made: the price of a search, for benches (P-29).
     pub scans: u64,
     pub columns: u64,
     pub samples: u64,
 }
+#[inline]
+fn median5(mut values: [i32; 5]) -> i32 {
+    for (i, j) in [(0, 1), (3, 4), (2, 4), (2, 3), (0, 3), (0, 2), (1, 4), (1, 3), (1, 2)] {
+        if values[i] > values[j] { values.swap(i, j); }
+    }
+    values[2]
+}
+
 impl<'a> Probe<'a> {
     pub fn new(world: &'a World) -> Self {
         Self::with_yield(world, &[])
@@ -738,6 +871,7 @@ impl<'a> Probe<'a> {
         let w = (hi[0] - lo[0]).max(0) as usize;
         let h = (hi[1] - lo[1]).max(0) as usize;
         Self {
+            ground_cells: None,
             world,
             pages: Vec::new(),
             replacement: Vec::new(),
@@ -756,6 +890,7 @@ impl<'a> Probe<'a> {
             prepared_routes: BTreeMap::new(),
             yielding: profile::Yielding::new(yielding),
             rubble: None,
+            support_page: support::PageCursor::default(),
             scans: 0,
             columns: 0,
             samples: 0,
@@ -763,6 +898,7 @@ impl<'a> Probe<'a> {
     }
     /// Resting debris counts as floor in its columns (ADR-292).
     pub fn with_rubble(mut self, rubble: &'a Rubble) -> Self {
+        self.support_page = support::PageCursor::default();
         self.rubble = Some(rubble);
         self
     }
@@ -776,6 +912,7 @@ impl<'a> Probe<'a> {
         let mut probe = Self::window(world, yielding, [0; 2], [0; 2]);
         probe.pages = columns.pages;
         probe.replacement = columns.replacement;
+        probe.ground_cells = columns.ground_cells;
         probe
     }
     /// Reuse exact local column answers across motion ticks. Both world
@@ -794,6 +931,7 @@ impl<'a> Probe<'a> {
         Columns {
             pages: std::mem::take(&mut self.pages),
             replacement: std::mem::take(&mut self.replacement),
+            ground_cells: self.ground_cells.take(),
         }
     }
     /// Independent scratch sharing only immutable, copy-on-write page answers.
@@ -801,6 +939,7 @@ impl<'a> Probe<'a> {
         let columns = Columns {
             pages: self.pages.clone(),
             replacement: self.replacement.clone(),
+            ground_cells: self.ground_cells.clone(),
         };
         let mut fork = Self::for_search(self.world, &self.yielding, columns);
         fork.rubble = self.rubble;
@@ -817,45 +956,90 @@ impl<'a> Probe<'a> {
         let mut floor = 0;
         let mut span = [u16::MAX, 0];
         let ceiling = self.world.column_ceiling(x as u32, z as u32);
-        // The resident 8x8 navigation tile gives the exact floor of every
-        // column when its lower and upper bounds agree. If this column's
-        // ceiling is that floor, it cannot hide yielding matter above it.
+        // The resident 8x8 navigation tile proves a column bare whenever the
+        // whole tile is bare or this column's ceiling matches the tile's lowest
+        // floor, including on sloped hills where bounds[0] < bounds[1].
         if let [a, b] = self.yielding.as_slice() {
-            let bounds = self
-                .world
-                .prepared_floor_tile(x as u32 / 8, z as u32 / 8, [*a, *b]);
-            if bounds
-                .is_some_and(|bounds| bounds[0] == bounds[1] && u32::from(bounds[0]) == ceiling)
+            if let Some((bounds, bare)) =
+                self.world
+                    .prepared_floor_tile_detail(x as u32 / 8, z as u32 / 8, [*a, *b])
             {
-                floor = ceiling as u16;
-                if let Some(top) = self.rubble.and_then(|r| r.get(&[x, z])) {
-                    floor = floor.max(*top);
-                }
-                return (floor, span);
-            }
-            if let Some(bounds) = bounds.filter(|bounds| u32::from(bounds[1]) < ceiling) {
-                // The prepared tile proves yielding matter above the floor.
-                // Evaluate its column once, including the lowest possible
-                // floor voxel, instead of regenerating the tree for every Y.
-                let low = u32::from(bounds[0].saturating_sub(1));
-                let mut materials = vec![AIR; (ceiling - low) as usize];
-                self.world.column(x as u32, z as u32, low, &mut materials);
-                for (dy, &m) in materials.iter().enumerate().rev() {
-                    if m == AIR {
-                        continue;
+                if bare || u32::from(bounds[0]) == ceiling {
+                    floor = ceiling as u16;
+                    if let Some(top) = self.rubble.and_then(|r| r.get(&[x, z])) {
+                        floor = floor.max(*top);
                     }
-                    let y = low as u16 + dy as u16;
-                    if self.yields(m) {
-                        span = [span[0].min(y), span[1].max(y)];
+                    return (floor, span);
+                }
+                if u32::from(bounds[0]) < ceiling {
+                    // Evaluate the column once above the tile's lowest floor
+                    // instead of regenerating procedural hills/trees per voxel.
+                    let low = u32::from(bounds[0].saturating_sub(1));
+                    let len = (ceiling - low) as usize;
+                    let mut stack = [AIR; 256];
+                    let mut heap = Vec::new();
+                    let materials = if len <= stack.len() {
+                        &mut stack[..len]
                     } else {
-                        floor = y + 1;
-                        break;
+                        heap.resize(len, AIR);
+                        heap.as_mut_slice()
+                    };
+                    self.world.column(x as u32, z as u32, low, materials);
+                    for (dy, &m) in materials.iter().enumerate().rev() {
+                        if m == AIR {
+                            continue;
+                        }
+                        let y = low as u16 + dy as u16;
+                        if self.yields(m) {
+                            span = [span[0].min(y), span[1].max(y)];
+                        } else {
+                            floor = y + 1;
+                            break;
+                        }
                     }
+                    if let Some(top) = self.rubble.and_then(|r| r.get(&[x, z])) {
+                        floor = floor.max(*top);
+                    }
+                    return (floor, span);
                 }
-                if let Some(top) = self.rubble.and_then(|r| r.get(&[x, z])) {
-                    floor = floor.max(*top);
+            } else if ceiling > 0 && self.world.batches_material_columns() {
+                let top_y = ceiling - 1;
+                if self.world.solid(x as u32, top_y, z as u32) {
+                    let top_m = self.world.material(x as u32, top_y, z as u32);
+                    if !self.yields(top_m) {
+                        floor = ceiling as u16;
+                    } else {
+                        span = [top_y as u16, top_y as u16];
+                        if top_y > 0 {
+                            let len = top_y as usize;
+                            let mut stack = [AIR; 256];
+                            let mut heap = Vec::new();
+                            let materials = if len <= stack.len() {
+                                &mut stack[..len]
+                            } else {
+                                heap.resize(len, AIR);
+                                heap.as_mut_slice()
+                            };
+                            self.world.column(x as u32, z as u32, 0, materials);
+                            for (dy, &m) in materials.iter().enumerate().rev() {
+                                if m == AIR || !self.world.solid(x as u32, dy as u32, z as u32) {
+                                    continue;
+                                }
+                                let y = dy as u16;
+                                if self.yields(m) {
+                                    span = [span[0].min(y), span[1].max(y)];
+                                } else {
+                                    floor = y + 1;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if let Some(top) = self.rubble.and_then(|r| r.get(&[x, z])) {
+                        floor = floor.max(*top);
+                    }
+                    return (floor, span);
                 }
-                return (floor, span);
             }
         }
         // The walk starts at the column's own ceiling, not at the sky
@@ -1009,6 +1193,70 @@ impl<'a> Probe<'a> {
             None => self.world.ny as i32,
         }
     }
+
+    /// Robust coarse support cells. Belly collision and actual sole queries
+    /// keep exact columns; small isolated debris/pits do not steer the torso.
+    fn ground_cell(&mut self, x: i32, z: i32, radius: i32) -> Fx {
+        let slot = ((x as u32).wrapping_mul(73856093)
+            ^ (z as u32).wrapping_mul(19349663)
+            ^ (radius as u32).wrapping_mul(83492791)) as usize
+            & (GROUND_CELL_BUCKETS - 1);
+        if let Some(cache) = &self.ground_cells {
+            for &(r, cx, cz, h) in &cache.slots[slot] {
+                if r == radius && cx == x && cz == z {
+                    return h;
+                }
+            }
+        }
+        let side = (radius as u32 * 2).next_power_of_two() as i32;
+        let cx = x * side + radius;
+        let cz = z * side + radius;
+        let heights = [(0, 0), (-radius, 0), (radius, 0), (0, -radius), (0, radius)].map(
+            |(dx, dz)| {
+                self.floor(
+                    (cx + dx).clamp(0, self.world.nx as i32 - 1),
+                    (cz + dz).clamp(0, self.world.nz as i32 - 1),
+                )
+            },
+        );
+        let h = Fx::from_int(median5(heights));
+        let (lo, hi) = ([cx - radius, cz - radius], [cx + radius, cz + radius]);
+        if lo[0] >= 0
+            && lo[1] >= 0
+            && hi[0] < self.world.nx as i32
+            && hi[1] < self.world.nz as i32
+        {
+            let cache = Arc::make_mut(
+                self.ground_cells
+                    .get_or_insert_with(|| Arc::new(GroundCells::new())),
+            );
+            let way = usize::from(cache.replacement[slot]);
+            cache.slots[slot][way] = (radius, x, z, h);
+            cache.replacement[slot] = (cache.replacement[slot] + 1) & 3;
+            cache.bounds = Some(cache.bounds.map_or((lo, hi), |(a, b)| {
+                (
+                    [a[0].min(lo[0]), a[1].min(lo[1])],
+                    [b[0].max(hi[0]), b[1].max(hi[1])],
+                )
+            }));
+        }
+        h
+    }
+    fn terrain_surface(&mut self, p: [Fx;2], s: Shape) -> Fx {
+        let radius = s.detail.max(0).min(s.step.max(0)).min(32);
+        if radius == 0 {return self.surface(p);}
+        let side=(radius as u32*2).next_power_of_two();
+        let shift=side.trailing_zeros();
+        let q = p.map(|v| Fx(v.sub(Fx::from_int(radius)).raw() >> shift));
+        let [x,z] = q.map(|v| (v.raw() >> 32) as i32);
+        let u=q[0].sub(Fx::from_int(x));let v=q[1].sub(Fx::from_int(z));
+        let a=self.ground_cell(x,z,radius);
+        let a=if u==Fx::ZERO {a} else {a.add(self.ground_cell(x+1,z,radius).sub(a).mul(u))};
+        if v==Fx::ZERO {return a;}
+        let b=self.ground_cell(x,z+1,radius);
+        let b=if u==Fx::ZERO {b} else {b.add(self.ground_cell(x+1,z+1,radius).sub(b).mul(u))};
+        a.add(b.sub(a).mul(v))
+    }
     /// Every yielding cell inside the hull at this pose, in column order.
     /// This is the cut a tracked hull makes when it stands here.
     pub fn crushed(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Vec<[u32; 3]> {
@@ -1017,7 +1265,8 @@ impl<'a> Probe<'a> {
     /// Ordered cut prefix for a bounded fragment pool. Frame cells do not
     /// count toward `limit`: the pool cannot claim them, but the caller still
     /// receives them in their original positions before the prefix ends.
-    pub fn crushed_limit(
+    #[cfg(test)]
+    pub fn legacy20_crushed_limit(
         &mut self,
         pos: [Fx; 2],
         head: i32,
@@ -1063,6 +1312,148 @@ impl<'a> Probe<'a> {
             }
         }
         out
+    }
+
+    pub fn crushed_limit(
+        &mut self,
+        pos: [Fx; 2],
+        head: i32,
+        s: Shape,
+        limit: usize,
+    ) -> Vec<[u32; 3]> {
+        let mut out = Vec::new();
+        if self.yielding.is_empty() || limit == 0 {
+            return out;
+        }
+        let mut claimable = 0usize;
+        // A generator can compute a column's terrain/tree geometry once for
+        // all its cells. Asking material() per voxel repeats that same work.
+        // World::column overlays edited chunks, so the ordered cut is exact.
+        let mut materials = Vec::new();
+        let (c, sin) = (angle::cos(head), angle::sin(head));
+        let (lo, hi) = self.extent(pos, head, s);
+        for z in lo[1]..=hi[1] {
+            if let Some((x0, x1)) = Self::row_interval(pos, c, sin, s, lo[0], hi[0], z) {
+                let mut x = x0;
+                while x <= x1 {
+                    let skip = self.skip_cached_bare_span(x, x1, z);
+                    if skip > 0 {
+                        x += skip;
+                        continue;
+                    }
+                    if Self::push_crushed_column(
+                        self,
+                        x,
+                        z,
+                        s.height,
+                        limit,
+                        &mut claimable,
+                        &mut materials,
+                        &mut out,
+                    ) {
+                        return out;
+                    }
+                    x += 1;
+                }
+            } else {
+                for (x, _, _) in Self::row(pos, c, sin, s, lo[0], hi[0], z) {
+                    if Self::push_crushed_column(
+                        self,
+                        x,
+                        z,
+                        s.height,
+                        limit,
+                        &mut claimable,
+                        &mut materials,
+                        &mut out,
+                    ) {
+                        return out;
+                    }
+                }
+            }
+        }
+        out
+    }
+    /// Skip contiguous columns already resident in `self.pages` that are proven
+    /// free of yielding spans, updating `columns` and `last_page` identically.
+    #[inline]
+    fn skip_cached_bare_span(&mut self, x: i32, x1: i32, z: i32) -> i32 {
+        if self.pages.is_empty()
+            || x < 0
+            || z < 0
+            || x1 >= self.world.nx as i32
+            || z >= self.world.nz as i32
+        {
+            return 0;
+        }
+        let key = [x / PAGE_SIDE as i32, z / PAGE_SIDE as i32];
+        let slot = if self.pages[self.last_page]
+            .as_ref()
+            .is_some_and(|p| p.key == key)
+        {
+            self.last_page
+        } else {
+            let bucket = ((key[0] as usize).wrapping_mul(73_856_093)
+                ^ (key[1] as usize).wrapping_mul(19_349_663))
+                % (PAGE_SLOTS / 4);
+            let Some(s) =
+                (bucket * 4..bucket * 4 + 4).find(|&i| self.pages[i].as_ref().is_some_and(|p| p.key == key))
+            else {
+                return 0;
+            };
+            s
+        };
+        let row = self.pages[slot].as_ref().unwrap().rows[z as usize % PAGE_SIDE];
+        let lx = (x as usize % PAGE_SIDE) as u32;
+        let page_end = ((key[0] + 1) * PAGE_SIDE as i32 - 1).min(x1);
+        let len = (page_end - x + 1) as u32;
+        let known_run = (!(row.known >> lx)).trailing_zeros().min(len);
+        if known_run == 0 {
+            return 0;
+        }
+        let bare_run = (row.yielding >> lx).trailing_zeros().min(known_run);
+        if bare_run == 0 {
+            return 0;
+        }
+        self.last_page = slot;
+        self.columns += u64::from(bare_run);
+        bare_run as i32
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn push_crushed_column(
+        &mut self,
+        x: i32,
+        z: i32,
+        height: i32,
+        limit: usize,
+        claimable: &mut usize,
+        materials: &mut Vec<Mat>,
+        out: &mut Vec<[u32; 3]>,
+    ) -> bool {
+        let Some((floor, [low, high])) = self.column(x, z) else {
+            return false;
+        };
+        let top = (floor as i32 + height).min(self.world.ny as i32);
+        if low == u16::MAX || i32::from(low) >= top {
+            return false;
+        }
+        let end = (i32::from(high) + 1).min(top);
+        materials.resize((end - i32::from(low)) as usize, AIR);
+        self.world
+            .column(x as u32, z as u32, u32::from(low), &mut materials[..]);
+        for (dy, &m) in materials.iter().enumerate() {
+            if m != AIR && self.yields(m) {
+                let p = [x as u32, u32::from(low) + dy as u32, z as u32];
+                if limit != usize::MAX && !self.world.on_frame(p[0], p[1], p[2]) {
+                    if *claimable == limit {
+                        return true;
+                    }
+                    *claimable += 1;
+                }
+                out.push(p);
+            }
+        }
+        false
     }
     fn extent(&self, pos: [Fx; 2], head: i32, s: Shape) -> ([i32; 2], [i32; 2]) {
         let (c, sin) = (angle::cos(head), angle::sin(head));
@@ -1232,7 +1623,8 @@ impl<'a> Probe<'a> {
     /// grade steeper than the tilt limit however level the hull sits.
     #[cfg(test)]
     fn contact(&mut self, p: [Fx; 2], radius: Fx, dir: [Fx; 2], s: Shape, grade: Fx) -> (Fx, bool) {
-        self.contact_for::<true>(p, radius, dir, s, grade)
+        let (h, excess) = self.contact_for::<true>(p, radius, dir, s, grade);
+        (h, excess > Fx::ZERO)
     }
     fn contact_for<const FOOTPRINT: bool>(
         &mut self,
@@ -1241,9 +1633,10 @@ impl<'a> Probe<'a> {
         dir: [Fx; 2],
         s: Shape,
         grade: Fx,
-    ) -> (Fx, bool) {
+    ) -> (Fx, Fx) {
         if s.ramp >= Fx::ZERO && s.step >= 0 && grade >= Fx::ZERO && radius >= Fx::ZERO {
-            let span = Fx::from_int(if s.span >= 2 { s.span } else { 0 });
+            let total_span = if s.span >= 2 { s.span + s.reach.max(0) } else { 0 };
+            let span = Fx::from_int(total_span);
             // Negate after the signed product to round the extent outward:
             // a negative Fx corner can be one raw unit farther than +corner.
             let r = if FOOTPRINT {
@@ -1256,11 +1649,13 @@ impl<'a> Probe<'a> {
             // low edge down, also for fractional/negative world positions.
             let lo = [0, 1].map(|a| (p[a].sub(r[a]).raw() >> 32) as i32);
             let hi = [0, 1].map(|a| p[a].add(r[a]).to_int_trunc() + 1);
+            let halo=s.detail_halo();
+            let lo=lo.map(|v|v-halo);let hi=hi.map(|v|v+halo);
             if let Some(floor) = self.uniform_floor(lo, hi) {
-                return (floor, false);
+                return (floor, Fx::ZERO);
             }
         }
-        let base = self.surface(p);
+        let base = self.terrain_surface(p, s);
         let mut height = base;
         let (nx, nz) = (
             Fx::from_int(self.world.nx as i32 - 1),
@@ -1274,7 +1669,10 @@ impl<'a> Probe<'a> {
         let step = Fx::from_int(s.step);
         // A point support sees no grade: a belt shorter than two units has
         // no line to sample.
-        for k in 1..=(if s.span >= 2 { s.span } else { 0 }) {
+        let span = if s.span >= 2 { s.span + s.reach.max(0) } else { 0 };
+        let pitch=if s.detail>0 {(s.detail.min(s.step.max(0)).min(32)*2+1).max(1)} else {1};
+        for i in 1..=(span+pitch-1)/pitch {
+            let k=(i*pitch).min(span);
             let d = Fx::from_int(k);
             let ramp_drop = s.ramp.mul(d);
             let climb = step.max(grade.mul(d));
@@ -1288,7 +1686,7 @@ impl<'a> Probe<'a> {
                 if q[0] < Fx::ZERO || q[1] < Fx::ZERO || q[0] >= nx || q[1] >= nz {
                     continue;
                 }
-                let there = self.surface(q);
+                let there = self.terrain_surface(q, s);
                 pair[i] = Some(there);
                 height = height.max(there.sub(ramp_drop));
                 required_level = required_level.max(there.sub(climb));
@@ -1301,7 +1699,11 @@ impl<'a> Probe<'a> {
             }
         }
         height = height.max(level);
-        let mut steep = required_level > level;
+        let mut excess = if required_level > level {
+            required_level.sub(level)
+        } else {
+            Fx::ZERO
+        };
         // The contact patch: nearby ground counts with the same approach
         // slope as ground ahead, or a corner sample would lift the support
         // onto a ledge at once and undo the run-up. A step under the edge
@@ -1323,25 +1725,26 @@ impl<'a> Probe<'a> {
             let across = patch_dir[1]
                 .mul(Fx::from_int(x))
                 .add(patch_dir[0].mul(Fx::from_int(z)));
-            let corner = self.surface([p[0].add(radius.mul(along)), p[1].add(radius.mul(across))]);
+            let corner = self.terrain_surface([p[0].add(radius.mul(along)), p[1].add(radius.mul(across))], s);
             height = height.max(corner.sub(s.ramp.mul(radius)));
-            let mid = self.surface([p[0].add(half.mul(along)), p[1].add(half.mul(across))]);
+            let mid = self.terrain_surface([p[0].add(half.mul(along)), p[1].add(half.mul(across))], s);
             // A supported bridge already holds this contact at `level`.
             // A dip inside its patch is not a new ledge above that plane.
             // Raised corners still refuse entry just like the belt line.
             if s.span >= 2 && corner.sub(mid) > step && corner.sub(level) > step {
-                steep = true;
+                excess = excess.max(corner.sub(mid.max(level)).sub(step));
             }
         }
-        (height, steep)
+        (height, excess)
     }
     pub fn support_pose(&mut self, pos: [Fx; 2], head: i32, mut s: Shape) -> Pose {
         // Contact belongs to the footprint. Looking beyond the track's
         // end makes a neighbouring wall lift even a parked vehicle.
         // Route clearance still looks ahead over the full approach span.
         s.span = s.span.min((s.half[0] - s.support[0]).max(0));
-        self.flat_pose(pos, s)
-            .unwrap_or_else(|| self.probe_pose_contact::<true>(pos, head, s, false, true, false))
+        self.flat_pose(pos, s).unwrap_or_else(|| {
+            self.probe_pose_contact::<true>(pos, head, s, false, CrushQuery::Count, false)
+        })
     }
     /// Suspension only needs the four contact floors, not another full hull
     /// clearance scan. Movement and planning still use the complete pose.
@@ -1352,10 +1755,11 @@ impl<'a> Probe<'a> {
         }
         self.contacts_for::<true>(pos, head, s).0
     }
-    fn contacts(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> ([Fx; 4], bool) {
+    fn contacts(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> ([Fx; 4], Fx) {
         self.contacts_for::<false>(pos, head, s)
     }
-    fn contacts_for<const FOOTPRINT: bool>(
+    #[cfg(test)]
+    fn legacy20_contacts_for<const FOOTPRINT: bool>(
         &mut self,
         pos: [Fx; 2],
         head: i32,
@@ -1388,17 +1792,20 @@ impl<'a> Probe<'a> {
                 grade
             }
         };
-        let mut steep = false;
+        let mut excess = Fx::ZERO;
         let mut floors = [(-1, -1), (1, -1), (-1, 1), (1, 1)].map(|(x, z)| {
             let p = point(x * s.support[0], z * s.support[1]);
-            let (h, too_steep) = self.contact_for::<FOOTPRINT>(p, radius, [c, sin], s, grade);
-            steep |= too_steep;
+            let (h, contact_excess) = self.contact_for::<FOOTPRINT>(p, radius, [c, sin], s, grade);
+            excess = excess.max(contact_excess);
             h
         });
         // A belt rests on a hump between its wheels: ground above the line
         // joining the two supports of a side lifts both of them, so the hull
         // rides over a summit instead of grounding its belly on it.
-        if s.span >= 2 {
+        // Detail-bearing articulated walkers stand on separate feet. The
+        // empty space between them is not a continuous track belt: a low
+        // barrier there must not lift every support and bounce the torso.
+        if s.span >= 2 && (s.detail == 0 || s.continuous) {
             // The lift fades in over this many units as a hump enters the
             // belt at one wheel and out as it leaves at the other, so the
             // hull rides onto and off a summit instead of jumping.
@@ -1419,7 +1826,7 @@ impl<'a> Probe<'a> {
                 let mut u = -s.support[0] + 1;
                 while u < s.support[0] {
                     let (t, w) = self.hump_weights[(u + support - 1) as usize];
-                    let g = self.surface(point(u, z * s.support[1]));
+                    let g = self.terrain_surface(point(u, z * s.support[1]),s);
                     let line = floors[rear].add(floors[front].sub(floors[rear]).mul(t));
                     let excess = g.sub(line).mul(w);
                     if excess > lift {
@@ -1436,13 +1843,147 @@ impl<'a> Probe<'a> {
                 }
             }
         }
-        (floors, steep)
+        (floors, excess > Fx::ZERO)
+    }
+
+    fn contacts_for<const FOOTPRINT: bool>(
+        &mut self,
+        pos: [Fx; 2],
+        head: i32,
+        s: Shape,
+    ) -> ([Fx; 4], Fx) {
+        let (c, sin) = (angle::cos(head), angle::sin(head));
+        let point = |x: i32, z: i32| {
+            [
+                pos[0]
+                    .add(c.mul(Fx::from_int(x)))
+                    .sub(sin.mul(Fx::from_int(z))),
+                pos[1]
+                    .add(sin.mul(Fx::from_int(x)))
+                    .add(c.mul(Fx::from_int(z))),
+            ]
+        };
+        let radius = Fx::from_int(
+            (s.half[0] - s.support[0])
+                .min(s.half[1] - s.support[1])
+                .min(s.step)
+                .max(1),
+        );
+        // tan of the tilt limit: the steepest grade the contact may climb.
+        let m = s.min_up.max(Fx::from_ratio(1, 100));
+        let grade = match self.grade_cache {
+            Some((key, grade)) if key == m => grade,
+            _ => {
+                let grade = Fx::ONE.sub(m.mul(m)).max(Fx::ZERO).sqrt().div(m);
+                self.grade_cache = Some((m, grade));
+                grade
+            }
+        };
+        let mut excess = Fx::ZERO;
+        let mut floors = [(-1, -1), (1, -1), (-1, 1), (1, 1)].map(|(x, z)| {
+            let p = point(x * s.support[0], z * s.support[1]);
+            let (h, contact_excess) = self.contact_for::<FOOTPRINT>(p, radius, [c, sin], s, grade);
+            excess = excess.max(contact_excess);
+            h
+        });
+        // A belt rests on a hump between its wheels: ground above the line
+        // joining the two supports of a side lifts both of them, so the hull
+        // rides over a summit instead of grounding its belly on it.
+        // Detail-bearing articulated walkers stand on separate feet. The
+        // empty space between them is not a continuous track belt: a low
+        // barrier there must not lift every support and bounce the torso.
+        if s.span >= 2 && (s.detail == 0 || s.continuous) {
+            if excess == Fx::ZERO
+                && floors[1] == floors[0]
+                && floors[2] == floors[0]
+                && floors[3] == floors[0]
+            {
+                let cx = (pos[0].raw() >> 32) as i32;
+                let cz = (pos[1].raw() >> 32) as i32;
+                let belt_pad = s.support[0].abs() + s.support[1].abs() + s.detail_halo() + 2;
+                if self.uniform_floor([cx - belt_pad, cz - belt_pad], [cx + belt_pad, cz + belt_pad])
+                    == Some(floors[0])
+                {
+                    return (floors, Fx::ZERO);
+                }
+            }
+            // The lift fades in over this many units as a hump enters the
+            // belt at one wheel and out as it leaves at the other, so the
+            // hull rides onto and off a summit instead of jumping.
+            let fade = (s.span / 2).max(1);
+            let support = s.support[0];
+            if self.hump_key != (support, fade) {
+                self.hump_weights.clear();
+                for u in -support + 1..support {
+                    let t = Fx::from_int(u + support).div(Fx::from_int(2 * support.max(1)));
+                    let w = Fx::from_int((support - u.abs()).min(fade)).div(Fx::from_int(fade));
+                    self.hump_weights.push((t, w));
+                }
+                self.hump_key = (support, fade);
+            }
+            for (rear, front, z) in [(0, 1, -1), (2, 3, 1)] {
+                let mut lift = Fx::ZERO;
+                let mut top = Fx::ZERO;
+                let mut u = -s.support[0] + 1;
+                while u < s.support[0] {
+                    let (t, w) = self.hump_weights[(u + support - 1) as usize];
+                    let g = self.terrain_surface(point(u, z * s.support[1]),s);
+                    let line = floors[rear].add(floors[front].sub(floors[rear]).mul(t));
+                    let excess = g.sub(line).mul(w);
+                    if excess > lift {
+                        lift = excess;
+                        top = g;
+                    }
+                    u += 1;
+                }
+                if lift > Fx::ZERO {
+                    // Both wheels rise together, and neither above the hump.
+                    for i in [rear, front] {
+                        floors[i] = floors[i].max(floors[i].add(lift).min(top));
+                    }
+                }
+            }
+        }
+        (floors, excess)
     }
     pub fn pose(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Pose {
         if let Some(pose) = self.flat_pose(pos, s) {
             return pose;
         }
         self.probe_pose(pos, head, s, false)
+    }
+    /// Exact terrain/belly pose when the caller only inspects `pose.crush > 0`.
+    /// Once any yielding column is confirmed under the hull, tiles whose solid
+    /// floor and rubble clear `min_belly` need no further column scans.
+    pub fn pose_crush_flag(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Pose {
+        if let Some(pose) = self.flat_pose(pos, s) {
+            return pose;
+        }
+        self.probe_pose_contact::<false>(pos, head, s, false, CrushQuery::Any, false)
+    }
+    fn pose_cost(&mut self, pos: [Fx; 2], head: i32, s: Shape, count_crush: bool) -> Pose {
+        if let Some(pose) = self.flat_pose(pos, s) {
+            return pose;
+        }
+        let crush = if count_crush {
+            CrushQuery::Count
+        } else {
+            CrushQuery::None
+        };
+        self.probe_pose_contact::<false>(pos, head, s, false, crush, false)
+    }
+    fn belly_gradient(&mut self,pos:[Fx;2],head:i32,s:Shape,pitch:Fx,roll:Fx)->(Fx,Fx) {
+        if !s.wide_high_belly() {return (pitch,roll);}
+        // Read a broad ground trend instead of magnifying a pebble under a
+        // small support through a many-metres-wide torso. Full support grade,
+        // step limits and every belly obstacle column are still checked.
+        let (c,sin)=(angle::cos(head),angle::sin(head));
+        let h=[(-1,-1),(1,-1),(-1,1),(1,1)].map(|(x,z)| {
+            let x=Fx::from_int(x*s.half[0]);let z=Fx::from_int(z*s.half[1]);
+            self.surface([pos[0].add(c.mul(x)).sub(sin.mul(z)),pos[1].add(sin.mul(x)).add(c.mul(z))])
+        });
+        (h[1].add(h[3]).sub(h[0]).sub(h[2]).div(Fx::from_int(4*s.half[0].max(1))),
+            h[2].add(h[3]).sub(h[0]).sub(h[1]).div(Fx::from_int(4*s.half[1].max(1))))
     }
     /// A recovery step may retain existing belly contacts while crossing a
     /// fraction of a column, but must not acquire a new blocked column.
@@ -1459,22 +2000,21 @@ impl<'a> Probe<'a> {
         if from.2.blocked == 0 || to.2.blocked > from.2.blocked {
             return false;
         }
-        let plane = |p: Pose| {
-            [
-                p.height,
-                p.floors[1]
+        let mut plane = |at:[Fx;2],head:i32,p: Pose| {
+            let pitch=p.floors[1]
                     .add(p.floors[3])
                     .sub(p.floors[0])
                     .sub(p.floors[2])
-                    .div(Fx::from_int(4 * s.support[0].max(1))),
-                p.floors[2]
+                    .div(Fx::from_int(4 * s.support[0].max(1)));
+            let roll=p.floors[2]
                     .add(p.floors[3])
                     .sub(p.floors[0])
                     .sub(p.floors[1])
-                    .div(Fx::from_int(4 * s.support[1].max(1))),
-            ]
+                    .div(Fx::from_int(4 * s.support[1].max(1)));
+            let (pitch,roll)=self.belly_gradient(at,head,s,pitch,roll);
+            [p.height,pitch,roll]
         };
-        let (source, target) = (plane(from.2), plane(to.2));
+        let (source, target) = (plane(from.0,from.1,from.2), plane(to.0,to.1,to.2));
         let clearance = s.clearance.max(Fx::from_int(s.step));
         let belly =
             |p: [Fx; 3], u: Fx, v: Fx| p[0].add(p[1].mul(u)).add(p[2].mul(v)).add(clearance);
@@ -1500,10 +2040,21 @@ impl<'a> Probe<'a> {
     /// Planning only consumes the full depth/crush counts of legal poses.
     /// An illegal pose may stop at the first proof of refusal. Execution
     /// still uses `pose`: decreasing penetration must retain exact counts.
+    #[cfg(test)]
     fn route_pose(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Pose {
-        self.route_pose_mode(pos, head, s, false)
+        self.route_pose_mode_cost(pos, head, s, false, true)
     }
-    fn route_pose_mode(&mut self, pos: [Fx; 2], head: i32, s: Shape, leave_steep: bool) -> Pose {
+    fn route_pose_cost(&mut self, pos: [Fx; 2], head: i32, s: Shape, count_crush: bool) -> Pose {
+        self.route_pose_mode_cost(pos, head, s, false, count_crush)
+    }
+    fn route_pose_mode_cost(
+        &mut self,
+        pos: [Fx; 2],
+        head: i32,
+        s: Shape,
+        leave_steep: bool,
+        count_crush: bool,
+    ) -> Pose {
         if let Some(pose) = self.prepared_routes.get(&(pos[0], pos[1], head)) {
             // Ordinary speculative poses may stop before scanning the belly
             // on a steep contact. An exit must validate that clearance too.
@@ -1514,18 +2065,30 @@ impl<'a> Probe<'a> {
         if let Some(pose) = self.flat_pose(pos, s) {
             return pose;
         }
-        self.probe_pose_cost(pos, head, s, true, true, leave_steep)
+        self.probe_pose_cost(pos, head, s, true, count_crush, leave_steep)
     }
+    #[cfg(test)]
     fn contact_steep(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> bool {
+        self.contact_excess(pos, head, s) > Fx::ZERO
+    }
+    fn contact_excess(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Fx {
         self.flat_pose(pos, s)
-            .map_or_else(|| self.contacts(pos, head, s).1, |p| p.steep)
+            .map_or_else(|| self.contacts(pos, head, s).1, |p| p.excess)
     }
     /// Immutable-world geometry for one speculative sweep batch. Logical
     /// progress and blocker callbacks remain with the owning search.
     pub fn route_samples(&mut self, s: Shape, samples: &[([Fx; 2], i32)]) -> Vec<Pose> {
+        self.route_samples_cost(s, samples, true)
+    }
+    pub fn route_samples_cost(
+        &mut self,
+        s: Shape,
+        samples: &[([Fx; 2], i32)],
+        count_crush: bool,
+    ) -> Vec<Pose> {
         samples
             .iter()
-            .map(|&(at, head)| self.route_pose(at, head, s))
+            .map(|&(at, head)| self.route_pose_cost(at, head, s, count_crush))
             .collect()
     }
     /// Ordered speculative prefix, stopping at the first failed connection
@@ -1537,9 +2100,18 @@ impl<'a> Probe<'a> {
         samples: &[([Fx; 2], i32)],
         open: impl Fn(&[Pose]) -> bool,
     ) -> Vec<Pose> {
+        self.route_prefix_cost(s, samples, true, open)
+    }
+    pub fn route_prefix_cost(
+        &mut self,
+        s: Shape,
+        samples: &[([Fx; 2], i32)],
+        count_crush: bool,
+        open: impl Fn(&[Pose]) -> bool,
+    ) -> Vec<Pose> {
         let mut poses = Vec::with_capacity(samples.len());
         for &(at, head) in samples {
-            poses.push(self.route_pose(at, head, s));
+            poses.push(self.route_pose_cost(at, head, s, count_crush));
             if !open(&poses) {
                 break;
             }
@@ -1567,6 +2139,7 @@ impl<'a> Probe<'a> {
                             floors: [h; 4],
                             blocked: 0,
                             steep: false,
+                            excess: Fx::ZERO,
                             tilt: false,
                             crush: 0,
                         });
@@ -1597,7 +2170,12 @@ impl<'a> Probe<'a> {
         count_crush: bool,
         leave_steep: bool,
     ) -> Pose {
-        self.probe_pose_contact::<false>(pos, head, s, stop_on_refusal, count_crush, leave_steep)
+        let crush = if count_crush {
+            CrushQuery::Count
+        } else {
+            CrushQuery::None
+        };
+        self.probe_pose_contact::<false>(pos, head, s, stop_on_refusal, crush, leave_steep)
     }
     #[allow(clippy::too_many_arguments)]
     fn probe_pose_contact<const FOOTPRINT: bool>(
@@ -1606,10 +2184,11 @@ impl<'a> Probe<'a> {
         head: i32,
         s: Shape,
         stop_on_refusal: bool,
-        count_crush: bool,
+        crush: CrushQuery,
         leave_steep: bool,
     ) -> Pose {
-        let (floors, steep) = self.contacts_for::<FOOTPRINT>(pos, head, s);
+        let (floors, excess) = self.contacts_for::<FOOTPRINT>(pos, head, s);
+        let steep = excess > Fx::ZERO;
         let (c, sin) = (angle::cos(head), angle::sin(head));
         let height = floors
             .iter()
@@ -1635,12 +2214,14 @@ impl<'a> Probe<'a> {
             floors,
             blocked: 0,
             steep,
+            excess,
             tilt,
             crush: 0,
         };
         if stop_on_refusal && (tilt || steep && !leave_steep) {
             return result;
         }
+        let (pitch, roll) = self.belly_gradient(pos, head, s, pitch, roll);
         let (lo, hi) = self.extent(pos, head, s);
         let clearance = s.clearance.max(Fx::from_int(s.step));
         // Every local coordinate of the rotated footprint lies inside these
@@ -1655,15 +2236,13 @@ impl<'a> Probe<'a> {
             [a, b] => Some([*a, *b]),
             _ => None,
         };
-        let upper = |lo, hi, profile| {
-            if count_crush {
-                self.world.prepared_bare_upper(lo, hi, profile)
-            } else {
-                self.world.prepared_floor_upper(lo, hi, profile)
-            }
-        };
         if let Some(profile) = profile {
-            if let Some(top) = upper(lo, hi, profile) {
+            let top = if crush == CrushQuery::None {
+                self.world.prepared_floor_upper(lo, hi, profile)
+            } else {
+                self.world.prepared_bare_upper(lo, hi, profile)
+            };
+            if let Some(top) = top {
                 if Fx::from_int(i32::from(top)) <= min_belly
                     && (no_rubble
                         || self.rubble.is_none_or(|r| {
@@ -1675,9 +2254,14 @@ impl<'a> Probe<'a> {
             }
         }
         // One tree or damaged tile must not force a wide articulated hull
-        // to read every otherwise bare column. Tile proofs may omit only
-        // columns with neither yielding matter nor rubble, whose highest
-        // floor is below even the lowest point of the hull's belly.
+        // to read every otherwise bare column. Tile proofs may omit bare tiles
+        // unconditionally, and floor-clear tiles whenever crush counting is
+        // either disabled or already satisfied for a boolean crush flag.
+        let mut bare_stack = [0u64; 16];
+        let mut bare_heap = Vec::new();
+        let mut floor_stack = [0u64; 16];
+        let mut floor_heap = Vec::new();
+        let mut all_floor_clear = false;
         let clear_tiles = if let Some(profile) = profile.filter(|_| {
             lo[0] >= 0
                 && lo[1] >= 0
@@ -1688,7 +2272,22 @@ impl<'a> Probe<'a> {
             let first = [lo[0] / 8, lo[1] / 8];
             let last = [hi[0] / 8, hi[1] / 8];
             let width = (last[0] - first[0] + 1) as usize;
-            let mut clear = Vec::with_capacity(width * (last[1] - first[1] + 1) as usize);
+            let count = width * (last[1] - first[1] + 1) as usize;
+            let words_needed = count.div_ceil(64);
+            let bare_bits: &mut [u64] = if words_needed <= bare_stack.len() {
+                &mut bare_stack[..words_needed]
+            } else {
+                bare_heap.resize(words_needed, 0u64);
+                bare_heap.as_mut_slice()
+            };
+            let floor_bits: &mut [u64] = if words_needed <= floor_stack.len() {
+                &mut floor_stack[..words_needed]
+            } else {
+                floor_heap.resize(words_needed, 0u64);
+                floor_heap.as_mut_slice()
+            };
+            all_floor_clear = true;
+            let mut idx = 0usize;
             for z in first[1]..=last[1] {
                 for x in first[0]..=last[0] {
                     let a = [x * 8, z * 8];
@@ -1698,17 +2297,36 @@ impl<'a> Probe<'a> {
                     ];
                     // A heap under one part of a broad hull only invalidates
                     // that tile's proof, not every bare tile of the footprint.
-                    let top = upper(a, b, profile);
-                    clear.push(
-                        top.is_some_and(|h| Fx::from_int(i32::from(h)) <= min_belly)
-                            && (no_rubble
-                                || self.rubble.is_none_or(|r| {
-                                    Fx::from_int(i32::from(r.upper_in(a, b))) <= min_belly
-                                })),
-                    );
+                    let rubble_ok = no_rubble
+                        || self
+                            .rubble
+                            .is_none_or(|r| Fx::from_int(i32::from(r.upper_in(a, b))) <= min_belly);
+                    if rubble_ok {
+                        if let Some((bounds, bare)) =
+                            self.world
+                                .prepared_floor_tile_detail(x as u32, z as u32, profile)
+                        {
+                            if Fx::from_int(i32::from(bounds[1])) <= min_belly {
+                                floor_bits[idx >> 6] |= 1u64 << (idx & 63);
+                                if bare {
+                                    bare_bits[idx >> 6] |= 1u64 << (idx & 63);
+                                }
+                            } else {
+                                all_floor_clear = false;
+                            }
+                        } else {
+                            all_floor_clear = false;
+                        }
+                    } else {
+                        all_floor_clear = false;
+                    }
+                    idx += 1;
                 }
             }
-            Some((first, width, clear))
+            if all_floor_clear && crush == CrushQuery::None {
+                return result;
+            }
+            Some((first, width, &*bare_bits, &*floor_bits))
         } else {
             None
         };
@@ -1721,13 +2339,21 @@ impl<'a> Probe<'a> {
             // Start each remaining run at its exact local coordinate; moving
             // by whole columns adds an integral multiple of c / -sin, with
             // the same fixed-point rounding as the unsplit row.
+            let need_crush_row =
+                crush == CrushQuery::Count || (crush == CrushQuery::Any && result.crush == 0);
             let (first, last) = clear_tiles
                 .as_ref()
-                .map_or((0, 0), |(first, _, _)| (first[0], hi[0] / 8));
+                .map_or((0, 0), |(first, _, _, _)| (first[0], hi[0] / 8));
             let runs = (first..=last).filter_map(|tile| {
-                if let Some((first, width, clear)) = &clear_tiles {
+                if let Some((first, width, bare_clear, floor_clear)) = &clear_tiles {
+                    let clear = if need_crush_row {
+                        bare_clear
+                    } else {
+                        floor_clear
+                    };
                     let i = (z / 8 - first[1]) as usize * width + (tile - first[0]) as usize;
-                    (!clear[i]).then_some((lo[0].max(tile * 8), hi[0].min(tile * 8 + 7)))
+                    let is_clear = (clear[i >> 6] & (1u64 << (i & 63))) != 0;
+                    (!is_clear).then_some((lo[0].max(tile * 8), hi[0].min(tile * 8 + 7)))
                 } else {
                     Some((lo[0], hi[0]))
                 }
@@ -1758,10 +2384,15 @@ impl<'a> Probe<'a> {
                     } else {
                         (a, b)
                     };
-                    let top = count_crush.then(|| min_belly.sub(clearance).add(hull_height));
+                    let need_crush = crush == CrushQuery::Count
+                        || (crush == CrushQuery::Any && result.crush == 0);
+                    let top = need_crush.then(|| min_belly.sub(clearance).add(hull_height));
                     if interval.is_some() {
-                        if let Some(crush) = self.clear_run(a, b, z, min_belly, top) {
-                            result.crush += crush;
+                        if let Some(c) = self.clear_run(a, b, z, min_belly, top) {
+                            result.crush += c;
+                            if crush == CrushQuery::Any && result.crush > 0 && all_floor_clear {
+                                return result;
+                            }
                             continue;
                         }
                     }
@@ -1786,11 +2417,16 @@ impl<'a> Probe<'a> {
                                 return result;
                             }
                         }
-                        if count_crush
+                        let need_crush = crush == CrushQuery::Count
+                            || (crush == CrushQuery::Any && result.crush == 0);
+                        if need_crush
                             && low != u16::MAX
                             && Fx::from_int(i32::from(low)) < local.add(hull_height)
                         {
                             result.crush += 1;
+                            if crush == CrushQuery::Any && all_floor_clear {
+                                return result;
+                            }
                         }
                     }
                 }
@@ -1798,6 +2434,13 @@ impl<'a> Probe<'a> {
         }
         result
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CrushQuery {
+    None,
+    Any,
+    Count,
 }
 
 #[derive(Clone, Copy)]
@@ -1854,10 +2497,7 @@ fn connects(
     for i in 1..=turns {
         let h = angle::norm(head + turn * i / turns);
         let next = ground.pose(from, h, shape);
-        if next.blocked != 0
-            || next.tilt
-            || next.steep && !old.steep
-            || next.height.sub(old.height).abs() > Fx::from_int(shape.step)
+        if !transition::TransitionProof::geometry(from,to,old,next,shape,transition::Policy::fine(shape,old.steep)).accepted()
             || !clear(from, h)
         {
             return None;
@@ -1870,10 +2510,7 @@ fn connects(
         let f = Fx::from_ratio(i, steps);
         let p = [from[0].add(delta[0].mul(f)), from[1].add(delta[1].mul(f))];
         let next = ground.pose(p, yaw, shape);
-        if next.blocked != 0
-            || next.tilt
-            || next.steep && !old.steep
-            || next.height.sub(old.height).abs() > Fx::from_int(shape.step)
+        if !transition::TransitionProof::geometry(from,to,old,next,shape,transition::Policy::fine(shape,old.steep)).accepted()
             || !clear(p, yaw)
         {
             return None;
@@ -2170,21 +2807,11 @@ impl Hunt {
                 samples: 0,
             })
         };
-        // Recovery uses exactly the executor's contacts. Padding a grade
-        // can call a physically flat source steep and permit an illegal entry.
-        let cfg = Search {
-            margin: if cfg.margin > 0 && ground.contact_steep(from, head, shape) {
-                0
-            } else {
-                cfg.margin
-            },
-            ..cfg
-        };
         let shape = Shape {
-            span: if shape.span >= 2 {
-                shape.span + cfg.margin.max(0)
+            reach: if shape.span >= 2 {
+                cfg.margin.max(0)
             } else {
-                shape.span
+                0
             },
             ..shape
         };
@@ -2304,9 +2931,10 @@ impl Hunt {
                 return Some(self.empty(false, true));
             }
         }
+        let count_crush = self.counts_crush();
         if let Some(run) = &mut pending.straight {
             if let Some((prepare, batch)) = prepare.and_then(|prepare| {
-                run.start_batch(self.shape, *allowance)
+                run.start_batch(self.shape, *allowance, count_crush)
                     .map(|batch| (prepare, batch))
             }) {
                 let prepared = prepare(batch, ground);
@@ -2334,6 +2962,7 @@ impl Hunt {
                 None,
                 None,
                 self.cfg.margin <= 0,
+                count_crush,
             );
             completed("plan_direct");
             self.probed += (before - *allowance) as u32;
@@ -2426,6 +3055,11 @@ impl Hunt {
     /// Where the search began.
     pub fn origin(&self) -> [Fx; 2] {
         self.from
+    }
+    /// Whether this search assigns nonzero graph cost to crushed vegetation.
+    #[inline]
+    pub fn counts_crush(&self) -> bool {
+        self.cfg.crush_cost > 0 && self.cfg.crush_cap > 0
     }
     /// One slice of a search that spans ticks: reuse its bounded pages and
     /// spend `budget` on target poses, swept poses or frontier nodes.
@@ -2657,6 +3291,13 @@ impl Hunt {
     }
     /// A search read back. `None` when the bytes do not describe one.
     pub fn load(s: &mut fx::blob::Scan, yielding: &[Mat]) -> Option<Hunt> {
+        Self::load_with_detail(s, yielding, 0)
+    }
+    /// The owning body restores its derived terrain profile alongside rigs.
+    pub fn load_with_detail(s: &mut fx::blob::Scan, yielding: &[Mat], detail: i32) -> Option<Hunt> {
+        Self::load_with_surface(s,yielding,detail,false)
+    }
+    pub fn load_with_surface(s:&mut fx::blob::Scan,yielding:&[Mat],detail:i32,continuous:bool)->Option<Hunt> {
         let mut i32s = [0i32; 7];
         let first = s.i32();
         let swept = first == -2;
@@ -2665,12 +3306,15 @@ impl Hunt {
         for v in &mut i32s[1..] {
             *v = s.i32();
         }
-        let shape = Shape {
+        let mut shape = Shape {
+            continuous, detail,
             half: [i32s[0], i32s[1]],
             support: [i32s[2], i32s[3]],
             step: i32s[4],
             height: i32s[5],
             span: i32s[6],
+            reach: 0,
+            grade_slack: Fx::from_int(1),
             clearance: s.fx(),
             min_up: s.fx(),
             ramp: s.fx(),
@@ -2689,6 +3333,7 @@ impl Hunt {
             crush_cap: s.u32(),
             heuristic_pct: s.u32(),
         };
+        shape.reach = if shape.span >= 2 { cfg.margin.max(0) } else { 0 };
         let from = [s.fx(), s.fx()];
         let to = [s.i32(), s.i32()];
         let anchor = [s.i32(), s.i32()];
@@ -2891,6 +3536,7 @@ impl Hunt {
                 self.spent += used;
                 continue;
             }
+            let count_crush = self.counts_crush();
             if let Some((node, cost, run)) = &mut self.connection {
                 let before = allowance;
                 let answer = run.advance_with_endpoints(
@@ -2901,6 +3547,7 @@ impl Hunt {
                     None,
                     None,
                     self.cfg.margin <= 0,
+                    count_crush,
                 );
                 self.probed += (before - allowance) as u32;
                 match answer {
@@ -2969,6 +3616,7 @@ impl Hunt {
         clear: &impl Fn([Fx; 2], i32) -> bool,
         allowance: &mut usize,
     ) {
+        let count_crush = self.counts_crush();
         let mut e = self.expansion.take().unwrap();
         let direction = e.node % 8;
         let at = self.point(e.node / 8);
@@ -2978,11 +3626,11 @@ impl Hunt {
         let source = if let Some(pose) = self.poses.get(&e.node) {
             *pose
         } else {
-            let pose = ground.pose(at, yaw, self.shape);
+            let pose = ground.pose_cost(at, yaw, self.shape, count_crush);
             self.poses.insert(e.node, pose);
             pose
         };
-        let leave_steep = source.steep && self.cfg.margin <= 0;
+        let leave_steep = source.steep;
         while e.edge < 3 && *allowance > 0 {
             if e.pending.is_none() {
                 let turn = i32::from(e.edge) - 1;
@@ -3016,7 +3664,8 @@ impl Hunt {
                     } else {
                         6
                     };
-                if base >= self.cost(j) {
+                let old_cost = self.cost(j);
+                if base >= old_cost {
                     e.edge += 1;
                     continue;
                 }
@@ -3033,7 +3682,13 @@ impl Hunt {
                     Some(p) if !leave_steep || !p.steep || p.tilt || p.blocked != 0 => p,
                     _ => {
                         self.probed += 1;
-                        let p = ground.route_pose_mode(q, next_yaw, self.shape, leave_steep);
+                        let p = ground.route_pose_mode_cost(
+                            q,
+                            next_yaw,
+                            self.shape,
+                            leave_steep,
+                            count_crush,
+                        );
                         self.poses.insert(j, p);
                         p
                     }
@@ -3042,7 +3697,7 @@ impl Hunt {
                     + (pose.crush as u32)
                         .saturating_mul(self.cfg.crush_cost)
                         .min(self.cfg.crush_cap);
-                if next_cost >= self.cost(j)
+                if next_cost >= old_cost
                     || pose.blocked != 0
                     || pose.tilt
                     || pose.steep && !leave_steep
@@ -3054,7 +3709,7 @@ impl Hunt {
             }
             let (j, next_cost, run) = e.pending.as_mut().unwrap();
             let before = *allowance;
-            let origin_pose = self.poses.get(&e.node).copied();
+            let origin_pose = Some(source);
             let target_pose = self.poses.get(j).copied();
             let answer = run.advance_with_endpoints(
                 ground,
@@ -3063,7 +3718,8 @@ impl Hunt {
                 allowance,
                 origin_pose,
                 target_pose,
-                self.cfg.margin <= 0,
+                true,
+                count_crush,
             );
             self.probed += (before - *allowance) as u32;
             match answer {
@@ -3173,6 +3829,7 @@ mod tests {
         rubble.insert([86, 100], 30);
         let mut probe = Probe::new(&w).with_rubble(&rubble);
         let shape = Shape {
+            continuous: false, detail: 0,
             half: [4, 4],
             support: [4, 4],
             clearance: Fx::from_int(2),
@@ -3180,6 +3837,8 @@ mod tests {
             min_up: Fx::from_ratio(4, 5),
             height: 8,
             span: 0,
+            reach: 0,
+            grade_slack: Fx::ZERO,
             ramp: Fx::ZERO,
         };
         let from = [80, 100].map(Fx::from_int);
@@ -3649,6 +4308,7 @@ mod tests {
             Some(start),
             Some(end),
             true,
+            true,
         );
         assert_eq!(actual, expected);
         assert_eq!(left_b, left_a);
@@ -3702,12 +4362,14 @@ mod tests {
             floors: [Fx::from_int(height); 4],
             blocked,
             steep: false,
+            excess: Fx::ZERO,
             tilt: false,
             crush: 0,
         };
         let mut batch = StartSweep {
             shape: tank(),
             samples: Vec::new(),
+            count_crush: true,
             height: Fx::ZERO,
             initial: true,
         };
@@ -4572,6 +5234,7 @@ mod tests {
     }
     fn tank() -> Shape {
         Shape {
+            continuous: false, detail: 0,
             half: [30, 12],
             support: [25, 10],
             clearance: Fx::from_ratio(45, 10),
@@ -4579,6 +5242,8 @@ mod tests {
             min_up: Fx::from_ratio(91, 100),
             height: 30,
             span: 25,
+            reach: 0,
+            grade_slack: Fx::from_int(1),
             ramp: Fx::from_ratio(3, 5),
         }
     }
@@ -5019,7 +5684,7 @@ mod tests {
             panic!("bounded target prelude should stay open");
         };
         assert_eq!(hunt.cfg.margin, search().margin);
-        assert_eq!(hunt.shape.span, padded.span);
+        assert_eq!(hunt.shape.span + hunt.shape.reach, padded.span);
     }
 
     #[test]
@@ -5567,6 +6232,125 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn crushed_limit_cached_bare_skip_and_belt_uniform_floor_preserve_exact_state() {
+        let mut w = world(false, false, false);
+        for (x, z) in [(116, 125), (129, 128), (133, 131)] {
+            w.queue_edit(voxel::Edit::put(x, 16, z, 4));
+            w.queue_edit(voxel::Edit::put(x, 17, z, 5));
+        }
+        w.flush();
+        w.prepare_navigation([4, 5]);
+        let changed = Changed::default();
+        for head in [-733, 0, 512, angle::FULL / 7, angle::FULL / 3] {
+            for limit in [1, 3, 16, usize::MAX] {
+                let pos = [
+                    Fx::from_int(126).add(Fx::from_ratio(1, 3)),
+                    Fx::from_int(128).add(Fx::from_ratio(2, 5)),
+                ];
+                let mut paged = Probe::for_local(&w, &[4, 5], Columns::default(), &changed);
+                let _ = paged.pose(pos, head, tank());
+                let cut_paged = paged.crushed_limit(pos, head, tank(), limit);
+
+                let mut dense = Probe::with_yield(&w, &[5, 4]);
+                let _ = dense.pose(pos, head, tank());
+                let cut_dense = dense.crushed_limit(pos, head, tank(), limit);
+                assert_eq!(cut_paged, cut_dense, "head={head} limit={limit}");
+            }
+        }
+        let mut w_forest = world(false, false, false);
+        for z in 80..176 {
+            for x in 80..176 {
+                if (x + z) % 5 == 0 {
+                    w_forest.queue_edit(voxel::Edit::put(x, 16, z, 4));
+                }
+            }
+        }
+        w_forest.flush();
+        w_forest.prepare_navigation([4, 5]);
+        let at = [Fx::from_int(128); 2];
+        let mut fast = Probe::with_yield(&w_forest, &[4, 5]);
+        let mut exact = Probe::with_yield(&w_forest, &[5, 4]);
+        assert_eq!(fast.contacts(at, 333, tank()), exact.contacts(at, 333, tank()));
+        assert_eq!(fast.samples, 0, "belt hump samples must skip on uniform floor under forest");
+        assert_eq!(fast.support_floors(at, 333, tank()), exact.support_floors(at, 333, tank()));
+        assert_eq!(fast.samples, 0);
+    }
+    #[test]
+    fn crush_belt_fast_paths_match_pre20_at_page_edges_and_changed_terrain() {
+        let mut w=world(false,false,false);
+        for &(x,z) in &[(1,1),(31,32),(32,31),(63,64),(64,63),(127,128),(128,127),(254,254)] {
+            w.queue_edit(voxel::Edit::put(x,16,z,4));w.queue_edit(voxel::Edit::put(x,17,z,5));
+        }
+        w.flush();w.prepare_navigation([4,5]);
+        let changed=Changed::default();
+        let mut fast=Probe::for_local(&w,&[4,5],Columns::default(),&changed);
+        let mut exact=Probe::for_local(&w,&[4,5],Columns::default(),&changed);
+        for repeat in 0..2 {for xy in [1,31,32,63,64,127,128,254] {for head in [-733,0,512,angle::FULL/7] {for limit in [0,1,3,usize::MAX] {
+            let pos=[Fx::from_int(xy).add(Fx::from_ratio(1,3)),Fx::from_int(xy).add(Fx::from_ratio(2,5))];
+            assert_eq!(fast.crushed_limit(pos,head,tank(),limit),exact.legacy20_crushed_limit(pos,head,tank(),limit),"repeat={repeat} xy={xy} head={head} limit={limit}");
+            assert_eq!(fast.columns,exact.columns);assert_eq!(fast.last_page,exact.last_page);
+        }}}}
+        drop(fast);drop(exact);
+        // Flat certificates, an interior hump, a hole, and a remote edit.
+        for mode in 0..4 {
+            if mode==1 {w.queue_edit(voxel::Edit::put(128,16,128,1));}
+            if mode==2 {w.queue_edit(voxel::Edit::dig(128,15,128));}
+            if mode==3 {w.queue_edit(voxel::Edit::put(16,16,16,1));}
+            w.flush();w.prepare_navigation([4,5]);
+            for xy in [1,32,128,254] {for head in [0,-733,angle::FULL/7] {for detail in [0,2] {
+                let pos=[Fx::from_int(xy).add(Fx::from_ratio(1,3));2];let shape=Shape{detail,continuous:true,..tank()};
+                for footprint in [false,true] {
+                    let mut a=Probe::with_yield(&w,&[4,5]);let mut b=Probe::with_yield(&w,&[4,5]);
+                    let actual=if footprint {a.contacts_for::<true>(pos,head,shape)}else{a.contacts_for::<false>(pos,head,shape)};
+                    let actual=(actual.0,actual.1>Fx::ZERO);
+                    let expected=if footprint {b.legacy20_contacts_for::<true>(pos,head,shape)}else{b.legacy20_contacts_for::<false>(pos,head,shape)};
+                    assert_eq!(actual,expected,"mode={mode} xy={xy} head={head} detail={detail}");
+                }
+            }}}
+        }
+    }
+
+    #[test]
+    fn crater_pit_width_beyond_span_is_steep_for_both_planner_and_motor() {
+        struct Pit13;
+        impl voxel::Generator for Pit13 {
+            fn material(&self, x: u32, y: u32, _: u32) -> u16 {
+                let in_pit = (97..=109).contains(&x);
+                let top = if in_pit { 10 } else { 20 };
+                u16::from(y < top)
+            }
+            fn uniform_box(&self, min: [u32; 3], max: [u32; 3]) -> Option<u16> {
+                if max[1] <= 10 {
+                    Some(1)
+                } else if min[1] >= 20 {
+                    Some(0)
+                } else {
+                    None
+                }
+            }
+        }
+        let world = World::new(256, 48, 256, 4096, Box::new(Pit13));
+        let motor_shape = Shape {
+            span: 12,
+            reach: 0,
+            step: 5,
+            ..tank()
+        };
+        let planner_shape = Shape {
+            reach: 2,
+            ..motor_shape
+        };
+        let pos = [Fx::from_int(128), Fx::from_int(128)];
+        let motor_pose = Probe::new(&world).pose(pos, 0, motor_shape);
+        let planner_pose = Probe::new(&world).pose(pos, 0, planner_shape);
+        assert!(motor_pose.steep, "13u pit deeper than step must be steep for motor");
+        assert!(
+            planner_pose.steep,
+            "planner reach=2 must not bridge a 13u pit wider than span=12"
+        );
+    }
+
 }
 
 #[cfg(test)]

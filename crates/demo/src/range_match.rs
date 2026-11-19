@@ -165,12 +165,53 @@ fn field(mut l: RangeLayout, zone: [i32; 2]) -> RangeLayout {
     l.zones.retain(|z| z.max[0] <= s[0] && z.max[1] <= s[2]);
     l.roads.retain(|r| r.points.iter().all(|p| inside(*p)));
     l.blocks.retain(|b| b.max[0] <= s[0] && b.max[2] <= s[2]);
+    // Authored mounds are bounded volumes too. Do not leave a distant mound
+    // outside a reduced match map (and do not reshape it by clipping its box).
+    l.mounds.retain(|m| (0..3).all(|a| m.min[a] >= 0 && m.max[a] <= s[a]));
     l.shields.retain(|b| inside([b.at[0], b.at[2]]));
     if let Some(c) = &mut l.course {
         c.ramps.retain(|b| b.max[0] <= s[0] && b.max[2] <= s[2]);
         c.max = [c.max[0].min(s[0]), c.max[1].min(s[2])];
     }
     l
+}
+
+#[cfg(test)]
+mod field_tests {
+    use super::*;
+
+    #[test]
+    fn every_reduced_match_preset_initialises_its_real_field() {
+        for preset in Preset::ALL.into_iter().filter(|p| *p != Preset::World) {
+            let sim = range(Setup { preset, ..Setup::default() })
+                .unwrap_or_else(|e| panic!("{}: {e}", preset.name()));
+            assert!(sim.units.iter().any(|u| u.status.alive));
+            assert!(sim.matter.economy.ledger.balanced());
+        }
+    }
+
+    #[test]
+    fn reduced_fields_keep_only_whole_mounds_and_validate() {
+        let stock = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        assert!(!stock.mounds.is_empty(), "fixture must exercise authored mounds");
+        for corner in [[512, 512], [1024, 1024], [2048, 2048]] {
+            let mut layout = stock.clone();
+            // Isolate field geometry from stock actors/aim points elsewhere.
+            layout.units.clear();
+            if let Some(course) = &mut layout.course { course.patrols.clear(); }
+            layout.gun = [200, 16, 200];
+            layout.target = [240, 16, 240];
+            layout.gun_point = true;
+            layout.clear_max = corner;
+            let reduced = field(layout, corner);
+            let size = reduced.size.map(|v| v as i32);
+            let expected: Vec<_> = stock.mounds.iter()
+                .filter(|m| (0..3).all(|a| m.min[a] >= 0 && m.max[a] <= size[a]))
+                .map(|m| (m.min, m.max)).collect();
+            assert_eq!(reduced.mounds.iter().map(|m| (m.min, m.max)).collect::<Vec<_>>(), expected);
+            reduced.validate().expect("reduced field must remain a valid layout");
+        }
+    }
 }
 
 /// Собрать полигон матча и начать бой.

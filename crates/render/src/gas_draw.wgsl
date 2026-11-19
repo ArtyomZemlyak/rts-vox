@@ -25,6 +25,7 @@ fn thermal_metric(cell:vec3<i32>, mode:u32, code:u32)->vec3<f32> {
     if !found && p.look.w>0.5 {return vec3(0.35,0.35,0.38);}
     var max_value=1000.0;
     if mode==2u {max_value=100.0;}
+    if mode==6u {max_value=500.0;}
     if mode==7u {max_value=2000.0;}
     if mode==8u {max_value=40.0;}
     let t=clamp(f32(value)/max_value,0.0,1.0);
@@ -33,7 +34,7 @@ fn thermal_metric(cell:vec3<i32>, mode:u32, code:u32)->vec3<f32> {
 }
 fn terrain_property(code:u32,mode:u32)->vec3<f32> {
     let unknown=vec3(0.35,0.35,0.38);
-    if code>=16u {return unknown;}
+    if code>=16u || mode==9u {return unknown;}
     let base=(arrayLength(&metric_cells)/4u-16u+code)*4u;
     if mode==3u {
         let phase=metric_cells[base]&0xffu;
@@ -177,12 +178,12 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
     let m=raw_material(vec3<i32>(floor(pos-normal*0.08)));
     if m==0u || m==15u {discard;}
     let metric_mode=u32(p.look.y);
-    if metric_mode==1u || metric_mode==2u || metric_mode==7u || metric_mode==8u {
+    if metric_mode==1u || metric_mode==2u || metric_mode==6u || metric_mode==7u || metric_mode==8u {
         // Preserve orientation so equally-valued faces remain legible.
         let metric_shade=0.55+0.45*max(0.0,dot(normal,normalize(p.sun.xyz)));
         return vec4(thermal_metric(vec3<i32>(floor(pos-normal*0.08)),metric_mode,m)*metric_shade,1.0);
     }
-    if metric_mode==3u || metric_mode==4u || metric_mode==5u || metric_mode==10u {
+    if metric_mode==3u || metric_mode==4u || metric_mode==5u || metric_mode==9u || metric_mode==10u {
         let metric_shade=0.55+0.45*max(0.0,dot(normal,normalize(p.sun.xyz)));
         return vec4(terrain_property(m,metric_mode)*metric_shade,1.0);
     }

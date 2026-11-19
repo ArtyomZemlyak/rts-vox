@@ -61,14 +61,18 @@ impl GaitParams {
 /// длины звеньев, направление сгиба и номера сегментов.
 #[derive(Clone, Debug)]
 pub struct LegRig {
+    pub lane_min: [f32;2],
+    pub lane_max: [f32;2],
+    pub foot_head: f32,
     /// Шарниры покоя в системе корня, мировые единицы.
     pub hip: Vec3,
     pub knee: Vec3,
     pub ankle: Vec3,
     pub l1: f32,
     pub l2: f32,
-    /// Куда сгибается колено: наружу от корпуса, в горизонтали.
+    /// Полное авторское направление сгиба в исходной плоскости ноги.
     pub bend: Vec3,
+    pub rest_axis: Vec3,
     /// Рамки покоя звеньев — от них считается поворот.
     pub thigh_rest: SegFrame,
     pub shin_rest: SegFrame,
@@ -122,6 +126,8 @@ pub enum LegRole {
 /// `per_mm` — мировых единиц в миллиметре; `frames` — рамки покоя
 /// всех сегментов (`model::segment_frames`).
 pub fn rigs_of(b: &UnitBody, per_mm: f32, frames: &[SegFrame]) -> Vec<LegRig> {
+    let spaces=sim_core::gait::rigs_of(b);
+    let scale=per_mm * voxel::unit::WORLD_MM as f32;
     let c = root_centre(b);
     let k = b.mm as f32 * per_mm;
     let at = |p: (i16, i16, i16)| {
@@ -133,18 +139,13 @@ pub fn rigs_of(b: &UnitBody, per_mm: f32, frames: &[SegFrame]) -> Vec<LegRig> {
     };
     b.legs
         .iter()
-        .map(|l: &Leg| {
+        .zip(&spaces)
+        .map(|(l,space): (&Leg,&sim_core::gait::LegRig)| {
             let (hip, knee, ankle) = (at(l.hip), at(l.knee), at(l.ankle));
-            // Сгиб — куда колено вынесено от прямой бедро–ступня,
-            // в горизонтали. У шагохода это наружу по диагонали.
-            let along = (ankle - hip).normalize_or_zero();
-            let off = knee - hip;
-            let side = off - along * off.dot(along);
-            let flat = Vec3::new(side.x, 0.0, side.z);
-            let bend = flat.try_normalize().unwrap_or_else(|| {
-                let out = Vec3::new(hip.x, 0.0, hip.z);
-                out.try_normalize().unwrap_or(Vec3::X)
-            });
+            // Use the physical rig's complete authored pole. A second,
+            // horizontally flattened pole flips the raised knee branch.
+            let bend = Vec3::new(space.bend.x.to_f64_lossy() as f32,
+                space.bend.y.to_f64_lossy() as f32,space.bend.z.to_f64_lossy() as f32);
             let seg = |i: u8| {
                 frames.get(i as usize).copied().unwrap_or(SegFrame {
                     pos: Vec3::ZERO,
@@ -153,12 +154,17 @@ pub fn rigs_of(b: &UnitBody, per_mm: f32, frames: &[SegFrame]) -> Vec<LegRig> {
                 })
             };
             LegRig {
+                lane_min: space.lane.min.map(|v|v.to_f64_lossy() as f32 *scale),
+                lane_max: space.lane.max.map(|v|v.to_f64_lossy() as f32 *scale),
+                foot_head: -(space.lane.head as f32)*std::f32::consts::TAU/fx::angle::FULL as f32,
                 hip,
                 knee,
                 ankle,
                 l1: (knee - hip).length().max(1e-3),
                 l2: (ankle - knee).length().max(1e-3),
                 bend,
+                rest_axis: Vec3::new(space.rest_axis.x.to_f64_lossy() as f32,
+                    space.rest_axis.y.to_f64_lossy() as f32,space.rest_axis.z.to_f64_lossy() as f32),
                 thigh_rest: seg(l.thigh),
                 shin_rest: seg(l.shin),
                 thigh: l.thigh as usize,
@@ -280,7 +286,7 @@ impl FootPlant {
         if self.anchor.is_none()
             || self.base.distance_squared(s.base) > (rig.l1 + rig.l2).powi(2) * 4.0
         {
-            let rest = rig.sole.contact(s.base + s.rot * rig.ankle, yaw, s.floor);
+            let rest = rig.sole.contact(s.base + s.rot * rig.lane_target(rig.ankle), yaw+rig.foot_head, s.floor);
             self.anchor = Some(rest);
             self.from = rest;
             self.goal = rest;
@@ -300,7 +306,7 @@ impl FootPlant {
                     s.base
                         + s.motion.linear * lead
                         + Quat::from_rotation_y(turn) * s.rot * rig.ankle,
-                    yaw + turn,
+                    yaw + turn+rig.foot_head,
                     s.floor,
                 );
             }
@@ -311,7 +317,7 @@ impl FootPlant {
                 s.floor,
             );
         }
-        let target = if swing {
+        let mut target = if swing {
             let span = (1.0 - g.duty).max(1e-3);
             let q = if s.motion.cycles > 1e-5 {
                 self.progress.max(((p - g.duty) / span).clamp(0.0, 1.0))
@@ -323,7 +329,8 @@ impl FootPlant {
             self.progress = q;
             let eased = q * q * (3.0 - 2.0 * q);
             let mut v = self.from.lerp(self.goal, eased);
-            v.pos.y += (q * std::f32::consts::PI).sin() * self.clearance;
+            let credit=(self.from.pos.y-self.goal.pos.y).max(0.0)*0.5;
+            v.pos.y += (q * std::f32::consts::PI).sin() * (self.clearance-credit).max(0.0);
             v
         } else {
             if self.swing {
@@ -331,6 +338,15 @@ impl FootPlant {
             }
             self.anchor.unwrap()
         };
+        let local=s.rot.inverse()*(target.pos-s.base);
+        let safe=rig.lane_target(local);
+        let active=rig.lane_min.iter().chain(&rig.lane_max).all(|v|v.is_finite());
+        if active {
+            let height=target.pos.y;
+            target=rig.sole.contact(s.base+s.rot*safe,yaw+rig.foot_head,s.floor);
+            target.pos.y=target.pos.y.max(height);
+            if !swing {self.anchor=Some(target);}
+        }
         self.swing = swing;
         self.base = s.base;
         let mut pose = rig.solve(s.rot.inverse() * (target.pos - s.base), s.rot);
@@ -344,6 +360,11 @@ impl FootPlant {
 }
 
 impl LegRig {
+    fn lane_target(&self,mut target:Vec3) -> Vec3 {
+        target.x=target.x.clamp(self.lane_min[0],self.lane_max[0]);
+        target.z=target.z.clamp(self.lane_min[1],self.lane_max[1]);
+        target
+    }
     pub fn role(&self, segment: usize) -> Option<LegRole> {
         if self.thigh == segment {
             Some(LegRole::Thigh)
@@ -382,6 +403,10 @@ impl LegRig {
     /// где окружность бедра встречает окружность голени, со стороны
     /// сгиба.
     pub fn solve(&self, target: Vec3, hull: Quat) -> LegPose {
+        self.solve_contact(self.lane_target(target),hull)
+    }
+
+    pub fn solve_contact(&self, target: Vec3, hull: Quat) -> LegPose {
         let d = target - self.hip;
         let dist = d.length().clamp(
             (self.l1 - self.l2).abs().max(1e-3),
@@ -390,7 +415,9 @@ impl LegRig {
         let u = d.try_normalize().unwrap_or(Vec3::NEG_Y);
         let a = (self.l1 * self.l1 - self.l2 * self.l2 + dist * dist) / (2.0 * dist);
         let h = (self.l1 * self.l1 - a * a).max(0.0).sqrt();
-        let n = (self.bend - u * self.bend.dot(u))
+        let k=1.0+self.rest_axis.dot(u);
+        let pole=if k>1.0/64.0 {self.bend-(self.rest_axis+u)*(self.bend.dot(u)/k)}else{self.bend};
+        let n = (pole - u * pole.dot(u))
             .try_normalize()
             .unwrap_or(Vec3::Y);
         let knee = self.hip + u * a + n * h;
@@ -425,7 +452,7 @@ impl LegRig {
         let (fwd, _, _) = hull.to_euler(bevy::math::EulerRot::YXZ);
         let foot = SegFrame {
             pos: ankle,
-            rot: hull.inverse() * Quat::from_rotation_y(fwd),
+            rot: hull.inverse() * Quat::from_rotation_y(fwd+self.foot_head),
             turret: false,
         };
         LegPose {
@@ -509,7 +536,9 @@ mod tests {
     #[test]
     fn the_simulation_poses_a_leg_where_this_module_draws_it() {
         use sim_core::damage::V3;
-        let b = voxel::unit::strider();
+        let mut bodies=voxel::roster::walking().into_iter().map(|(_,b)|b).collect::<Vec<_>>();
+        bodies.extend([voxel::unit::commander(),voxel::unit::walker04(),voxel::unit::strider(),voxel::unit::spider()]);
+        for b in bodies {
         let ours = rigs_of(&b, 0.01, &crate::model::segment_frames(&b, 0.01));
         let theirs = sim_core::gait::rigs_of(&b);
         assert_eq!(ours.len(), theirs.len());
@@ -531,6 +560,7 @@ mod tests {
                 a.ankle + Vec3::new(6.0, 3.0, 0.0),
                 a.ankle + Vec3::new(-5.0, 1.0, 4.0),
                 a.ankle + Vec3::new(0.0, 8.0, -2.0),
+                Vec3::new(a.ankle.x-6.0,a.hip.y+10.0,a.ankle.z),
             ] {
                 let mine = a.solve(target, Quat::IDENTITY);
                 let sim = s.solve(v3(target));
@@ -561,6 +591,7 @@ mod tests {
             assert!((mine.rot * Vec3::Y - f(up)).length() < 0.02);
         }
     }
+        }
 
     fn params() -> GaitParams {
         GaitParams {
@@ -583,12 +614,16 @@ mod tests {
             turret: false,
         };
         LegRig {
+            lane_min: [f32::NEG_INFINITY;2],
+            lane_max: [f32::INFINITY;2],
+            foot_head: 0.0,
             hip,
             knee,
             ankle,
             l1: (knee - hip).length(),
             l2: (ankle - knee).length(),
             bend: Vec3::new(-1.0, 0.0, -1.0).normalize(),
+            rest_axis: (ankle-hip).normalize(),
             thigh_rest: rest(knee - hip),
             shin_rest: rest(ankle - knee),
             thigh: 0,
@@ -703,6 +738,7 @@ mod tests {
                 &mut second.knee,
                 &mut second.ankle,
                 &mut second.bend,
+                &mut second.rest_axis,
             ] {
                 v.x = -v.x;
                 v.z = -v.z;

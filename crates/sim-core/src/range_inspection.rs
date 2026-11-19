@@ -60,6 +60,11 @@ impl BlastRange {
         self.inspect_cell_with_motion(at, true)
     }
     /// Skip the potentially deep granular-column query for static overlays.
+    /// Sparse active granular columns; rendering may stop at its publication budget.
+    pub fn diagnostic_ground_motion(&self) -> impl Iterator<Item = ([u32; 3], fx::Fx)> + '_ {
+        self.granular.diagnostic_motion(&self.world)
+    }
+
     pub fn inspect_cell_with_motion(&self, at: [u32; 3], motion: bool) -> Option<CellInspection> {
         if (0..3).any(|a| at[a] >= self.size[a]) {
             return None;

@@ -11,7 +11,17 @@ fx = { path = "../fx" }
 meshing = { path = "../meshing" }
 modding = { path = "../modding" }
 nav = { path = "../nav" }
-render = { path = "../render" }
+render = { path = "../render", optional = true }
 sim-core = { path = "../sim-core" }
 voxel = { path = "../voxel" }
 worldgen = { path = "../worldgen" }
+
+[features]
+# Scene/match tests and sim-cli do not need Bevy/wgpu. Only the graphics
+# culling benchmark imports render; opt in explicitly for that executable.
+render-tools = ["dep:render"]
+
+[[bin]]
+name = "bench_cull_world"
+path = "src/bin/bench_cull_world.rs"
+required-features = ["render-tools"]

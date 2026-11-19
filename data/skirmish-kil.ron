@@ -11,6 +11,7 @@
   (kind: GrebenStorage, allied: true, at: (6200,16,7600)),
   (kind: Crawler, allied: true, at: (5000,16,7400)),
   (kind: Tank, allied: false, at: (6500,16,8500)),
+  (kind: PowerPlantT1, allied: true, at: (5700,16,8400)),
  ],
  blocks: [
   (min: (4900,0,6800), max: (7300,160,8700), material: 0),

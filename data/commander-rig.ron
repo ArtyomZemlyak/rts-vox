@@ -5,6 +5,7 @@
     pitch_up_degrees: 45,
     rest_pitch_degrees: -55,
     walk_swing_degrees: 6,
+    turn_swing_degrees: 3,
     elbow_degrees: 50,
     elbow_swing_degrees: 20,
     slew_degrees_s: 60,

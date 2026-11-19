@@ -72,7 +72,12 @@ impl Connection {
         }
         self.sample_range(shape, budget)
     }
-    pub(super) fn start_batch(&self, shape: Shape, budget: usize) -> Option<StartSweep> {
+    pub(super) fn start_batch(
+        &self,
+        shape: Shape,
+        budget: usize,
+        count_crush: bool,
+    ) -> Option<StartSweep> {
         if budget < 16 {
             return None;
         }
@@ -80,6 +85,7 @@ impl Connection {
         (samples.len() >= 16).then_some(StartSweep {
             shape,
             samples,
+            count_crush,
             height: self.height,
             initial: self.cursor == 0,
         })
@@ -118,16 +124,23 @@ impl Connection {
         // A speculative suffix has no preceding pose. Do not reject its
         // first steep sample before the authoritative sweep checks the source.
         let mut steep = None;
+        let mut excess = None;
         for pose in poses {
-            if pose.blocked != 0
-                || pose.tilt
-                || pose.steep && steep == Some(false)
-                || pose.height.sub(height).abs() > Fx::from_int(shape.step)
-            {
+            if !transition::TransitionProof::geometry_accepted(
+                Pose {
+                    height,
+                    steep: steep.unwrap_or(true),
+                    excess: excess.unwrap_or(pose.excess),
+                    ..*pose
+                },
+                *pose,
+                transition::Policy::fine(shape, steep != Some(false)),
+            ) {
                 return false;
             }
             height = pose.height;
             steep = Some(pose.steep);
+            excess = Some(pose.excess);
         }
         true
     }
@@ -140,7 +153,7 @@ impl Connection {
         clear: &impl Fn([Fx; 2], i32) -> bool,
         allowance: &mut usize,
     ) -> Option<Option<usize>> {
-        self.advance_with_endpoints(ground, shape, clear, allowance, None, None, true)
+        self.advance_with_endpoints(ground, shape, clear, allowance, None, None, true, true)
     }
     /// The search has already probed both nodes of an edge. Reuse their exact
     /// poses while charging the same logical queries for bounded progress.
@@ -154,6 +167,7 @@ impl Connection {
         origin_pose: Option<Pose>,
         target_pose: Option<Pose>,
         allow_grade_exit: bool,
+        count_crush: bool,
     ) -> Option<Option<usize>> {
         let delta = [self.to[0].sub(self.from[0]), self.to[1].sub(self.from[1])];
         let yaw = self.yaw;
@@ -166,13 +180,16 @@ impl Connection {
         // Ordinary sweeps and a rejected live blocker keep their cheap path;
         // the derived answer needs no new field in the saved connection.
         let mut steep = None;
+        let mut excess = None;
         while *allowance > 0 {
             *allowance -= 1;
             if self.cursor == 0 {
-                let origin =
-                    origin_pose.unwrap_or_else(|| ground.route_pose(self.from, self.head, shape));
+                let origin = origin_pose.unwrap_or_else(|| {
+                    ground.route_pose_cost(self.from, self.head, shape, count_crush)
+                });
                 self.height = origin.height;
                 steep = Some(origin.steep);
+                excess = Some(origin.excess);
             } else {
                 let (p, h) = self.sample(self.cursor, turns, steps);
                 if !clear(p, h) {
@@ -180,16 +197,17 @@ impl Connection {
                 }
                 // A zero-angle turn's first sample is exactly the source
                 // pose again. Reuse its full clearance and crush answer.
+                let leave = allow_grade_exit && steep == Some(true);
                 let mut next = if self.cursor == turns + steps {
                     target_pose.unwrap_or_else(|| {
-                        ground.route_pose_mode(p, h, shape, allow_grade_exit && steep == Some(true))
+                        ground.route_pose_mode_cost(p, h, shape, leave, count_crush)
                     })
                 } else if turn == 0 && self.cursor == 1 {
                     origin_pose.unwrap_or_else(|| {
-                        ground.route_pose_mode(p, h, shape, allow_grade_exit && steep == Some(true))
+                        ground.route_pose_mode_cost(p, h, shape, leave, count_crush)
                     })
                 } else {
-                    ground.route_pose_mode(p, h, shape, allow_grade_exit && steep == Some(true))
+                    ground.route_pose_mode_cost(p, h, shape, leave, count_crush)
                 };
                 if allow_grade_exit
                     && next.steep
@@ -197,35 +215,45 @@ impl Connection {
                     && next.blocked == 0
                     && steep.is_none()
                 {
-                    let previous = if self.cursor == 1 {
-                        origin_pose.map(|pose| pose.steep)
+                    let prev_excess = if self.cursor == 1 {
+                        origin_pose.map(|pose| pose.excess)
                     } else {
                         None
-                    };
-                    let previous = previous.unwrap_or_else(|| {
+                    }
+                    .unwrap_or_else(|| {
                         let (p, h) = self.sample(self.cursor - 1, turns, steps);
-                        ground.contact_steep(p, h, shape)
+                        ground.contact_excess(p, h, shape)
                     });
+                    let previous = prev_excess > Fx::ZERO;
                     steep = Some(previous);
+                    excess = Some(prev_excess);
                     if previous {
                         // A speculative steep refusal can have skipped its belly.
-                        next = ground.route_pose_mode(p, h, shape, true);
+                        next = ground.route_pose_mode_cost(p, h, shape, true, count_crush);
                     }
                 }
-                if next.blocked != 0
-                    || next.tilt
-                    || next.steep && (!allow_grade_exit || steep != Some(true))
-                    || next.height.sub(self.height).abs() > Fx::from_int(shape.step)
-                {
+                if !transition::TransitionProof::geometry_accepted(
+                    Pose {
+                        height: self.height,
+                        steep: steep.unwrap_or(false),
+                        excess: excess.unwrap_or(Fx::ZERO),
+                        ..next
+                    },
+                    next,
+                    transition::Policy::fine(shape, allow_grade_exit && steep == Some(true)),
+                ) {
                     return Some(None);
                 }
-                self.crush = if self.cursor <= turns {
-                    self.crush.max(next.crush)
-                } else {
-                    self.crush + next.crush
-                };
+                if count_crush {
+                    self.crush = if self.cursor <= turns {
+                        self.crush.max(next.crush)
+                    } else {
+                        self.crush + next.crush
+                    };
+                }
                 self.height = next.height;
                 steep = Some(next.steep);
+                excess = Some(next.excess);
             }
             self.cursor += 1;
             if self.cursor > turns + steps {

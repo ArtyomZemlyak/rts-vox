@@ -1,5 +1,51 @@
 # Навигация по документации
 
+15.11.2026: [618 — объёмная голограмма и жизненный цикл проектора](analysis/618-volumetric-hologram-projector-20261115.md).
+
+15.11.2026: [617 — пространственная иерархия UI и глобальная очередь](analysis/617-spatial-ui-hierarchy-and-production-islands-20261115.md).
+
+15.11.2026: [616 — optical/pixel система UI, приёмка и release](analysis/616-optical-pixel-ui-system-20261115.md).
+
+[Единая система UI: матрица режимов и токены](ui-style-system.md).
+
+15.11.2026: [611 — кастомная физика: от capsule и грязи до SDF и MPM](analysis/611-custom-physics-alternatives-20261115.md).
+
+15.11.2026: [610 — восстановление шага после разрушения опоры и у края кратера](analysis/610-walking-support-recovery-20261115.md).
+
+15.11.2026: [609 — настоящий боевой FPS release/4К и блокировка выдачи candidate](analysis/609-active-battle-fps-ab-20261115.md).
+
+14.11.2026: [608 — ходьба во время перекрывающихся взрывов: 2/5, сохранённые отказы](analysis/608-walking-during-overlapping-blasts-20261114.md).
+
+14.11.2026: [607 — источник живой опоры и готовность после посадки](analysis/607-live-support-source-readiness-20261114.md).
+14.11.2026: [606 — снег, грязь, опора и альтернативные архитектуры контакта](analysis/606-terrain-contact-alternatives-20261114.md).
+14.11.2026: [605 — неподвижные planted-контакты и окно до публикации корпуса](analysis/605-planted-contact-window-acceptance-20261114.md).
+14.11.2026: [604 — независимая проверка окна опоры, посадки и текущих отказов](analysis/604-independent-contact-window-review-20261114.md).
+14.11.2026: [603 — узкие ворота и восстановление глобального поиска](analysis/603-narrow-gate-terrain-replan-20261114.md).
+14.11.2026: [601 — непрерывный отрыв и досягаемость swing](analysis/601-continuous-takeoff-and-swing-20261114.md).
+14.11.2026: [600 — мировые anchors двуногих и общий preview](analysis/600-biped-world-anchors-and-shared-preview-20261114.md).
+14.11.2026: [599 — мировые anchors многоногих](analysis/599-multiped-world-anchors-20261114.md).
+14.11.2026: [598 — мягкое сопротивление леса и мелких камней](analysis/598-forest-and-pebbles-resistance-20261114.md).
+14.11.2026: [597 — допуск Strider по опорам и скачки корпуса](analysis/597-strider-support-window-and-height-20261114.md).
+13.11.2026: [595 — посадка и готовность опоры принять вес](analysis/595-support-readiness-and-acceptance-review-20261113.md).
+13.11.2026: [594 — живой носитель опоры и движущиеся обломки](analysis/594-moving-support-and-debris-contact-review-20261113.md).
+13.11.2026: [593 — мировой planted, lane-fit и окно допуска движения](analysis/593-planted-anchor-and-motion-window-review-20261113.md).
+13.11.2026: [592 — проверка серий взрывов и корректировка кратерных тестов](analysis/592-multiple-craters-validation-20261113.md).
+13.11.2026: [591 — многократные кратеры, обломки и граница динамической походки](analysis/591-multi-crater-and-dynamic-locomotion-20261113.md).
+13.11.2026: [590 — независимая проверка сроков шагов, контакта и оставшихся ограничений](analysis/590-step-deadlines-and-contact-review-20261113.md).
+13.11.2026: [589 — барьеры и очередность шагов паука](analysis/589-spider-barriers-and-step-deadlines-20261113.md).
+13.11.2026: [588 — восстановление стоп после копки и удаления обломков](analysis/588-live-walker-support-20261113.md).
+13.11.2026: [587 — независимая проверка живой опоры, инструментов и границ доказательства](analysis/587-locomotion-validation-review-20261113.md).
+13.11.2026: [586 — повторное ревью скорости и достоверности проверок](analysis/586-validation-cycle-review-20261113.md).
+13.11.2026: [585 — ускоренный цикл проверки механики](analysis/585-fast-mechanics-validation-20261113.md).
+13.11.2026: [584 — независимая проверка ходьбы, опорной сетки и инструментов](analysis/584-locomotion-evidence-and-next-steps-20261113.md).
+13.11.2026: [583 — кратеры, обломки и редкие пробы шагающих](analysis/583-walking-craters-and-debris-20261113.md).
+13.11.2026: [582 — ноги и корпус на неровной местности](analysis/582-uneven-ground-foot-placement-20261113.md).
+13.11.2026: [581 — опорная нога командира и Walker04](analysis/581-biped-support-coordination-20261113.md).
+
+13.11.2026: [быстрые проверки без графики и просмотр записанной походки](testing-fast.md).
+Полный разбор пакета Kimi, принятые рекомендации и оставшиеся ограничения —
+[580](analysis/580-kimi-review-and-fast-testing-20261113.md).
+
 ## Актуальный срез реализации — 08.11.2026
 
 Движение 09.11: [535 — высокие соседи и стыковка краулера](analysis/535-elevated-obstacles-and-crawler-docking-20261109.md), [534 — короткий задний ход у стены](analysis/534-short-reverse-near-walls-20261109.md), [533 — повтор приказа и промежуточные точки](analysis/533-repeated-move-and-waypoint-flow-20261109.md), [532 — движущиеся соседи и группа командиров](analysis/532-moving-neighbours-and-walking-groups-20261109.md), [531 — отзывчивость приказов и обход зданий](analysis/531-responsive-unit-navigation-20261109.md).
@@ -105,3 +151,9 @@ headless-тика на срезе 04.11; это не FPS нынешней игр
 Возврат башен по направлению движения без активной боевой цели — [544](analysis/544-idle-turret-travel-20261110.md).
 Плечи, локти, походная поза и анимация рук командира — [545](analysis/545-commander-arm-mechanics-20261110.md).
 Повторное ревью и проверки накопленных изменений перед отправкой в main — [546](analysis/546-prepush-review-20261110.md).
+
+14.11.2026: [599 — неподвижные опоры паука и шагохода, contact IK и посадка](analysis/599-multiped-world-anchors-20261114.md).
+
+14.11.2026: [600 — неподвижные опоры двуногих и общий прогноз шага](analysis/600-biped-world-anchors-and-shared-preview-20261114.md).
+
+14.11.2026: [601 — непрерывный отрыв и фактическая подошва](analysis/601-continuous-takeoff-and-swing-20261114.md).

@@ -1,0 +1,10 @@
+// Stock tracked pace. Course tank_speed is the authored baseline (world units/s).
+// New top speed x3 and time-to-top-speed /3 require acceleration x9.
+(
+    speed_multiplier: 3,
+    acceleration_multiplier: 9,
+    brake_multiplier: 9,
+    tier2_speed_pct: 91,
+    // Relative to the slower tier-2 combat tracks, not the fastest light tank.
+    crawler_speed_pct: 90,
+)

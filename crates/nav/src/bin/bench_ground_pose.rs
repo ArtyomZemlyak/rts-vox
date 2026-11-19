@@ -12,9 +12,10 @@ fn main() {
     let w = World::new(2048, 96, 2048, 65536, Box::new(Flat));
     w.prepare_navigation([4, 5]);
     for half in [[26,18],[72,72],[200,200]] {
-        let shape = Shape { half, support: half.map(|n| n * 3 / 4),
+        let shape = Shape {
+            continuous: false, detail: 0, half, support: half.map(|n| n * 3 / 4),
             clearance: Fx::from_int(3), step: 8, min_up: Fx::from_ratio(7,10),
-            height: 60, span: 8, ramp: Fx::ONE };
+            height: 60, span: 8, reach: 0, grade_slack: Fx::ZERO, ramp: Fx::ONE };
         let mut probe = Probe::with_yield(&w, &[4,5]);
         let begin = Instant::now();
         let mut sum = 0i64;

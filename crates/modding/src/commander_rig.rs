@@ -8,6 +8,8 @@ pub struct Tuning {
     pub pitch_up_degrees: i32,
     pub rest_pitch_degrees: i32,
     pub walk_swing_degrees: i32,
+    #[serde(default = "turn_swing")]
+    pub turn_swing_degrees: i32,
     pub elbow_degrees: i32,
     pub elbow_swing_degrees: i32,
     pub slew_degrees_s: i32,
@@ -26,6 +28,7 @@ impl Tuning {
             || !(10..=60).contains(&t.pitch_up_degrees)
             || !(-t.pitch_down_degrees..=-20).contains(&t.rest_pitch_degrees)
             || !(0..=12).contains(&t.walk_swing_degrees)
+            || !(0..=8).contains(&t.turn_swing_degrees)
             || !(25..=65).contains(&t.elbow_degrees)
             || !(0..=25).contains(&t.elbow_swing_degrees)
             || t.elbow_degrees - t.elbow_swing_degrees < 15
@@ -42,6 +45,7 @@ impl Tuning {
     }
 }
 
+fn turn_swing() -> i32 { 3 }
 fn work_ready() -> i32 { 6 }
 
 #[cfg(test)]
@@ -51,11 +55,13 @@ mod tests {
     fn commander_rig_rejects_intersecting_folds_and_invalid_servos() {
         let stock = include_str!("../../../data/commander-rig.ron");
         Tuning::from_ron(stock).unwrap();
-        let legacy=stock.replace("    work_ready_degrees: 6,", "");
+        let legacy=stock.replace("    work_ready_degrees: 6,", "").replace("    turn_swing_degrees: 3,", "");
         assert!(!legacy.contains("work_ready_degrees"));
         assert_eq!(Tuning::from_ron(&legacy).unwrap().work_ready_degrees, 6);
+        assert_eq!(Tuning::from_ron(&legacy).unwrap().turn_swing_degrees, 3);
         for (valid, invalid) in [
             ("elbow_degrees: 50", "elbow_degrees: 80"),
+            ("turn_swing_degrees: 3", "turn_swing_degrees: 30"),
             ("yaw_limit_degrees: 35", "yaw_limit_degrees: 90"),
             ("settle_ticks: 6", "settle_ticks: 0"),
             ("work_ready_degrees: 6", "work_ready_degrees: 0"),

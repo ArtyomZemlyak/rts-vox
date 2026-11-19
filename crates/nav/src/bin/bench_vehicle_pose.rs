@@ -15,6 +15,7 @@ fn main() {
     let world = World::new(384, 96, 384, 100, Box::new(Grade));
     world.prepare_navigation([4, 5]);
     let shape = Shape {
+        continuous: false, detail: 0,
         half: [88, 80],
         support: [50, 60],
         clearance: Fx::from_int(38),
@@ -22,6 +23,8 @@ fn main() {
         min_up: Fx::from_ratio(84, 100),
         height: 20,
         span: 12,
+        reach: 0,
+        grade_slack: Fx::ZERO,
         ramp: Fx::from_ratio(1, 2),
     };
     // Warm and measured rounds rotate cases; rebuilding the per-pose probe

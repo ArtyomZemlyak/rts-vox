@@ -32,6 +32,7 @@ impl Tuning {
         if !(1..=60).contains(&t.speed)
             || !(1..=32).contains(&t.step)
             || t.chassis.gait.is_none()
+            || t.chassis.gait.is_some_and(|g| g.body_sway_pct > 100 || g.lane_duty_pct > 100)
             || t.chassis.mass <= 0
             || t.chassis.density <= 0
             || !(1..=300).contains(&t.charge_ticks)

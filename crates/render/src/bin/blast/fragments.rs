@@ -10,17 +10,23 @@ mod dense;
 pub(super) mod history;
 #[cfg(test)]
 #[path = "fragments/lifecycle_tests.rs"]
-mod lifecycle_tests;
+pub(super) mod lifecycle_tests;
 #[path = "fragments/picking.rs"]
 pub(super) mod picking;
 #[path = "fragments/slots.rs"]
 mod slots;
 #[derive(Component)]
 pub struct Piece(u64, u64, bool);
+#[derive(Component)]
+pub struct Surface;
+fn retained_mesh(buf: &render::geom::MeshBuf) -> Mesh {
+    let mut m = super::mesh(buf); m.asset_usage |= RenderAssetUsages::MAIN_WORLD; m
+}
 #[derive(Default)]
 pub struct Cache {
     meshes: BTreeMap<(render::model::FragmentMeshKey, u8), Handle<Mesh>>,
     materials: BTreeMap<u16, Handle<StandardMaterial>>,
+    metric_materials: BTreeMap<[u8; 3], Handle<StandardMaterial>>,
     chunks: BTreeMap<u64, Vec<Handle<Mesh>>>,
     slots: dense::Slots,
     batches: batches::Batches,
@@ -33,6 +39,9 @@ pub fn material_colour(material: u16) -> [f32; 4] {
         12 => [0.18, 0.38, 0.30],
         2 => [0.42, 0.40, 0.34],
         3 => [0.29, 0.32, 0.33],
+        13 => [1.0, 0.33, 0.055],
+        14 => [1.0, 0.45, 0.11],
+        16 => [0.95, 0.70, 0.22],
         4 => [0.17, 0.22, 0.10],
         5 => [0.27, 0.20, 0.12],
         7 => [0.23, 0.25, 0.12],
@@ -43,7 +52,7 @@ pub fn pos(v: [fx::Fx; 3]) -> Vec3 {
     Vec3::from(v.map(|a| a.to_f64_lossy() as f32))
 }
 fn piece_mesh(shape: u64, side: u8, colour: [f32; 4]) -> Mesh {
-    super::mesh(&render::model::fragment_to_mesh(shape, side, colour))
+    retained_mesh(&render::model::fragment_to_mesh(shape, side, colour))
 }
 fn rubble_variant(f: &sim_core::burst::Fragment) -> u8 {
     if f.chunk.is_some()
@@ -60,6 +69,7 @@ fn rubble_variant(f: &sim_core::burst::Fragment) -> u8 {
     1 + ((hash ^ (hash >> 27)) & 15) as u8
 }
 fn piece_colour(f: &sim_core::burst::Fragment) -> [f32; 4] {
+    if matches!(f.material, 13 | 14 | 16) { return material_colour(f.material); }
     if let Some(p) = f.paint {
         let part = match p[2] {
             1 => voxel::Part::Core,
@@ -85,6 +95,7 @@ fn piece_material(
         .entry(mat)
         .or_insert_with(|| {
             materials.add(StandardMaterial {
+                emissive: if matches!(mat, 13 | 14 | 16) { LinearRgba::rgb(2.0, 0.3, 0.025) } else { LinearRgba::BLACK },
                 metallic: if mat == 3 { 0.65 } else { 0.0 },
                 perceptual_roughness: if mat == 3 { 0.63 } else { 0.95 },
                 ..default()
@@ -103,8 +114,12 @@ pub fn draw(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut old: Query<(Entity, &Piece, &mut Transform)>,
     batching: Option<Res<batches::Enabled>>,
+    lab: Option<Res<laboratory::Laboratory>>,
     batch_entities: Query<Entity, With<batches::RestingBatch>>,
+    mut metric_log: Local<Option<(u64,u8,u32)>>,
 ) {
+    let mode = lab.as_ref().map_or(0, |l| l.metric_mode());
+    let diagnostic = mode > 0;
     let fragments = &scene.sim.matter.debris.fragments;
     let alpha = if scene.realtime && !scene.paused {
         (scene.acc * sim_core::TICKS_PER_SECOND as f32).clamp(0.0, 1.0)
@@ -124,6 +139,7 @@ pub fn draw(
     let mut update = || {
         batches.update(
             batching.is_some(),
+            mode,
             &scene,
             &visual,
             &mut commands,
@@ -170,12 +186,57 @@ pub fn draw(
         chunks,
         meshes: cached_meshes,
         materials: cached_materials,
+        metric_materials,
         ..
     } = &mut *cache;
     for (entry, f) in slots.entries.iter_mut().zip(fragments) {
+        let colour_key = diagnostic.then(|| laboratory::metric_quantize(laboratory::fragment_metric_colour(f, &scene.sim, mode)));
+        let diagnostic_material = colour_key.map(|key| laboratory::fragment_metric_material(key, metric_materials, &mut materials));
+        // A view change must not wait behind physical section mesh work. These
+        // meshes belong to this section: swap only their colour arrays and keep
+        // positions/indices, clipping source and the real paint for restoration.
+        if let Some(slot) = entry.slot.as_mut().filter(|slot| old.contains(slot.entity)) {
+            if let Some(appearance) = &mut slot.appearance {
+                if slot.diagnostic != diagnostic {
+                    if diagnostic {
+                        for handle in chunks.get(&f.id).into_iter().flatten() {
+                            if let Some(mut mesh) = meshes.get_mut(handle) {
+                                if let Some(bevy::mesh::VertexAttributeValues::Float32x4(col)) = mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR) {
+                                    let original = std::mem::replace(col, vec![[1.0; 4]; col.len()]);
+                                    appearance.colours.push((handle.clone(), original));
+                                }
+                            }
+                        }
+                    } else {
+                        for (handle, original) in appearance.colours.drain(..) {
+                            if let Some(mut mesh) = meshes.get_mut(&handle) { mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, original); }
+                        }
+                    }
+                }
+                if slot.diagnostic != diagnostic || slot.colour != colour_key {
+                    for (&child, original) in slot.children.iter().zip(&appearance.materials) {
+                        commands.entity(child).insert(MeshMaterial3d(diagnostic_material.as_ref().unwrap_or(original).clone()));
+                    }
+                    slot.diagnostic = diagnostic;
+                    slot.colour = colour_key;
+                }
+            }
+        }
+        if let Some(slot) = &entry.slot {
+            if slot.diagnostic != diagnostic && matches!(entry.prepared, dense::Prepared::Existing(_)) {
+                entry.prepared = dense::Prepared::Replace(slot.key, dense::transform(f));
+            }
+        }
         let (piece_key, current) = match entry.prepared {
             dense::Prepared::Existing(next) => {
-                let slot = entry.slot.as_ref().unwrap();
+                let slot = entry.slot.as_mut().unwrap();
+                if slot.colour != colour_key {
+                    if let Some(mat) = &diagnostic_material {
+                        if slot.children.is_empty() { commands.entity(slot.entity).insert(MeshMaterial3d(mat.clone())); }
+                        for &child in &slot.children { commands.entity(child).insert(MeshMaterial3d(mat.clone())); }
+                    }
+                    slot.colour = colour_key;
+                }
                 if let Some(transform) = next {
                     if let Ok((_, p, mut tr)) = old.get_mut(slot.entity) {
                         debug_assert_eq!((p.0, p.1, p.2), (f.id, slot.key.0, slot.key.1));
@@ -240,6 +301,8 @@ pub fn draw(
                 chunk.template as usize,
             );
             let mut handles = Vec::new();
+            let mut children = Vec::new();
+            let mut appearance = slots::Appearance { colours: Vec::new(), materials: Vec::new() };
             let entity = commands
                 .spawn((
                     Piece(f.id, chunk.hash(), dead),
@@ -250,51 +313,65 @@ pub fn draw(
                     for (finish, mut buf) in
                         render::model::section_to_mesh_tinted(template, chunk, tint)
                     {
-                        if dead {
-                            wreck::charred(&mut buf);
-                        }
-                        let handle = meshes.add(super::mesh(&buf));
+                        if dead { wreck::charred(&mut buf); }
+                        let original = diagnostic.then(|| std::mem::replace(&mut buf.col, vec![[1.0; 4]; buf.pos.len()]));
+                        let handle = meshes.add(retained_mesh(&buf));
+                        if let Some(original) = original { appearance.colours.push((handle.clone(), original)); }
                         handles.push(handle.clone());
-                        parent.spawn((
+                        let original_material = if dead { art.burned_materials[finish].clone() } else { art.materials[finish].clone() };
+                        appearance.materials.push(original_material.clone());
+                        let child = parent.spawn((
+                            Surface,
                             Mesh3d(handle),
-                            MeshMaterial3d(if dead {
-                                art.burned_materials[finish].clone()
-                            } else {
-                                art.materials[finish].clone()
-                            }),
+                            MeshMaterial3d(diagnostic_material.as_ref().unwrap_or(&original_material).clone()),
                             Transform::default(),
-                        ));
+                        )).id();
+                        children.push(child);
                     }
                 })
                 .id();
-            entry.slot = Some(slots::Slot::new(entity, piece_key, f, current, transform));
+            let mut slot = slots::Slot::new(entity, piece_key, f, current, transform);
+            slot.diagnostic = diagnostic; slot.colour = colour_key; slot.children = children;
+            slot.appearance = Some(Box::new(appearance));
+            entry.slot = Some(slot);
             chunks.insert(f.id, handles);
             continue;
         }
-        let colour = piece_colour(f);
+        let colour = if diagnostic { [1.0; 4] } else { piece_colour(f) };
         let variant = rubble_variant(f);
-        let key = ((f.material, f.shape, f.side, f.paint), variant);
+        let key = ((f.material, f.shape, f.side, f.paint), variant | if diagnostic { 128 } else { 0 });
         let mesh = cached_meshes
             .entry(key)
             .or_insert_with(|| {
                 meshes.add(if variant == 0 {
                     piece_mesh(f.shape, f.side, colour)
                 } else {
-                    super::mesh(&render::model::rubble_pile_to_mesh(variant - 1, colour))
+                    retained_mesh(&render::model::rubble_pile_to_mesh(variant - 1, colour))
                 })
             })
             .clone();
-        let material = piece_material(f.material, cached_materials, &mut materials);
+        let material = diagnostic_material.unwrap_or_else(|| piece_material(f.material, cached_materials, &mut materials));
         let entity = commands
             .spawn((
                 Piece(f.id, 0, false),
+                Surface,
                 Mesh3d(mesh),
                 MeshMaterial3d(material),
                 transform,
             ))
             .id();
-        entry.slot = Some(slots::Slot::new(entity, piece_key, f, current, transform));
+        let mut slot = slots::Slot::new(entity, piece_key, f, current, transform);
+        slot.diagnostic = diagnostic; slot.colour = colour_key;
+        entry.slot = Some(slot);
     }
+    let key=(scene.generation,mode,scene.sim.tick/5);
+    if scene.out.is_some() && mode>0 && *metric_log!=Some(key) {
+        let individual=slots.entries.iter().filter(|entry|entry.slot.as_ref().is_some_and(|slot|slot.diagnostic)).count();
+        let batched=cache.batches.flags.iter().filter(|&&v|v).count();
+        println!("METRIC_COVERAGE tick={} mode={mode} paused={} total={} individual={individual} batched={batched} pending={} units={} terrain_global=true",scene.sim.tick,scene.paused,fragments.len(),fragments.len().saturating_sub(individual+batched),scene.sim.units.len());
+        *metric_log=Some(key);
+    }
+
 }
 
 #[cfg(test)]

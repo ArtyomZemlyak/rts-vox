@@ -1017,6 +1017,65 @@ fn buried_scenario_charge_power_expands_real_uplift_and_replays() {
 }
 
 #[test]
+fn stock_buried_scenario_completes_landing_at_four_yields_with_workers_and_restore() {
+    let experiment=modding::laboratory::experiments::stock().into_iter()
+        .find(|e|e.id=="buried-dome").unwrap();
+    let base=ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut yields=Vec::new();
+    for power in [1000,4000,10_000,100_000] {
+        let config=base.at_power(power);
+        let mut reference=Vec::new();
+        let mut expected=None;
+        for workers in [1,2] {
+            let mut r=BlastRange::with_layout(config,experiment.layout.clone()).unwrap();
+            r.control();r.set_physics_workers(workers);r.set_navigation_workers(workers);
+            assert!(r.execute_command(Command::Gun(battle::commands::GunCommand::Detonate {
+                at:[384,8,336]
+            })).admitted());
+            let mut radius2=0i64;
+            let mut highest=16i64;
+            let mut peak_cells=0usize;
+            let mut checkpoints=Vec::new();
+            let mut replay:Option<BlastRange>=None;
+            for tick in 1..=600 {
+                r.step();
+                assert!(r.matter.economy.ledger.balanced());
+                assert!(r.matter.spent_mj<=r.matter.supplied_mj);
+                if let Some(copy)=&mut replay {
+                    copy.step();assert_eq!(copy.state_hash(),r.state_hash(),"yield{power} restore tick{tick}");
+                }
+                if tick==3 {
+                    let mut copy=BlastRange::restore(config,&r.snapshot()).unwrap();
+                    copy.set_physics_workers(3-workers);copy.set_navigation_workers(3-workers);
+                    replay=Some(copy);
+                }
+                if tick==43 {replay=None;}
+                peak_cells=peak_cells.max(r.bodies.list.iter().map(|b|b.voxels.len()).sum());
+                for body in &r.bodies.list {
+                    for v in &body.voxels {
+                        let (x,y,z)=body.world_of(*v);let dx=x-384;let dz=z-336;
+                        radius2=radius2.max(dx*dx+dz*dz);highest=highest.max(y);
+                    }
+                }
+                if tick%50==0 {checkpoints.push(r.state_hash());}
+            }
+            assert!(r.ready()&&r.bodies.list.is_empty()&&r.world.queued()==0&&r.matter.debris.claims()==0,
+                "unlanded/unfinished yield{power} workers{workers}");
+            let result=(radius2,highest,peak_cells,r.upheaval.raised);
+            assert!(result.0>0&&result.1>16&&result.2>0&&result.3>0);
+            if workers==1 {reference=checkpoints;expected=Some(result);}
+            else {assert_eq!(reference,checkpoints);assert_eq!(expected,Some(result));}
+        }
+        yields.push(expected.unwrap());
+    }
+    for pair in yields.windows(2) {
+        assert!(pair[1].0>pair[0].0&&pair[1].1>pair[0].1&&pair[1].2>pair[0].2&&pair[1].3>pair[0].3,
+            "full scenario did not scale its actual ground: {yields:?}");
+    }
+    println!("buried full600 workers1/2, radius2/height/peak/raised={yields:?}");
+}
+
+#[test]
 fn buried_heave_uses_edited_ground_above_the_original_surface() {
     let mut r = lab();
     r.set_physics_workers(1);
@@ -1323,4 +1382,77 @@ fn lab_physics_hydraulic_erosion_uses_real_current_and_replays() {
     }
     assert_eq!(r.water.stats().units, r.water.stats().initial_units);
     assert!(r.matter.economy.ledger.balanced());
+}
+
+
+#[test]
+fn sustained_body_laser_keeps_real_liquid_and_hole_after_core_death_with_restore_workers() {
+    use modding::range::{RangeUnitDef, RangeUnitKind};
+    let mut reference = None;
+    for workers in [1, 2] {
+        let mut layout = modding::laboratory::Definition::stock().layout;
+        layout.size = [256, 128, 256];
+        layout.clear_min = [1, 1]; layout.clear_max = [255, 255];
+        layout.gun_point = true; layout.gun = [32, 32, 32];
+        layout.target = [128, 16, 128]; layout.laboratory = true;
+        layout.units = vec![RangeUnitDef { allied: true, kind: RangeUnitKind::Tank,
+            at: [128, 16, 128], weapon: None }];
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap();
+        let mut r = BlastRange::with_layout(c, layout).unwrap();
+        r.control(); r.set_physics_workers(workers); r.set_navigation_workers(workers);
+        r.units[0].motion.enabled = false;
+        let mut core = None;
+        let body = &r.units[0].body;
+        for z in 0..body.vol.nz { for y in 0..body.vol.ny { for x in 0..body.vol.nx {
+            if body.vol.get(x as usize, y as usize, z as usize)
+                && body.part_at(x as usize, y as usize, z as usize) == voxel::unit::Part::Core {
+                core.get_or_insert(thermal::Cell { unit: 0, part: 0, at: [x, y, z] });
+            }
+        } } }
+        let aim = core.unwrap().world(&r.units).unwrap().map(Fx::to_int_trunc);
+        let (lo, hi) = r.units[0].bounds();
+        assert!(r.execute_command(Command::Gun(battle::commands::GunCommand::LabStream {
+            origin: [lo[0] - 20, aim[1], aim[2]], target: [hi[0] + 20, aim[1], aim[2]], enabled: true,
+        })).accepted());
+        let mut hashes = Vec::new(); let mut replay = None;
+        let mut peak_liquid = 0; let mut descended = false; let mut passed = false;
+        let mut previous = std::collections::BTreeMap::new();
+        for tick in 1..=360 {
+            r.step();
+            if let Some(copy) = &mut replay {
+                let copy: &mut BlastRange = copy;
+                copy.step(); assert_eq!(r.state_hash(), copy.state_hash(), "body laser restore tick {tick}");
+            }
+            if tick == 60 {
+                let mut copy = BlastRange::restore(r.config, &r.snapshot()).expect("live laser/drop restore");
+                copy.set_physics_workers(3 - workers); copy.set_navigation_workers(3 - workers);
+                assert_eq!(r.state_hash(), copy.state_hash()); replay = Some(copy);
+            }
+            let mut liquid = 0;
+            for f in &r.matter.debris.fragments {
+                if r.matter.debris.molten_heat(f.id).is_some() {
+                    assert_eq!(f.material, 13); assert!(!f.resting);
+                    liquid += 1;
+                    if previous.get(&f.id).is_some_and(|y| f.position.y < *y) { descended = true; }
+                    previous.insert(f.id, f.position.y);
+                }
+            }
+            peak_liquid = peak_liquid.max(liquid);
+            passed |= r.streams.traces.iter().any(|t| t.to[0] > Fx::from_int(hi[0]));
+            assert!(r.matter.economy.ledger.balanced(), "body laser matter tick {tick}");
+            hashes.push(r.state_hash());
+            if workers == 1 && [24, 120, 360].contains(&tick) {
+                if let Ok(directory) = std::env::var("RTS_LASER611_SNAPSHOTS") {
+                    let path = std::path::Path::new(&directory);
+                    std::fs::create_dir_all(path).unwrap();
+                    std::fs::write(path.join(format!("unit-laser-{tick}.bin")), r.snapshot()).unwrap();
+                }
+            }
+        }
+        eprintln!("body laser360 workers={workers} melted={} peak_liquid={peak_liquid} descended={descended} passed={passed} alive={} hash={:016x}", r.thermals.melted, r.units[0].status.alive, r.state_hash());
+        assert!(peak_liquid > 0 && descended && passed);
+        assert!(r.thermals.melted > 32 && !r.units[0].status.alive);
+        if let Some(prior) = &reference { assert_eq!(&hashes, prior, "workers1/2"); }
+        reference = Some(hashes);
+    }
 }

@@ -28,7 +28,10 @@ pub struct HeatTuning {
     pub melt_flow: [Option<MeltFlow>; 3],
     #[serde(default)]
     pub melt_moves_per_tick: usize,
+    #[serde(default = "legacy_vapor_heat_multiple")]
+    pub vapor_heat_multiple: u32,
 }
+fn legacy_vapor_heat_multiple() -> u32 { 3 }
 impl HeatTuning {
     pub fn from_ron(text: &str) -> Result<Self, String> {
         let t: Self = ron::from_str(text).map_err(|e| e.to_string())?;
@@ -40,6 +43,7 @@ impl HeatTuning {
                 .flatten()
                 .any(|p| p.from == 0 || p.to == 0 || p.from == p.to)
             || t.melt_moves_per_tick > 512
+            || !(1..=100).contains(&t.vapor_heat_multiple)
             || t.melt_flow
                 .iter()
                 .flatten()

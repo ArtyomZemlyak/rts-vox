@@ -60,7 +60,16 @@ use sim_core::blast::BlastRange;
 // forest intentionally change movement. Physics 1/4/8 agree (analysis/398).
 // ADR-815: tiered mechanical grades and physical-volume fracture prices.
 // All 600 tick hashes agree on physics 1/4 (analysis/400).
-const GOLDEN_600: u64 = 0x8b8e_c5ae_b10f_421e;
+// ADR-882: accepted walking/support work and physical body melt.
+// Both worker counts retain the full authored battle and all load assertions.
+// ADR-884: physical T3 barrel/trunnion and explicit geometry snapshot slots.
+// ADR-885 preserves pending support-source events across cold restores.
+// Integration627 transports the authored knee plane with its rest axis,
+// credits an already raised recovery instead of adding the descent as lift,
+// and withdraws unreachable support before publishing a failed stance fit.
+// Physical poses/combat intentionally change. All600 intermediate states
+// are compared on workers1/2/4/8; actual combat-load assertions stay.
+const GOLDEN_600: u64 = 0xc02b_cafc_47e9_b7b8;
 
 /// Сценарий собирается **из тех же данных, что у игры**: `include_str!`
 /// разворачивается на сборке, ввода-вывода в тесте нет, а литералы
@@ -78,46 +87,66 @@ fn reference() -> BlastRange {
 /// холостой фазой не закреплял бы ничего.
 #[test]
 fn the_reference_battle_hashes_what_was_recorded() {
-    let mut sim = reference();
-    let mut blast = false;
-    for _ in 0..600 {
-        sim.step();
-        blast |= sim.battle.impacts.iter().any(|i| {
-            matches!(
-                i.weapon,
-                Weapon::Blast
-                    | Weapon::Canister
-                    | Weapon::Siege
-                    | Weapon::Energy
-                    | Weapon::Annihilation
-            )
+    let mut previous = None;
+    let mut reference_hashes = Vec::new();
+    for workers in [1, 2, 4, 8] {
+        let mut sim = reference();
+        sim.set_physics_workers(workers);
+        sim.set_navigation_workers(workers);
+        let mut blast = false;
+        for tick in 0..600 {
+            sim.step();
+            let hash = sim.state_hash();
+            if workers == 1 {
+                reference_hashes.push(hash);
+            } else {
+                assert_eq!(
+                    hash,
+                    reference_hashes[tick],
+                    "reference worker{workers} tick{}",
+                    tick + 1
+                );
+            }
+            blast |= sim.battle.impacts.iter().any(|i| {
+                matches!(
+                    i.weapon,
+                    Weapon::Blast
+                        | Weapon::Canister
+                        | Weapon::Siege
+                        | Weapon::Energy
+                        | Weapon::Annihilation
+                )
+            });
+        }
+        let fired = [true, false].map(|side| {
+            (0..sim.units.len())
+                .filter(|&id| sim.allied(id) == side)
+                .map(|id| sim.battle.actors[id].fired)
+                .sum::<u32>()
         });
+        let dead = sim.units.iter().filter(|u| !u.status.alive).count();
+        assert!(
+            fired.iter().all(|&n| n > 0),
+            "сторона не стреляла: {fired:?}"
+        );
+        assert!(dead > 0, "за 600 тиков боя никто не погиб");
+        assert!(sim.collapsed_cells > 0, "слой обрушения не работал");
+        assert!(blast, "ни одного взрывного попадания");
+        assert!(!sim.matter.debris.fragments.is_empty(), "нет обломков");
+        assert!(sim.matter.economy.ledger.balanced());
+        // Маршруты боя строятся продолжением по тикам (ADR-680): работа
+        // дальнего поиска входит в прогон, а не обходит его.
+        assert!(sim.coarse_work > 0, "дальний поиск не работал");
+        let hash = sim.state_hash();
+        eprintln!("golden600 workers={workers} hash={hash:016x}");
+        if let Some(prior) = previous {
+            assert_eq!(hash, prior, "golden workers1/2/4/8");
+        }
+        previous = Some(hash);
     }
-    let fired = [true, false].map(|side| {
-        (0..sim.units.len())
-            .filter(|&id| sim.allied(id) == side)
-            .map(|id| sim.battle.actors[id].fired)
-            .sum::<u32>()
-    });
-    let dead = sim.units.iter().filter(|u| !u.status.alive).count();
-    assert!(
-        fired.iter().all(|&n| n > 0),
-        "сторона не стреляла: {fired:?}"
-    );
-    assert!(dead > 0, "за 600 тиков боя никто не погиб");
-    assert!(sim.collapsed_cells > 0, "слой обрушения не работал");
-    assert!(blast, "ни одного взрывного попадания");
-    assert!(!sim.matter.debris.fragments.is_empty(), "нет обломков");
-    assert!(sim.matter.economy.ledger.balanced());
-    // Маршруты боя строятся продолжением по тикам (ADR-680): работа
-    // дальнего поиска входит в прогон, а не обходит его.
-    assert!(sim.coarse_work > 0, "дальний поиск не работал");
-    let hash = sim.state_hash();
     assert_eq!(
-        hash, GOLDEN_600,
-        "хеш эталонного боя изменился: {hash:016x} вместо {GOLDEN_600:016x}.\n\
-         Если симуляция менялась намеренно — записать новое число сюда \
-         и в docs/11-roadmap.md одним коммитом.\n\
-         Если нет — это десинк, и искать его надо сейчас."
+        previous.unwrap(),
+        GOLDEN_600,
+        "intentional current reference hash"
     );
 }

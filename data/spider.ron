@@ -1,6 +1,6 @@
 // Giant assault spider: 17.6 x 16 metres, eight articulated legs.
 (
-    speed: 24, step: 14, charge_ticks: 16,
+    speed: 24, step: 28, charge_ticks: 16,
     chassis: (
         mass: 400, density: 2400, thrust: 2400, brake: 3600,
         turn: 70, pivot: 110, pivot_speed: 20, climb: 90, descend: 105,
@@ -9,7 +9,7 @@
         max_tilt_pct: 84, contact_cm: 100, approach_pct: 50,
         settle_pct: 50, settle_tilt_pct: 50, settle_catch_pct: 30,
         push_max_mps: 4, spin_max_deg_s: 45,
-        gait: Some((stride_cm: 440, duty_pct: 75, lift_cm: 100,
+        gait: Some((body_sway_pct: 12, lane_duty_pct: 50, stride_cm: 440, duty_pct: 75, lift_cm: 100,
             offset_pct: (0, 50, 25, 75))),
     ),
     // 0.6 second opening pass in 30 Hz stream samples, up to 12 m before the target.

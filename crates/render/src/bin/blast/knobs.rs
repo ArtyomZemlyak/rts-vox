@@ -1125,14 +1125,15 @@ pub fn build(commands: &mut Commands, camera: Entity, text_font: &TextFont) {
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
                 padding: UiRect::horizontal(px(3)),
-                border_radius: BorderRadius::all(px(5)),
+                border: UiRect::bottom(px(1)),
                 ..default()
             },
-            BackgroundColor(Color::srgb(0.075, 0.13, 0.15)),
+            BackgroundColor(panel::theme::service::BUTTON),
+            BorderColor::all(panel::theme::service::FRAME),
             children![(
                 Text::new(label),
                 text_font.clone(),
-                TextColor(Color::srgb(0.82, 0.9, 0.91)),
+                TextColor(panel::theme::service::TEXT),
             )],
         )
     };
@@ -1155,33 +1156,34 @@ pub fn build(commands: &mut Commands, camera: Entity, text_font: &TextFont) {
                 row_gap: px(4),
                 flex_direction: FlexDirection::Column,
                 border: UiRect::all(px(1)),
-                border_radius: BorderRadius::all(px(10)),
+                border_radius: BorderRadius::ZERO,
                 display: Display::None,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.025, 0.045, 0.06, 0.96)),
-            BorderColor::all(Color::srgb(0.17, 0.29, 0.32)),
+            BackgroundColor(panel::theme::service::PANEL),
+            BorderColor::all(panel::theme::service::FRAME),
             UiTargetCamera(camera),
         ))
         .with_children(|p| {
             p.spawn((
-                Text::new("НАСТРОЙКИ"),
+                Text::new("ПАРАМЕТРЫ"),
                 TextFont {
                     font_size: FontSize::Px(19.0),
                     ..text_font.clone()
                 },
-                TextColor(Color::srgb(0.83, 0.94, 0.93)),
+                TextColor(panel::theme::service::TEXT),
             ));
             p.spawn((
                 Text::new(
-                    "↓ Ещё параметры ниже · колесо прокручивает; −/+ меняют значение; щелчок по числу — точный ввод, Enter",
+                    "Ещё параметры ниже · колесо прокручивает; −/+ меняют значение; щелчок по числу — точный ввод, Enter",
                 ),
                 TextFont {
                     font_size: FontSize::Px(12.0),
                     ..text_font.clone()
                 },
-                TextColor(Color::srgb(0.48, 0.65, 0.68)),
+                TextColor(panel::theme::service::MUTED),
             ));
+            ui_motion::settings_control(p,text_font);
             for row in [&Group::ALL[..4], &Group::ALL[4..]] {
                 p.spawn(Node {
                     width: percent(100),
@@ -1218,7 +1220,7 @@ pub fn build(commands: &mut Commands, camera: Entity, text_font: &TextFont) {
                             font_size: FontSize::Px(13.0),
                             ..text_font.clone()
                         },
-                        TextColor(Color::srgb(0.72, 0.84, 0.85)),
+                        TextColor(panel::theme::service::TEXT),
                         Node {
                             flex_grow: 1.0,
                             ..default()
@@ -1233,7 +1235,7 @@ pub fn build(commands: &mut Commands, camera: Entity, text_font: &TextFont) {
                             font_size: FontSize::Px(13.0),
                             ..text_font.clone()
                         },
-                        TextColor(Color::srgb(0.9, 0.96, 0.95)),
+                        TextColor(panel::theme::service::FOCUS),
                         Node {
                             width: px(78),
                             justify_content: JustifyContent::FlexEnd,
@@ -1265,7 +1267,7 @@ pub fn build(commands: &mut Commands, camera: Entity, text_font: &TextFont) {
                     font_size: FontSize::Px(12.0),
                     ..text_font.clone()
                 },
-                TextColor(Color::srgb(0.61, 0.77, 0.78)),
+                TextColor(panel::theme::service::MUTED),
             ));
         });
 }
@@ -1540,10 +1542,8 @@ pub fn refresh(
                     .editing
                     .as_ref()
                     .is_some_and(|(s, _)| *s == usize::from(slot));
-                color.0 = if editing {
-                    Color::srgb(0.12, 0.34, 0.36)
-                } else if *interaction == Interaction::Hovered {
-                    Color::srgb(0.1, 0.2, 0.22)
+                color.0 = if editing || *interaction != Interaction::None {
+                    panel::theme::service::button_background(*interaction, editing)
                 } else {
                     Color::NONE
                 };
@@ -1551,13 +1551,7 @@ pub fn refresh(
             }
             _ => continue,
         };
-        color.0 = if *interaction == Interaction::Hovered {
-            Color::srgb(0.16, 0.28, 0.3)
-        } else if active {
-            Color::srgb(0.09, 0.31, 0.32)
-        } else {
-            Color::srgb(0.075, 0.13, 0.15)
-        };
+        color.0 = panel::theme::service::button_background(*interaction, active);
     }
     for mut t in &mut notice {
         *t = Text::new(if Group::ALL[o.group] == Group::Density {

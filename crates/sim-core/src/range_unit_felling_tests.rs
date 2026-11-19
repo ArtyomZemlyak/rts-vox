@@ -149,6 +149,7 @@ fn contact_and_crown(kind: RangeUnitKind) {
         for refusal in ["none", "flying", "claims"] {
             let full_pool = refusal != "none";
             let mut a = grove(kind, allied);
+            a.navigation.fell.dust_materials = [0]; // Keep the original full-pool/32-tick assertions.
             if refusal == "flying" {
                 a.matter.tuning.max_flying = 0;
             }
@@ -201,6 +202,7 @@ fn contact_and_crown(kind: RangeUnitKind) {
             assert!(b.set_navigation_workers(1));
             assert!(b.set_physics_workers(1));
             for r in [&mut a, &mut b] {
+                r.navigation.fell.dust_materials = [0];
                 r.matter.tuning.max_flying = 4096;
                 r.matter.tuning.max_claims = 4096;
             }
@@ -270,7 +272,7 @@ fn emplacements_reject_movement_and_do_not_remotely_fell_trees() {
         assert_eq!(r.removed_materials[4] + r.removed_materials[5], 0);
         checked += 1;
     }
-    assert_eq!(checked, 12); // Legacy emplacements plus Razlom, Greben and Kil T1–T4.
+    assert_eq!(checked, 15); // Legacy emplacements, Razlom, Greben, Kil T1–T4 and power plants T1–T3.
 }
 
 #[test]
@@ -378,5 +380,236 @@ fn every_armed_kind_damages_wood_with_its_stock_weapon() {
             r.removed_materials[5],
             r.heat.burned_by_material[5]
         );
+    }
+}
+
+
+#[test]
+fn mixed_felling_reopens_after_restore_on_one_real_tree() {
+    let mut reference=None;
+    for workers in [1,2,4,8] {
+    let mut hashes=Vec::new();
+    let mut layout = grove(RangeUnitKind::Tank, true).layout.take().unwrap();
+    layout.blocks.retain(|b| (190..=192).contains(&b.min[2]));
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut a = BlastRange::with_layout(config, layout).unwrap();
+    a.start_battle().unwrap();
+    assert!(a.set_navigation_workers(workers));assert!(a.set_physics_workers(workers));
+    a.matter.tuning.max_flying = 0;
+    assert!(a.battle_order(0, Order::Move, Some([350, 192])));
+    let mut contacted = Vec::new();
+    for _ in 0..180 {
+        tick_without_fire(&mut a, true);
+        hashes.push(a.state_hash());
+        contacted.extend(a.units[0].motion.cut.iter().copied());
+        if contacted.iter().any(|p| p[1] < 23) {
+            break;
+        }
+    }
+    assert!(contacted.iter().any(|p| p[1] < 23));
+    assert!(a.matter.felling_pending() > 0);
+    assert_eq!(a.matter.spent_mj,0,"a full physical pool cannot pay an unadmitted leaf cut");
+    a.battle.actors[0].order = Order::Hold;
+    a.units[0].motion.stop();
+    a.units[0].motion.enabled = false;
+    a.units[0].motion.pos[0] = Fx::from_int(350);
+    a.units[0].update_pose(0);
+    let bytes = a.snapshot();
+    let mut b = BlastRange::restore(config, &bytes).unwrap();
+    assert_eq!(b.snapshot(), bytes);
+    for r in [&mut a, &mut b] {
+        r.matter.tuning.max_flying = 4096;
+        r.matter.tuning.max_claims = 4096;
+
+    }
+    let other=if workers==1 {8}else{1};
+    assert!(b.set_navigation_workers(other));assert!(b.set_physics_workers(other));
+    for _ in 0..300 {
+        tick_without_fire(&mut a, false);
+        tick_without_fire(&mut b, false);
+        hashes.push(a.state_hash());
+        assert_eq!(a.state_hash(), b.state_hash());
+        assert!(a.matter.economy.ledger.balanced());
+        if a.matter.felling_pending() == 0 && a.world.queued() == 0 {
+            break;
+        }
+    }
+    assert_eq!(a.matter.felling_pending(), 0);
+    assert!(a.removed_materials[4] > 0 && a.removed_materials[5] > 0);
+    assert_eq!(a.matter.economy.sunk(crate::matter::Sink::Pulverised),0,"stock foliage must remain physical");
+    assert!(a.matter.spent_mj>0,"reopened physical cuts must be paid");
+    assert!(a.matter.debris.fragments.iter().any(|f| f.material == 4));
+    assert!(a.matter.debris.fragments.iter().any(|f| f.material == 5));
+    for p in contacted {
+        assert_eq!(a.world.material(p[0], p[1], p[2]), 0, "contact remained at {p:?}");
+    }
+    if let Some(expected)=reference.as_ref(){assert_eq!(&hashes,expected,"physical foliage workers={workers}");}else{reference=Some(hashes);}
+    }
+}
+
+
+#[test]
+fn walker04_forest_traversal_keeps_bounded_fragments_and_worker_replay_hashes() {
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut reference = None;
+    for workers in [1, 2, 4, 8] {
+        let mut l = RangeLayout::from_ron(include_str!("../../../data/range-motion-yard.ron")).unwrap();
+        l.size = [2048, 512, 2048];
+        l.clear_max = [2048, 2048];
+        l.blocks.clear();
+        if let Some(c) = l.course.as_mut() {
+            c.max = [2008, 2008];
+            c.ramps.clear();
+            c.patrols.truncate(1);
+            c.patrols[0].unit = 0;
+            c.patrols[0].points = vec![[1400, 1024], [700, 1024]];
+        }
+        let mut roots = Vec::new();
+        for x in (900..1060).step_by(32) {
+            for z in (976..1072).step_by(24) {
+                l.blocks.push(RangeBlock {
+                    min: [x, 16, z],
+                    max: [x + 2, 36, z + 2],
+                    material: 5,
+                });
+                l.blocks.push(RangeBlock {
+                    min: [x - 3, 28, z - 3],
+                    max: [x + 5, 40, z + 5],
+                    material: 4,
+                });
+                roots.push([x as u32, 16, z as u32]);
+            }
+        }
+        l.units = vec![RangeUnitDef {
+            kind: RangeUnitKind::Walker04,
+            at: [720, 16, 1024],
+            allied: true,
+            weapon: None,
+        }];
+        let mut sim = BlastRange::with_layout(config, l).unwrap();
+        assert!(sim.set_navigation_workers(workers));
+        assert!(sim.set_physics_workers(workers));
+        sim.start_free_control().unwrap();
+        assert!(sim.battle_order(
+            0,
+            Order::Pilot {
+                throttle: 1,
+                turn: 0,
+                aim: [1600, 32, 1024],
+                fire: false,
+            },
+            None,
+        ));
+        let mut replay: Option<BlastRange> = None;
+        let mut hashes = Vec::new();
+        let mut max_fragments = 0usize;
+        for tick in 0..400 {
+            sim.step();
+            if let Some(copy) = replay.as_mut() {
+                copy.step();
+                assert_eq!(sim.state_hash(), copy.state_hash(), "workers={workers} tick={tick}");
+            } else if tick == 65 {
+                let mut copy = BlastRange::restore(config, &sim.snapshot()).unwrap();
+                let alt = if workers == 1 { 4 } else { 1 };
+                assert!(copy.set_navigation_workers(alt));
+                assert!(copy.set_physics_workers(alt));
+                replay = Some(copy);
+            }
+            assert!(sim.matter.economy.ledger.balanced());
+            max_fragments = max_fragments.max(sim.matter.debris.fragments.len());
+            hashes.push(sim.state_hash());
+            if sim.units[0].motion.pos[0] > Fx::from_int(1068) { break; }
+        }
+        let felled = roots
+            .iter()
+            .filter(|&&[x, y, z]| sim.world.material(x, y, z) != 5)
+            .count();
+        assert!(felled >= 4, "Walker04 felled only {felled} trunks");
+        assert!(max_fragments <= sim.matter.tuning.max_fragments as usize,
+            "physical foliage exceeded the configured pool: {max_fragments}");
+        assert!(sim.units[0].motion.pos[0] > Fx::from_int(1068),
+            "Walker04 did not leave the authored grove: {:?}", sim.units[0].motion.pos);
+        assert_eq!(sim.matter.economy.sunk(crate::matter::Sink::Pulverised), 0);
+        assert!(sim.matter.debris.fragments.iter().any(|piece| piece.material == 4),
+            "stock crowns must produce physical foliage, not just trunk fragments");
+        if let Some(expected) = reference.as_ref() {
+            assert_eq!(&hashes, expected, "worker desync at workers={workers}");
+        } else {
+            reference = Some(hashes);
+        }
+    }
+}
+
+#[test]
+fn walker04_hilly_forest_move_matches_across_cold_worker_restores() {
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let base = RangeLayout::from_ron(include_str!("../../../data/range-motion-yard.ron")).unwrap();
+    let mut reference: Option<Vec<u64>> = None;
+    for workers in [1, 2, 4, 8] {
+        let mut l = base.clone();
+        l.size = [1536, 512, 1536];
+        l.zones.clear();
+        l.roads.clear();
+        l.mounds.clear();
+        l.shields.clear();
+        l.blocks.clear();
+        l.course = None;
+        l.clear_min = [280, 940];
+        l.clear_max = [440, 1110];
+        l.units = vec![RangeUnitDef {
+            kind: RangeUnitKind::Walker04,
+            at: [360, 16, 1024],
+            allied: true,
+            weapon: None,
+        }];
+        l.battle = true;
+        let mut sim = BlastRange::with_layout(config, l).unwrap();
+        assert!(sim.set_navigation_workers(workers));
+        assert!(sim.set_physics_workers(workers));
+        sim.start_free_control().unwrap();
+        assert!(sim.battle_order(0, Order::Move, Some([1100, 1024])));
+        let mut replay: Option<BlastRange> = None;
+        let mut hashes = Vec::new();
+        let mut min_up_y = Fx::ONE;
+        for tick in 0..140 {
+            sim.step();
+            min_up_y = min_up_y.min(sim.units[0].motion.hull.up.y);
+            if let Some(copy) = replay.as_mut() {
+                copy.step();
+                assert_eq!(
+                    sim.state_hash(),
+                    copy.state_hash(),
+                    "workers={workers} tick={tick}"
+                );
+            } else if tick == 25 {
+                let mut copy = BlastRange::restore(config, &sim.snapshot()).unwrap();
+                let alt = if workers == 1 { 4 } else { 1 };
+                assert!(copy.set_navigation_workers(alt));
+                assert!(copy.set_physics_workers(alt));
+                replay = Some(copy);
+            }
+            assert!(sim.matter.economy.ledger.balanced());
+            hashes.push(sim.state_hash());
+        }
+        assert!(
+            sim.units[0].motion.pos[0] > Fx::from_int(520),
+            "Walker04 must advance across hilly forest under Order::Move: {:?}",
+            sim.units[0].motion.pos
+        );
+        assert!(
+            min_up_y >= Fx::from_ratio(99, 100),
+            "Walker04 torso tilted past the hill-leveling cap: min_up_y={:?}",
+            min_up_y
+        );
+        assert_eq!(sim.matter.economy.sunk(crate::matter::Sink::Pulverised), 0);
+        assert!(
+            sim.matter.debris.fragments.iter().any(|piece| piece.material == 4),
+            "hilly forest felling must keep physical foliage fragments"
+        );
+        if let Some(expected) = reference.as_ref() {
+            assert_eq!(&hashes, expected, "worker desync at workers={workers}");
+        } else {
+            reference = Some(hashes);
+        }
     }
 }

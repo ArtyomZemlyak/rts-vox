@@ -204,7 +204,8 @@ fn main() {
         .find(|w| w[0] == "--siege")
         .map(|w| w[1].as_str());
     let replay = args.iter().any(|a| a == "--replay");
-    let world_battle = assault || siege.is_some() || args.iter().any(|a| a == "--world");
+    let playable_world = args.iter().any(|a| a == "--playable-world");
+    let world_battle = playable_world || assault || siege.is_some() || args.iter().any(|a| a == "--world");
     let scenario = args
         .windows(2)
         .find(|w| w[0] == "--scenario")
@@ -283,6 +284,8 @@ fn main() {
         .windows(2)
         .find(|w| w[0] == "--balance")
         .map_or("even", |w| w[1].as_str());
+    assert!(!playable_world || (!assault && siege.is_none() && balance == "even"),
+        "--playable-world uses the complete stock native battle");
     assert!(
         !ai_vs_ai || world_battle || scenario.is_some(),
         "--ai-vs-ai requires --world, --assault, --siege or --scenario"
@@ -298,6 +301,13 @@ fn main() {
     let mut layout =
         modding::range::RangeLayout::from_ron(include_str!("../../../../data/range-km.ron"))
             .unwrap();
+    if playable_world {
+        // read_layout in the native entry point provides the editor's subsoil.
+        let editor=modding::range::RangeEditor::from_ron(include_str!(
+            "../../../../data/range-editor.ron")).unwrap();
+        let level=layout.ground_level.max(sim_core::blast::FLOOR+editor.subsoil_units);
+        layout=layout.with_ground_level(level).unwrap();
+    }
     let mut mission_deployment = None;
     let t =
         modding::range_battle::Tuning::from_ron(include_str!("../../../../data/range-battle.ron"))
@@ -314,12 +324,35 @@ fn main() {
             !args.iter().any(|a| a == "--units" || a == "--eight"),
             "--world uses its authored roster"
         );
-        let preset = modding::range_skirmish::WorldBattle::from_ron(include_str!(
+        let mut preset = modding::range_skirmish::WorldBattle::from_ron(include_str!(
             "../../../../data/battle-world.ron"
         ))
         .unwrap();
+        if playable_world {
+            // Match Workshop::battle_world, including height, build yard and
+            // live economy. The older authored62-unit --world remains available.
+            let dy=layout.ground_level-sim_core::blast::FLOOR;
+            for u in &mut preset.units {u.at[1]+=dy;}
+            for b in &mut preset.blocks {b.min[1]+=dy;b.max[1]+=dy;}
+            layout.blocks.retain(|b|!preset.blocks.contains(b));
+            layout.idle_enemies=false;
+            layout.unit_yaws.clear();
+        }
         layout.units = preset.units;
         layout.blocks.extend(preset.blocks);
+        if playable_world {
+            let yard=modding::range::RangeLayout::from_ron(include_str!(
+                "../../../../data/battle-build-yard.ron")).unwrap()
+                .with_ground_level(layout.ground_level).unwrap();
+            layout.size[1]=layout.size[1].max(yard.size[1]);
+            layout.units.extend(yard.units);layout.blocks.extend(yard.blocks);
+            let mut economy=modding::range_economy::RangeEconomy::stock();
+            if let Some(bank)=&mut economy.bank {
+                bank.base_store=bank.base_store.max(yard.ready.as_ref().map_or(0,|r|r.store));
+            }
+            layout.economy=Some(economy);layout.ready=yard.ready;
+            println!("playable_world=true initial_units={} ground_level={} live_economy=true",layout.units.len(),layout.ground_level);
+        }
         let omitted: &[usize] = match balance {
             "even" => &[],
             // Keep the full authored battle and remove only a few mobile
@@ -402,10 +435,16 @@ fn main() {
             })
             .collect();
     }
-    let config = modding::explosion::ExplosionConfig::from_ron(include_str!(
+    let mut config = modding::explosion::ExplosionConfig::from_ron(include_str!(
         "../../../../data/explosion.ron"
     ))
     .unwrap();
+    if playable_world {
+        // The native default is scaled_config(false,false,1000).
+        config=config.at_power(1000);
+        config.gas_pressure_milli=config.gas_pressure_milli.min(10000);
+        config.gas_source_radius=config.gas_radius_at_power(1000);
+    }
     let mut sim = BlastRange::with_layout(config, layout).unwrap_or_else(|e| panic!("layout: {e}"));
     let verify_frontier = args.iter().any(|a| a == "--verify-collapse-frontier");
     sim.verify_collapse_frontier_reuse(verify_frontier);
@@ -822,6 +861,7 @@ fn main() {
     let mut laser_contacts = 0usize;
     // Actual ray contact events, captured before endpoint geometry is edited.
     let mut laser_contact_kinds = [0usize; 4];
+    let mut physical_laser_rays = 0usize;
     let mut felling_head_age = QueueAge::default();
     let mut collapse_backlog_age = QueueAge::default();
     let mut felling_previous = sim.matter.admission.felling;
@@ -904,6 +944,12 @@ fn main() {
         let mut rubble_print_us = 0;
         let mut heat_detail = [0u128; 8];
         let mut profile = TickProfile::default();
+        // The playable yard can produce new actors between motion phases.
+        let units=sim.units.len();
+        unit_start.resize(units,start);unit_last.resize(units,start);
+        unit_time_windows[tick_index/300].resize(units,0);
+        unit_phase_windows[tick_index/300].resize(units,[0;6]);
+        terrain_phase_windows[tick_index/300].resize(units,[0;4]);
         let unit_window = &mut unit_time_windows[tick_index / 300];
         let unit_phases = &mut unit_phase_windows[tick_index / 300];
         let terrain_phases = &mut terrain_phase_windows[tick_index / 300];
@@ -911,6 +957,7 @@ fn main() {
         let ground_counts = &mut ground_windows[tick_index / 300].1;
         let completed = |phase: &'static str| {
             if damage_trace {
+                if phase == "orders_laser_beam" { physical_laser_rays += 1; }
                 if let Some(kind) = match phase {
                     "orders_laser_contact_unit" => Some(0),
                     "orders_laser_contact_world" => Some(1),
@@ -1043,12 +1090,15 @@ fn main() {
                     let phase = match stage {
                         "hunt" => 0,
                         "plan" | "plan_coarse" | "plan_fine" | "plan_target" | "plan_prepare"
+                        | "plan_reverse" | "plan_hull_detour"
                         | "plan_direct" => 1,
                         "terrain_pose" | "terrain_collision" | "terrain_crush" | "terrain" => 2,
                         "ride" => 3,
                         "feet" => 4,
                         "unit_done" => 5,
-                        _ => unreachable!(),
+                        // Observer labels are extensible. An unknown interval
+                        // remains measured as other instead of crashing a run.
+                        _ => 5,
                     };
                     unit_phases[id][phase] += elapsed;
                     let terrain = match stage {
@@ -1371,15 +1421,19 @@ fn main() {
                     sim.matter.debris.fragments.iter().filter(|f| !f.resting).count(),
                     sim.matter.debris.claims(),
                     sim.matter.debris.fragment_room(&sim.matter.tuning));
-                assert_eq!(
-                    laser_contact_kinds[..3].iter().sum::<usize>(),
-                    laser_contacts,
-                    "laser ray contact events differ from visible traces"
-                );
+                // Authored30Hz samples are all simulated; the20Hz renderer
+                // retains only the final trace per siege emitter/tick.
+                // Validate one terminal classification per physical ray,
+                // rather than equating it with coalesced presentation traces.
+                assert_eq!(laser_contact_kinds.iter().sum::<usize>(), physical_laser_rays,
+                    "physical laser rays must each have one contact/miss classification");
+                assert!(laser_contacts <= laser_contact_kinds[..3].iter().sum::<usize>(),
+                    "a visible siege contact has no physical ray");
                 println!(
-                    "damage_laser tick={} unit_world_shield_miss={:?}",
-                    sim.tick, laser_contact_kinds
+                    "damage_laser tick={} physical_rays={} visible_siege_contacts={} unit_world_shield_miss={:?}",
+                    sim.tick, physical_laser_rays, laser_contacts, laser_contact_kinds
                 );
+                physical_laser_rays = 0;
                 laser_contact_kinds.fill(0);
                 println!(
                     "damage_unit_heat tick={} hot={} melted={} rejected_heat={}",
@@ -1388,6 +1442,12 @@ fn main() {
                     sim.thermals.melted,
                     sim.thermals.rejected_heat
                 );
+                let molten: Vec<_> = sim.matter.debris.fragments.iter()
+                    .filter(|f| sim.matter.debris.molten_heat(f.id).is_some()).collect();
+                println!("damage_liquid tick={} drops={} held={} mass_g={} vapor_sink={}", sim.tick,
+                    molten.len(), molten.iter().map(|f| sim.matter.economy.ledger.held(f.held)).sum::<u64>(),
+                    molten.iter().map(|f| f.mass_g).sum::<u64>(),
+                    sim.matter.economy.ledger.sunk(sim_core::matter::Sink::Pulverised));
                 let admission = sim.matter.admission;
                 let pool = sim.matter.debris.fragment_pools(&sim.matter.tuning);
                 println!("damage_storage tick={} working={} parked={} flying={} working_cap={} parked_cap={} record_bytes={} section_bytes={}",

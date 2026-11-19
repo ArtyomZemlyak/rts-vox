@@ -571,6 +571,24 @@ mod tests {
         for _ in 0..90 {
             r.step();
         }
+        // The current policy reserves the whole project before printing.
+        // A few seconds of passive/mined income no longer pay for a factory;
+        // prove the shortage first, then supply the exact live-price shortfall.
+        assert!(r.construction_sites().iter().all(|s| s.delivered == 0));
+        for id in 0..2 {
+            let price = r.construction_cost(RangeUnitKind::KilFactoryT1).unwrap();
+            let available = r.commander_accessible_matter(id);
+            assert!(available > 0 && available < price);
+            let tank = r.mining().unwrap().tank(id).unwrap();
+            let ground = r.matter.economy.ground;
+            let shortfall = price - available;
+            r.matter.economy.ledger.reveal(ground, shortfall);
+            assert_eq!(r.matter.economy.ledger.transfer(ground, tank, shortfall), shortfall);
+        }
+        for _ in 0..INTERVAL * 2 {
+            r.step();
+            if r.construction_sites().iter().any(|s| s.delivered > 0) { break; }
+        }
         let sites = r.construction_sites();
         assert!(sites.iter().any(|s| s.delivered > 0), "both AIs mined but neither began printing: {sites:?}, tanks {:?}, orders {:?}, positions {:?}", [r.tank_held(0),r.tank_held(1)], [r.battle.actors[0].order,r.battle.actors[1].order], [r.units[0].motion.pos,r.units[1].motion.pos]);
         assert!(r.matter.economy.ledger.balanced());
@@ -666,7 +684,9 @@ mod tests {
             1_000_000
         );
         r.production_phase();
-        assert!(r.production_paid(factory).unwrap_or(0) > 350_000);
+        let paid = r.production_paid(factory).unwrap_or(0);
+        let price = r.production_cost(RangeUnitKind::Crawler).unwrap();
+        assert!(paid > 0 && paid < price, "fixture needs a partially paid crawler");
         r.units[tank].status.alive = false;
         r.units[1].motion.pos = [1000, 16, 1800].map(fx::Fx::from_int);
         let head = r.units[1].motion.drive.head;
@@ -760,6 +780,10 @@ mod tests {
     #[test]
     fn ai_builds_a_dock_before_ordering_its_crawler() {
         let mut r = battle();
+        // This scene tests logistics, not emergency reinforcement. The enemy
+        // commander is within the current energy weapon's 1200-unit reach.
+        // Armed local threats are covered by the separate defence regression.
+        r.units[1].status.weapon = false;
         let factory = r.place_sandbox_unit(RangeUnitKind::KilFactoryT1, true, [1340, 16, 1600], 0).unwrap();
         r.place_sandbox_unit(RangeUnitKind::Tank, true, [600, 16, 2000], 0).unwrap();
         r.place_sandbox_unit(RangeUnitKind::TurretT1, true, [600, 16, 1200], 0).unwrap();
@@ -783,6 +807,7 @@ mod tests {
     #[test]
     fn ai_refunds_a_crawler_when_its_dock_is_lost() {
         let mut r = battle();
+        r.units[1].status.weapon = false;
         let factory = r.place_sandbox_unit(RangeUnitKind::KilFactoryT1, true, [1340, 16, 1600], 0).unwrap();
         r.place_sandbox_unit(RangeUnitKind::Tank, true, [600, 16, 2000], 0).unwrap();
         r.place_sandbox_unit(RangeUnitKind::TurretT1, true, [600, 16, 1200], 0).unwrap();

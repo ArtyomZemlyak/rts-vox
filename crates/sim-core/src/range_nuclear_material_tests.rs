@@ -127,6 +127,7 @@ fn nuclear_equal_receivers_follow_material_strength_with_modest_hull_advantage()
 #[test]
 fn nuclear_paid_middle_ring_damages_forest_and_houses_without_remote_hull_breakup() {
     let (mut r, samples) = environment_with_middle(true);
+    r.navigation.fell.dust_materials = [0]; // Retain the falling-crown physical scenario.
     let forest = [
         sample(
             &r,

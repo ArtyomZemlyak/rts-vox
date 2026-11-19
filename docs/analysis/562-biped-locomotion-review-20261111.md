@@ -4,7 +4,9 @@
 [560](560-current-motion-engine-review-20261111.md) и
 [561](561-motion-contact-planning-optimization-20261111.md).
 Сквозное ревью и программа приёмки — [563](563-cross-system-locomotion-review-20261112.md),
-[564](564-locomotion-acceptance-and-evidence-20261112.md).
+[564](564-locomotion-acceptance-and-evidence-20261112.md). Ревью реализации
+переноса, коридоров стоп и инерции Codex —
+[570](570-biped-gait-implementation-review-20261112.md).
 Рабочее дерево содержит незакоммиченные изменения Codex и предыдущие отчёты.
 Механика в этом исследовании не менялась. Новые стенды находились только в
 `target/` и не добавляли зависимостей или игровых модулей.

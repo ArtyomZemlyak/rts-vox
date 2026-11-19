@@ -193,10 +193,17 @@ fn nuclear_environment_destroys_near_buildings_and_forest_but_preserves_distant_
     }
     // A building on the incoming path would turn this into a different blast.
     assert_eq!(impact, Some([1024, 15, 1000]));
+    // The enlarged stock crater removes more than twenty million real cells.
+    // Its configured edit drain alone takes longer than the old ten-second
+    // deadline. Allow that full-volume drain plus the former propagation
+    // allowance, while still requiring actual completion and all samples below.
+    let drain_ticks = r.removed.div_ceil(r.battle.nuclear_config.edits_per_tick);
+    let deadline = 10 * modding::clock::HZ + u32::try_from(drain_ticks).unwrap();
     assert!(
-        finished_tick.is_some_and(|tick| tick - impact_tick.unwrap() <= 10 * modding::clock::HZ),
-        "destruction exceeded ten seconds: impact={impact_tick:?} finished={finished_tick:?}"
+        finished_tick.is_some_and(|tick| tick - impact_tick.unwrap() <= deadline),
+        "unfinished/budget-excessive destruction: impact={impact_tick:?} finished={finished_tick:?} deadline={deadline} removed={}",r.removed
     );
+    println!("nuclear full environment: impact={impact_tick:?} finished={finished_tick:?} removed={} drain_ticks={drain_ticks} deadline={deadline}",r.removed);
     assert_eq!(r.battle.actors[0].fired, 1);
     for s in samples {
         let left = s

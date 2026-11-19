@@ -1,0 +1,41 @@
+// Ten real tanks merge through a 120-unit opening; paired with bench_mobility --case gate.
+// Millimetre scale: one world cell is 0.1 m. Layout is reloaded with F5.
+(
+    course: Some((
+        min: (40, 40), max: (1560, 1560),
+        tank_speed: 40, walker_speed: 84, step_height: 5, walker_step_height: 8,
+        walker_terrain_tilt_pct: 70,
+        tank_terrain_tilt_pct: 88,
+        tank_terrain_approach_pct: 70,
+        walker_terrain_approach_pct: 90,
+        arrival: 4, reload_ticks: 40, turn_alignment_pct: 97, replan_ticks: 60,
+        ramps: [],
+        patrols: [],
+    )),
+    auto_attack_range: "acquisition", // Sensor reach; weapon reach gates firing.
+    target: (392, 24, 336),
+    airburst_on_target: true,
+    size: (1600, 128, 1600),
+    battle: true,
+    idle_enemies: true,
+    clear_min: (0, 0),
+    clear_max: (1600, 1600),
+    units: [
+        (kind: Tank, allied: true, at: (260,16,550)),
+        (kind: Tank, allied: true, at: (260,16,640)),
+        (kind: Tank, allied: true, at: (260,16,730)),
+        (kind: Tank, allied: true, at: (260,16,820)),
+        (kind: Tank, allied: true, at: (350,16,550)),
+        (kind: Tank, allied: true, at: (350,16,640)),
+        (kind: Tank, allied: true, at: (350,16,730)),
+        (kind: Tank, allied: true, at: (350,16,820)),
+        (kind: Tank, allied: true, at: (440,16,550)),
+        (kind: Tank, allied: true, at: (440,16,640)),
+    ],
+    blocks: [
+        (min: (760,16,0), max: (800,64,640), material: 2),
+        (min: (760,16,760), max: (800,64,1600), material: 2),
+    ],
+    power_milli: [500, 1000, 2000, 4000],
+    unit_resistance: 180,
+)

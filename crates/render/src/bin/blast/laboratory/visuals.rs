@@ -111,9 +111,23 @@ fn tint(material: u16) -> [f32; 3] {
         _ => [0.48, 0.70, 0.86],
     }
 }
-/// Orthographic thumbnail of actual authored cuboids and full unit template meshes.
-/// Called once per asset, one asset per frame; never creates or ticks a SIM.
-pub fn thumbnail(element: &Element, templates: &Templates) -> Image {
+/// Add the library's opaque canvas without rerendering the model geometry.
+pub fn thumbnail_canvas(mut image: Image) -> Image {
+    let height = image.texture_descriptor.size.height as usize;
+    let width = image.texture_descriptor.size.width as usize;
+    if let Some(data) = image.data.as_mut() {
+        for (i, p) in data.chunks_exact_mut(4).enumerate() {
+            if p[3] == 0 {
+                let v = 20 + (i / width * 10 / height) as u8;
+                p.copy_from_slice(&[v, v + 9, v + 17, 255]);
+            }
+        }
+    }
+    image
+}
+
+/// Same rasterizer, with actual geometry coverage retained in alpha.
+pub fn transparent_thumbnail(element: &Element, templates: &Templates) -> Image {
     let mut vertices: Vec<(Vec3, [f32; 3])> = Vec::new();
     let mut triangles: Vec<[usize; 3]> = Vec::new();
     for b in &element.blocks {
@@ -214,13 +228,6 @@ pub fn thumbnail(element: &Element, templates: &Templates) -> Image {
         })
         .collect();
     let mut pixels = vec![0u8; W * H * 4];
-    for y in 0..H {
-        for x in 0..W {
-            let i = (y * W + x) * 4;
-            let v = 20 + (y * 10 / H) as u8;
-            pixels[i..i + 4].copy_from_slice(&[v, v + 9, v + 17, 255]);
-        }
-    }
     let mut depths = vec![f32::NEG_INFINITY; W * H];
     for [a, b, c] in triangles {
         let [p, q, r] = [screen[a], screen[b], screen[c]];
@@ -254,6 +261,7 @@ pub fn thumbnail(element: &Element, templates: &Templates) -> Image {
                 if d > depths[i] {
                     depths[i] = d;
                     pixels[i * 4..i * 4 + 3].copy_from_slice(&colour);
+                    pixels[i * 4 + 3] = 255;
                 }
             }
         }

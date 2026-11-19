@@ -1,0 +1,9 @@
+// Course step height remains the baseline; body geometry supplies a hard reach cap.
+// Three representative occupied probes admit local contact on voxel stair-steps;
+// the mask still records partial coverage. This is not a force/pressure model.
+(
+    biped: (step_pct: 75, max_step_cm: 60, leg_reach_pct: 40, min_up_pct: 82, approach_pct: 65, stance_reach_pct: 98, stance_drop_pct: 50, detail_pct: 10, max_detail_cm: 20, sole_ready_pct: 33, sole_gap_mm: 50),
+    // Four-legged walkers retain a supporting pair while the other feet move.
+    multiped: (step_pct: 125, max_step_cm: 100, leg_reach_pct: 40, min_up_pct: 74, approach_pct: 90, stance_reach_pct: 90, stance_drop_pct: 50, detail_pct: 10, max_detail_cm: 20, min_support_pct: 50, sole_ready_pct: 33, sole_gap_mm: 75),
+    spider: (step_pct: 175, max_step_cm: 280, leg_reach_pct: 40, min_up_pct: 70, approach_pct: 100, stance_reach_pct: 98, stance_drop_pct: 100, detail_pct: 10, max_detail_cm: 20, min_support_pct: 50, sole_ready_pct: 33, sole_gap_mm: 50),
+)

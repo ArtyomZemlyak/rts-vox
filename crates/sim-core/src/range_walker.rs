@@ -10,11 +10,130 @@ pub(super) fn tuning() -> &'static modding::walker_rig::Tuning {
     })
 }
 
+/// Actual bore alignment, independent of the servo marker's eased range.
+/// Use squared transverse miss distance, preserving the existing world-unit
+/// accuracy even when a target moves directly towards/away from the weapon.
+pub(super) fn bore_ready(axis: V3, delta: V3) -> bool {
+    let error = Fx::from_int(tuning().arm_fire_error_units);
+    axis.dot(delta) > Fx::ZERO
+        && axis.cross(delta).len_sq() <= error.mul(error).mul(axis.len_sq())
+}
+
+/// A point order may hit yielding vegetation with the ordinary physical ray.
+/// A crown is not terrain, nor is wood in front of the ordered point a reason
+/// to suppress that ray. Hard cover and the actual non-yielding floor still
+/// obstruct it; automatic unit targeting keeps its existing visibility gate.
+pub(super) fn world_target_clear(
+    world: &World,
+    from: [Fx; 3],
+    target: [i32; 3],
+    point_order: bool,
+    yielding: &[voxel::store::Mat],
+) -> bool {
+    if target[0] < 0 || target[2] < 0
+        || target[0] >= world.nx as i32 || target[2] >= world.nz as i32
+    {
+        return false;
+    }
+    let ceiling = world.column_ceiling(target[0] as u32, target[2] as u32) as i32;
+    let start = from.map(Fx::to_int_trunc);
+    if !point_order {
+        return target[1] >= ceiling && voxel::los::line_of_sight(
+            world, (start[0], start[1], start[2]), (target[0], target[1], target[2]),
+        ).clear;
+    }
+    if target[1] < ceiling {
+        // One exact column, with the same data-defined yielding profile as
+        // navigation. Do not allocate a whole search/page cache for a shot.
+        let mut probe = nav::vehicle::Probe::around(
+            world, yielding, [Fx::from_int(target[0]), Fx::from_int(target[2])], 0,
+        );
+        if target[1] < probe.floor(target[0], target[2]) {
+            return false;
+        }
+    }
+    let mut clear = true;
+    voxel::los::walk(
+        (start[0], start[1], start[2]), (target[0], target[1], target[2]),
+        |x, y, z| {
+            if x >= 0 && y >= 0 && z >= 0 && world.solid(x as u32, y as u32, z as u32)
+                && !yielding.contains(&world.material(x as u32, y as u32, z as u32))
+            {
+                clear = false;
+                false
+            } else {
+                true
+            }
+        },
+    );
+    clear
+}
+
 #[cfg(test)]
 #[path = "range_walker_elbow_tests.rs"]
 mod elbow_tests;
 
 impl RangeUnit {
+    /// Saved aim points encode each bearing's servo direction and range.
+    /// Ease in spherical coordinates: jumping range must not change pitch
+    /// instantly, and the final few degrees must not skip the easing curve.
+    pub(super) fn walker_servo_target(&self, arm: usize, prior: [i32; 3], next: [i32; 3]) -> [i32; 3] {
+        if prior == next { return next; }
+        let origin = self.seg_frames[10 + arm * 4].base;
+        let delta = |p: [i32;3]| V3::new(Fx::from_int(p[0]),Fx::from_int(p[1]),Fx::from_int(p[2])).sub(origin);
+        let before = delta(prior); let after = delta(next);
+        let horizontal = |v: V3| v.x.mul(v.x).add(v.z.mul(v.z)).sqrt();
+        let bh = horizontal(before); let ah = horizontal(after);
+        let yaw = |v: V3| fx::angle::atan2(v.z.raw(),v.x.raw());
+        let pitch = |v: V3, h: Fx| fx::angle::atan2(v.y.raw(),h.raw());
+        let rig = tuning();
+        let limit = rig.arm_turn_deg_s * fx::angle::FULL / (360 * crate::TICKS_PER_SECOND);
+        // This is the trigonometric table's resolution, not an aim tolerance.
+        // Finish on the exact integer target to retain distant laser precision.
+        let quantum = fx::angle::FULL / 1024;
+        let step = |from: i32, to: i32| {
+            let error = fx::angle::diff(to,from);
+            if error.abs() <= quantum { (to,true) } else {
+                let travel = (error.abs() / rig.arm_settle_ticks).max(quantum).min(limit).min(error.abs());
+                (fx::angle::norm(from + travel * error.signum()),false)
+            }
+        };
+        let (yaw, yaw_done) = step(yaw(before),yaw(after));
+        let (pitch, pitch_done) = step(pitch(before,bh),pitch(after,ah));
+        let br = bh.mul(bh).add(before.y.mul(before.y)).sqrt();
+        let ar = ah.mul(ah).add(after.y.mul(after.y)).sqrt();
+        let radial = ar.sub(br);
+        // Track small range changes immediately. Easing every centimetre of
+        // recession would leave a permanently lagging marker on a moving tank.
+        // Large range switches still settle, bounding the near-target elbow fold.
+        let follow_range = radial.abs() <= br.div(Fx::from_int(rig.arm_settle_ticks));
+        if yaw_done && pitch_done && follow_range { return next; }
+        if yaw_done && pitch_done {
+            // Integer world targets cannot retain fractional radial progress.
+            // Finish along the near-collinear segment with at least one cell
+            // of progress per differing coordinate, rather than hovering a few
+            // cells short forever or snapping the whole remaining radius.
+            return std::array::from_fn(|axis| {
+                let error = i64::from(next[axis]) - i64::from(prior[axis]);
+                let travel = error / i64::from(rig.arm_settle_ticks);
+                (i64::from(prior[axis]) + if travel == 0 { error.signum() } else { travel }) as i32
+            });
+        }
+        let radius = if follow_range { ar } else {
+            br.add(radial.div(Fx::from_int(rig.arm_settle_ticks)))
+        }.max(Fx::ONE);
+        let point = {
+            let (cy,sy) = if yaw_done && ah > Fx::ZERO {
+                (after.x.div(ah),after.z.div(ah))
+            } else { (fx::angle::cos(yaw),fx::angle::sin(yaw)) };
+            let (cp,sp) = if pitch_done && ar > Fx::ZERO {
+                (ah.div(ar),after.y.div(ar))
+            } else { (fx::angle::cos(pitch),fx::angle::sin(pitch)) };
+            V3::new(cy.mul(cp).mul(radius),sp.mul(radius),sy.mul(cp).mul(radius))
+        }.add(origin);
+        [point.x.to_int_trunc(),point.y.to_int_trunc(),point.z.to_int_trunc()]
+    }
+
     pub(super) fn aim_walker_arms(&mut self, turret_yaw: i32) {
         if self.kind == RangeUnitKind::Commander {
             self.aim_commander_arms(turret_yaw);

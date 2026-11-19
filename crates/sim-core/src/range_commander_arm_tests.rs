@@ -171,3 +171,27 @@ fn commander_articulated_scene_roundtrips_and_provides_native_pose_fixtures() {
         std::fs::write(out.join(format!("{name}.bin")),snapshot).unwrap();
     }
 }
+
+#[test]
+fn commander_passive_arms_counter_swing_backsteps_and_stationary_turns() {
+    let mut u = RangeUnit::of_kind(RangeUnitKind::Commander,[600,16,600]);
+    u.motion.phase = fx::angle::QUARTER;
+    u.motion.drive.vel = Fx::from_int(u.motion.speed);
+    u.update_pose(0);
+    let forward = [gun_pitch(&u,0),gun_pitch(&u,1)];
+    u.motion.drive.vel = Fx::from_int(-u.motion.speed);
+    u.update_pose(0);
+    let reverse = [gun_pitch(&u,0),gun_pitch(&u,1)];
+    assert!(reverse[0] < forward[0] - degrees(5), "backstep retained the forward arm swing");
+    assert!(reverse[1] > forward[1] + degrees(5));
+    u.motion.drive.vel = Fx::ZERO; u.motion.phase = 0;
+    let turn = u.motion.chassis.turn * fx::angle::FULL / (360 * crate::TICKS_PER_SECOND);
+    u.motion.drive.yaw_rate = turn; u.update_pose(0);
+    let left = [gun_pitch(&u,0),gun_pitch(&u,1)];
+    u.motion.drive.yaw_rate = -turn; u.update_pose(0);
+    assert!(gun_pitch(&u,0) < left[0] - degrees(2),"pivot did not counterbalance the arms");
+    assert!(gun_pitch(&u,1) > left[1] + degrees(2));
+    joints(&u);
+    let before = u.seg_frames.clone(); u.update_pose(0);
+    assert_eq!(before,u.seg_frames,"pose reads must not advance animation");
+}

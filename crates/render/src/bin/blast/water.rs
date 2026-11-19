@@ -68,7 +68,11 @@ fn water_metric(
     }
     let def = mats.and_then(|m| m.get(11));
     Some(match mode {
-        1 | 6 | 7 | 8 => unknown,
+        1 | 7 | 8 => unknown,
+        6 => water.falling_speed_at(p).map_or(unknown, |v| {
+            scale((v.raw().max(0) as u64).saturating_mul(200)
+                .saturating_div(fx::ONE_RAW as u64).min(u64::from(u32::MAX)) as u32, 500)
+        }),
         2 => scale(100, 100),
         3 => [0.1, 0.45, 0.95, 1.0],
         4 => def.map_or(unknown, |m| scale(m.strength, 500)),
@@ -253,7 +257,7 @@ pub fn draw(
         cache.versions.clear();
         cache.section = section;
     }
-    if cache.metric != mode || (mode == 9 && cache.metric_tick != tick) {
+    if cache.metric != mode || (matches!(mode, 6 | 9) && cache.metric_tick != tick) {
         cache.versions.clear();
         cache.metric = mode;
         cache.metric_tick = tick;
@@ -334,6 +338,22 @@ pub fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn falling_water_speed_colours_every_face_in_the_surface_and_section() {
+        struct Empty;
+        impl voxel::Generator for Empty { fn material(&self,_:u32,_:u32,_:u32)->u16 {0} }
+        let world=voxel::World::new(64,64,64,1024,Box::new(Empty));
+        let mut water=Water::new();assert!(water.edit_volume([30,50,30],true));
+        for _ in 0..8 {water.step(&world,&[]);}
+        let (at,_)=water.cells().next().unwrap();
+        let speed=water.falling_speed_at(at).expect("falling speed must be an actual saved state");assert!(speed>fx::Fx::ZERO);
+        let expected=laboratory::metric_colour((speed.raw() as u64*200/fx::ONE_RAW as u64) as u32,500);
+        let chunk=at.map(|v|v/MESH_SIDE);
+        for cut in [None,Some((0,at[0] as i32,true))] {
+            let mesh=surface_for(&water,chunk,6,None,cut);
+            assert!(!mesh.col.is_empty());assert!(mesh.col.iter().all(|c|*c==expected));
+        }
+    }
     #[test]
     fn section_exposes_water_interior_on_both_sides_of_every_axis() {
         let mut w = Water::new();

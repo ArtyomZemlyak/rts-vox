@@ -25,6 +25,17 @@ fx = { path = "../fx" }
 [features]
 # Opt-in ECS tracing and real system names; only existing Bevy dependencies.
 render-tasks = ["bevy/detailed_trace", "bevy/debug"]
+# A validated candidate has a distinct filename; the player launcher ignores it.
+candidate-bin = []
+
+[[bin]]
+name = "blast"
+path = "src/bin/blast.rs"
+
+[[bin]]
+name = "blast-candidate"
+path = "src/bin/blast.rs"
+required-features = ["candidate-bin"]
 
 [lib]
 path = "src/lib.rs"

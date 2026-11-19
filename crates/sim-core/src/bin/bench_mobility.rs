@@ -13,7 +13,9 @@ fn main() {
     let mut layout = RangeLayout::from_ron(
         source
             .as_deref()
-            .unwrap_or(include_str!("../../../../data/range-motion-yard.ron")),
+            .unwrap_or(if case == "gate" {
+                include_str!("../../../../data/range-motion-gate.ron")
+            } else { include_str!("../../../../data/range-motion-yard.ron") }),
     )
     .unwrap();
     let mut orders: Vec<_> = layout
@@ -24,6 +26,12 @@ fn main() {
         .iter()
         .map(|p| (p.unit, p.points[0]))
         .collect();
+    if case == "gate" {
+        // Group commands are not patrols (the authored patrol list is bounded
+        // separately). Issue the same ten one-shot orders as the gate fixture.
+        orders = layout.units.iter().enumerate()
+            .map(|(id,u)| (id,[u.at[0]+700,u.at[2]])).collect();
+    }
     if case == "junction" {
         let kinds = [
             RangeUnitKind::Tank,
@@ -55,7 +63,7 @@ fn main() {
         ];
         layout.course.as_mut().unwrap().patrols.clear();
     } else {
-        assert_eq!(case, "yard");
+        assert!(["yard", "gate"].contains(&case));
     }
     let cfg = modding::explosion::ExplosionConfig::from_ron(include_str!(
         "../../../../data/explosion.ron"
@@ -72,7 +80,8 @@ fn main() {
             i64::from(goal[0] - m.pos[0].to_int_trunc()),
         );
     }
-    assert_eq!(sim.battle_group_move(&orders, [800, 850]), orders.len());
+    let group_goal = if case == "gate" { [1100, 700] } else { [800, 850] };
+    assert_eq!(sim.battle_group_move(&orders, group_goal), orders.len());
     let prefix = value("--snapshot-prefix");
     let capture: usize = value("--snapshot-tick").unwrap_or("300").parse().unwrap();
     if let Some(p) = prefix {
@@ -141,4 +150,20 @@ fn main() {
         );
     }
     println!("mobility case={case} ticks={ticks} arrived={} count={} last_arrival={} blocked={} mean_tick_us={} p99_tick_us={} hash={:016x}",finished.iter().filter(|&&v|v>0).count(),orders.len(),finished.iter().max().unwrap(),blocked.iter().sum::<usize>(),times.iter().sum::<u128>()/ticks as u128/1000,times[ticks*99/100]/1000,sim.state_hash());
+    if let Some(p) = prefix {
+        std::fs::write(format!("{p}-end.bin"), sim.snapshot()).unwrap();
+    }
+    if case == "gate" {
+        assert!(finished.iter().all(|&t| t>0), "gate group did not finish within {ticks} ticks");
+        for &(id,goal) in &orders {
+            let m=&sim.units[id].motion;
+            let dx=m.pos[0].sub(fx::Fx::from_int(goal[0]));
+            let dz=m.pos[2].sub(fx::Fx::from_int(goal[1]));
+            let arrival=fx::Fx::from_int(m.arrival+1)
+                .add(fx::Fx::from_ratio(m.speed,sim_core::TICKS_PER_SECOND));
+            assert!(m.destination.is_none() && dx.mul(dx).add(dz.mul(dz))<=arrival.mul(arrival),
+                "gate actor {id} stopped short of its actual goal");
+        }
+        assert!(sim.matter.economy.ledger.balanced());
+    }
 }

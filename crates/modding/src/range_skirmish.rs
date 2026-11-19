@@ -300,6 +300,16 @@ mod tests {
             let saved = layout.to_ron().unwrap();
             assert!(RangeLayout::from_ron(&saved).unwrap().endless_battle);
             if let Some(ready) = &scenario.ready {
+                // Authored industrial work uses the current powered economy,
+                // not the historical unpowered test balance.
+                let reach = i64::from(layout.economy.as_ref().unwrap().balance.as_ref().unwrap().power_link_reach);
+                for at in ready.production.iter().map(|p| scenario.units[p.actor].at)
+                    .chain(ready.construction.iter().map(|s| s.at)) {
+                    assert!(scenario.units.iter().any(|source| source.allied
+                        && matches!(source.kind, RangeUnitKind::PowerPlantT1 | RangeUnitKind::PowerPlantT2 | RangeUnitKind::PowerPlantT3 | RangeUnitKind::Base | RangeUnitKind::Commander)
+                        && i64::from(source.at[0]-at[0]).pow(2)+i64::from(source.at[2]-at[2]).pow(2)<=reach*reach),
+                        "industrial work needs an actual local power source: {} at {at:?}",scenario.title);
+                }
                 for order in &ready.production {
                     let factory = &scenario.units[order.actor];
                     let radius = layout.economy.as_ref().unwrap().production.as_ref().unwrap().supply_radius;

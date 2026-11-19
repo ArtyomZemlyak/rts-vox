@@ -2,7 +2,7 @@
 //! layer tore loose — wall, rock, a trunk — falls whole and is drawn as
 //! the cubes it is, until it lands and bakes back into the world.
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap,BTreeSet};
 
 #[path = "bodies/occupancy.rs"]
 mod occupancy;
@@ -81,15 +81,21 @@ pub(super) fn pose(b: &voxel::bodies::Body) -> Transform {
 pub fn draw(
     mut commands: Commands,
     scene: Res<Scene>,
+    lab: Option<Res<laboratory::Laboratory>>,
+    mut stamp: Local<BTreeMap<u64, (u8, i64)>>,
+    mut diagnostic_material: Local<Option<Handle<StandardMaterial>>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut material: Local<Option<Handle<StandardMaterial>>>,
     mut old: Query<(Entity, &FallingBody, &Mesh3d, &mut Transform)>,
 ) {
+    let mode = lab.as_ref().map_or(0, |l| l.metric_mode());
     let bodies = &scene.sim.bodies.list;
+    let live:BTreeSet<_>=bodies.iter().map(|b|b.id).collect();
+    stamp.retain(|id, _| live.contains(id));
     let mut entities = BTreeMap::new();
     for (e, b, mesh, _) in &mut old {
-        if bodies.iter().any(|x| x.id == b.0) {
+        if live.contains(&b.0) {
             entities.insert(b.0, e);
         } else {
             commands.entity(e).despawn();
@@ -100,12 +106,16 @@ pub fn draw(
         // The body's origin, the fraction of the next voxel it has fallen
         // taken off its height, so the fall reads smoothly.
         let transform = pose(b);
+        let key = (mode, if mode == 6 { b.vy.raw() } else { 0 });
         if let Some(&entity) = entities.get(&b.id) {
-            if let Ok((_, _, _, mut tr)) = old.get_mut(entity) {
-                *tr = transform;
+            if stamp.get(&b.id) == Some(&key) {
+                if let Ok((_, _, _, mut tr)) = old.get_mut(entity) { *tr = transform; }
+                continue;
             }
-            continue;
+            if let Ok((_, _, mesh, _)) = old.get_mut(entity) { meshes.remove(mesh.0.id()); }
+            commands.entity(entity).despawn();
         }
+        stamp.insert(b.id, key);
         // One quad per exposed face. Merging an entire cube for every cell
         // gave a large fractured slab millions of hidden triangles and an
         // O(n²) mesh-build path on the frame where it detached.
@@ -202,7 +212,17 @@ pub fn draw(
                     b.oy + i64::from(b.fallen) + i64::from(v.y),
                     b.oz + i64::from(v.z),
                 ];
-                col.extend([surface_colour(v.mat, source, normal); 4]);
+                let diagnostic = match mode {
+                    3 => if matches!(v.mat, 11 | 13 | 14 | 16) { [0.1, 0.45, 0.95, 1.0] }
+                        else if scene.sim.matter.economy.mats.get(v.mat).is_some_and(|m| m.loose) { [0.95, 0.72, 0.1, 1.0] }
+                        else { [0.58, 0.58, 0.62, 1.0] },
+                    4 => scene.sim.matter.economy.mats.get(v.mat).map_or(laboratory::METRIC_UNKNOWN, |m| laboratory::metric_colour(m.strength, 500)),
+                    5 => scene.sim.matter.economy.mats.get(v.mat).map_or(laboratory::METRIC_UNKNOWN, |m| laboratory::metric_colour(m.density, 1000)),
+                    6 => laboratory::metric_colour((b.vy.raw().unsigned_abs().saturating_mul(200) / fx::ONE_RAW as u64).min(u64::from(u32::MAX)) as u32, 500),
+                    10 => { let id=u32::from(v.mat); [0.18+(id*43%70) as f32/100.0,0.18+(id*67%70) as f32/100.0,0.18+(id*29%70) as f32/100.0,1.0] },
+                    _ => laboratory::METRIC_UNKNOWN,
+                };
+                col.extend([if mode > 0 { diagnostic } else { surface_colour(v.mat, source, normal) }; 4]);
                 idx.extend([start, start + 1, start + 2, start, start + 2, start + 3]);
             }
         }
@@ -211,20 +231,20 @@ pub fn draw(
         }
         let mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
-            RenderAssetUsages::RENDER_WORLD,
+            RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
         )
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, pos)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, nrm)
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, col)
         .with_inserted_indices(Indices::U32(idx));
-        let handle = material
+        let handle = if mode > 0 { diagnostic_material.get_or_insert_with(|| materials.add(StandardMaterial { base_color: Color::WHITE, unlit: true, ..default() })).clone() } else { material
             .get_or_insert_with(|| {
                 materials.add(StandardMaterial {
                     perceptual_roughness: 0.95,
                     ..default()
                 })
             })
-            .clone();
+            .clone() };
         commands.spawn((
             FallingBody(b.id),
             Mesh3d(meshes.add(mesh)),

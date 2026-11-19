@@ -28,6 +28,7 @@ pub struct Visual {
     /// table and the hull-local traverse. Interpolate their picture only.
     battle_heads: Vec<(Quat, Vec3)>,
     previous_arms: Vec<Option<[Transform; 20]>>,
+    previous_siege_pitches: Vec<i32>,
     gun_head: Option<(Quat, Vec3)>,
     occupied: Vec<usize>,
     /// Reuse the merged occupancy allocation from the previous tick.
@@ -304,8 +305,9 @@ impl ActorFrame {
                 - Vec3::Y * self.cutter_depth + self.cutter_offset)
                 .with_rotation(self.hull * rotation);
         }
-        if (self.kind == RangeUnitKind::Walker04.index() || self.kind == RangeUnitKind::Commander.index())
-            && witness.2.is_some_and(|segment| segment >= 10)
+        if ((self.kind == RangeUnitKind::Walker04.index() || self.kind == RangeUnitKind::Commander.index())
+            && witness.2.is_some_and(|segment| segment >= 10))
+            || (self.kind == RangeUnitKind::ArtilleryTurretT3.index() && witness.2 == Some(0))
         {
             if let Some(frame) = self.walker_segments.get(witness.2.expect("arm segment")) {
                 return *frame;
@@ -411,6 +413,7 @@ pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWin
                 if u.kind == RangeUnitKind::Commander { 10 + i.min(7) } else if i < 16 { 10 + i } else { 26 + i - 16 }])))
     }).collect();
     v.gun_head = Some(weapon_picture(&sim.gun));
+    v.previous_siege_pitches = sim.units.iter().chain(std::iter::once(&sim.gun)).map(|u| u.turret_pitch).collect();
     // Capture resting pieces too: one may wake during the upcoming step.
     // Reuse dense origins; each parallel picture leaf merges its sorted IDs.
     v.fragments
@@ -1044,6 +1047,7 @@ pub fn animate(
         previous_bores,
         battle_heads,
         previous_arms,
+        previous_siege_pitches,
         rigs,
         frame_poses,
         cutter_clock,
@@ -1106,6 +1110,10 @@ pub fn animate(
             frame.cutter_offset = cutter_offsets[i];
         }
         frame.walker_segments.clear();
+        if u.articulated_siege() {
+            frame.walker_segments.push(siege_barrel_picture(u, frame.turret, frame.pos + frame.turret_offset,
+                previous_siege_pitches.get(i).copied().unwrap_or(u.turret_pitch), t));
+        }
         if matches!(u.kind, RangeUnitKind::Walker04 | RangeUnitKind::Commander) {
             let delta = frame.turret * now.0.inverse();
             let actual_origin = pose(u).pos + now.1;
@@ -1162,7 +1170,7 @@ pub fn animate(
                     Some(w) if t < 1.0 => w.lerp(now, t),
                     _ => now,
                 };
-                let mut pose = rig.solve(rot.inverse() * (c.pos - p.pos), rot);
+                let mut pose = rig.solve_contact(rot.inverse() * (c.pos - p.pos), rot);
                 pose.foot.rot = rot.inverse() * c.rot;
                 frame.legs.push(pose);
             }
@@ -1239,6 +1247,18 @@ fn commander_arm_picture(u: &RangeUnit, index: usize, crown: Quat, origin: Vec3,
     drawn
 }
 
+/// Interpolate elevation about the physical bearing, retaining its position.
+fn siege_barrel_picture(u: &RangeUnit, deck: Quat, origin: Vec3, previous_pitch: i32, t: f32) -> Transform {
+    let root = weapon_picture(u).0;
+    let relative = |pitch| root.inverse() * segment_picture(&u.muzzle_frame(&u.pose, u.turret_delta, pitch)).rotation;
+    let rotation = deck * relative(previous_pitch).slerp(relative(u.turret_pitch), t);
+    let a = u.body.segments[0].attach;
+    let at = Vec3::new(a.at.0 as f32, a.at.1 as f32, a.at.2 as f32)
+        - Vec3::from(render::model::root_centre(&u.body));
+    Transform::from_translation(origin + deck * at * (u.body.mm as f32 / voxel::unit::WORLD_MM as f32))
+        .with_rotation(rotation)
+}
+
 /// Player links use the same foot interpolation as target walkers.
 pub fn gun_segments(scene: &Scene, v: &Visual, p: Pose) -> Vec<Transform> {
     let u = &scene.sim.gun;
@@ -1255,6 +1275,10 @@ pub fn gun_segments(scene: &Scene, v: &Visual, p: Pose) -> Vec<Transform> {
     }
     let root = render::realtime::hull_rotation(p.up, p.yaw);
     let (weapon, weapon_offset) = visible_gun_frame(scene, v);
+    if u.articulated_siege() {
+        return vec![siege_barrel_picture(u, weapon, p.pos + weapon_offset,
+            v.previous_siege_pitches.get(scene.sim.units.len()).copied().unwrap_or(u.turret_pitch), fraction(scene))];
+    }
     let frames = render::model::segment_frames(&u.body, 0.01);
     let rigs = gait::rigs_of(&u.body, 0.01, &frames);
     let mut out: Vec<_> = frames
@@ -1299,7 +1323,7 @@ pub fn gun_segments(scene: &Scene, v: &Visual, p: Pose) -> Vec<Transform> {
             .copied()
             .flatten();
         let c = old.map_or(now, |was| was.lerp(now, fraction(scene)));
-        let mut solved = rig.solve(root.inverse() * (c.pos - p.pos), root);
+        let mut solved = rig.solve_contact(root.inverse() * (c.pos - p.pos), root);
         solved.foot.rot = root.inverse() * c.rot;
         for (seg, tr) in out.iter_mut().enumerate() {
             if let Some(role) = rig.role(seg) {
@@ -1314,6 +1338,26 @@ pub fn gun_segments(scene: &Scene, v: &Visual, p: Pose) -> Vec<Transform> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn siege_barrel_picture_matches_physical_mount_and_keeps_the_deck_level() {
+        let mut u = RangeUnit::of_kind(RangeUnitKind::ArtilleryTurretT3, [200, 16, 200]);
+        let deck = weapon_picture(&u);
+        u.turret_pitch = fx::angle::FULL / 8;
+        u.update_pose(0);
+        assert_eq!(deck, weapon_picture(&u));
+        let origin = pose(&u).pos;
+        let flat = siege_barrel_picture(&u, deck.0, origin, 0, 0.0);
+        let mid = siege_barrel_picture(&u, deck.0, origin, 0, 0.5);
+        let raised = siege_barrel_picture(&u, deck.0, origin, 0, 1.0);
+        let physical = segment_picture(&u.seg_frames[0]);
+        assert!(raised.translation.distance(physical.translation) < 0.001);
+        assert!(raised.rotation.angle_between(physical.rotation) < 0.001);
+        assert_eq!(flat.translation, mid.translation);
+        assert_eq!(mid.translation, raised.translation);
+        assert!((mid.rotation * Vec3::X).y > 0.3);
+        assert!((raised.rotation * Vec3::X).y > 0.7);
+    }
 
     #[test]
     fn prepared_window_index_matches_modulo_at_edges_and_full_u32_range() {

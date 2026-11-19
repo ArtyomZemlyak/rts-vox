@@ -3,7 +3,9 @@
 //! Инварианты (`CLAUDE.md`):
 //! - внутри крейта только явные `wrapping_*` / `checked_*` / `saturating_*`;
 //! - голого `+` или `*` на внутреннем `i64` быть не должно;
-//! - умножение через `i128`, деление через сдвиг в `i128`.
+//! - умножение через `i128`; дробное деление через сдвиг в `i128`.
+//!   Точные целые множители сокращаются до эквивалентного `i64`-деления.
+//!   Положительные дробные степени двойки сокращаются до точного сдвига.
 
 #![forbid(unsafe_code)]
 
@@ -40,8 +42,9 @@ impl Fx {
     /// Точная дробь `num/den` без промежуточного float.
     #[inline]
     pub const fn from_ratio(num: i32, den: i32) -> Fx {
-        let n = (num as i128).wrapping_shl(FRAC_BITS);
-        Fx((n / den as i128) as i64)
+        // An i32 shifted by 32 fits i64, including MIN. The sole overflowing
+        // quotient MIN / -1 wraps exactly like the former i128-to-i64 cast.
+        Fx((num as i64).wrapping_shl(FRAC_BITS).wrapping_div(den as i64))
     }
 
     #[inline]
@@ -75,6 +78,24 @@ impl Fx {
     /// Деление. Панику на нуле оставляем: молчаливый мусор хуже.
     #[inline]
     pub const fn div(self, o: Fx) -> Fx {
+        if o.0 == ONE_RAW { return self; }
+        if self.0 == 0 {
+            // Preserve the zero-divisor panic, including 0 / 0.
+            return Fx(0i64.wrapping_div(o.0));
+        }
+        if (o.0 & ONE_RAW.wrapping_sub(1)) == 0 {
+            // Cancel the exact shared 2^32 factor. Signed division still
+            // truncates toward zero; wrapping preserves MIN / -1. Zero
+            // continues to panic in every profile through wrapping_div.
+            return Fx(self.0.wrapping_div(o.0 >> FRAC_BITS));
+        }
+        let denominator=o.0 as u64;
+        if denominator < ONE_RAW as u64 && denominator.is_power_of_two() {
+            // The denominator divides the numerator's exact 2^32 factor.
+            // This is multiplication by an integer, including for negatives;
+            // wrapping the low 64 bits matches the former i128-to-i64 cast.
+            return Fx(self.0.wrapping_shl(FRAC_BITS.wrapping_sub(denominator.trailing_zeros())));
+        }
         let n = (self.0 as i128).wrapping_shl(FRAC_BITS);
         Fx((n / o.0 as i128) as i64)
     }
@@ -165,6 +186,64 @@ pub const fn wrapping_sum(acc: i64, v: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integer_paths_match_wide_reference_at_signed_boundaries_and_mixed_inputs() {
+        let ratio=|n:i32,d:i32|Fx(((n as i128).wrapping_shl(FRAC_BITS)/(d as i128))as i64);
+        let divide=|n:i64,d:i64|Fx(((n as i128).wrapping_shl(FRAC_BITS)/(d as i128))as i64);
+        let divisors=[i32::MIN,-65536,-20,-2,-1,1,2,20,65536,i32::MAX];
+        for n in [i32::MIN,i32::MIN.wrapping_add(1),-65536,-1,0,1,65536,i32::MAX] {
+            for d in divisors {assert_eq!(Fx::from_ratio(n,d),ratio(n,d),"ratio {n}/{d}");}
+        }
+        for n in [i64::MIN,i64::MIN.wrapping_add(1),ONE_RAW.wrapping_neg(),-3,-1,0,1,3,ONE_RAW,i64::MAX] {
+            for d in divisors {
+                let d=(d as i64).wrapping_shl(FRAC_BITS);
+                assert_eq!(Fx(n).div(Fx(d)),divide(n,d),"whole {n}/{d}");
+            }
+            for d in [i64::MIN.wrapping_add(1),ONE_RAW.wrapping_neg().wrapping_add(1),-1,1,
+                ONE_RAW.wrapping_sub(1),ONE_RAW.wrapping_add(1),i64::MAX] {
+                assert_eq!(Fx(n).div(Fx(d)),divide(n,d),"fractional {n}/{d}");
+            }
+        }
+        let mut seed=17u64;
+        for _ in 0..4096 {
+            seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let n=seed as i32;let d=(seed>>32)as i32;
+            if d!=0 {
+                assert_eq!(Fx::from_ratio(n,d),ratio(n,d));
+                let raw=(d as i64).wrapping_shl(FRAC_BITS);
+                assert_eq!(Fx(seed as i64).div(Fx(raw)),divide(seed as i64,raw));
+            }
+            let raw=seed as i64;let fractional=raw.rotate_left(17).wrapping_add(1);
+            if fractional!=0 {assert_eq!(Fx(raw).div(Fx(fractional)),divide(raw,fractional));}
+        }
+    }
+
+    #[test]
+    fn fractional_power_of_two_division_matches_wide_signed_reference() {
+        let reference=|n:i64,d:i64|Fx(((n as i128).wrapping_shl(FRAC_BITS)/(d as i128))as i64);
+        for shift in 0..FRAC_BITS {
+            let divisor=1i64.wrapping_shl(shift);
+            for n in [i64::MIN,i64::MIN.wrapping_add(1),-3,-1,0,1,3,ONE_RAW,i64::MAX] {
+                for d in [divisor,divisor.wrapping_neg()] {
+                    assert_eq!(Fx(n).div(Fx(d)),reference(n,d),"{n}/{d}");
+                }
+            }
+        }
+        let mut seed=17u64;
+        for shift in (0..FRAC_BITS).cycle().take(4096) {
+            seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let divisor=1i64.wrapping_shl(shift);let n=seed as i64;
+            assert_eq!(Fx(n).div(Fx(divisor)),reference(n,divisor));
+        }
+    }
+
+    #[test]
+    fn integer_paths_keep_zero_divisor_panics() {
+        assert!(std::panic::catch_unwind(||Fx::from_ratio(1,0)).is_err());
+        assert!(std::panic::catch_unwind(||Fx::ONE.div(Fx::ZERO)).is_err());
+        assert!(std::panic::catch_unwind(||Fx::ZERO.div(Fx::ZERO)).is_err());
+    }
 
     #[test]
     fn from_int_roundtrip() {

@@ -5,6 +5,9 @@ use super::*;
 use modding::explosion::Delivery;
 use modding::range::RangeUnitDef;
 
+#[path = "range_combat_review_tests.rs"]
+mod combat_review_tests;
+
 #[test]
 fn range_scenario_continues_after_last_enemy_but_standard_battle_ends() {
     let mut ordinary = arena_of([RangeUnitKind::Tank, RangeUnitKind::Tank]);
@@ -4000,7 +4003,15 @@ fn enemy_ai_move_orders_keep_firing_for_every_chassis() {
             }],
         )
         .unwrap();
+        let mut restored = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+        // status is derived from the material body on restore. This fixture
+        // artificially suppresses weapons without destroying their voxels.
+        for unit in &mut restored.units { unit.status.weapon = false; }
+        restored.set_navigation_workers(2);
+        restored.set_physics_workers(2);
         r.step();
+        restored.step();
+        assert_eq!(r.state_hash(), restored.state_hash(), "pending unarmed Move must replay");
         assert_eq!(r.battle.actors[1].order, Order::Move);
         r.battle.ai.next_tick = u32::MAX;
         let start = r.units[1].motion.pos;
@@ -6621,4 +6632,125 @@ fn player_commander_defends_without_automatically_pursuing_distant_enemy() {
     assert!(r.battle_order(0, Order::Attack(1), None));
     r.battle_tick();
     assert!(r.units[0].motion.destination.is_some(), "explicit attack must still allow pursuit");
+}
+
+#[test]
+fn walker04_fires_and_damages_a_receding_target_without_waiting_for_it_to_stop() {
+    let mut layout=arena_of([RangeUnitKind::Walker04,RangeUnitKind::Tank]).layout.unwrap();
+    layout.units[1].at=[1500,16,600];
+    let cfg=ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut r=BlastRange::with_layout(cfg,layout).unwrap();
+    r.set_physics_workers(1);r.set_navigation_workers(1);r.start_battle().unwrap();
+    r.battle.actors[0].order=Order::Attack(1);r.battle.actors[0].target=Some(1);
+    r.battle.actors[1].order=Order::Hold;r.units[1].status.weapon=false;
+    let mut restored:Option<BlastRange>=None;let mut replay_steps=0;
+    let advance=|r:&mut BlastRange|{
+        r.units[1].motion.pos[0]=r.units[1].motion.pos[0].add(Fx::from_int(2));
+        let yaw=r.units[1].motion.drive.head;r.units[1].update_pose(yaw);
+        r.battle.ai.next_tick=r.tick+r.battle.ai.tuning.decision_ticks;
+        let goal=aim_point(&r.units[1]);r.step();goal
+    };
+    let mut fired_while_moving=false;
+    for tick in 0..220 {
+        advance(&mut r);
+        if let Some(copy)=restored.as_mut(){advance(copy);replay_steps+=1;assert_eq!(r.state_hash(),copy.state_hash(),"moving target replay at {tick}");}
+        else if tick==0{let mut copy=BlastRange::restore(r.config,&r.snapshot()).unwrap();copy.set_navigation_workers(2);copy.set_physics_workers(2);restored=Some(copy);}
+        if !r.battle.walker_lasers.is_empty(){
+            assert!(r.battle.walker_lasers.iter().any(|trace|trace.hit),"aligned beams missed the moving tank");
+            assert!(r.units[1].revision>0,"moving target took no physical damage");
+            fired_while_moving=true;
+            break;
+        }
+    }
+    assert!(replay_steps>0,"fixture must continue the restored moving fight");
+    assert!(fired_while_moving,"walker never fired at a steadily receding tank");
+}
+
+#[test]
+fn oblique_kinetic_fire_finishes_surviving_core_and_bores_reactor() {
+    // 1. Under oblique yaw, removing the hit world voxel never leaves aim_point
+    //    locked onto an empty quantized world cell (`!u.solid(aim)`).
+    let mut r = arena_of([RangeUnitKind::TurretT1, RangeUnitKind::Tank]);
+    let p = r.units[0].motion.pos.map(Fx::to_int_trunc);
+    r.units[1].motion.pos = [p[0] + 240, p[1], p[2]].map(Fx::from_int);
+    let oblique_yaw = fx::angle::HALF + fx::angle::FULL / 12;
+    r.units[1].motion.drive.head = oblique_yaw;
+    r.units[1].update_pose(oblique_yaw);
+    for step in 0..8 {
+        let aim = aim_point(&r.units[1]);
+        assert!(
+            r.units[1].solid(aim),
+            "oblique step {step}: aim_point {aim:?} landed in empty air"
+        );
+        let (part, cell) = r.units[1].hit(aim).expect("solid aim must hit unit");
+        if part == 0 {
+            assert!(r.units[1].body.remove(cell[0], cell[1], cell[2]));
+            r.units[1].removed.push(cell.map(|v| v as u8));
+        } else {
+            assert!(r.units[1].body.segments[part - 1]
+                .body
+                .remove(cell[0], cell[1], cell[2]));
+            r.units[1]
+                .seg_removed
+                .push((part as u8 - 1, cell.map(|v| v as u8)));
+        }
+    }
+
+    // 2. TurretT1 cleanly finishes off an obliquely angled Tank instead of
+    //    shooting forever through an already-carved hole into the ground behind it.
+    let mut duel = arena_of([RangeUnitKind::TurretT1, RangeUnitKind::Tank]);
+    let p0 = duel.units[0].motion.pos.map(Fx::to_int_trunc);
+    duel.units[1].motion.pos = [p0[0] + 240, p0[1], p0[2]].map(Fx::from_int);
+    duel.units[1].motion.drive.head = oblique_yaw;
+    duel.units[1].update_pose(oblique_yaw);
+    duel.set_physics_workers(1);
+    duel.set_navigation_workers(1);
+    duel.start_battle().unwrap();
+    duel.battle.actors[1].order = Order::Hold;
+    assert!(duel.battle_order(0, Order::Attack(1), None));
+    for _ in 0..400 {
+        duel.battle.ai.next_tick = duel.tick + duel.battle.ai.tuning.decision_ticks;
+        duel.step();
+        if duel.units[1].status.alive {
+            let aim = aim_point(&duel.units[1]);
+            assert!(duel.units[1].solid(aim), "live tank aim became empty air");
+        } else {
+            break;
+        }
+    }
+    assert!(
+        !duel.units[1].status.alive && duel.battle.actors[0].fired <= 6,
+        "oblique tank survived {} turret shots",
+        duel.battle.actors[0].fired
+    );
+    assert!(duel.matter.economy.ledger.balanced());
+
+    // 3. Tank in Auto ("by target") ammo loads armour-piercing Kinetic against
+    //    Commander and destroys it via breach-focused reactor perforation.
+    let mut cmd_duel = arena_of([RangeUnitKind::Tank, RangeUnitKind::Commander]);
+    std::sync::Arc::make_mut(&mut cmd_duel.battle.tuning).tank_ammo =
+        modding::range_battle::TankAmmo {
+            tank: Delivery::Kinetic,
+            strider: Delivery::Blast,
+            ground: Delivery::Blast,
+        };
+    assert!(cmd_duel.set_battle_weapon(0, None));
+    cmd_duel.set_physics_workers(1);
+    cmd_duel.set_navigation_workers(1);
+    cmd_duel.start_battle().unwrap();
+    cmd_duel.battle.actors[1].order = Order::Hold;
+    assert!(cmd_duel.battle_order(0, Order::Attack(1), None));
+    for _ in 0..1600 {
+        cmd_duel.battle.ai.next_tick = cmd_duel.tick + cmd_duel.battle.ai.tuning.decision_ticks;
+        cmd_duel.step();
+        if !cmd_duel.units[1].status.alive {
+            break;
+        }
+    }
+    assert!(
+        !cmd_duel.units[1].status.alive && cmd_duel.battle.actors[0].fired <= 22,
+        "commander survived {} tank shots",
+        cmd_duel.battle.actors[0].fired
+    );
+    assert!(cmd_duel.matter.economy.ledger.balanced());
 }

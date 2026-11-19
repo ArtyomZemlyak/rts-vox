@@ -25,6 +25,8 @@ pub mod kinds;
 pub mod lab_tools;
 pub mod laboratory;
 pub mod navigation;
+pub mod tracked_motion;
+pub mod terrain_motion;
 pub mod range;
 pub mod range_battle;
 pub mod range_economy;
@@ -39,6 +41,7 @@ pub mod unit_heat;
 pub mod upheaval;
 pub mod vox;
 pub mod water;
+pub mod walking_terrain;
 pub mod weapons;
 
 pub use data::{load_pack, merge_materials, LoadError, Pack, UnitDef, UnitModel};

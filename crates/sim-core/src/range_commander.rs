@@ -36,9 +36,19 @@ impl RangeUnit {
 
     pub(super) fn commander_rest_targets(&self, turret_yaw: i32) -> [[i32; 3]; 2] {
         let crown = self.aimed_frame(&self.pose, fx::angle::diff(turret_yaw, self.motion.drive.head), self.turret_pitch);
-        let speed = self.motion.drive.vel.abs().div(Fx::from_int(self.motion.speed.max(1))).min(Fx::ONE);
+        let speed = self.motion.drive.vel.div(Fx::from_int(self.motion.speed.max(1)))
+            .max(Fx::ONE.neg()).min(Fx::ONE);
+        let turn_limit = (i64::from(self.motion.chassis.turn) * i64::from(fx::angle::FULL)
+            / i64::from(360 * crate::TICKS_PER_SECOND)).max(1) as i32;
+        let turn = Fx::from_ratio(self.motion.drive.yaw_rate, turn_limit)
+            .max(Fx::ONE.neg()).min(Fx::ONE);
+        // Backsteps reverse the counter-swing. A stationary pivot still
+        // balances the free tools, using saved motion rather than a clock.
         let swing = fx::angle::sin(self.motion.phase).mul(speed)
-            .mul(Fx::from_int(degrees(tuning().walk_swing_degrees))).to_int_trunc();
+            .mul(Fx::from_int(degrees(tuning().walk_swing_degrees)))
+            .add(fx::angle::cos(self.motion.phase).mul(turn)
+                .mul(Fx::from_int(degrees(tuning().turn_swing_degrees))))
+            .to_int_trunc();
         std::array::from_fn(|arm| {
             let pitch = degrees(tuning().rest_pitch_degrees) + if arm == 0 { swing } else { -swing };
             let direction = self.pose.x.scale(fx::angle::cos(pitch))

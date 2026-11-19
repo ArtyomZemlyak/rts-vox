@@ -93,6 +93,7 @@ fn crater_route_detours_a_new_deep_pit_and_finishes_for_tracks_and_legs() {
     ] {
         let mut w = World::new(640, 128, 640, 65536, Box::new(Flat));
         let mut m = accepted(&body, kind);
+        if kind==RangeUnitKind::Strider {m.trace_anchors(true);}
         for tick in 0..20 {
             advance(&mut m, &w, &body, tick, &Default::default());
         }
@@ -114,7 +115,14 @@ fn crater_route_detours_a_new_deep_pit_and_finishes_for_tracks_and_legs() {
         let mut low = m.pos[1];
         for tick in 20..1800 {
             m.allow_start(true);
+            m.clear_anchor_trace();
             advance(&mut m, &w, &body, tick, &Default::default());
+            if kind==RangeUnitKind::Strider && [400,800,1600].contains(&tick) {
+                println!("PIT_WINDOW tick={tick} pos={:?} head={} vel={:?} load={:?} drive_scale={:?} grounded={} blocked={} phase={} cursor={} trace={:?} feet={:?}",
+                    m.pos,m.drive.head,m.drive.vel,m.hull.load,m.drive_scale,m.hull.grounded(),m.blocked,m.phase,m.cursor,
+                    m.anchor_trace().map(|t|(t.window_reason,t.window_unready,t.window_limited,t.motor_command,t.motor_terrain,t.motor_step)),
+                    m.feet.iter().map(|f|(f.ready(),f.support.reason,f.placement().map(|c|c.pos))).collect::<Vec<_>>());
+            }
             detour = detour.max(m.pos[2].sub(Fx::from_int(320)).abs());
             low = low.min(m.pos[1]);
             if m.destination.is_none() {

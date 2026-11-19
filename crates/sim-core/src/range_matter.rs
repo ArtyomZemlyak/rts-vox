@@ -72,6 +72,14 @@ type BodyFracturePrice = ([u32; 5], (u64, u64));
 const FELL_BITS: u32 = 21;
 const FELL_MASK: u64 = (1 << FELL_BITS) - 1;
 const FELL_BIAS: i64 = 1 << (FELL_BITS - 1);
+// Phase-local direct-mapped memo. Multiply before selecting the high bits:
+// low-bit masks alias every X and adjacent Y of the packed frontier key.
+const DEFERRED_WORD_BITS: u32 = 10;
+const DEFERRED_WORDS: usize = 1 << DEFERRED_WORD_BITS;
+#[inline]
+fn deferred_word_bucket(word: u64) -> usize {
+    (word.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (u64::BITS - DEFERRED_WORD_BITS)) as usize
+}
 fn fell_key(p: [i32; 3]) -> u64 {
     debug_assert!(p.iter().all(
         |&v| (i64::from(v) + FELL_BIAS) >= 0 && (i64::from(v) + FELL_BIAS) <= FELL_MASK as i64
@@ -116,6 +124,7 @@ pub struct Matter {
     pub tuning: modding::tuning::Blast,
     phase_changes: [Option<modding::heat::Transformation>; 4],
     melt_flow: [Option<modding::heat::MeltFlow>; 3],
+    melt_tuning: modding::heat::HeatTuning,
     pub remaining_mj: u64,
     pub supplied_mj: u64,
     pub spent_mj: u64,
@@ -315,7 +324,7 @@ impl Matter {
             damage_tick: 0,
             debris: Bursts::default(),
             admission: AdmissionProfile::default(),
-            fragment_box: 2,
+            fragment_box: t.blast.fragment_box.clamp(1, 4) as u8,
             economy,
             tuning: t.blast,
             phase_changes: modding::heat::HeatTuning::from_ron(include_str!(
@@ -326,6 +335,7 @@ impl Matter {
             melt_flow: modding::heat::HeatTuning::from_ron(include_str!("../../../data/heat.ron"))
                 .expect("heat tuning")
                 .melt_flow,
+            melt_tuning: modding::heat::HeatTuning::from_ron(include_str!("../../../data/heat.ron")).expect("heat tuning"),
             remaining_mj: 0,
             supplied_mj: 0,
             spent_mj: 0,
@@ -560,17 +570,39 @@ impl Matter {
         optimized: bool,
         room: &mut Option<u32>,
     ) -> usize {
+        if cells.is_empty() {
+            return 0;
+        }
+        if optimized {
+            self.felling.sync_profile([w.nx, w.ny, w.nz], &f.materials);
+        }
+        let has_yielding_dust = f.materials.iter().any(|m| f.dust_materials.contains(m));
+        let use_seen_cache = optimized && !self.felling.has_reference();
+        let mut seen_deferred = [(u64::MAX, 0u64); DEFERRED_WORDS];
         let mut cut = 0;
-        let mut deferred = false;
+        let mut deferred =
+            optimized && !has_yielding_dust && *room == Some(0) && self.debris.claims() == 0;
+        let mut mat_cursor = voxel::World::mat_cursor();
         for &p in cells {
             let key = fell_key(p.map(|v| v as i32));
-            // After a refusal this call only registers contacts. An existing
-            // self-seed already owns that work: do not re-read terrain and
-            // claims on every tick while the hull remains over the plant.
-            if optimized && deferred && self.felling.contains(&(key, key)) {
-                continue;
+            let (w_key, bit) = (key >> 6, 1u64 << (key & 63));
+            let bucket = deferred_word_bucket(w_key);
+            // After a physical refusal this call registers contacts. An existing
+            // self-seed already owns that work: cache 64-Z contact words across
+            // the hull's Z rows so parked/creeping hulls do not re-walk B-trees.
+            if optimized && deferred {
+                if use_seen_cache {
+                    if seen_deferred[bucket].0 != w_key {
+                        seen_deferred[bucket] = (w_key, self.felling.contact_word(w_key));
+                    }
+                    if seen_deferred[bucket].1 & bit != 0 {
+                        continue;
+                    }
+                } else if self.felling.contains(&(key, key)) {
+                    continue;
+                }
             }
-            let m = w.material(p[0], p[1], p[2]);
+            let m = w.material_cached(&mut mat_cursor, p[0], p[1], p[2]);
             if m == AIR
                 || !f.materials.contains(&m)
                 || self.debris.claimed(p)
@@ -578,8 +610,32 @@ impl Matter {
             {
                 continue;
             }
+            if f.dust_materials.contains(&m) {
+                if w.has_pending_dig(p[0], p[1], p[2]) {
+                    continue;
+                }
+                w.queue_dig_by(p[0], p[1], p[2], crate::heat::VAPOR);
+                let (cost, _) = self.cost_cached(m);
+                if self.felling.remove(&(key, key)) {
+                    self.admission.felling[2] += 1;
+                    if use_seen_cache && seen_deferred[bucket].0 == w_key {
+                        seen_deferred[bucket].1 &= !bit;
+                    }
+                }
+                self.supplied_mj += cost;
+                self.spent_mj += cost;
+                cut += 1;
+                self.spread(p.map(|v| v as i32), p.map(|v| v as i32), f.radius);
+                continue;
+            }
             if deferred {
-                self.admission.felling[0] += u64::from(self.felling.insert((key, key)));
+                let pristine =
+                    optimized && w.chunk_of(p[0], p[1], p[2]).is_some_and(|ci| w.chunk_fresh(ci));
+                let (fresh, mask) = self.felling.insert_contact(key, pristine);
+                if use_seen_cache {
+                    seen_deferred[bucket] = (w_key, mask);
+                }
+                self.admission.felling[0] += u64::from(fresh);
                 continue;
             }
             let (cost, motion) = self.cost_cached(m);
@@ -601,10 +657,21 @@ impl Matter {
             };
             if !claimed {
                 deferred = true;
-                self.admission.felling[0] += u64::from(self.felling.insert((key, key)));
+                let pristine =
+                    optimized && w.chunk_of(p[0], p[1], p[2]).is_some_and(|ci| w.chunk_fresh(ci));
+                let (fresh, mask) = self.felling.insert_contact(key, pristine);
+                if use_seen_cache {
+                    seen_deferred[bucket] = (w_key, mask);
+                }
+                self.admission.felling[0] += u64::from(fresh);
                 continue;
             }
-            self.admission.felling[2] += u64::from(self.felling.remove(&(key, key)));
+            if self.felling.remove(&(key, key)) {
+                self.admission.felling[2] += 1;
+                if use_seen_cache && seen_deferred[bucket].0 == w_key {
+                    seen_deferred[bucket].1 &= !bit;
+                }
+            }
             self.supplied_mj += cost;
             self.spent_mj += cost;
             cut += 1;
@@ -613,8 +680,8 @@ impl Matter {
         cut
     }
     /// Release the crown hanging from earlier cuts: connected yielding cells
-    /// within the radius leave as unpowered debris and fall. Nothing is paid
-    /// twice, and a full pool only postpones the rest.
+    /// within the radius leave as unpowered debris or configured dust.
+    /// Nothing is paid twice; full pools postpone physical pieces.
     pub fn step_felling(&mut self, w: &mut World, f: &Felling) {
         self.step_felling_in(w, f, true);
     }
@@ -628,26 +695,48 @@ impl Matter {
         optimized: bool,
         room: &mut Option<u32>,
     ) {
+        if optimized {
+            self.felling.sync_profile([w.nx, w.ny, w.nz], &f.materials);
+        }
+        let has_yielding_dust = f.materials.iter().any(|m| f.dust_materials.contains(m));
         let mut left = f.cells_per_tick;
         let mut after = None;
+        let mut cursor = felling_front::Cursor::default();
+        let mut mat_cursor = voxel::World::mat_cursor();
         while left > 0 {
-            let entry = if let Some(previous) = after {
-                self.felling.after(previous).inspect(|pair| {
-                    self.felling.remove(pair);
-                })
-            } else {
-                self.felling.pop_first()
-            };
-            let Some((p, seed)) = entry else {
+            if optimized && !has_yielding_dust && *room == Some(0) && self.debris.claims() == 0 {
+                if let Some((w_key, first_p, last_p, take_n, rem_after, verified)) =
+                    self.felling.peek_verified_contact_run(after, left, &mut cursor)
+                {
+                    let [x, y, z0] = fell_cell(first_p);
+                    let [_, _, z1] = fell_cell(last_p);
+                    if x >= 0
+                        && y >= 0
+                        && z0 >= 0
+                        && (x as u32) < w.nx
+                        && (y as u32) < w.ny
+                        && (z1 as u32) < w.nz
+                        && (z0 as u32 / 16..=z1 as u32 / 16).all(|cz| {
+                            w.chunk_of(x as u32, y as u32, cz * 16)
+                                .is_some_and(|ci| w.chunk_fresh(ci))
+                        })
+                    {
+                        self.felling
+                            .advance_contact_word(w_key, rem_after, verified, &mut cursor);
+                        left -= take_n;
+                        self.admission.felling[1] += u64::from(take_n);
+                        self.admission.felling[4] += u64::from(take_n);
+                        after = Some((last_p, last_p));
+                        continue;
+                    }
+                }
+            }
+            let Some((raw, is_verified)) = self.felling.next_verified(after, &mut cursor) else {
                 break;
             };
-            if after.is_some() {
-                after = entry;
-            }
-            let (p, seed) = (fell_cell(p), fell_cell(seed));
+            let (p, seed) = (fell_cell(raw.0), fell_cell(raw.1));
             left -= 1;
             self.admission.felling[1] += 1;
-            self.admission.felling[2] += 1;
             if p[0] < 0
                 || p[1] < 0
                 || p[2] < 0
@@ -655,34 +744,110 @@ impl Matter {
                 || p[1] >= w.ny as i32
                 || p[2] >= w.nz as i32
             {
+                self.felling.remove(&raw);
+                cursor.invalidate();
+                self.admission.felling[2] += 1;
+                if after.is_some() {
+                    after = Some(raw);
+                }
                 continue;
             }
             let q = p.map(|v| v as u32);
-            let m = w.material(q[0], q[1], q[2]);
-            if m == AIR
-                || !f.materials.contains(&m)
-                || self.debris.claimed(q)
-                || w.on_frame(q[0], q[1], q[2])
-            {
+            if w.on_frame(q[0], q[1], q[2]) || self.debris.claimed(q) {
+                self.felling.remove(&raw);
+                cursor.invalidate();
+                self.admission.felling[2] += 1;
+                if after.is_some() {
+                    after = Some(raw);
+                }
                 continue;
             }
-            // Felled wood crumbles in two-cell pieces whatever the weapon.
+            if is_verified
+                && optimized
+                && !has_yielding_dust
+                && w.solid(q[0], q[1], q[2])
+                && w.chunk_of(q[0], q[1], q[2])
+                    .is_some_and(|ci| w.chunk_fresh(ci))
+            {
+                let cap = *room.get_or_insert_with(|| self.routine_fragment_room());
+                if cap == 0
+                    && !f.materials.iter().any(|&ym| {
+                        self.debris
+                            .can_claim_without_room(q, ym, self.fragment_box, &self.tuning)
+                    })
+                {
+                    self.admission.felling[4] += 1;
+                    after = Some(raw);
+                    continue;
+                }
+            }
+            let m = w.material_cached(&mut mat_cursor, q[0], q[1], q[2]);
+            if m == AIR || !f.materials.contains(&m) {
+                self.felling.remove(&raw);
+                cursor.invalidate();
+                self.admission.felling[2] += 1;
+                if after.is_some() {
+                    after = Some(raw);
+                }
+                continue;
+            }
+            if f.dust_materials.contains(&m) {
+                self.felling.remove(&raw);
+                cursor.invalidate();
+                self.admission.felling[2] += 1;
+                if after.is_some() {
+                    after = Some(raw);
+                }
+                if !w.has_pending_dig(q[0], q[1], q[2]) {
+                    w.queue_dig_by(q[0], q[1], q[2], crate::heat::VAPOR);
+                    if p == seed {
+                        let (cost, _) = self.cost_cached(m);
+                        self.supplied_mj += cost;
+                        self.spent_mj += cost;
+                    }
+                }
+                self.admission.felling[3] += 1;
+                self.spread(p, seed, f.radius);
+                continue;
+            }
+            // Keep each cut's propagation origin; group only its physical pieces.
             let claimed = if optimized {
                 let capacity = room.get_or_insert_with(|| self.routine_fragment_room());
-                self.debris
-                    .claim_voxel_with_room(w, q, m, seed, 0, 2, &self.tuning, capacity)
+                (*capacity > 0
+                    || self
+                        .debris
+                        .can_claim_without_room(q, m, self.fragment_box, &self.tuning))
+                    && self.debris.claim_voxel_with_room(
+                        w,
+                        q,
+                        m,
+                        seed,
+                        0,
+                        self.fragment_box,
+                        &self.tuning,
+                        capacity,
+                    )
             } else {
-                self.debris.claim_voxel(w, q, m, seed, 0, 2, &self.tuning)
+                self.debris.claim_voxel(w, q, m, seed, 0, self.fragment_box, &self.tuning)
             };
             if !claimed {
-                self.felling.insert((fell_key(p), fell_key(seed)));
-                self.admission.felling[2] -= 1;
+                if optimized
+                    && w.chunk_of(q[0], q[1], q[2])
+                        .is_some_and(|ci| w.chunk_fresh(ci))
+                {
+                    self.felling.mark_verified(&raw);
+                }
                 self.admission.felling[4] += 1;
-                // Keep this work, but do not let one full-pool cell prevent
-                // bounded cleanup of stale entries farther along the frontier.
-                // The cursor lives only inside this atomic call, not a tick.
-                after = entry;
+                // Keep this work in place without B-tree remove/insert churn,
+                // while still advancing bounded cleanup farther along the frontier.
+                after = Some(raw);
                 continue;
+            }
+            self.felling.remove(&raw);
+            cursor.invalidate();
+            self.admission.felling[2] += 1;
+            if after.is_some() {
+                after = Some(raw);
             }
             // A self-seed is a hull contact rejected before a successful cut.
             // Charge its fracture once, on admission. The hull has already
@@ -922,6 +1087,20 @@ impl Matter {
         *room -= 1;
         self.admission.melt[0] += 1;
         true
+    }
+    pub(super) fn set_melt_tuning(&mut self, tuning: modding::heat::HeatTuning) {
+        self.melt_tuning = tuning;
+    }
+    /// Preserve the physical quantum/grade and inherited motion; only its phase changes.
+    pub(super) fn liquefy_last_body_fragment(&mut self, heat: u32) {
+        let f = self.debris.fragments.last_mut().expect("admitted body melt");
+        if let Some(flow) = self.melt_flow.iter().flatten().find(|p| p.solid == f.material) {
+            f.material = flow.liquid;
+            f.basis = crate::burst::IDENTITY;
+            f.side = 1;
+            f.resting = false;
+            self.debris.molten.cells.insert(f.id, heat);
+        }
     }
     pub fn ground(&mut self, w: &mut World, p: [i32; 3], at: [i32; 3]) -> ClaimResult {
         if !claimable(w, p) {
@@ -1606,6 +1785,9 @@ impl Matter {
             completed,
             task,
         );
+        let melt_tuning = modding::heat::HeatTuning { melt_flow: self.melt_flow, ..self.melt_tuning };
+        self.debris.step_molten(w, &mut self.economy, &self.tuning, &melt_tuning,
+            Fx::from_ratio(gravity, crate::TICKS_PER_SECOND.pow(2)), tick, hulls);
         self.thermal_reserve = 0;
         self.body_heat_reserve = 0;
         self.damage_waiting = false;
@@ -1710,7 +1892,8 @@ impl Matter {
                         voxel::unit::artillery_turret_t2()
                     }
                     modding::range::RangeUnitKind::ArtilleryTurretT3 => {
-                        voxel::unit::artillery_turret_t3()
+                        if u.articulated_siege() { voxel::unit::artillery_turret_t3() }
+                        else { voxel::unit::artillery_turret_t3_legacy() }
                     }
                     modding::range::RangeUnitKind::NuclearSilo => voxel::unit::nuclear_silo(),
                     modding::range::RangeUnitKind::Walker04 => voxel::unit::walker04(),
@@ -1719,7 +1902,10 @@ impl Matter {
                     modding::range::RangeUnitKind::PowerPlantT2 => voxel::unit::power_plant_t2(),
                     modding::range::RangeUnitKind::PowerPlantT3 => voxel::unit::power_plant_t3(),
                     modding::range::RangeUnitKind::RazlomT3 => voxel::unit::razlom_t3(),
-                    modding::range::RangeUnitKind::GrebenStorage => voxel::unit::greben_storage(),
+                    modding::range::RangeUnitKind::GrebenStorage => {
+                        if u.full_greben() { voxel::unit::greben_storage() }
+                        else { voxel::unit::greben_storage_legacy() }
+                    }
                     modding::range::RangeUnitKind::KilFactoryT1 => voxel::unit::kil_factory(1),
                     modding::range::RangeUnitKind::KilFactoryT2 => voxel::unit::kil_factory(2),
                     modding::range::RangeUnitKind::KilFactoryT3 => voxel::unit::kil_factory(3),
@@ -1842,7 +2028,7 @@ impl Matter {
 #[cfg(test)]
 mod felling_key_tests {
     use super::{fell_cell, fell_key, Matter};
-    use fx::blob::Blob;
+    use fx::blob::{Blob, Scan};
     use std::collections::BTreeSet;
 
     #[test]
@@ -1899,6 +2085,182 @@ mod felling_key_tests {
     }
 
     #[test]
+    fn configured_foliage_dust_preserves_trunk_and_ledger() {
+        struct Grove;
+        impl voxel::Generator for Grove {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < 4 {
+                    1
+                } else if [x, y, z] == [4, 4, 4] {
+                    4
+                } else if [x, y, z] == [5, 4, 4] {
+                    5
+                } else {
+                    0
+                }
+            }
+        }
+        let mut world = voxel::World::new(32, 16, 32, 4096, Box::new(Grove));
+        let mut matter = Matter::new(&[]);
+        let mut f = modding::navigation::Navigation::from_ron(include_str!(
+            "../../../data/range-navigation.ron"
+        ))
+        .unwrap()
+        .fell;
+        f.dust_materials = [4]; // Explicit legacy-mode fixture; stock foliage stays physical.
+        let cuts = [[4, 4, 4], [5, 4, 4]];
+        matter.felling_phase(&mut world, [(&cuts[..], [4, 4, 4])], &f);
+        let paid = matter.spent_mj;
+        let queued = world.queued();
+        matter.felling_phase(&mut world, [(&cuts[..], [4, 4, 4])], &f);
+        assert_eq!(matter.spent_mj, paid);
+        assert_eq!(world.queued(), queued);
+        let mut pending_world = Blob::new();
+        world.save(&mut pending_world);
+        let mut pending_matter = Blob::new();
+        matter.save(&mut pending_matter);
+        let mut restored_world = voxel::World::new(32, 16, 32, 4096, Box::new(Grove));
+        assert!(restored_world.load(&mut Scan::new(&pending_world.v)));
+        let mut restored_matter = Matter::new(&[]);
+        restored_matter
+            .load(&mut Scan::new(&pending_matter.v), &restored_world, &[])
+            .unwrap();
+        world.flush();
+        matter.flush(&world, true, 98, 1, &[], &f.materials);
+        restored_world.flush();
+        restored_matter.flush(&restored_world, true, 98, 1, &[], &f.materials);
+        let mut expected = Blob::new();
+        world.save(&mut expected);
+        matter.save(&mut expected);
+        let mut actual = Blob::new();
+        restored_world.save(&mut actual);
+        restored_matter.save(&mut actual);
+        assert_eq!(expected.v, actual.v);
+        assert_eq!(world.material(4, 4, 4), 0);
+        assert_eq!(world.material(5, 4, 4), 0);
+        assert_eq!(matter.economy.sunk(crate::matter::Sink::Annihilation), 0);
+        assert_eq!(
+            matter.economy.sunk(crate::matter::Sink::Pulverised),
+            matter.economy.per_voxel(4)
+        );
+        assert!(!matter.debris.fragments.is_empty());
+        assert!(
+            matter
+                .debris
+                .fragments
+                .iter()
+                .all(|piece| piece.material == 5)
+        );
+        assert!(matter.economy.ledger.balanced());
+    }
+
+    #[test]
+    fn deferred_foliage_dust_survives_restore_and_pays_its_late_cut() {
+        struct Grove;
+        impl voxel::Generator for Grove {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < 4 {
+                    1
+                } else if [x, y, z] == [4, 4, 4] {
+                    5
+                } else if [x, y, z] == [20, 4, 4] {
+                    4
+                } else {
+                    0
+                }
+            }
+        }
+        let mut world = voxel::World::new(32, 16, 32, 4096, Box::new(Grove));
+        let mut matter = Matter::new(&[]);
+        matter.tuning.max_flying = 0;
+        let mut f = modding::navigation::Navigation::from_ron(include_str!(
+            "../../../data/range-navigation.ron"
+        ))
+        .unwrap()
+        .fell;
+        f.dust_materials = [4]; // Explicit legacy-mode fixture; stock foliage stays physical.
+        f.cells_per_tick = 1;
+        let key = fell_key([20, 4, 4]);
+        matter.felling.insert((key, key));
+        assert_eq!(world.material(20, 4, 4), 4);
+        assert_eq!(matter.spent_mj, 0);
+        assert!(matter.felling.contains(&(key,key)));
+        let mut world_bytes = Blob::new();
+        world.save(&mut world_bytes);
+        let mut matter_bytes = Blob::new();
+        matter.save(&mut matter_bytes);
+        let mut restored_world = voxel::World::new(32, 16, 32, 4096, Box::new(Grove));
+        assert!(restored_world.load(&mut Scan::new(&world_bytes.v)));
+        let mut restored = Matter::new(&[]);
+        restored
+            .load(&mut Scan::new(&matter_bytes.v), &restored_world, &[])
+            .unwrap();
+        assert!(restored.felling.contains(&(key,key)));
+        restored.tuning.max_flying = 0;
+        matter.step_felling(&mut world, &f);
+        restored.step_felling(&mut restored_world, &f);
+        assert!(matter.spent_mj > 0 && matter.spent_mj <= matter.supplied_mj);
+        assert_eq!(restored.spent_mj, matter.spent_mj);
+        world.flush();
+        matter.flush(&world, true, 98, 1, &[], &f.materials);
+        restored_world.flush();
+        restored.flush(&restored_world, true, 98, 1, &[], &f.materials);
+        assert_eq!(restored_world.material(20, 4, 4), 0);
+        assert_eq!(restored_world.material(4, 4, 4), 5);
+        assert_eq!(restored.economy.sunk(crate::matter::Sink::Annihilation), 0);
+        assert_eq!(
+            restored.economy.sunk(crate::matter::Sink::Pulverised),
+            restored.economy.per_voxel(4)
+        );
+        let mut expected = Blob::new();
+        world.save(&mut expected);
+        matter.save(&mut expected);
+        let mut actual = Blob::new();
+        restored_world.save(&mut actual);
+        restored.save(&mut actual);
+        assert_eq!(expected.v, actual.v);
+        assert!(restored.economy.ledger.balanced());
+    }
+
+    #[test]
+    fn foliage_dust_waits_in_fifo_and_restores_without_repeat_payment() {
+        struct Grove;
+        impl voxel::Generator for Grove {
+            fn material(&self,x:u32,y:u32,z:u32)->u16 {
+                if y<4 {1} else if y==4 && z==4 && (4..=6).contains(&x) {4} else {0}
+            }
+        }
+        let mut world=voxel::World::new(32,16,32,1,Box::new(Grove));
+        let mut matter=Matter::new(&[]);matter.tuning.max_flying=0;
+        let mut f=modding::navigation::Navigation::from_ron(include_str!("../../../data/range-navigation.ron")).unwrap().fell;
+        f.dust_materials=[4]; // Explicit legacy-mode fixture, not production policy.
+        let cells=[[6,4,4],[4,4,4],[5,4,4]];
+        assert_eq!(matter.fell(&mut world,&cells,[4,4,4],&f),3);
+        let paid=matter.spent_mj;assert!(paid>0);assert_eq!(world.queued(),3);
+        assert_eq!(matter.fell(&mut world,&cells,[4,4,4],&f),0);
+        assert_eq!(world.queued(),3);assert_eq!(matter.spent_mj,paid);
+        let mut wb=Blob::new();world.save(&mut wb);let mut mb=Blob::new();matter.save(&mut mb);
+        let mut copy_world=voxel::World::new(32,16,32,1,Box::new(Grove));
+        assert!(copy_world.load(&mut Scan::new(&wb.v)));
+        let mut copy=Matter::new(&[]);copy.load(&mut Scan::new(&mb.v),&copy_world,&[]).unwrap();
+        for (tick,expected) in cells.into_iter().enumerate() {
+            world.flush();copy_world.flush();
+            assert_eq!(world.completed().len(),1,"world edit quota was bypassed");
+            let edit=world.completed()[0].0;assert_eq!([edit.x,edit.y,edit.z],expected);
+            matter.flush(&world,true,98,tick as u64,&[],&f.materials);
+            copy.flush(&copy_world,true,98,tick as u64,&[],&f.materials);
+            assert_eq!(matter.fell(&mut world,&cells,[4,4,4],&f),0);
+            assert_eq!(copy.fell(&mut copy_world,&cells,[4,4,4],&f),0);
+            assert_eq!(matter.spent_mj,paid);assert_eq!(copy.spent_mj,paid);
+            let mut a=Blob::new();world.save(&mut a);matter.save(&mut a);
+            let mut b=Blob::new();copy_world.save(&mut b);copy.save(&mut b);assert_eq!(a.v,b.v);
+            assert!(matter.debris.fragments.is_empty());assert!(matter.economy.ledger.balanced());
+        }
+        assert_eq!(world.queued(),0);
+        assert_eq!(matter.economy.sunk(crate::matter::Sink::Pulverised),3*matter.economy.per_voxel(4));
+    }
+
+    #[test]
     fn shared_felling_phase_matches_separate_claim_batches_at_pool_boundaries() {
         struct Grove;
         impl voxel::Generator for Grove {
@@ -1936,6 +2298,7 @@ mod felling_key_tests {
                 .unwrap()
                 .fell;
                 f.cells_per_tick = 31;
+                f.dust_materials = [0]; // Preserve the physical-pool contract.
                 for tick in 0..4 {
                     for m in [&mut actual, &mut reference] {
                         // Invalidate at phase boundaries: capacity and thermal
@@ -2134,4 +2497,338 @@ mod felling_key_tests {
                 .collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn stock_physical_foliage_defers_in_a_full_pool_and_restores_its_mass() {
+        struct Grove;
+        impl voxel::Generator for Grove {
+            fn material(&self,x:u32,y:u32,z:u32)->u16 {
+                if y<4 {1} else if [x,y,z]==[4,4,4] {4} else if [x,y,z]==[5,4,4] {5} else {0}
+            }
+        }
+        let mut w=voxel::World::new(32,16,32,4096,Box::new(Grove));let mut m=Matter::new(&[]);
+        let f=modding::navigation::Navigation::from_ron(include_str!("../../../data/range-navigation.ron")).unwrap().fell;
+        assert_eq!(f.dust_materials,[0]);m.tuning.max_flying=0;
+        let cuts=[[4,4,4],[5,4,4]];
+        assert_eq!(m.fell(&mut w,&cuts,[4,4,4],&f),0);
+        assert_eq!(w.queued(),0);assert_eq!(m.spent_mj,0);assert_eq!(m.felling_pending(),2);
+        let mut wb=Blob::new();w.save(&mut wb);let mut mb=Blob::new();m.save(&mut mb);
+        let mut cw=voxel::World::new(32,16,32,4096,Box::new(Grove));assert!(cw.load(&mut Scan::new(&wb.v)));
+        let mut cm=Matter::new(&[]);cm.load(&mut Scan::new(&mb.v),&cw,&[]).unwrap();
+        for (matter,world) in [(&mut m,&mut w),(&mut cm,&mut cw)] {
+            matter.tuning.max_flying=4096;matter.step_felling(world,&f);world.flush();
+            matter.flush(world,true,98,1,&[],&f.materials);
+            assert_eq!(world.material(4,4,4),0);assert_eq!(world.material(5,4,4),0);
+            assert!(matter.spent_mj>0);assert_eq!(matter.felling_pending(),0);
+            assert_eq!(matter.economy.sunk(crate::matter::Sink::Pulverised),0);
+            for material in [4,5] {
+                let pieces:Vec<_>=matter.debris.fragments.iter().filter(|p|p.material==material).collect();
+                assert_eq!(pieces.iter().map(|p|p.count).sum::<u32>(),1);
+                assert_eq!(pieces.iter().map(|p|matter.economy.ledger.held(p.held)).sum::<u64>(),matter.economy.per_voxel(material));
+            }
+            assert!(matter.economy.ledger.balanced());
+        }
+        let mut a=Blob::new();w.save(&mut a);m.save(&mut a);let mut b=Blob::new();cw.save(&mut b);cm.save(&mut b);assert_eq!(a.v,b.v);
+    }
+
+    #[test]
+    fn physical_foliage_partial_fifo_confirms_without_dust_or_repeat_payment() {
+        struct Grove;
+        impl voxel::Generator for Grove { fn material(&self,x:u32,y:u32,z:u32)->u16 {
+            if y<4 {1} else if y==4 && z==4 && (4..=6).contains(&x) {4} else {0}
+        }}
+        let mut w=voxel::World::new(32,16,32,1,Box::new(Grove));let mut m=Matter::new(&[]);
+        let f=modding::navigation::Navigation::from_ron(include_str!("../../../data/range-navigation.ron")).unwrap().fell;
+        assert_eq!(f.dust_materials,[0]);let cells=[[6,4,4],[4,4,4],[5,4,4]];
+        assert_eq!(m.fell(&mut w,&cells,[4,4,4],&f),3);let paid=m.spent_mj;
+        let mut wb=Blob::new();w.save(&mut wb);let mut mb=Blob::new();m.save(&mut mb);
+        let mut cw=voxel::World::new(32,16,32,1,Box::new(Grove));assert!(cw.load(&mut Scan::new(&wb.v)));
+        let mut cm=Matter::new(&[]);cm.load(&mut Scan::new(&mb.v),&cw,&[]).unwrap();
+        for (tick,expected) in cells.into_iter().enumerate() {
+            w.flush();cw.flush();assert_eq!(w.completed().len(),1);
+            let edit=w.completed()[0].0;assert_eq!([edit.x,edit.y,edit.z],expected,"edit FIFO changed");
+            m.flush(&w,true,98,tick as u64,&[],&f.materials);cm.flush(&cw,true,98,tick as u64,&[],&f.materials);
+            assert_eq!(m.fell(&mut w,&cells,[4,4,4],&f),0);assert_eq!(cm.fell(&mut cw,&cells,[4,4,4],&f),0);
+            assert_eq!(m.spent_mj,paid);assert_eq!(cm.spent_mj,paid);
+            let mut a=Blob::new();w.save(&mut a);m.save(&mut a);let mut b=Blob::new();cw.save(&mut b);cm.save(&mut b);assert_eq!(a.v,b.v);
+            assert_eq!(m.economy.sunk(crate::matter::Sink::Pulverised),0);assert!(m.economy.ledger.balanced());
+        }
+        assert_eq!(w.queued(),0);assert_eq!(m.debris.fragments.iter().map(|p|p.count).sum::<u32>(),3);
+        assert_eq!(m.debris.fragments.iter().map(|p|m.economy.ledger.held(p.held)).sum::<u64>(),3*m.economy.per_voxel(4));
+    }
+
+
+    #[test]
+    fn stock_physical_foliage_uses_configured_four_cell_groups() {
+        struct Crown;
+        impl voxel::Generator for Crown {fn material(&self,x:u32,y:u32,z:u32)->u16 {
+            if y<4 {1} else if (4..8).contains(&x) && (4..8).contains(&y) && (4..8).contains(&z) {4} else {0}
+        }}
+        let mut w=voxel::World::new(32,16,32,4096,Box::new(Crown));let mut m=Matter::new(&[]);
+        let f=modding::navigation::Navigation::from_ron(include_str!("../../../data/range-navigation.ron")).unwrap().fell;
+        assert_eq!(f.dust_materials,[0]);assert_eq!(m.fragment_box,4);
+        let key=fell_key([4,4,4]);m.felling.insert((key,key));m.step_felling(&mut w,&f);w.flush();m.flush(&w,true,98,1,&[],&f.materials);
+        assert_eq!(m.felling_pending(),0);assert_eq!(m.debris.fragments.len(),1,"a connected4cube mustnotbe eight2cubes or64points");
+        let piece=&m.debris.fragments[0];assert_eq!(piece.material,4);assert_eq!(piece.side,4);assert_eq!(piece.count,64);assert_eq!(piece.shape,u64::MAX);
+        assert_eq!(m.economy.ledger.held(piece.held),64*m.economy.per_voxel(4));
+        assert_eq!(m.economy.sunk(crate::matter::Sink::Pulverised),0);assert!(m.economy.ledger.balanced());
+    }
+
+    #[test]
+    fn hull_cut_batch_preserves_legacy_neighbor_quota_without_shifting_seed_or_radius() {
+        struct Tree;
+        impl voxel::Generator for Tree {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < 4 {
+                    1
+                } else if (10..13).contains(&x) && (10..13).contains(&z) && (4..10).contains(&y) {
+                    5
+                } else if (8..15).contains(&x) && (8..15).contains(&z) && (10..13).contains(&y) {
+                    4
+                } else if [x, y, z] == [28, 10, 28] {
+                    4
+                } else {
+                    0
+                }
+            }
+        }
+        let mut w = voxel::World::new(32, 32, 32, 4096, Box::new(Tree));
+        let mut m = Matter::new(&[]);
+        let f = modding::navigation::Navigation::from_ron(include_str!(
+            "../../../data/range-navigation.ron"
+        ))
+        .unwrap()
+        .fell;
+        let cuts: Vec<_> = (10..13)
+            .flat_map(|x| (4..8).flat_map(move |y| (10..13).map(move |z| [x, y, z])))
+            .collect();
+        assert_eq!(m.fell(&mut w, &cuts, [11, 5, 11], &f), 36);
+        // Keep the legacy quota and exact (position, seed) ordering, including
+        // air/interior visits: removing them admitted physical work earlier.
+        let mut expected = BTreeSet::new();
+        for cut in &cuts {
+            let seed = cut.map(|v| v as i32);
+            for axis in 0..3 {
+                for direction in [-1, 1] {
+                    let mut p = seed;
+                    p[axis] += direction;
+                    if p[1] >= seed[1]
+                        && (0..3).map(|a| (p[a] - seed[a]).pow(2)).sum::<i32>() <= f.radius * f.radius
+                    {
+                        expected.insert((fell_key(p), fell_key(seed)));
+                    }
+                }
+            }
+        }
+        assert_eq!(expected.len(), 180, "fixture must exercise stale quota visits");
+        assert_eq!(m.felling.iter().collect::<BTreeSet<_>>(), expected);
+        for _ in 0..8 {
+            m.step_felling(&mut w, &f);
+            w.flush();
+            m.flush(&w, true, 98, 1, &[], &f.materials);
+        }
+        assert_eq!(m.felling_pending(), 0);
+        assert_eq!(m.economy.sunk(crate::matter::Sink::Pulverised), 0);
+        assert!(m.economy.ledger.balanced());
+        for y in 8..13 {
+            for z in 8..15 {
+                for x in 8..15 {
+                    assert_eq!(w.material(x, y, z), 0, "crown within radius stayed at {:?}", [x, y, z]);
+                }
+            }
+        }
+        assert_eq!(w.material(28, 10, 28), 4, "remote foliage outside radius was touched");
+    }
+
+
+    #[test]
+    fn no_room_claim_filter_matches_exact_admission_for_join_bridge_and_caps() {
+        struct Wood;
+        impl voxel::Generator for Wood {fn material(&self,_:u32,_:u32,_:u32)->u16 {5}}
+        let mut joins=0;let mut refusals=0;let mut bridges=0;
+        for small_piece_pct in [0,100] {for side in [1u8,2,3,4] {
+            let mut w=voxel::World::new(32,32,32,4096,Box::new(Wood));let mut m=Matter::new(&[]);m.tuning.max_claims=128;m.tuning.small_piece_pct=small_piece_pct;
+            let base=[12,12,12];let mut room=8;
+            for offset in [[0,0,0],[u32::from(side)-1,0,0]] {
+                let p=std::array::from_fn(|a|base[a]+offset[a]);
+                if !m.debris.claimed(p) {assert!(m.debris.claim_voxel_with_room(&mut w,p,5,[21,23,25],0,side,&m.tuning,&mut room));}
+            }
+            let mut cells:Vec<_>=(0..u32::from(side)).flat_map(|z|(0..u32::from(side)).flat_map(move|y|(0..u32::from(side)).map(move|x|[base[0]+x,base[1]+y,base[2]+z]))).collect();
+            cells.extend([[20,20,20],[21,20,20]]);
+            for p in cells {
+                if m.debris.claimed(p) {continue;}
+                let filter=m.debris.can_claim_without_room(p,5,side,&m.tuning);let mut zero=0;
+                let actual=m.debris.claim_voxel_with_room(&mut w,p,5,[31,17,29],0,side,&m.tuning,&mut zero);
+                assert_eq!(filter,actual,"side={side} p={p:?}");
+                if actual {joins+=1;if zero>0 {bridges+=1;}}else{refusals+=1;}
+            }
+            m.tuning.max_claims=0;let p=[13,13,13];let mut zero=0;
+            assert!(!m.debris.can_claim_without_room(p,5,side,&m.tuning));
+            assert!(!m.debris.claim_voxel_with_room(&mut w,p,5,[0;3],0,side,&m.tuning,&mut zero));
+        }
+        }
+        assert!(joins>0 && refusals>0 && bridges>0,"must cover full-pool joining, refusal and capacity-releasing bridges: joins={joins} refusals={refusals} bridges={bridges}");
+    }
+
+    #[test]
+    fn verified_pristine_word_runs_and_seen_deferred_match_scalar_oracle_with_zero_repeat_reads() {
+        use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+        struct CountedForest {
+            armed: Arc<AtomicBool>,
+            reads: Arc<AtomicUsize>,
+        }
+        impl voxel::Generator for CountedForest {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if self.armed.load(Ordering::Relaxed) {
+                    self.reads.fetch_add(1, Ordering::Relaxed);
+                }
+                if y < 8 {
+                    1
+                } else if y < 20 && (x + y + z) % 7 != 0 {
+                    4 + ((x + z) % 2) as u16
+                } else {
+                    0
+                }
+            }
+        }
+        let armed = Arc::new(AtomicBool::new(false));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut w_opt = voxel::World::new(
+            96,
+            32,
+            128,
+            4096,
+            Box::new(CountedForest {
+                armed: armed.clone(),
+                reads: reads.clone(),
+            }),
+        );
+        let mut w_ref = voxel::World::new(
+            96,
+            32,
+            128,
+            4096,
+            Box::new(CountedForest {
+                armed: Arc::new(AtomicBool::new(false)),
+                reads: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        let mut f = modding::navigation::Navigation::from_ron(include_str!(
+            "../../../data/range-navigation.ron"
+        ))
+        .unwrap()
+        .fell;
+        f.radius = 10;
+        f.cells_per_tick = 256;
+        let mut opt = Matter::new(&[]);
+        let mut reference = Matter::new(&[]);
+        opt.tuning.max_flying = 2;
+        reference.tuning.max_flying = 2;
+
+        let cuts: Vec<[u32; 3]> = (16..92)
+            .flat_map(|z| (16..32).flat_map(move |x| (8..14).map(move |y| [x, y, z])))
+            .collect();
+
+        // Tick 1: saturate pool and populate verified contacts + spread neighbors.
+        opt.felling_phase(&mut w_opt, [(&cuts[..], [24, 8, 48])], &f);
+        reference.fell_in(&mut w_ref, &cuts, [24, 8, 48], &f, false);
+        reference.step_felling_in(&mut w_ref, &f, false);
+        w_opt.flush();
+        w_ref.flush();
+        opt.flush(&w_opt, true, 98, 1, &[], &f.materials);
+        reference.flush(&w_ref, true, 98, 1, &[], &f.materials);
+        assert_eq!(opt.felling.iter().collect::<Vec<_>>(), reference.felling.iter().collect::<Vec<_>>());
+        assert_eq!(opt.admission.felling, reference.admission.felling);
+
+        // Lock max_flying=0 so the entire 256-budget hits verified contacts + deferred hull cuts.
+        opt.tuning.max_flying = 0;
+        reference.tuning.max_flying = 0;
+        opt.felling_phase(&mut w_opt, [(&cuts[..], [24, 8, 48])], &f);
+        reference.fell_in(&mut w_ref, &cuts, [24, 8, 48], &f, false);
+        reference.step_felling_in(&mut w_ref, &f, false);
+        assert_eq!(opt.admission.felling, reference.admission.felling);
+
+        // Now arm the procedural read counter: another saturated tick over the same hull cuts
+        // and verified contact prefix must perform ZERO procedural generator material reads!
+        reads.store(0, Ordering::Relaxed);
+        armed.store(true, Ordering::Relaxed);
+        opt.felling_phase(&mut w_opt, [(&cuts[..], [24, 8, 48])], &f);
+        armed.store(false, Ordering::Relaxed);
+        reference.fell_in(&mut w_ref, &cuts, [24, 8, 48], &f, false);
+        reference.step_felling_in(&mut w_ref, &f, false);
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            0,
+            "repeated saturated felling tick over verified pristine contacts must do 0 procedural reads"
+        );
+        assert_eq!(opt.admission.felling, reference.admission.felling);
+
+        // Mutate previously pristine chunks via dig + non-yielding put, then drain everything to completion.
+        for p in [[17, 9, 20], [18, 10, 40]] {
+            w_opt.queue_dig(p[0], p[1], p[2]);
+            w_ref.queue_dig(p[0], p[1], p[2]);
+        }
+        for p in [[19, 11, 22], [20, 10, 70]] {
+            w_opt.queue_edit(voxel::Edit::put(p[0], p[1], p[2], 2));
+            w_ref.queue_edit(voxel::Edit::put(p[0], p[1], p[2], 2));
+        }
+        w_opt.flush();
+        w_ref.flush();
+        opt.felling_phase(&mut w_opt, [(&[][..], [0; 3])], &f);
+        reference.step_felling_in(&mut w_ref, &f, false);
+        assert_eq!(opt.admission.felling, reference.admission.felling);
+        assert_eq!(opt.felling.iter().collect::<Vec<_>>(), reference.felling.iter().collect::<Vec<_>>());
+
+        opt.tuning.max_flying = 4096;
+        reference.tuning.max_flying = 4096;
+        for step in 0..512 {
+            opt.felling_phase(&mut w_opt, [(&[][..], [0; 3])], &f);
+            reference.step_felling_in(&mut w_ref, &f, false);
+            w_opt.flush();
+            w_ref.flush();
+            opt.flush(&w_opt, true, 98, step + 2, &[], &f.materials);
+            reference.flush(&w_ref, true, 98, step + 2, &[], &f.materials);
+            assert_eq!(opt.admission.felling, reference.admission.felling, "drain step {step}");
+            if opt.felling_pending() == 0 {
+                break;
+            }
+        }
+        assert_eq!(opt.felling_pending(), 0);
+        assert_eq!(reference.felling_pending(), 0);
+        assert_eq!(opt.supplied_mj, reference.supplied_mj);
+        assert_eq!(opt.spent_mj, reference.spent_mj);
+        assert_eq!(w_opt.bits(), w_ref.bits());
+    }
+
+    #[test]
+    fn verified_pristine_dust_profile_change_preserves_scalar_quota() {
+        struct Trees;
+        impl voxel::Generator for Trees {
+            fn material(&self,_:u32,y:u32,_:u32)->u16 {if y<8 {1}else if y<16 {4}else{0}}
+        }
+        let mut a=voxel::World::new(96,32,128,4096,Box::new(Trees));let mut z=voxel::World::new(96,32,128,4096,Box::new(Trees));
+        let mut f=modding::navigation::Navigation::from_ron(include_str!("../../../data/range-navigation.ron")).unwrap().fell;f.cells_per_tick=7;
+        let cuts:Vec<_>=(16..80).map(|p|[20,9,p]).collect();let mut opt=Matter::new(&[]);let mut scalar=Matter::new(&[]);
+        opt.tuning.max_flying=0;scalar.tuning.max_flying=0;
+        opt.felling_phase(&mut a,[(&cuts[..],[20,9,16])],&f);scalar.fell_in(&mut z,&cuts,[20,9,16],&f,false);scalar.step_felling_in(&mut z,&f,false);
+        assert_eq!(opt.admission.felling,scalar.admission.felling);assert_eq!(opt.felling.iter().collect::<Vec<_>>(),scalar.felling.iter().collect::<Vec<_>>());
+        let visits=opt.admission.felling[1];f.dust_materials=[4];
+        opt.step_felling_in(&mut a,&f,true);scalar.step_felling_in(&mut z,&f,false);
+        assert_eq!(opt.admission.felling,scalar.admission.felling);assert_eq!(opt.admission.felling[1],visits+7);assert!(opt.admission.felling[3]>0,"configured dust must actually be processed, not capacity-deferred from a stale hint");
+        assert_eq!(opt.felling.iter().collect::<Vec<_>>(),scalar.felling.iter().collect::<Vec<_>>());assert_eq!(opt.supplied_mj,scalar.supplied_mj);assert_eq!(opt.spent_mj,scalar.spent_mj);
+        a.flush();z.flush();assert_eq!(a.bits(),z.bits());
+    }
+
+
+    #[test]
+    fn deferred_word_cache_retains_locality_for_zxy_hull_cut_order() {
+        let mut slots=[u64::MAX;super::DEFERRED_WORDS];let mut unique=std::collections::BTreeSet::new();let mut misses=0;
+        for z in 16..92 {for x in 16..32 {for y in 8..14 {
+            let word=super::fell_key([x,y,z])>>6;unique.insert(word);let i=super::deferred_word_bucket(word);
+            assert!(i<slots.len());if slots[i]!=word {misses+=1;slots[i]=word;}
+        }}}
+        assert_eq!(unique.len(),192,"actual bounded hull-cut fixture working set");
+        assert!(misses<=unique.len()*2,"bounded repeated hull cuts thrash the word memo: {misses} loads for {} unique words",unique.len());
+    }
+
 }

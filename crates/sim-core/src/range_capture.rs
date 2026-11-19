@@ -146,12 +146,16 @@ fn capture_inner<const COLUMNS: bool>(
     // into slices would otherwise read a moving hull's armour where it
     // has driven to, while the wave strikes its frozen cells as bare
     // (ADR-445).
+    // Frozen poses plus the checked live sizes define these exact bounds.
+    // Share the existing size-keyed memo with later frontier/contact reads;
+    // damage and occupied-voxel tests still run against the live bodies.
+    let boxes=e.unit_boxes(units);
     let queries: Vec<_> = units
         .iter()
         .enumerate()
         .filter_map(|(i, u)| {
             let (pose, segs, delta) = (e.poses[i], &e.seg_poses[i], e.turret_deltas[i]);
-            let (lo, hi) = u.bounds_aimed(Some(&pose), segs, delta, e.turret_pitches[i]);
+            let (lo, hi) = boxes[i];
             (0..3)
                 .all(|a| far[a] >= lo[a] && origin[a] <= hi[a])
                 .then(|| {
@@ -173,14 +177,26 @@ fn capture_inner<const COLUMNS: bool>(
     // approximation — and at four charges the capture fell from 12.2
     // to 11.2 ms on a clean world and from 23.7 to 17.3 ms late in a
     // match, where the dent map has grown.
-    let mut dented = vec![false; cells];
-    for q in dents
-        .range([origin[0], i32::MIN, i32::MIN]..=[far[0], i32::MAX, i32::MAX])
-        .map(|(q, _)| q)
-    {
-        let cell = [0, 1, 2].map(|a| (q[a] - origin[a]).div_euclid(e.cell));
-        if (0..3).all(|a| cell[a] >= 0 && (cell[a] as usize) < n) {
-            dented[(cell[2] as usize * n + cell[1] as usize) * n + cell[0] as usize] = true;
+    let slice_start = e.captured;
+    let slice_len = next - slice_start;
+    let mut dented = vec![false; slice_len];
+    if !dents.is_empty() && slice_len > 0 {
+        let z_min = origin[2] + (slice_start / (n * n)) as i32 * e.cell;
+        let z_max = origin[2] + ((next - 1) / (n * n) + 1) as i32 * e.cell - 1;
+        for q in dents
+            .range([origin[0], i32::MIN, i32::MIN]..=[far[0], i32::MAX, i32::MAX])
+            .map(|(q, _)| q)
+        {
+            if q[2] < z_min || q[2] > z_max || q[1] < origin[1] || q[1] > far[1] {
+                continue;
+            }
+            let cell = [0, 1, 2].map(|a| (q[a] - origin[a]).div_euclid(e.cell));
+            if (0..3).all(|a| cell[a] >= 0 && (cell[a] as usize) < n) {
+                let idx = (cell[2] as usize * n + cell[1] as usize) * n + cell[0] as usize;
+                if idx >= slice_start && idx < next {
+                    dented[idx - slice_start] = true;
+                }
+            }
         }
     }
     // Every body role uses this same monotone, clamped formula in
@@ -204,7 +220,7 @@ fn capture_inner<const COLUMNS: bool>(
     // Production capture always enables these exact row reductions.
     let batch_rows = !cfg!(test) || parallel;
     let batch_ground =
-        COLUMNS && batch_rows && (5..=64).contains(&e.cell) && w.batches_material_columns();
+        COLUMNS && batch_rows && (2..=64).contains(&e.cell) && w.batches_material_columns();
     let fill = |start: usize, output: &mut [u32]| {
         // A parallel chunk visits at most two Z planes. Share column
         // ceilings across heights locally; no cache crosses a worker.
@@ -259,26 +275,66 @@ fn capture_inner<const COLUMNS: bool>(
                 offset += len;
                 continue;
             }
-            if batch_rows && x == 0 && len == n {
-                let row = &mut row_ceilings[z - first_z];
-                if *row == u32::MAX {
-                    *row = (0..n).map(|x| ceiling(x, z, &mut ceilings)).max().unwrap();
-                }
+            if batch_rows {
                 let wz = origin[2] + z as i32 * e.cell;
                 let body = queries.iter().any(|(_, lo, hi, ..)| {
                     wy <= hi[1] && wy + e.cell > lo[1] && wz <= hi[2] && wz + e.cell > lo[2]
                 });
-                if wy >= *row as i32 && !body {
-                    for (x, resistance) in output[offset..offset + len].iter_mut().enumerate() {
-                        let cx = x as i32 - half as i32;
-                        *resistance = if cx * cx + transverse > radius2 {
-                            u32::MAX
-                        } else {
-                            0
-                        };
+                if x == 0 && len == n {
+                    let row = &mut row_ceilings[z - first_z];
+                    if *row == u32::MAX {
+                        *row = (0..n).map(|x| ceiling(x, z, &mut ceilings)).max().unwrap();
                     }
-                    offset += len;
-                    continue;
+                    if wy >= *row as i32 && !body {
+                        for (x, resistance) in output[offset..offset + len].iter_mut().enumerate() {
+                            let cx = x as i32 - half as i32;
+                            *resistance = if cx * cx + transverse > radius2 {
+                                u32::MAX
+                            } else {
+                                0
+                            };
+                        }
+                        offset += len;
+                        continue;
+                    }
+                }
+                if !body && len >= 2 && wy < w.ny as i32 && wy + e.cell > 0 {
+                    let wx_start = origin[0] + x as i32 * e.cell;
+                    let wx_end = origin[0] + (x + len) as i32 * e.cell;
+                    let row_dents = &dented[index - slice_start..index + len - slice_start];
+                    if wx_start >= 0
+                        && wx_end <= w.nx as i32
+                        && wz >= 0
+                        && wz + e.cell <= w.nz as i32
+                        && !row_dents.contains(&true)
+                    {
+                        let ry0 = wy.max(0) as u32;
+                        let ry1 = (wy + e.cell).min(w.ny as i32) as u32;
+                        if ry0 < ry1 {
+                            if let Some(mat) = w.uniform_box(
+                                [wx_start as u32, ry0, wz as u32],
+                                [wx_end as u32, ry1, (wz + e.cell) as u32],
+                            ) {
+                                let r_row = if mat == 0 {
+                                    0
+                                } else {
+                                    terrain_work(mat, ry0 as i32, e.soil_y(), c)
+                                };
+                                for (local, resistance) in
+                                    output[offset..offset + len].iter_mut().enumerate()
+                                {
+                                    let cx = (x + local) as i32 - half as i32;
+                                    *resistance = if cx * cx + transverse > radius2 {
+                                        u32::MAX
+                                    } else {
+                                        r_row
+                                    };
+                                }
+                                offset += len;
+                                continue;
+                            }
+                        }
+                    }
                 }
             }
             for (local, resistance) in output[offset..offset + len].iter_mut().enumerate() {
@@ -309,48 +365,62 @@ fn capture_inner<const COLUMNS: bool>(
                     *resistance = u32::MAX;
                     continue;
                 }
-                let look = dented[(z * n + y) * n + x];
+                let look = dented[index - slice_start];
                 let mut r = 0;
                 if p[1] < w.ny as i32 && end[1] >= 0 {
                     if p[1] < ceiling(x, z, &mut ceilings) as i32 {
                         let x0 = p[0].max(0);
                         let x1 = (end[0] + 1).min(w.nx as i32);
                         let y0 = p[1].max(0);
+                        let y1_box = (end[1] + 1).min(w.ny as i32);
                         let z0 = p[2].max(0);
                         let z1 = (end[2] + 1).min(w.nz as i32);
-                        if batch_ground && x0 < x1 && z0 < z1 {
-                            let maximum = if !look {
-                                terrain_candidates(
+                        if batch_ground && x0 < x1 && y0 < y1_box && z0 < z1 {
+                            let uniform = (!look).then(|| {
+                                w.uniform_box(
+                                    [x0 as u32, y0 as u32, z0 as u32],
+                                    [x1 as u32, y1_box as u32, z1 as u32],
+                                )
+                            }).flatten();
+                            let maximum = if let Some(mat) = uniform {
+                                r = if mat == 0 {
+                                    0
+                                } else {
+                                    terrain_work(mat, y0, e.soil_y(), c)
+                                };
+                                r
+                            } else if !look {
+                                let maximum = terrain_candidates(
                                     w,
                                     [x0, y0, z0],
-                                    [x1, (end[1] + 1).min(w.ny as i32), z1],
+                                    [x1, y1_box, z1],
                                 )
                                 .map_or(maximum, |ids| {
                                     ids.into_iter()
                                         .map(|m| terrain_work(m, y0, e.soil_y(), c))
                                         .max()
                                         .unwrap_or(0)
-                                })
+                                });
+                                let q = [x0, y0, z0];
+                                r = terrain_work(
+                                    material_cached(w, &mut cursor, q),
+                                    q[1],
+                                    e.soil_y(),
+                                    c,
+                                );
+                                maximum
                             } else {
+                                let q = [x0, y0, z0];
+                                let dent = dents.get(&q).copied().unwrap_or(0);
+                                r = terrain_work(
+                                    material_cached(w, &mut cursor, q),
+                                    q[1],
+                                    e.soil_y(),
+                                    c,
+                                )
+                                .saturating_sub(dent);
                                 maximum
                             };
-                            // A saturated first sample already proves the
-                            // terrain maximum, without preparing a column.
-                            // Otherwise exact max is independent of traversal
-                            // order: share generator work along each column.
-                            let q = [x0, y0, z0];
-                            let dent = if look {
-                                dents.get(&q).copied().unwrap_or(0)
-                            } else {
-                                0
-                            };
-                            r = terrain_work(
-                                material_cached(w, &mut cursor, q),
-                                q[1],
-                                e.soil_y(),
-                                c,
-                            )
-                            .saturating_sub(dent);
                             // Tall solid surfaces often supply the exact max
                             // (rock, walls). A bounded set of live witnesses can
                             // prove it before preparing every ground column.
@@ -559,6 +629,124 @@ mod tests {
     use fx::{blob::Blob, Fx};
     use modding::range::RangeUnitKind;
     use voxel::{Edit, Generator};
+
+    #[test]
+    fn capture_uniform_rows_and_slice_dents_match_dense_voxels_with_partial_rows() {
+        use std::sync::{Arc,atomic::{AtomicUsize,Ordering}};
+        struct Uniform {mat:u16,edge:u32,rows:Arc<AtomicUsize>}
+        impl Generator for Uniform {
+            fn material(&self,_:u32,y:u32,_:u32)->u16 {if y<24 {self.mat}else{0}}
+            fn uniform_box(&self,lo:[u32;3],hi:[u32;3])->Option<u16> {
+                if hi[0]-lo[0]>self.edge {self.rows.fetch_add(1,Ordering::Relaxed);}
+                if hi[1]<=24 {Some(self.mat)}else if lo[1]>=24 {Some(0)}else{None}
+            }
+            fn batches_columns(&self)->bool {true}
+            fn soil_height(&self,_:u32,_:u32)->Option<u32> {Some(24)}
+        }
+        let mut c=ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+        c.half_cells=3;c.soil_depth_cost=19;
+        let mut row_proofs=0;
+        for edge in [2,3,4,5] {for mat in [1,2] {
+            c.cell_units=edge;
+            let calls=Arc::new(AtomicUsize::new(0));
+            let mut w=World::new(48,48,48,4096,Box::new(Uniform {mat,edge:edge as u32,rows:calls.clone()}));
+            let mut dents=SurfaceWork::from([([-100,-100,-100],999),([100,100,100],999)]);
+            for z in 14..19 {for y in 15..24 {for x in 14..19 {dents.insert([x,y,z],1_000_000);}}}
+            for workers in [1,2,4,8] {
+                let pool=rayon::ThreadPoolBuilder::new().num_threads(workers).build().unwrap();
+                for at in [[17,20,17],[1,1,1],[47,46,47]] {
+                    let mut actual=Explosion::begin(at,&c,&[]);
+                    for (slice,budget) in [0,1,2,5,8,17,64,usize::MAX].into_iter().enumerate() {
+                        if slice==5 {w.queue_edit(Edit::put(20,21,20,3));w.flush();dents.insert([20,21,20],731);}
+                        calls.store(0,Ordering::Relaxed);
+                        pool.install(||capture(&mut actual,&w,&c,&[],&dents,budget,true));
+                        row_proofs+=calls.load(Ordering::Relaxed);
+                        let n=actual.wave.size();let half=(n/2)as i32;
+                        for i in 0..actual.captured {
+                            let cell=[i%n,i/n%n,i/(n*n)];
+                            let d=cell.map(|v|v as i32-half);
+                            let lo=std::array::from_fn::<_,3,_>(|a|actual.origin[a]+cell[a]as i32*edge);
+                            let end=lo.map(|v|v+edge);
+                            let mut expected=0;
+                            if d.into_iter().map(|v|v*v).sum::<i32>()>half*half || end[1]<=0 {expected=u32::MAX;}
+                            else {
+                                for z in lo[2].max(0)..end[2].min(w.nz as i32) {
+                                    for y in lo[1].max(0)..end[1].min(w.ny as i32) {
+                                        for x in lo[0].max(0)..end[0].min(w.nx as i32) {
+                                            let m=w.material(x as u32,y as u32,z as u32);
+                                            if m!=0 {expected=expected.max(terrain_work(m,y,actual.soil_y(),&c).saturating_sub(dents.get(&[x,y,z]).copied().unwrap_or(0)));}
+                                        }
+                                    }
+                                }
+                            }
+                            assert_eq!(actual.wave.resistance_at(cell),expected,"workers={workers} edge={edge} mat={mat} at={at:?} slice={slice} cell={cell:?}");
+                        }
+                    }
+                    assert!(!actual.capturing());
+                }
+            }
+        }}
+        assert!(row_proofs>0,"fixture must execute uniform row certificates");
+    }
+
+    #[test]
+    fn capture_frozen_bounds_cache_tracks_live_sizes_and_cold_restore() {
+        struct Ground;
+        impl Generator for Ground {
+            fn material(&self,_:u32,y:u32,_:u32)->u16 {u16::from(y<16)}
+        }
+        let world=World::new(384,192,384,100,Box::new(Ground));
+        let mut c=ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+        c.half_cells=2;c.cell_units=2;
+        let mut units=vec![
+            super::super::RangeUnit::of_kind(RangeUnitKind::Spider,[160,16,160]),
+            super::super::RangeUnit::of_kind(RangeUnitKind::ArtilleryTurretT3,[164,16,160]),
+        ];
+        units[0].update_pose(2731);units[1].turret_delta=8192;units[1].turret_pitch=4096;
+        let mut warm=Explosion::begin([164,24,160],&c,&units);
+        let dents=SurfaceWork::new();
+        warm.capture(&world,&c,&units,&dents,1);
+        assert_eq!(warm.boxes.len(),units.len(),"capture must share the checked bounds memo");
+        let original=warm.unit_boxes(&units);
+        units[0].motion.pos[0]=units[0].motion.pos[0].add(Fx::from_int(80));
+        units[0].update_pose(8192);
+        assert_eq!(warm.unit_boxes(&units),original,"live motion cannot move frozen wave geometry");
+        units[0].body=units[0].body.resampled(100).unwrap();
+        let exact:Vec<_>=units.iter().enumerate().map(|(i,u)|u.bounds_aimed(
+            Some(&warm.poses[i]),&warm.seg_poses[i],warm.turret_deltas[i],warm.turret_pitches[i])).collect();
+        assert_ne!(exact,original,"exercise an actual root/segment size change");
+        assert_eq!(warm.unit_boxes(&units),exact);
+
+        // Restore the actual current range format, including the separate
+        // pitch/contact sections; Explosion::load alone is the legacy base.
+        use super::super::BlastRange;
+        use modding::range::{RangeLayout,RangeUnitDef};
+        let mut layout=RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        layout.size=[640,192,640];layout.course=None;layout.blocks.clear();layout.shields.clear();
+        layout.clear_min=[16,16];layout.clear_max=[624,624];layout.battle=true;
+        layout.units=vec![
+            RangeUnitDef{kind:RangeUnitKind::Spider,allied:true,at:[160,16,160],weapon:None},
+            RangeUnitDef{kind:RangeUnitKind::ArtilleryTurretT3,allied:false,at:[164,16,160],weapon:None},
+        ];
+        let mut live=BlastRange::with_layout(c,layout).unwrap();live.start_battle().unwrap();
+        live.battle.actors[1].turret.angle=8192;
+        live.battle.actors[1].elevation=crate::turret::Traverse::new(4096);
+        live.units[1].turret_pitch=4096;live.units[1].update_pose(8192);
+        let mut wave=Explosion::begin([164,24,160],&live.config,&live.units);
+        wave.capture(&live.world,&live.config,&live.units,&live.surface_work,1);
+        assert!(!wave.boxes.is_empty());live.explosion=Some(wave);
+        let mut last=None;
+        let restored=BlastRange::restore_observed(live.config,&live.snapshot(),|section,offset,unit|last=Some((section,offset,unit)));
+        let mut replay=restored.unwrap_or_else(||panic!("full cold fixture rejected at {last:?}"));
+        assert_eq!(live.state_hash(),replay.state_hash());
+        assert!(replay.explosion.as_ref().unwrap().boxes.is_empty());
+        assert_eq!(live.explosion.as_ref().unwrap().turret_pitches,replay.explosion.as_ref().unwrap().turret_pitches);
+        for budget in [1,7,31,usize::MAX] {
+            let a=live.explosion.as_mut().unwrap().capture(&live.world,&live.config,&live.units,&live.surface_work,budget);
+            let b=replay.explosion.as_mut().unwrap().capture(&replay.world,&replay.config,&replay.units,&replay.surface_work,budget);
+            assert_eq!(a,b);assert_eq!(live.state_hash(),replay.state_hash(),"full cold capture continuation");
+        }
+    }
 
     #[test]
     fn explicit_material_work_above_legacy_bounds_matches_scalar_capture() {

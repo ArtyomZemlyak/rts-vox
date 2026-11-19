@@ -548,28 +548,23 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
         .map(|src| modding::range_skirmish::Skirmish::from_ron(src).expect("stock encounter"))
         .collect();
     let camera = commands.spawn(ui_camera()).id();
-    // Load an installed UI font in memory; no system font is copied into assets.
-    let font = std::fs::read("C:/Windows/Fonts/segoeui.ttf")
-        .ok()
-        .map(Font::from_bytes)
-        .map(|f| fonts.add(f));
-    let text_font = TextFont {
-        font: font.map(Into::into).unwrap_or_default(),
-        font_size: FontSize::Px(14.0),
-        ..default()
-    };
-    strategic_icons::setup(&mut commands, camera, &text_font);
-    knobs::build(&mut commands, camera, &text_font);
-    hud::build(&mut commands, camera, &text_font);
-    pilot::build(&mut commands, camera, &text_font);
-    minimap::build(&mut commands, camera, &text_font);
-    laboratory::build(&mut commands, camera, &text_font);
-    frontend::build(&mut commands, camera, &text_font, &mut fonts, &mut images);
-    construction::build(&mut commands, camera, &text_font);
-    spatial_ui::build(&mut commands, camera, &text_font, &mut fonts, &mut images);
+    let faces = theme::Fonts::load(&mut fonts);
+    let text_font = faces.service.clone();
+    commands.insert_resource(faces.clone());
+    strategic_icons::setup(&mut commands, camera, &faces.pixel);
+    knobs::build(&mut commands, camera, &faces.service);
+    hud::build(&mut commands, camera, &faces.pixel);
+    pilot::build(&mut commands, camera, &faces.pixel);
+    minimap::build(&mut commands, camera, &faces.pixel);
+    laboratory::build(&mut commands, camera, &faces.service);
+    frontend::build(&mut commands, camera, &faces.service, &mut fonts, &mut images);
+    construction::build(&mut commands, camera, &faces.pixel);
+    ui_motion::build(&mut commands,camera);
+    spatial_ui::build(&mut commands, camera, &faces.optical, &mut fonts, &mut images);
     let mut root = commands.spawn((
         PanelRoot,
         hud::Drawer,
+        theme::Style::Service,
         ScrollPanel,
         ScrollPosition::default(),
         bevy::ui::RelativeCursorPosition::default(),
@@ -585,11 +580,11 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             row_gap: px(5),
             flex_direction: FlexDirection::Column,
             border: UiRect::all(px(1)),
-            border_radius: BorderRadius::all(px(10)),
+            border_radius: BorderRadius::ZERO,
             ..default()
         },
-        BackgroundColor(theme::PANEL),
-        BorderColor::all(theme::FRAME),
+        BackgroundColor(theme::service::PANEL),
+        BorderColor::all(theme::service::FRAME),
         ZIndex(10),
         UiTargetCamera(camera),
     ));
@@ -600,19 +595,32 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 font_size: FontSize::Px(23.0),
                 ..text_font.clone()
             },
-            TextColor(theme::TEXT),
+            TextColor(theme::service::TEXT),
         ));
         p.spawn((
             Text::new("Операции на километровой карте"),
             text_font.clone(),
-            TextColor(theme::MUTED),
+            TextColor(theme::service::MUTED),
         ));
         p.spawn((
             Text::new(""),
             text_font.clone(),
-            TextColor(theme::ACCENT),
+            TextColor(theme::service::ACCENT),
             SectorLabel,
         ));
+        p.spawn((hud::DrawerSection(6),Node{width:percent(100),row_gap:px(6),column_gap:px(8),
+            flex_wrap:FlexWrap::Wrap,..default()})).with_children(|p| {
+            for (name,action) in [("Начать бой",Action::BattleStart),("Сражения",Action::Drawer(1)),("Опыты",Action::Drawer(2)),
+                ("Лаборатория",Action::Laboratory),("Редактор",Action::Drawer(4)),
+                ("Камера",Action::Drawer(3)),("Настройки",Action::Settings)] {
+                let mut button=p.spawn((Button,action,Node{min_height:px(32),padding:UiRect::all(px(6)),..default()},
+                    BackgroundColor(theme::service::BUTTON)));
+                if action==Action::BattleStart {button.insert(hud::BattleButton);}
+                button.with_children(|p| {
+                    p.spawn((Text::new(name),text_font.clone(),TextColor(theme::service::TEXT)));
+                });
+            }
+        });
         let mut rows: Vec<(bool, Vec<(&str, Action)>)> = vec![
             (false, vec![("Лаборатория материалов", Action::Laboratory)]),
             (
@@ -629,6 +637,15 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 vec![("ИИ против ИИ · вся карта", Action::BattleWorldAuto)],
             ),
             (false, vec![("Бой 2×2 / расстановка", Action::BattlePreset)]),
+            (false, vec![
+                ("Повторить бой", Action::BattleReplay),
+                ("Другой бой", Action::BattleChoose),
+                ("Сводка", Action::Drawer(5)),
+            ]),
+            (false, vec![
+                ("К цели задачи", Action::MissionTarget),
+                ("Исполнители", Action::MissionParticipants),
+            ]),
             (false, vec![("Паук: лазерный прорыв", Action::Skirmish(2))]),
             (false, vec![("Штурм турелей T1/T2", Action::Skirmish(3))]),
             (false, vec![("Артиллерия T2: картечь", Action::Skirmish(4))]),
@@ -687,6 +704,13 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 vec![
                     ("Управлять юнитом", Action::Play),
                     ("Расстановка", Action::Edit),
+                ],
+            ),
+            (
+                false,
+                vec![
+                    ("Свободная расстановка +", Action::FreePlacement),
+                    ("Сброс сцены", Action::Reset),
                 ],
             ),
             (
@@ -888,14 +912,14 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                             align_items: AlignItems::Center,
                             justify_content: JustifyContent::Center,
                             padding: UiRect::horizontal(px(3)),
-                            border_radius: BorderRadius::all(px(5)),
+                            border_radius: BorderRadius::ZERO,
                             ..default()
                         },
-                        BackgroundColor(theme::BUTTON),
+                        BackgroundColor(theme::service::BUTTON),
                     ))
                     .with_children(|b| {
                         let mut text =
-                            b.spawn((Text::new(label), text_font.clone(), TextColor(theme::TEXT)));
+                            b.spawn((Text::new(label), text_font.clone(), TextColor(theme::service::TEXT)));
                         if action == Action::ProjectileMarkers {
                             text.insert(hud::HudText(7));
                         }
@@ -906,7 +930,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
         p.spawn((
             Text::new(""),
             text_font,
-            TextColor(theme::MUTED),
+            TextColor(theme::service::MUTED),
             Readout,
             hud::DrawerSection(5),
         ));
@@ -917,6 +941,12 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
 /// map (P-24).
 #[derive(Component)]
 pub struct PanelRoot;
+/// Transparent layout wrappers never consume world input.
+#[derive(Component)]
+pub struct LayoutOnly;
+/// Visible child islands own only their actual rectangular hit areas.
+#[derive(Component)]
+pub struct HitIsland;
 
 // Bevy injects each resource independently into this system.
 #[allow(clippy::too_many_arguments)]
@@ -927,7 +957,7 @@ pub fn actions(
     snapshot: Res<super::ui_snapshot::UiSnapshot>,
     interactions: Query<(&Action, &Interaction), Changed<Interaction>>,
     windows: Query<&Window>,
-    roots: Query<&bevy::ui::RelativeCursorPosition, Or<(With<PanelRoot>, With<laboratory::Root>)>>,
+    roots: Query<&bevy::ui::RelativeCursorPosition, (Or<(With<PanelRoot>, With<laboratory::Root>, With<HitIsland>)>, Without<LayoutOnly>)>,
     mut scrolls: Query<&mut ScrollPosition, With<ScrollPanel>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut gas: ResMut<GasInput>,
@@ -2096,6 +2126,7 @@ pub fn refresh(
         &Interaction,
         &mut BackgroundColor,
         Option<&mut BorderColor>,
+        Option<&theme::Style>,
     )>,
     mut text: Query<&mut Text, (With<Readout>, Without<SectorLabel>)>,
     mut sectors: Query<&mut Text, (With<SectorLabel>, Without<Readout>)>,
@@ -2151,7 +2182,7 @@ pub fn refresh(
         .first()
         .copied()
         .filter(|weapon| weapons.iter().all(|other| other == weapon));
-    for (a, interaction, mut color, border) in &mut buttons {
+    for (a, interaction, mut color, border, style) in &mut buttons {
         let active = match *a {
             Action::Drawer(id) => panel.drawer == id,
             Action::Ranges => panel.ranges,
@@ -2197,9 +2228,10 @@ pub fn refresh(
             Action::ScenarioMenu => panel.scenarios_open,
             _ => false,
         };
-        color.0 = theme::button_background(*interaction, active);
+        let style = style.copied().unwrap_or(theme::Style::Service);
+        color.0 = style.button(*interaction, active);
         if let Some(mut border) = border {
-            *border = BorderColor::all(if active { theme::ACCENT } else { theme::FRAME });
+            *border = BorderColor::all(style.border(active));
         }
     }
     if panel.drawer != 5 || text.is_empty() {

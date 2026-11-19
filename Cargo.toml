@@ -17,3 +17,14 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 overflow-checks = true
+
+# Real SIM tests at optimized speed, without the release profile's costly
+# whole-program link. Keep arithmetic checks identical to test/release.
+[profile.sim-test]
+inherits = "test"
+opt-level = 1
+lto = "off"
+codegen-units = 256
+incremental = true
+debug = 1
+overflow-checks = true

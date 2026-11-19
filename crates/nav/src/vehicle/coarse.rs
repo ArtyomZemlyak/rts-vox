@@ -87,11 +87,15 @@ struct Ground<'a> {
     yielding: [Mat; 2],
     radius: i32,
     step: i32,
+    shape: Shape,
     local_grade: bool,
     /// Previous row of this corridor only; never retained across world views.
     row: Vec<[u16; 2]>,
+    explain: bool,
+    refusal: Option<transition::TransitionProof>,
 }
 impl<'a> Ground<'a> {
+    fn proof_shape(&self)->Shape {Shape {step:self.step,..self.shape}}
     fn new(world: &'a World, rubble: &Rubble, shape: Shape, cfg: Config) -> Self {
         Self {
             world,
@@ -102,8 +106,10 @@ impl<'a> Ground<'a> {
             // footprint probe.
             radius: shape.half[0].min(shape.half[1]) + 1,
             step: shape.step,
+            shape,
             local_grade: cfg.local_grade,
             row: Vec::new(),
+            explain:false,refusal:None,
         }
     }
     #[cfg(test)]
@@ -134,21 +140,20 @@ impl<'a> Ground<'a> {
         })
     }
     fn clear(&mut self, a: [i32; 2], b: [i32; 2]) -> bool {
+        self.refusal=None;
         let Some((lo, hi)) = self.bounds(a, b) else {
-            return false;
+            let mut p=transition::TransitionProof::corridor(a.map(Fx::from_int),b.map(Fx::from_int),self.proof_shape(),0,0);
+            p.refuse(transition::Reason::Bounds);self.refusal=Some(p);return false;
         };
         let first = [lo[0] as u32 / 8, lo[1] as u32 / 8];
         let end = [hi[0] as u32 / 8 + 1, hi[1] as u32 / 8 + 1];
+        let no_debris = !self
+            .debris
+            .may_touch(first.map(|v| v as usize), end.map(|v| v as usize));
         // Tiny corridors already read only a handful of contiguous tiles.
-        // Shared requirements amortize their lookup on broad hulls/corridors.
-        // Rubble must retain its live, exact tile overlay (including columns
-        // outside the corridor but inside the floor tiles it reads).
-        if end[0] - first[0] >= 12
-            && end[1] - first[1] >= 12
-            && !self
-                .debris
-                .may_touch(first.map(|v| v as usize), end.map(|v| v as usize))
-        {
+        // Shared requirements amortize their lookup across standard and broad
+        // corridors alike. Rubble must retain its live, exact tile overlay.
+        if !self.explain && no_debris && (end[0] - first[0]) * (end[1] - first[1]) >= 16 {
             if let Some(clear) = self.world.prepared_floor_passage(
                 first,
                 end,
@@ -159,6 +164,7 @@ impl<'a> Ground<'a> {
                 return clear;
             }
         }
+        let shape = self.proof_shape();
         if self.local_grade {
             let width = (hi[0] / 8 - lo[0] / 8 + 1) as usize;
             // Missing upper/left neighbours have neutral extrema. Reset on
@@ -172,8 +178,12 @@ impl<'a> Ground<'a> {
                     .floor_tile_row(lo[0] as u32 / 8, z as u32, width, self.yielding)
                     .unwrap();
                 for (column, [bottom, top]) in tiles.enumerate() {
-                    let x = lo[0] / 8 + column as i32;
-                    let top = top.max(self.debris.top(x as usize, z as usize));
+                    let top = if no_debris {
+                        top
+                    } else {
+                        let x = lo[0] / 8 + column as i32;
+                        top.max(self.debris.top(x as usize, z as usize))
+                    };
                     let above = self.row[column];
                     // Previously visited neighbours have already passed their
                     // own height checks. Only this tile and the cross terms
@@ -181,10 +191,26 @@ impl<'a> Ground<'a> {
                     // Do not compare the left neighbour with the upper one;
                     // they need not be mutually traversable. Signed height
                     // differences also keep extreme step values overflow-free.
-                    if i32::from(top) - i32::from(bottom.min(left[0]).min(above[0])) > self.step
-                        || i32::from(left[1].max(above[1])) - i32::from(bottom) > self.step
-                    {
-                        return false;
+                    for (low, high) in [
+                        (bottom.min(left[0]).min(above[0]), top),
+                        (bottom, left[1].max(above[1])),
+                    ] {
+                        if !transition::TransitionProof::corridor_accepted(
+                            shape,
+                            i32::from(low),
+                            i32::from(high),
+                        ) {
+                            if self.explain {
+                                self.refusal = Some(transition::TransitionProof::corridor(
+                                    a.map(Fx::from_int),
+                                    b.map(Fx::from_int),
+                                    shape,
+                                    i32::from(low),
+                                    i32::from(high),
+                                ));
+                            }
+                            return false;
+                        }
                     }
                     self.row[column] = [bottom, top];
                     left = [bottom, top];
@@ -201,20 +227,55 @@ impl<'a> Ground<'a> {
                     .floor_tile_row(lo[0] as u32 / 8, z as u32, width, self.yielding)
                     .unwrap();
                 for (column, [bottom, top]) in tiles.enumerate() {
-                    let x = lo[0] / 8 + column as i32;
-                    let top = top.max(self.debris.top(x as usize, z as usize));
+                    let top = if no_debris {
+                        top
+                    } else {
+                        let x = lo[0] / 8 + column as i32;
+                        top.max(self.debris.top(x as usize, z as usize))
+                    };
                     low = low.min(bottom);
                     high = high.max(top);
                 }
                 // Bounds only widen. Check once per contiguous row so a
                 // clear corridor retains its branch-free inner reduction.
-                if i32::from(high - low) > self.step {
+                if !transition::TransitionProof::corridor_accepted(
+                    shape,
+                    i32::from(low),
+                    i32::from(high),
+                ) {
+                    if self.explain {
+                        self.refusal = Some(transition::TransitionProof::corridor(
+                            a.map(Fx::from_int),
+                            b.map(Fx::from_int),
+                            shape,
+                            i32::from(low),
+                            i32::from(high),
+                        ));
+                    }
                     return false;
                 }
             }
-            i32::from(high - low) <= self.step
+            transition::TransitionProof::corridor_accepted(shape, i32::from(low), i32::from(high))
         }
     }
+}
+
+
+/// Explain a conservative whole-map corridor without inventing Ready or source
+/// IDs for aggregated tiles. Exact endpoint sources refine this result; motor
+/// landing remains a separate obligation. No derived cache enters the proof.
+pub fn transition_proof(world:&World,rubble:&Rubble,shape:Shape,from:[i32;2],to:[i32;2],cfg:Config)->transition::TransitionProof {
+    let mut ground=Ground::new(world,rubble,shape,cfg);ground.explain=true;
+    let clear=ground.clear(from,to);
+    let mut probe=Probe::with_yield(world,&cfg.yielding).with_rubble(rubble);
+    let a=from.map(Fx::from_int);let b=to.map(Fx::from_int);
+    let mut proof=ground.refusal.take().unwrap_or_else(|| {
+        let old=probe.pose(a,0,shape);
+        probe.transition_proof(a,0,b,0,shape,transition::Policy::fine(shape,old.steep))
+    });
+    proof.level=transition::Level::Coarse;
+    if !clear && proof.accepted() {proof.refuse(transition::Reason::RequiredLift);}
+    probe.resolve_transition_sources(&mut proof,[0,0],shape);proof
 }
 
 /// The work a call may still spend. Work never exceeds it: a call whose
@@ -1366,6 +1427,13 @@ impl Search {
     /// A search read back for a world of `size` columns. `None` when the
     /// bytes do not describe one.
     pub fn load(s: &mut fx::blob::Scan, size: [u32; 2]) -> Option<Self> {
+        Self::load_with_detail(s, size, 0)
+    }
+    /// Detail is derived from the owner's body, not a new save field.
+    pub fn load_with_detail(s: &mut fx::blob::Scan, size: [u32; 2], detail: i32) -> Option<Self> {
+        Self::load_with_surface(s,size,detail,false)
+    }
+    pub fn load_with_surface(s:&mut fx::blob::Scan,size:[u32;2],detail:i32,continuous:bool)->Option<Self> {
         let i = [
             s.i32(),
             s.i32(),
@@ -1376,11 +1444,14 @@ impl Search {
             s.i32(),
         ];
         let shape = Shape {
+            continuous, detail,
             half: [i[0], i[1]],
             support: [i[2], i[3]],
             step: i[4],
             height: i[5],
             span: i[6],
+            reach: 0,
+            grade_slack: Fx::ZERO,
             clearance: s.fx(),
             min_up: s.fx(),
             ramp: s.fx(),
@@ -1709,6 +1780,45 @@ mod tests {
         assert!(accepted.into_iter().all(|n| n > 100));
         assert!(refused.into_iter().all(|n| n > 100));
     }
+    #[test]
+    fn shared_requirements_small_and_skinny_corridors_keep_exact_refusals() {
+        struct Terraces;
+        impl voxel::Generator for Terraces {
+            fn material(&self,x:u32,y:u32,z:u32)->Mat {
+                let h=16+if x>=128 {8}else{0}+if z>=160 {6}else{0};
+                if y<h {2} else if x.is_multiple_of(19) && y<h+5 {4} else {AIR}
+            }
+        }
+        let mut world=World::new(320,64,320,100_000,Box::new(Terraces));world.prepare_navigation([4,5]);
+        let mut rubble=Rubble::new();let mut threshold=[false;3];let mut answers=[0;2];
+        for stage in 0..4 {
+            if stage==1 {world.queue_edit(voxel::Edit::put(130,37,73,3));world.flush();}
+            if stage==2 {rubble.insert([63,119],54);}
+            if stage==3 {rubble.remove(&[63,119]);world.queue_edit(voxel::Edit::dig(130,37,73));world.flush();}
+            for local_grade in [false,true] {
+                for half in [[0,0],[1,3],[9,9],[20,12]] {
+                    for step in [-1,0,4,8,32] {
+                        let mut g=Ground::new(&world,&rubble,Shape{half,step,..shape()},Config{local_grade,..config()});
+                        for a in [[65,65],[67,66],[95,97]] {
+                            for delta in [[112,0],[120,0],[128,0],[0,48],[24,24],[80,24]] {
+                                let b=[a[0]+delta[0],a[1]+delta[1]];
+                                if let Some((lo,hi))=g.bounds(a,b) {
+                                    let area=(hi[0]/8-lo[0]/8+1)*(hi[1]/8-lo[1]/8+1);
+                                    if (15..=17).contains(&area) {threshold[(area-15)as usize]=true;}
+                                }
+                                let expected=reference_clear(&g,a,b);answers[usize::from(expected)]+=1;
+                                g.explain=false;assert_eq!(g.clear(a,b),expected,"fast stage={stage} {half:?} step={step} {a:?}->{b:?}");
+                                g.explain=true;assert_eq!(g.clear(a,b),expected,"proof stage={stage} {half:?} step={step} {a:?}->{b:?}");
+                                if !expected {assert_eq!(g.refusal.as_ref().unwrap().first_refusal,Some(transition::Reason::RequiredLift));}
+                                assert_eq!(g.clear(b,a),expected);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(threshold.into_iter().all(|v|v));assert!(answers.into_iter().all(|v|v>100));
+    }
     struct Floor;
     #[test]
     fn shared_requirements_keep_broad_corridors_exact_with_live_craters_and_rubble() {
@@ -1825,6 +1935,7 @@ mod tests {
     }
     fn shape() -> Shape {
         Shape {
+            continuous: false, detail: 0,
             half: [10, 5],
             support: [8, 4],
             clearance: Fx::from_int(4),
@@ -1832,6 +1943,8 @@ mod tests {
             min_up: Fx::from_ratio(9, 10),
             height: 12,
             span: 8,
+            reach: 0,
+            grade_slack: Fx::ZERO,
             ramp: Fx::from_ratio(3, 5),
         }
     }

@@ -10,6 +10,90 @@ fn legacy_economy() -> modding::range_economy::RangeEconomy {
     e
 }
 
+fn greben_geometry_scene(full_first: bool) -> BlastRange {
+    let mut l = RangeLayout::from_ron(include_str!("../../../data/fixture-drive.ron")).unwrap();
+    l.size = [1600, 512, 1408]; l.clear_min = [1, 1]; l.clear_max = [1599, 1407];
+    l.units = vec![
+        RangeUnitDef {kind: RangeUnitKind::GrebenStorage, allied: true, at: [450, 16, 700], weapon: None},
+        RangeUnitDef {kind: RangeUnitKind::GrebenStorage, allied: true, at: [1100, 16, 700], weapon: None},
+    ];
+    l.economy = None; l.ready = None; l.course = None; l.shields.clear();
+    let mut r = BlastRange::with_layout(ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(), l).unwrap();
+    for id in 0..2 {
+        if id == 0 && full_first {continue;}
+        r.units[id] = crate::blast::RangeUnit::of_kind_geometry(RangeUnitKind::GrebenStorage, r.units[id].at, true, false);
+    }
+    r.matter = crate::blast::matter::Matter::new(&r.units);
+    r.combustion = crate::blast::fire::Combustion::new(&r.units, &mut r.matter);
+    for id in 0..2 {
+        let p = [if r.units[id].full_greben() {160} else {60}, 60, 20];
+        assert!(r.units[id].body.remove(p[0], p[1], p[2]));
+        r.units[id].removed.push(p.map(|v|v as u8));
+        r.matter.annihilate_removed(id, &r.units[id], 0, 0);
+        r.units[id].refresh_damage(id);
+    }
+    r
+}
+
+#[test]
+fn greben_full_and_legacy_modules_keep_damage_and_matter_owners_on_restore() {
+    let mut r = greben_geometry_scene(true);
+    let bytes = r.snapshot();
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 84);
+    let mut copy = BlastRange::restore(r.config, &bytes).expect("mixed storage geometry restores");
+    assert!(copy.units[0].full_greben() && !copy.units[1].full_greben());
+    assert_eq!(bytes, copy.snapshot());
+    for _ in 0..20 {r.step();copy.step();assert_eq!(r.state_hash(),copy.state_hash());assert!(r.matter.economy.ledger.balanced());}
+    let mut bad = bytes.clone(); bad[12..16].copy_from_slice(&0u32.to_le_bytes());
+    assert!(BlastRange::restore(r.config, &bad).is_none());
+    let mut bad = bytes; bad[16..20].copy_from_slice(&2u32.to_le_bytes());
+    assert!(BlastRange::restore(r.config, &bad).is_none(), "non-storage slot accepted");
+}
+
+#[test]
+fn greben_pre84_snapshot_preserves_the_clipped_template_without_creating_matter() {
+    let r = greben_geometry_scene(false);let bytes = r.snapshot();
+    assert_ne!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()),84);
+    let copy = BlastRange::restore(r.config,&bytes).expect("old storage damage restores");
+    assert!(copy.units.iter().all(|u|!u.full_greben()));
+    assert_eq!(bytes,copy.snapshot());assert_eq!(r.state_hash(),copy.state_hash());
+    assert!(copy.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn greben_unstarted_and_partial_sites_keep_their_paid_geometry_across_restore() {
+    for legacy in [false,true] {
+        let mut l = RangeLayout::from_ron(include_str!("../../../data/fixture-drive.ron")).unwrap();
+        l.size=[1600,512,1600];l.clear_min=[1,1];l.clear_max=[1599,1599];l.course=None;l.shields.clear();
+        l.units=vec![RangeUnitDef{kind:RangeUnitKind::Commander,allied:true,at:[400,16,700],weapon:None},
+            RangeUnitDef{kind:RangeUnitKind::Tank,allied:false,at:[1450,16,1450],weapon:None}];
+        let mut e=legacy_economy();e.production.as_mut().unwrap().producers.retain(|p|p.kind==RangeUnitKind::GrebenStorage);l.economy=Some(e);
+        let cfg=ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        let mut r=BlastRange::with_layout(cfg,l).unwrap();r.start_battle().unwrap();
+        let site=r.create_construction_site(RangeUnitKind::GrebenStorage,true,[950,16,700]).unwrap();
+        r.set_construction_quota(site,0);
+        let c=r.mining.as_mut().unwrap().construction.as_mut().unwrap();
+        let quantum=site_quantum(&c.sites[site]);
+        if legacy {
+            c.sites[site].legacy_greben=true;
+            c.sites[site].required=quantum*legacy_greben_geometry().len() as u64;
+        }
+        let tank=r.mining().unwrap().tank(0).unwrap();r.matter.economy.ledger.generate(tank,quantum*1024);
+        let bytes=r.snapshot();
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap())==84,!legacy);
+        let mut copy=BlastRange::restore(cfg,&bytes).expect("unstarted storage geometry");
+        assert_eq!(bytes,copy.snapshot());
+        for _ in 0..3 {
+            let paid=r.commander_print_step(0,site,4096,quantum*128);
+            assert!(paid>0);assert_eq!(paid,copy.commander_print_step(0,site,4096,quantum*128));
+            let id=r.construction_sites()[site].unit.unwrap();
+            assert_eq!(r.units[id].full_greben(),!legacy);
+            assert_eq!(r.snapshot(),copy.snapshot());assert!(r.matter.economy.ledger.balanced());
+            copy=BlastRange::restore(cfg,&r.snapshot()).expect("partial storage geometry");
+        }
+    }
+}
+
 use crate::blast::ExplosionConfig;
 use modding::range::{RangeBlock, RangeLayout};
 
@@ -1396,6 +1480,7 @@ fn a_delivery_does_not_repair_already_built_cells_or_erase_dents() {
     let density = r.matter.source_density(STEEL) as Amount;
     let mut site = Site {
         kind,
+        legacy_greben: false,
         allied: true,
         at,
         required: 1 << 30,

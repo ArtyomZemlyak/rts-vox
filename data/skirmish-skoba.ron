@@ -14,6 +14,7 @@
   (kind: Crawler, allied: true, at: (5000,16,7400)),
   (kind: SkobaDrone, allied: true, at: (7000,60,7360)),
   (kind: Tank, allied: false, at: (6800,16,8600)),
+  (kind: PowerPlantT1, allied: true, at: (5700,16,8400)),
  ],
  blocks: [
   (min: (4900,0,6800), max: (7300,160,8700), material: 0),

@@ -82,6 +82,8 @@ struct Drone {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Site {
     kind: RangeUnitKind,
+    // Persisted through envelope84, without changing historical site records.
+    legacy_greben: bool,
     allied: bool,
     at: [i32; 3],
     required: Amount,
@@ -94,7 +96,11 @@ struct Site {
 fn site_quantum(site: &Site) -> Amount {
     // Stock parts of one construction template share their voxel scale and
     // structural grade. Delivery is intrinsic material, not 785-IU tokens.
-    site.required / (construction_geometry(site.kind).len() as u64).max(1)
+    site.required / (site_geometry(site).len() as u64).max(1)
+}
+
+fn site_geometry(site: &Site) -> &'static [(Option<usize>, [usize; 3])] {
+    if site.legacy_greben {legacy_greben_geometry()} else {construction_geometry(site.kind)}
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,6 +122,8 @@ pub struct SiteView {
 /// Lightweight presentation data for unfinished sites, without drone counts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProgressView {
+    pub id: usize,
+    pub kind: RangeUnitKind,
     pub allied: bool,
     pub at: [i32; 3],
     pub unit: Option<usize>,
@@ -335,6 +343,7 @@ impl Construction {
             delivered = delivered.checked_add(completed)?;
             self.sites.push(Site {
                 kind,
+                legacy_greben: kind == RangeUnitKind::GrebenStorage,
                 allied,
                 at,
                 required,
@@ -1556,6 +1565,24 @@ impl BlastRange {
         sites
     }
     pub(in super::super) fn construction_history_count(&self)->usize {self.mining.as_ref().and_then(|m|m.construction.as_ref()).map_or(0,|c|c.sites.len())}
+    pub(in super::super) fn full_greben_sites(&self) -> Vec<usize> {
+        self.mining.as_ref().and_then(|m|m.construction.as_ref()).map_or_else(Vec::new, |c|
+            c.sites.iter().enumerate().filter(|(_,s)|s.kind==RangeUnitKind::GrebenStorage && !s.legacy_greben).map(|(id,_)|id).collect())
+    }
+    pub(in super::super) fn load_greben_sites(&mut self, full:&std::collections::BTreeSet<usize>) -> Option<()> {
+        let Some(c)=self.mining.as_mut().and_then(|m|m.construction.as_mut()) else {return full.is_empty().then_some(());};
+        for &id in full {
+            let site=c.sites.get_mut(id)?;
+            if site.kind!=RangeUnitKind::GrebenStorage {return None;}
+            site.legacy_greben=false;
+        }
+        for site in c.sites.iter().filter(|s|s.kind==RangeUnitKind::GrebenStorage) {
+            if let Some(id)=site.unit {
+                if self.units.get(usize::from(id))?.full_greben()==site.legacy_greben {return None;}
+            }
+        }
+        Some(())
+    }
     pub fn construction_site_state(&self,id:usize)->Option<SiteView> {
         let s=self.mining.as_ref()?.construction.as_ref()?.sites.get(id)?;
         Some(SiteView{id,kind:s.kind,at:s.at,required:s.required,delivered:s.delivered,quota:s.quota,assigned:0,
@@ -1576,7 +1603,7 @@ impl BlastRange {
         self.mining.as_ref().and_then(|m| m.construction.as_ref())
             .into_iter().flat_map(|c| c.sites.iter().enumerate())
             .filter(|(id,s)| s.delivered < s.required && !self.construction_cancelled(*id) && s.unit.is_none_or(|id|self.units[usize::from(id)].status.alive))
-            .map(|(_,s)| ProgressView { allied: s.allied, at: s.at,
+            .map(|(id,s)| ProgressView { id, kind: s.kind, allied: s.allied, at: s.at,
                 unit: s.unit.map(usize::from), required: s.required, delivered: s.delivered })
     }
 
@@ -1588,7 +1615,7 @@ impl BlastRange {
     fn construction_print_impact(&self, site: usize) -> Option<[Fx; 3]> {
         let s = self.mining.as_ref()?.construction.as_ref()?.sites.get(site)?;
         let unit = self.units.get(usize::from(s.unit?))?;
-        let cells = construction_geometry(s.kind);
+        let cells = site_geometry(s);
         let count = ((cells.len() as u128 * u128::from(s.delivered)) / u128::from(s.required.max(1))) as usize;
         let (segment, cell) = *cells.get(count.checked_sub(1)?)?;
         let frame = match segment {
@@ -1665,6 +1692,7 @@ impl BlastRange {
         let c = m.construction.as_mut()?;
         c.sites.push(Site {
             kind,
+            legacy_greben: false,
             allied,
             at,
             required,
@@ -1834,11 +1862,14 @@ impl BlastRange {
                 }
             } else {
                 if self.units[id].motion.destination.is_some() { self.units[id].motion.stop(); }
+                let free_repair_ready = self.economic_rules().repair_power == 0
+                    && self.commander_tool_in_reach(id, at);
                 let facing = self.units[id].commander_face(at);
                 let yaw = self.units[id].motion.drive.head;
                 self.battle.actors[id].turret = crate::turret::Traverse::new(yaw);
                 self.units[id].set_arm_targets([at, at, [1, 0, 0], [0, 0, 0]], yaw);
-                if facing && work_requests.get(id).is_some_and(|demand|*demand>0)
+                if facing && (free_repair_ready
+                    || work_requests.get(id).is_some_and(|demand|*demand>0))
                     && self.units[id].commander_arm_ready(1,at) {
                     self.commander_repair_step(id, target);
                 }
@@ -2029,7 +2060,7 @@ fn ensure_site_unit(r: &mut BlastRange, site: &mut Site) -> bool {
         return false;
     }
     let body = r.matter.economy.ledger.create(Kind::Body, 0, site.required);
-    let id = r.append_unit(super::produce::Spawned {
+    let id = r.append_unit_geometry(super::produce::Spawned {
         def: RangeUnitDef {
             allied: site.allied,
             kind: site.kind,
@@ -2038,7 +2069,7 @@ fn ensure_site_unit(r: &mut BlastRange, site: &mut Site) -> bool {
         },
         body,
         tank: None,
-    });
+    }, !site.legacy_greben);
     r.note_construction_spawn();
     site.unit = Some(id as u16);
     true
@@ -2054,7 +2085,9 @@ fn apply_site_progress(
     delivered: Amount,
 ) {
     let id = usize::from(unit);
-    let cells = construction_geometry(kind);
+    let cells = if kind==RangeUnitKind::GrebenStorage && !r.units[id].full_greben() {
+        legacy_greben_geometry()
+    } else {construction_geometry(kind)};
     let share = |amount: Amount| {
         ((cells.len() as u128 * u128::from(amount)) / u128::from(required.max(1))) as usize
     };
@@ -2125,10 +2158,24 @@ fn construction_geometry(kind: RangeUnitKind) -> &'static [(Option<usize>, [usiz
     CELLS[kind.index()].get_or_init(|| {
         let unit = RangeUnit::of_kind(kind, [0; 3]);
         let root = construction_cells(kind);
+        ordered_geometry(&unit.body, root)
+    })
+}
+
+fn legacy_greben_geometry() -> &'static [(Option<usize>, [usize; 3])] {
+    static CELLS: std::sync::OnceLock<Vec<(Option<usize>, [usize; 3])>> = std::sync::OnceLock::new();
+    CELLS.get_or_init(|| {
+        let body=voxel::unit::greben_storage_legacy();
+        ordered_geometry(&body, &connected_cells(&body))
+    })
+}
+
+fn ordered_geometry(body:&voxel::unit::UnitBody, root:&[[usize;3]]) -> Vec<(Option<usize>,[usize;3])> {
+        type Cell = (Option<usize>, [usize; 3]);
         let seen: std::collections::BTreeSet<_> = root.iter().copied().collect();
         let mut cells: Vec<Cell> = root.iter().map(|p| (None, *p)).collect();
-        for (segment, body) in std::iter::once((None, &unit.body)).chain(
-            unit.body
+        for (segment, body) in std::iter::once((None, body)).chain(
+            body
                 .segments
                 .iter()
                 .enumerate()
@@ -2146,7 +2193,6 @@ fn construction_geometry(kind: RangeUnitKind) -> &'static [(Option<usize>, [usiz
             }
         }
         cells
-    })
 }
 
 fn construction_cells(kind: RangeUnitKind) -> &'static [[usize; 3]] {

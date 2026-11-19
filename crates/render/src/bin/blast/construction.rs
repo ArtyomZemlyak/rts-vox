@@ -7,15 +7,32 @@ use std::collections::BTreeMap;
 use workbench::ghost::Templates;
 use workbench::Selection;
 
+#[path="construction/production_hud.rs"]
+pub mod production_hud;
 const SLOTS: usize = 16;
 const QUEUE_SLOTS: usize = 16;
-const QUEUE_HEIGHT: f32 = 68.0;
 #[path="construction/plans.rs"]
 pub mod plans;
 #[cfg(test)]
 #[path = "construction/tests.rs"]
-mod tests;
-pub const HEIGHT: f32 = 272.0;
+pub(super) mod tests;
+pub const HEIGHT: f32 = 128.0;
+fn catalogue_width(viewport:Vec2)->f32 {(viewport.x-186.-320.).clamp(96.,720.)}
+fn catalogue_page_size(viewport:Vec2)->usize {((catalogue_width(viewport)/112.) as usize).clamp(1,6)}
+/// Keep native-size text while giving short viewports their world space back.
+pub(super) fn dock_height(viewport: Vec2) -> f32 {
+    if viewport.y < 780. { 100. } else { HEIGHT }
+}
+fn quote_bottom(viewport: Vec2) -> f32 {
+    200_f32.min((viewport.y-104.).max(0.))
+}
+/// The visible quote is protected from the projector above the fixed minimap.
+pub(super) fn quote_bounds(viewport: Vec2) -> (Vec2, Vec2) {
+    (Vec2::new(16.,viewport.y-quote_bottom(viewport)-112.),Vec2::new(160.,112.))
+}
+
+#[derive(Component)]
+pub(super) enum CatalogPart { Filters, Row }
 /// Both the button and keyboard use the same permission; opening the editor
 /// rebuilds a layout and must never reset damage in an ongoing standard battle.
 pub fn editing_allowed(sim: &BlastRange, panel: Option<&panel::Panel>) -> bool {
@@ -32,6 +49,7 @@ pub(super) enum Context {
 #[derive(Resource, Default)]
 pub struct Catalog {
     context: Context,
+    legacy_requested: bool,
     generation: u64,
     tier: u8,
     category: u8,
@@ -46,11 +64,16 @@ pub struct Catalog {
     hover_tick: Option<u32>,
     hover_issue: Option<String>,
     icons: BTreeMap<usize, Handle<Image>>,
+    optical_icons: BTreeMap<usize, Handle<Image>>,
+    pixel_icons: BTreeMap<usize, Handle<Image>>,
     costs: BTreeMap<usize, u64>,
     capture_initialized: bool,
     image_ready_frames: u8,
 }
 impl Catalog {
+    pub(super) fn motion_selected(&self,action:Action)->Option<bool> {match action {Action::Tier(t)=>Some(t==self.tier),Action::Category(c)=>Some(c==self.category),_=>None}}
+    /// Refresh resolves menu/lab visibility; spatial UI alone owns the child islands.
+    pub(super) fn is_hidden(&self) -> bool { self.context == Context::Hidden || !self.legacy_requested }
     pub fn capture_ready(&self) -> bool {
         self.context == Context::Hidden || self.image_ready_frames >= 3
     }
@@ -227,10 +250,10 @@ fn choices(c: &Catalog, sim: &BlastRange) -> Vec<RangeUnitKind> {
 }
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Action {
+    DismissPlacement,
     Tier(u8),
     Category(u8),
     Page(i32),
-    QueuePage(i32),
     Choose(usize),
     Side(bool),
     Cancel,
@@ -247,7 +270,9 @@ pub(super) struct Slot(usize);
 pub(super) struct Picture(usize);
 #[derive(Component)]
 pub(super) enum Caption {
+    #[cfg_attr(not(test), allow(dead_code))]
     Heading,
+    #[cfg_attr(not(test), allow(dead_code))]
     Hint,
     Item(usize),
 }
@@ -266,6 +291,89 @@ pub(super) struct QueuePip(usize, usize);
 #[derive(Component)]
 pub(super) struct SandboxControl(u8);
 
+#[derive(Component)]
+pub(super) struct RecipeTooltip;
+#[derive(Component)]
+pub(super) struct RecipeTooltipText;
+#[derive(Default)]
+pub(super) struct RecipeHover {
+    key: Option<(u64, usize, RangeUnitKind)>,
+    seconds: f32,
+}
+
+/// Details use live economic quotes, never copied balance constants.
+fn recipe_details(c: &Catalog, sim: &BlastRange, kind: RangeUnitKind) -> String {
+    let mut info = format!("{} · T{}", name(kind), tier(kind));
+    match c.context {
+        Context::Factory(actor) => {
+            if let Some((mass, ticks, power)) = sim.production_quote(actor, kind) {
+                info.push_str(&format!("\nМасса {} · Энергия {}\nПотребление {}",
+                    economy_display::mass(mass), economy_display::energy_work(power.saturating_mul(u64::from(ticks))),
+                    economy_display::energy(power)));
+            }
+            info.push_str("\nЛКМ — в очередь");
+        }
+        Context::Engineer(actor) => {
+            if let Some(&mass) = c.costs.get(&kind.index()) {
+                info.push_str(&format!("\nМасса {}", economy_display::mass(mass)));
+                if sim.units[actor].kind == RangeUnitKind::Commander {
+                    info.push_str(&format!(" · Энергия ~{}", economy_display::energy_work(sim.construction_energy_estimate(mass))));
+                } else {
+                    info.push_str(&format!("\nПотребление {}/дрон", economy_display::energy(sim.economic_rules().drone_power)));
+                }
+            }
+            info.push_str("\nЛКМ — разместить · Shift — очередь");
+        }
+        _ => info.push_str("\nЛКМ — выбрать · затем укажите место"),
+    }
+    let generation = sim.economic_rules().generation(kind);
+    if generation > 0 { info.push_str(&format!("\nВыработка +{}", economy_display::energy(generation))); }
+    info
+}
+
+/// The normal hover and capture preview use the same real quote, node and geometry.
+pub fn tooltip(
+    c: Res<Catalog>, scene: Res<Scene>, time: Res<Time>, scale: Res<UiScale>,
+    mut spatial: ResMut<spatial_ui::State>, windows: Query<&Window>, roots: Query<&Node, With<Root>>,
+    cards: Query<(Option<&Slot>,Option<&spatial_ui::Part>,&Interaction),Or<(With<Slot>,With<spatial_ui::Part>)>>, mut hover: Local<RecipeHover>,
+    mut tip: Query<&mut Node, (With<RecipeTooltip>, Without<Root>)>,
+    mut labels: Query<&mut Text, With<RecipeTooltipText>>,
+) {
+    spatial.reserve_quote(false);
+    let visible=c.generation==scene.generation&&c.context!=Context::Hidden&&roots.iter().any(|n|n.display!=Display::None);
+    let preview=visible.then(||spatial.recipe_preview()).flatten();
+    let selected=preview.or_else(||visible.then(||cards.iter().find_map(|(slot,part,i)| {
+        if *i!=Interaction::Hovered {return None;}
+        slot.map(|slot|slot.0).or_else(||match part {Some(spatial_ui::Part::Recipe(i))=>Some(*i),_=>None})
+    })).flatten());
+    let kind=selected.and_then(|slot|choices(&c,&scene.sim).get(c.page*c.per_page.max(1)+slot).copied());
+    let key=kind.map(|kind|(scene.generation,c.page,kind));
+    if hover.key==key {hover.seconds+=time.delta_secs().min(0.1);} else {hover.key=key;hover.seconds=0.;}
+    let Ok(window)=windows.single() else {return};
+    let viewport=window.size()/scale.0;
+    for mut node in &mut tip {
+        let Some(kind)=kind.filter(|_|preview.is_some()||hover.seconds>=0.12) else {
+            if node.display!=Display::None { node.display=Display::None; }
+            continue;
+        };
+        spatial.reserve_quote(true);
+        // Anchor the live quote above the fixed minimap, independently of card size.
+        let bottom=px(quote_bottom(viewport));
+        if node.display!=Display::Flex || node.left!=px(16) || node.top!=Val::Auto || node.bottom!=bottom || node.width!=px(160) {
+            node.left=px(16);node.top=Val::Auto;node.bottom=bottom;node.width=px(160);
+            node.display=Display::Flex;
+        }
+        // Abbreviate labels, not data: the live full quote remains the only price source.
+        let value=recipe_details(&c,&scene.sim,kind)
+            .replace("Масса ","М ").replace("Энергия ","Э ").replace("Потребление ","Пит. ")
+            .replace("ЛКМ — разместить · Shift — очередь","ЛКМ / Shift — план")
+            .replace("ЛКМ — в очередь","ЛКМ — очередь")
+            .replace("ЛКМ — выбрать · затем укажите место","ЛКМ — выбрать")
+            .replace("Выработка +","Ген. +");
+        for mut text in &mut labels {if text.0!=value {text.0.clone_from(&value);}}
+    }
+}
+
 pub fn input(
     mut c: ResMut<Catalog>,
     mut scene: ResMut<Scene>,
@@ -276,7 +384,7 @@ pub fn input(
     buttons: Query<(&Action, &Interaction), Changed<Interaction>>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform), With<GasCamera>>,
-    roots: Query<&bevy::ui::RelativeCursorPosition, With<panel::PanelRoot>>,
+    roots: Query<&bevy::ui::RelativeCursorPosition, (Or<(With<panel::PanelRoot>,With<panel::HitIsland>)>,Without<panel::LayoutOnly>)>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     streaming: Option<Res<streaming::Streaming>>,
@@ -383,6 +491,11 @@ pub fn input(
             scene.notice.clear();
         }
         match *action {
+            Action::DismissPlacement => {
+                c.pending = None;
+                c.hover = None;
+                panel.construction_kind = None;
+            }
             Action::Tier(t) => {
                 c.tier = t;
                 c.page = 0;
@@ -393,9 +506,6 @@ pub fn input(
             }
             Action::Page(delta) => {
                 c.page = (c.page as i32 + delta).max(0) as usize;
-            }
-            Action::QueuePage(delta) => {
-                c.queue_page = (c.queue_page as i32 + delta).max(0) as usize;
             }
             Action::Side(allied) if next == Context::Sandbox => {
                 c.allied = allied;
@@ -614,17 +724,21 @@ fn button(p: &mut ChildSpawnerCommands, font: &TextFont, text: &str, action: Act
     let mut e = p.spawn((
         Button,
         action,
+        match action {Action::Tier(t)|Action::Category(t)=>optical_ui::Finish::pixel_filter(t),_=>optical_ui::Finish::pixel(0)},
         Node {
+            column_gap:px(4),
             padding: UiRect::axes(px(10), px(6)),
             align_items: AlignItems::Center,
-            border: UiRect::all(px(1)),
+            border: if matches!(action,Action::Tier(_)|Action::Category(_)) {UiRect::bottom(px(1))} else {UiRect::all(px(1))},
             ..default()
         },
         BackgroundColor(theme::BUTTON),
         BorderColor::all(theme::FRAME),
     ));
     e.with_children(|p| {
-        label(p, font, text, 14.0);
+        match action {Action::Tier(t)=>optical_ui::pixel_glyph(p,t),Action::Category(t)=>optical_ui::pixel_glyph(p,5+t),_=>{}}
+        let face=TextFont{weight:if matches!(action,Action::Tier(_)|Action::Category(_)){bevy::text::FontWeight::MEDIUM}else{font.weight},..font.clone()};
+        label(p, &face, text, 14.0);
     });
     e.id()
 }
@@ -633,45 +747,115 @@ pub fn shortcuts(p: &mut ChildSpawnerCommands, font: &TextFont) {
     button(p, font, "Завод", Action::Focus(false));
 }
 pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
+    production_hud::build(commands,camera,font);
+    commands.spawn((RecipeTooltip, panel::PanelRoot, UiTargetCamera(camera), GlobalZIndex(35),
+        bevy::ui::FocusPolicy::Pass, Pickable::IGNORE,
+        bevy::ui::RelativeCursorPosition::default(),
+        Node { position_type: PositionType::Absolute, width: px(160), border:UiRect::all(px(1)),padding: UiRect::all(px(8)),
+            display: Display::None, ..default() }, BackgroundColor(theme::PANEL),BorderColor::all(theme::FRAME)))
+        .with_children(|p| { theme::corners(p);p.spawn((RecipeTooltipText, Text::new(""),
+            TextFont { font_size: FontSize::Px(14.), ..theme::data_font(font) },bevy::text::LineHeight::Px(14.),TextColor(theme::TEXT))); });
     commands
         .spawn((
             Root,
+            panel::LayoutOnly,
+            Pickable::IGNORE,
+            bevy::ui::FocusPolicy::Pass,
             panel::PanelRoot,
             bevy::ui::RelativeCursorPosition::default(),
             UiTargetCamera(camera),
             GlobalZIndex(10),
             Node {
                 position_type: PositionType::Absolute,
-                left: px(16),
-                right: px(16),
-                bottom: px(16),
+                left: px(186),
+                right: px(320),
+                bottom: px(72),
                 height: px(HEIGHT),
-                padding: UiRect::all(px(12)),
+                max_width: px(720),
+                padding: UiRect::all(px(0)),
                 row_gap: px(8),
-                flex_direction: FlexDirection::Column,
-                border: UiRect::top(px(2)),
+                flex_direction: FlexDirection::ColumnReverse,
+                border: UiRect::ZERO,
                 display: Display::None,
                 ..default()
             },
-            BackgroundColor(theme::PANEL),
-            BorderColor::all(theme::FRAME),
+            BackgroundColor(Color::NONE),
+            BorderColor::all(Color::NONE),
         ))
         .with_children(|p| {
-            p.spawn(Node {
-                column_gap: px(8),
-                row_gap: px(6),
+            p.spawn((CatalogPart::Filters, panel::HitIsland, optical_ui::Finish::data(), bevy::ui::RelativeCursorPosition::default(), BackgroundColor(theme::PANEL), Node {
+                padding: UiRect::all(px(4)),
+                align_self:AlignSelf::FlexStart,max_width:percent(100),
+                column_gap: px(4),
+                row_gap: px(4),
                 flex_wrap: FlexWrap::Wrap,
                 align_items: AlignItems::Center,
                 ..default()
-            })
+            }))
             .with_children(|p| {
-                label(p, font, "СТРОИТЕЛЬСТВО", 15.0);
                 for (t, n) in [(0, "Все тиры"), (1, "T1"), (2, "T2"), (3, "T3"), (4, "T4")] {
                     button(p, font, n, Action::Tier(t));
                 }
-                for (t, n) in [(0, "Всё"), (1, "Юниты"), (2, "Постройки")] {
+                for (t, n) in [(0, "Всё"), (1, "Юн."), (2, "Постр.")] {
                     button(p, font, n, Action::Category(t));
                 }
+            });
+            p.spawn((CatalogPart::Row, Node {
+                column_gap: px(8),
+                width: percent(100),
+                height: px(80),
+                flex_grow: 0.0,
+                flex_shrink: 0.0,
+                ..default()
+            }))
+            .with_children(|p| {
+                for slot in 0..SLOTS {
+                    p.spawn((
+                        Button,
+                        panel::HitIsland,
+                        bevy::ui::RelativeCursorPosition::default(),
+                        Action::Choose(slot),
+                        Slot(slot),
+                        optical_ui::Finish::pixel(2),
+                        Node {
+                            flex_grow: 0.0,
+                            flex_shrink: 0.0,
+                            flex_basis: px(104),
+                            min_width: px(90),
+                            height: percent(100),
+                            min_height: px(0),
+                            flex_direction: FlexDirection::Column,
+                            padding: UiRect::all(px(6)),
+                            border: UiRect::bottom(px(1)),
+                            align_items: AlignItems::Center,
+                            row_gap: px(4),
+                            ..default()
+                        },
+                        BackgroundColor(theme::BUTTON),
+                        BorderColor::all(theme::FRAME),
+                    ))
+                    .with_children(|p| {
+                        p.spawn((
+                            Picture(slot),
+                            ImageNode::default(),
+                            Node {
+                                height: px(64),
+                                width: px(104),
+                                ..default()
+                            },
+                        ));
+                        let id = label(p, font, "", 14.0);
+                        p.commands().entity(id).insert((Caption::Item(slot), bevy::text::LineHeight::Px(14.)));
+                    });
+                }
+            });
+
+        });
+    commands.spawn((AuxRoot, panel::PanelRoot, bevy::ui::RelativeCursorPosition::default(),
+        UiTargetCamera(camera),GlobalZIndex(12), Node {position_type:PositionType::Absolute,
+        right:px(16),bottom:px(64),max_width:px(440),padding:UiRect::all(px(4)),column_gap:px(4),
+        row_gap:px(4),flex_wrap:FlexWrap::Wrap,display:Display::None,..default()},BackgroundColor(theme::PANEL)))
+        .with_children(|p| {
                 for (side, n) in [(true, "Свои"), (false, "Враги")] {
                     let id = button(p, font, n, Action::Side(side));
                     p.commands().entity(id).insert(SandboxControl(0));
@@ -685,96 +869,81 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 button(p, font, "Отмена", Action::Cancel);
                 button(p, font, "←", Action::Page(-1));
                 button(p, font, "→", Action::Page(1));
-            });
-            let id = label(p, font, "", 14.0);
-            p.commands().entity(id).insert(Caption::Heading);
-            p.spawn((QueueWidget, QueueRow, Node {
-                display: Display::None, height: px(QUEUE_HEIGHT), flex_shrink: 0.0,
-                align_items: AlignItems::Center, column_gap: px(5), ..default()
-            })).with_children(|p| {
-                let id = label(p, font, "ОЧЕРЕДЬ", 13.0);
-                p.commands().entity(id).insert(QueueText(None));
-                button(p, font, "‹", Action::QueuePage(-1));
-                for slot in 0..QUEUE_SLOTS {
-                    p.spawn((QueueWidget, QueueCard(slot), Node {
-                        position_type: PositionType::Relative, width: px(54), height: px(58),
-                        flex_shrink: 0.0, border: UiRect::all(px(1)), ..default()
-                    }, BackgroundColor(theme::BUTTON), BorderColor::all(theme::FRAME)))
-                    .with_children(|p| {
-                        p.spawn((QueueImage(slot), ImageNode::default(), Node {
-                            position_type: PositionType::Absolute, left: px(1), top: px(0),
-                            width: px(50), height: px(46), ..default()
-                        }));
-                        let id = p.spawn((QueueText(Some(slot)), Text::new(""),
-                            TextFont { font_size: FontSize::Px(11.0), ..font.clone() },
-                            TextColor(theme::TEXT), Node { position_type: PositionType::Absolute,
-                                left: px(3), top: px(0), ..default() })).id();
-                        let _ = id;
-                        p.spawn(Node { position_type: PositionType::Absolute, bottom: px(2),
-                            left: px(2), column_gap: px(1), ..default() }).with_children(|p| {
-                            for segment in 0..10 {
-                                p.spawn((QueueWidget, QueuePip(slot, segment), Node {
-                                    width: px(4), height: px(5), ..default()
-                                }, BackgroundColor(theme::FRAME)));
-                            }
-                        });
-                    });
-                }
-                button(p, font, "›", Action::QueuePage(1));
-            });
-            p.spawn(Node {
-                column_gap: px(10),
-                width: percent(100),
-                height: px(144),
-                flex_grow: 0.0,
-                flex_shrink: 0.0,
-                ..default()
-            })
-            .with_children(|p| {
-                for slot in 0..SLOTS {
-                    p.spawn((
-                        Button,
-                        Action::Choose(slot),
-                        Slot(slot),
-                        Node {
-                            flex_grow: 0.0,
-                            flex_shrink: 0.0,
-                            flex_basis: px(180),
-                            min_width: px(180),
-                            height: percent(100),
-                            min_height: px(0),
-                            flex_direction: FlexDirection::Column,
-                            padding: UiRect::all(px(6)),
-                            border: UiRect::all(px(1)),
-                            align_items: AlignItems::Center,
-                            row_gap: px(4),
-                            ..default()
-                        },
-                        BackgroundColor(theme::BUTTON),
-                        BorderColor::all(theme::FRAME),
-                    ))
-                    .with_children(|p| {
-                        p.spawn((
-                            Picture(slot),
-                            ImageNode::default(),
-                            Node {
-                                height: px(72),
-                                width: px(104),
-                                ..default()
-                            },
-                        ));
-                        let id = label(p, font, "", 14.0);
-                        p.commands().entity(id).insert(Caption::Item(slot));
-                    });
-                }
-            });
-            let id = label(p, font, "", 13.0);
-            p.commands().entity(id).insert(Caption::Hint);
         });
 }
 
+/// Resolve the catalogue after this frame's world projection is known.
+/// A spider can request the sandbox catalogue while its command hologram owns
+/// the screen. Only this system opens Root, including after a selection change.
+#[derive(Component)]
+pub struct AuxRoot;
+
+pub fn sync_visibility(
+    catalog: Res<Catalog>,
+    _spatial: Res<spatial_ui::State>,
+    mut roots: Query<(Has<AuxRoot>,&mut Node), Or<(With<Root>,With<AuxRoot>)>>,
+) {
+    for (aux,mut node) in &mut roots {
+        let next = if catalog.legacy_requested && (!aux || catalog.context!=Context::Hidden) {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if node.display != next { node.display = next; }
+    }
+}
+
+/// All bounds depend on the viewport, never on which actor is selected.
+pub fn responsive(
+    windows: Query<&Window>, scale: Res<UiScale>,
+    mut nodes: Query<(
+        &mut Node, Option<&Root>, Option<&Slot>, Option<&Picture>,
+        Option<&CatalogPart>, Option<&Action>,
+    ), Or<(With<Root>, With<Slot>, With<Picture>, With<CatalogPart>, With<Action>)>>,
+) {
+    let Ok(window)=windows.single() else { return };
+    let viewport=window.size()/scale.0;
+    let compact=viewport.y<780.;
+    for (mut node, root, slot, picture, part, action) in &mut nodes {
+        if root.is_some() {
+            let height=px(dock_height(viewport));
+            if node.height!=height {node.height=height;}
+            if node.row_gap!=px(8.) {node.row_gap=px(8.);}
+        }
+        if slot.is_some() {
+            let per_page=catalogue_page_size(viewport);
+            let basis=px((catalogue_width(viewport)-(per_page-1) as f32*8.)/per_page as f32);
+            let padding=UiRect::all(px(if compact {2.} else {6.}));
+            let gap=px(if compact {2.} else {4.});
+            if node.flex_basis!=basis {node.flex_basis=basis;}
+            if node.padding!=padding {node.padding=padding;}
+            if node.row_gap!=gap {node.row_gap=gap;}
+        }
+        if picture.is_some() {
+            let (width,height)=(px(if compact {52.} else {76.}),px(if compact {32.} else {44.}));
+            if node.width!=width {node.width=width;}
+            if node.height!=height {node.height=height;}
+        }
+        match part {
+            Some(CatalogPart::Filters)=>{
+                if node.padding!=UiRect::all(px(2)) {node.padding=UiRect::all(px(2));}
+                if node.column_gap!=px(4) {node.column_gap=px(4);}
+            }
+            Some(CatalogPart::Row)=>{
+                let height=px(if compact {68.} else {80.});
+                if node.height!=height {node.height=height;}
+            }
+            None=>{}
+        }
+        if matches!(action,Some(Action::Tier(_)|Action::Category(_))) {
+            let padding=UiRect::axes(px(4),px(2));
+            if node.padding!=padding {node.padding=padding;}
+        }
+    }
+}
+
 pub fn refresh(
-    (mut c, spatial): (ResMut<Catalog>, Option<Res<spatial_ui::State>>),
+    (mut c, _spatial): (ResMut<Catalog>, Option<Res<spatial_ui::State>>),
     (scene, publication): (Res<Scene>, Option<Res<super::ui_snapshot::UiSnapshot>>),
     panel: Res<panel::Panel>,
     edit: Res<Workshop>,
@@ -815,7 +984,7 @@ pub fn refresh(
         &mut BorderColor,
         &Interaction,
     )>,
-    mut controls: Query<(&Action, &Interaction, &mut BackgroundColor), (Without<Slot>, Without<QueueWidget>)>,
+    mut controls: Query<(&Action, &Interaction, &mut BackgroundColor, Option<&mut BorderColor>), (Without<Slot>, Without<QueueWidget>)>,
     mut sides: Query<(&SandboxControl, &mut Node), (Without<Slot>, Without<Root>)>,
     (mut text, mut pictures): (
         Query<(&Caption, &mut Text), Without<QueueText>>,
@@ -833,64 +1002,46 @@ pub fn refresh(
     } else {
         view_context(&c,&scene.sim, &panel, &edit)
     };
-    let compact = windows.single().is_ok_and(|w| w.width() < 1280.0);
-    let plans:Vec<_>=if let Context::Engineer(actor)=context {scene.sim.order_queue(actor).into_iter().filter_map(|p|match p.order {
-        sim_core::blast::battle::Order::Build(site)=>scene.sim.construction_site_state(site).filter(|s|!s.cancelled&&!s.destroyed&&!s.complete),_=>None}).collect()}else{Vec::new()};
-    let planning=!plans.is_empty();
-    let producer=if planning {None}else{queue_actor(context,&scene.sim)};
-    let queue_visible=producer.is_some() || planning;
-    let queue_height = if queue_visible { QUEUE_HEIGHT + 8.0 } else { 0.0 };
-    for mut root in &mut root {
-        root.display = if context == Context::Hidden {
-            Display::None
+    let legacy_queue_ui = !queue_nodes.is_empty()
+        || !queue_text.is_empty()
+        || !queue_images.is_empty()
+        || text.iter().any(|(c, _)| !matches!(c, Caption::Item(_)));
+    let mut plans = Vec::new();
+    let planning = if let Context::Engineer(actor) = context {
+        if legacy_queue_ui {
+            plans = scene.sim.order_queue(actor).into_iter().filter_map(|p| match p.order {
+                sim_core::blast::battle::Order::Build(site) => scene
+                    .sim
+                    .construction_site_state(site)
+                    .filter(|s| !s.cancelled && !s.destroyed && !s.complete),
+                _ => None,
+            }).collect();
+            !plans.is_empty()
         } else {
-            Display::Flex
-        };
-        root.height = px((if compact { HEIGHT + 52.0 } else { HEIGHT }) + queue_height);
-    }
-    let height = (if compact { HEIGHT + 52.0 } else { HEIGHT }) + queue_height;
-    for (mut node, deck, strip, map, briefing) in &mut legacy {
-        if deck.is_some() {
-            node.display = if context == Context::Hidden && !lab.active() && !pilot.active() {
-                Display::Flex
-            } else {
-                Display::None
-            };
+            scene.sim.order_queue(actor).into_iter().any(|p| match p.order {
+                sim_core::blast::battle::Order::Build(site) => scene
+                    .sim
+                    .construction_site_state(site)
+                    .is_some_and(|s| !s.cancelled && !s.destroyed && !s.complete),
+                _ => false,
+            })
         }
-        if strip.is_some() && context != Context::Hidden {
-            node.bottom = px(height + 28.0);
-        }
-        // On a short window the mission card would be half hidden beneath
-        // the catalogue/roster. The Summary drawer remains accessible.
-        // HUD refresh restores normal visibility when the catalogue closes.
-        if briefing.is_some()
-            && context != Context::Hidden
-            && windows.single().is_ok_and(|w| w.height() < 760.0)
-        {
-            node.display = Display::None;
-        }
-        if map.is_some() {
-            node.display = if context != Context::Hidden
-                && windows.single().is_ok_and(|w| w.height() < 760.0)
-            {
-                Display::None
-            } else {
-                Display::Flex
-            };
-            node.bottom = px(if context != Context::Hidden {
-                height + 32.0
-            } else {
-                234.0
-            });
-        }
+    } else {
+        false
+    };
+    let producer = if planning { None } else { queue_actor(context, &scene.sim) };
+    c.legacy_requested = edit.layout.is_some()&&!lab.active()&&!pilot.active()&&!menu.shown();
+    // responsive owns viewport-dependent dimensions; refresh must not reset them.
+    let _ = &mut root;
+    // No selection-dependent movement: the bottom dock and minimap own fixed anchors.
+    for (mut node, deck, strip, _map, _briefing) in &mut legacy {
+        if (deck.is_some() || (strip.is_some() && context!=Context::Hidden)) && node.display!=Display::None {node.display=Display::None;}
     }
     if context == Context::Hidden || context != c.context {
+        for (_,mut node,_,_,_) in &mut cards {if node.display!=Display::None {node.display=Display::None;}}
         return;
     }
-    c.per_page = if spatial.as_ref().is_some_and(|s| s.enabled) && matches!(context,Context::Engineer(_)|Context::Factory(_)) {4}else{windows
-        .single()
-        .map_or(8, |w| ((w.width() - 64.0) / 190.0) as usize)
-        .clamp(3, SLOTS)};
+    c.per_page = windows.single().map_or(6,|w|catalogue_page_size(w.size()/panel::hud::scale(w.size())));
     let list = choices(&c, &scene.sim);
     let pages = list.len().div_ceil(c.per_page).max(1);
     c.page = c.page.min(pages - 1);
@@ -899,9 +1050,15 @@ pub fn refresh(
         .skip(c.page * c.per_page)
         .take(c.per_page)
         .collect();
-    let queue = if planning {plans.iter().map(|s|s.kind).collect()}else if let Some(actor) = producer {
+    let queue = if !legacy_queue_ui {
+        Vec::new()
+    } else if planning {
+        plans.iter().map(|s| s.kind).collect()
+    } else if let Some(actor) = producer {
         scene.sim.production_queue(actor).unwrap_or_default()
-    } else { Vec::new() };
+    } else {
+        Vec::new()
+    };
     let queue_per_page = windows.single().map_or(8, |w| ((w.width() - 250.0).max(54.0) / 59.0) as usize).clamp(1, QUEUE_SLOTS);
     let queue_pages = queue.len().div_ceil(queue_per_page).max(1);
     c.queue_page = c.queue_page.min(queue_pages - 1);
@@ -913,23 +1070,28 @@ pub fn refresh(
         })
     } else { 0 };
     for (mut node, row, card, pip, background, border) in &mut queue_nodes {
-        if row.is_some() { node.display = if queue_visible { Display::Flex } else { Display::None }; }
+        if row.is_some() && node.display != Display::None { node.display = Display::None; }
         if let Some(QueueCard(slot)) = card {
-            node.display = if *slot < queue_page.len() { Display::Flex } else { Display::None };
-            if let Some(mut b) = border { *b = BorderColor::all(if queue_start + *slot == 0 { theme::ACCENT } else { theme::FRAME }); }
+            let next_display = if *slot < queue_page.len() { Display::Flex } else { Display::None };
+            if node.display != next_display { node.display = next_display; }
+            let next_border = BorderColor::all(if queue_start + *slot == 0 { theme::ACCENT } else { theme::FRAME });
+            if let Some(mut b) = border { if *b != next_border { *b = next_border; } }
         }
         if let (Some(QueuePip(slot, segment)), Some(mut bg)) = (pip, background) {
-            node.display = if queue_start + *slot == 0 { Display::Flex } else { Display::None };
-            bg.0 = if (*segment as u64 + 1) * 10 <= progress { theme::ACCENT } else { theme::FRAME };
+            let next_display = if queue_start + *slot == 0 { Display::Flex } else { Display::None };
+            if node.display != next_display { node.display = next_display; }
+            let next_bg = if (*segment as u64 + 1) * 10 <= progress { theme::ACCENT } else { theme::FRAME };
+            if bg.0 != next_bg { bg.0 = next_bg; }
         }
     }
     for (QueueText(slot), mut text) in &mut queue_text {
-        text.0 = match slot {
+        let next = match slot {
             None if queue.is_empty() => "ОЧЕРЕДЬ · пусто".into(),
             None => format!("{} · {} / {}",if planning {"ПЛАН СТРОЙКИ"}else{"ОЧЕРЕДЬ"}, c.queue_page + 1, queue_pages),
             Some(slot) if *slot < queue_page.len() => format!("{}", queue_start + slot + 1),
             _ => String::new(),
         };
+        if text.0 != next { text.0 = next; }
     }
     if page.iter().chain(queue_page.iter()).all(|k| c.icons.contains_key(&k.index())) {
         c.image_ready_frames = c.image_ready_frames.saturating_add(1);
@@ -957,20 +1119,30 @@ pub fn refresh(
             unit_yaws: vec![],
             shields: vec![],
         };
-        let icon = images.add(laboratory::visuals::thumbnail(&element, &templates));
+        let thumbnail = laboratory::visuals::transparent_thumbnail(&element, &templates);
+        let mut clean=thumbnail.clone();
+        clean.sampler=bevy::image::ImageSampler::nearest();
+        let pixel=images.add(clean);
+        c.pixel_icons.insert(kind.index(),pixel);
+        let optical = images.add(spatial_ui::hologram_thumbnail(thumbnail.clone()));
+        c.optical_icons.insert(kind.index(), optical);
+        let icon = images.add(laboratory::visuals::thumbnail_canvas(thumbnail));
         c.icons.insert(kind.index(), icon);
     }
     for (Slot(slot), mut node, mut background, mut border, interaction) in &mut cards {
-        node.display = if *slot < page.len() {
+        let next_display = if *slot < page.len() {
             Display::Flex
         } else {
             Display::None
         };
+        if node.display != next_display { node.display = next_display; }
         let active = page.get(*slot).is_some_and(|k| Some(*k) == c.pending);
-        background.0 = theme::button_background(*interaction, active);
-        *border = BorderColor::all(if active { theme::ACCENT } else { theme::FRAME });
+        let next_bg = theme::button_background(*interaction, active);
+        if background.0 != next_bg { background.0 = next_bg; }
+        let next_border = BorderColor::all(if active { theme::FOCUS } else { theme::FRAME });
+        if *border != next_border { *border = next_border; }
     }
-    for (action, interaction, mut background) in &mut controls {
+    for (action, interaction, mut background, border) in &mut controls {
         let active = match *action {
             Action::Tier(t) => t == c.tier,
             Action::Category(t) => t == c.category,
@@ -978,7 +1150,10 @@ pub fn refresh(
             Action::GrebenMode => c.production_mode,
             _ => false,
         };
-        background.0 = theme::button_background(*interaction, active);
+        let next_bg = if matches!(action,Action::Tier(_)|Action::Category(_)) && !active && *interaction==Interaction::None {Color::NONE}else{theme::button_background(*interaction, active)};
+        if background.0 != next_bg { background.0 = next_bg; }
+        let next_border = BorderColor::all(if active {theme::CYAN}else if matches!(action,Action::Tier(_)){theme::LAVENDER.with_alpha(0.28)}else{theme::FRAME});
+        if let Some(mut border)=border { if *border != next_border { *border = next_border; } }
     }
     for (scope, mut node) in &mut sides {
         let shown=match scope.0 {
@@ -986,17 +1161,22 @@ pub fn refresh(
             1=>matches!(context,Context::Factory(id) if matches!(scene.sim.units[id].kind,RangeUnitKind::KilFactoryT1|RangeUnitKind::KilFactoryT2|RangeUnitKind::KilFactoryT3)),
             _=>producer.is_some_and(|id|scene.sim.units[id].kind==RangeUnitKind::GrebenStorage),
         };
-        node.display=if shown {Display::Flex}else{Display::None};
+        let next_display = if shown {Display::Flex}else{Display::None};
+        if node.display != next_display { node.display = next_display; }
     }
     for (Picture(slot), mut image) in &mut pictures {
-        image.image = page
+        let handle = page
             .get(*slot)
-            .and_then(|k| c.icons.get(&k.index()))
+            .and_then(|k| c.pixel_icons.get(&k.index()))
             .cloned()
             .unwrap_or_default();
+        let settled = if handle == Handle::default() { Color::NONE } else { Color::WHITE };
+        if image.image != handle || image.color != settled { optical_ui::preview_image(&mut image,handle); }
     }
     for (QueueImage(slot), mut image) in &mut queue_images {
-        image.image = queue_page.get(*slot).and_then(|k| c.icons.get(&k.index())).cloned().unwrap_or_default();
+        let handle=queue_page.get(*slot).and_then(|k| c.optical_icons.get(&k.index())).cloned().unwrap_or_default();
+        let settled = if handle == Handle::default() { Color::NONE } else { Color::WHITE };
+        if image.image != handle || image.color != settled { optical_ui::preview_image(&mut image,handle); }
     }
     if matches!(context, Context::Engineer(_)) {
         for &kind in &page {
@@ -1006,7 +1186,7 @@ pub fn refresh(
         }
     }
     for (caption, mut text) in &mut text {
-        text.0 = match *caption {
+        let mut next = match *caption {
             Caption::Heading => match context {
                 Context::Sandbox => format!(
                     "ПОЛИГОН · свободное размещение · страница {}/{}",
@@ -1036,30 +1216,7 @@ pub fn refresh(
                 }
                 Context::Hidden => String::new(),
             },
-            Caption::Item(slot) => page.get(slot).map_or(String::new(), |k| {
-                let cost = if let Context::Factory(actor) = context {
-                    scene
-                        .sim
-                        .production_quote(actor,*k)
-                        .map(|(v,ticks,power)| format!(" · {} мат. · {} энерг. · {} мощн.", economy_display::mass(v), economy_display::energy_work(power.saturating_mul(u64::from(ticks))), economy_display::energy(power)))
-                        .unwrap_or_default()
-                } else if let Context::Engineer(actor) = context {
-                    c.costs.get(&k.index()).map_or_else(String::new, |v| {
-                        let mut label = format!(" · {} мат.", economy_display::mass(*v));
-                        if scene.sim.units[actor].kind == RangeUnitKind::Commander {
-                            let demand = scene.sim.economic_rules().print_power;
-                            let work = scene.sim.construction_energy_estimate(*v);
-                            label.push_str(&format!(" · ~{} энерг. · мощн. {}", economy_display::energy_work(work), economy_display::energy(demand)));
-                        } else { label.push_str(&format!(" · {} мощн./дрон", economy_display::energy(scene.sim.economic_rules().drone_power))); }
-                        label
-                    })
-                } else {
-                    String::new()
-                };
-                let generation = scene.sim.economic_rules().generation(*k);
-                let output = if generation > 0 { format!(" · +{} мощн.", economy_display::energy(generation)) } else { String::new() };
-                format!("{} · T{}{cost}{output}", name(*k), tier(*k))
-            }),
+            Caption::Item(slot) => page.get(slot).map_or(String::new(), |k| name(*k).into()),
             Caption::Hint => {
                 if c.pending.is_some() && c.hover.is_some_and(|(_, invalid)| invalid) {
                     c.hover_issue.clone().unwrap_or_else(|| "Здесь разместить нельзя".into())
@@ -1123,29 +1280,30 @@ pub fn refresh(
         };
         if matches!(caption, Caption::Heading) && context != Context::Sandbox {
             if let Some((held, cap)) = scene.sim.side_store(true) {
-                text.0.push_str(&format!(" · склад: {}/{}", economy_display::mass(held), economy_display::mass(cap)));
+                next.push_str(&format!(" · склад: {}/{}", economy_display::mass(held), economy_display::mass(cap)));
             }
             if let Context::Engineer(actor) = context {
                 if scene.sim.units[actor].kind == RangeUnitKind::Commander {
                     if let Some((held, cap)) = scene.sim.tank_fill(actor) {
                         let income = scene.sim.economic_rules().commander_matter_per_second;
                         let actual = if held >= cap { 0 } else { income };
-                        text.0.push_str(&format!(" · командир: {}/{} (+{}/с)", economy_display::mass(held), economy_display::mass(cap), economy_display::mass(actual)));
+                        next.push_str(&format!(" · командир: {}/{} (+{}/с)", economy_display::mass(held), economy_display::mass(cap), economy_display::mass(actual)));
                     }
                 }
             }
             let (generation, demand) = publication.as_ref().map_or_else(|| scene.sim.construction_energy(true), |p| p.energy_total);
-            text.0.push_str(&format!(" · все сети: +{} / −{} мощн.", economy_display::energy(generation), economy_display::energy(demand)));
+            next.push_str(&format!(" · все сети: +{} / −{} мощн.", economy_display::energy(generation), economy_display::energy(demand)));
             if let Context::Engineer(actor) | Context::Factory(actor) = context {
                 let local = publication.as_ref().map_or_else(
                     || scene.sim.construction_power_networks().get(actor).copied().flatten(),
                     |p| p.energy_local.get(actor).copied().flatten());
                 if let Some((generation, demand)) = local {
-                    text.0.push_str(&format!(" · рядом: +{} / −{}", economy_display::energy(generation), economy_display::energy(demand)));
-                    if demand > generation { text.0.push_str(" (дефицит)"); }
-                } else { text.0.push_str(" · нет подключения к энергии"); }
+                    next.push_str(&format!(" · рядом: +{} / −{}", economy_display::energy(generation), economy_display::energy(demand)));
+                    if demand > generation { next.push_str(" (дефицит)"); }
+                } else { next.push_str(" · нет подключения к энергии"); }
             }
         }
+        if text.0 != next { text.0 = next; }
     }
 }
 
@@ -1154,40 +1312,21 @@ pub fn refresh(
 pub(super) struct SpatialRecipe {
     pub kind: RangeUnitKind,
     pub image: Handle<Image>,
-    pub cost: String,
 }
 pub(super) struct SpatialCatalog {
     pub recipes: Vec<SpatialRecipe>,
-    pub heading: String,
-    pub queue: Vec<(RangeUnitKind,Handle<Image>)>,
-    pub progress: u64,
-    pub hint: String,
-    pub greben: bool,
+    pub has_work: bool,
 }
 pub(super) fn spatial_catalog(c:&Catalog,sim:&BlastRange,generation:u64,selected:usize)->Option<SpatialCatalog> {
     let actor=match c.context {Context::Engineer(id)|Context::Factory(id)=>id,_=>return None};
     if c.generation!=generation || actor!=selected {return None;}
     sim.units.get(actor)?;
     let list=choices(c,sim);
-    let pages=list.len().div_ceil(c.per_page.max(1)).max(1);
     let recipes:Vec<_>=list.into_iter().skip(c.page*c.per_page.max(1)).take(4).map(|kind| {
-        let cost=if matches!(c.context,Context::Factory(_)) {
-            sim.production_quote(actor,kind).map(|(mass,ticks,power)|format!("М {} · Э {}",economy_display::mass(mass),economy_display::energy_work(power.saturating_mul(u64::from(ticks))))).unwrap_or_else(||"Недоступно".into())
-        }else {
-            c.costs.get(&kind.index()).map(|&mass|if sim.units[actor].kind==RangeUnitKind::Commander {
-                format!("М {} · Э ~{}",economy_display::mass(mass),economy_display::energy_work(sim.construction_energy_estimate(mass)))
-            }else{format!("М {} · пит. {}/дрон",economy_display::mass(mass),economy_display::energy(sim.economic_rules().drone_power))}).unwrap_or_default()
-        };
-        SpatialRecipe{kind,image:c.icons.get(&kind.index()).cloned().unwrap_or_default(),cost}
+        SpatialRecipe{kind,image:c.optical_icons.get(&kind.index()).or_else(||c.icons.get(&kind.index())).cloned().unwrap_or_default()}
     }).collect();
-    let empty=recipes.is_empty();
-    let plans:Vec<_>=if matches!(c.context,Context::Engineer(_)) {sim.order_queue(actor).into_iter().filter_map(|p|match p.order {
-        sim_core::blast::battle::Order::Build(site)=>sim.construction_site_state(site).filter(|s|!s.complete&&!s.cancelled&&!s.destroyed),_=>None}).collect()}else{Vec::new()};
-    let queue=if plans.is_empty(){queue_actor(c.context,sim).and_then(|id|sim.production_queue(id)).unwrap_or_default()}else{plans.iter().map(|s|s.kind).collect()};
-    let progress=if plans.is_empty(){sim.production_progress(actor).map_or(0,|(ticks,build,paid,cost)|
-        (u64::from(ticks)*100/u64::from(build.max(1))).min(paid.saturating_mul(100)/cost.max(1)).min(100))}else{plans[0].delivered.saturating_mul(100)/plans[0].required.max(1)};
-    Some(SpatialCatalog{recipes,heading:format!("{} · {}/{}",if matches!(c.context,Context::Factory(_)){"ПРОИЗВОДСТВО"}else{"СТРОИТЕЛЬСТВО"},c.page+1,pages),
-        queue:queue.into_iter().map(|k|(k,c.icons.get(&k.index()).cloned().unwrap_or_default())).collect(),progress,
-        hint:if empty {"В этом тире нет доступных рецептов · выберите другой тир".into()}else if matches!(c.context,Context::Factory(_)){"ЛКМ — в очередь · ПКМ по карте — точка сбора".into()}else if c.pending.is_some(){"ЛКМ по земле — поставить · Shift — очередь · Esc — отменить".into()}else{"Выберите постройку · Shift — очередь размещений".into()},
-        greben:sim.units.get(actor).is_some_and(|u|u.kind==RangeUnitKind::GrebenStorage)})
+    let engineer_work=matches!(c.context,Context::Engineer(_)) && sim.order_queue(actor).into_iter().any(|p|match p.order {
+        sim_core::blast::battle::Order::Build(site)=>sim.construction_site_state(site).is_some_and(|s|!s.complete&&!s.cancelled&&!s.destroyed),_=>false});
+    let has_work=engineer_work || queue_actor(c.context,sim).and_then(|id|sim.production_queue(id)).is_some_and(|q|!q.is_empty());
+    Some(SpatialCatalog{recipes,has_work})
 }

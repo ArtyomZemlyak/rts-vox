@@ -3,6 +3,7 @@
 //! `--weapon energy` selects the long range and seven energy stages.
 //! `--shots out/blast` writes key stages. Space pauses, R restarts, Esc exits.
 //! `--load out/x/fixture.bin` opens a range snapshot (`sim-cli` fixtures).
+//! `--play-recording FILE.rtsr` replays existing lab inputs on a matching --load snapshot.
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::atmosphere::ScatteringMedium;
@@ -67,6 +68,11 @@ mod status_log;
 mod strategic_icons;
 #[path = "blast/spatial_ui.rs"]
 mod spatial_ui;
+#[path = "blast/optical_ui.rs"]
+mod optical_ui;
+#[path="blast/ui_motion.rs"]
+mod ui_motion;
+#[path="blast/ui_acceptance.rs"]mod ui_acceptance;
 #[path = "blast/streaming.rs"]
 mod streaming;
 #[path = "blast/surround.rs"]
@@ -394,6 +400,16 @@ fn main() {
     let mut select_unit = None;
     let mut start_layout_battle = false;
     let mut pause_at_start = false;
+    let mut object_catalog = false;
+    let mut object_sequence = false;
+    let mut material_sequence = false;
+    let mut motion_sequence = None;
+    let mut ui_acceptance_mode=None;
+    let mut ui_effects=None;
+    let mut production_details=false;
+    let mut screen_ui=false;
+    let mut object_tools = false;
+    let mut object_tooltip = None;
     let mut profile_background = false;
     let mut out = None;
     let mut all_frames = false;
@@ -413,9 +429,11 @@ fn main() {
     // The live tuning menu open from the first frame (ADR-298), for a
     // capture of it.
     let mut settings = false;
+    let mut menu_capture_page = None;
     let mut stock_tuning = false;
     let mut layout_file = None;
     let mut load_file: Option<String> = None;
+    let mut play_recording: Option<String> = None;
     let mut power = 1000;
     let mut uncovered = false;
     let mut edit = false;
@@ -458,9 +476,26 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "--main-menu" | "--skip-menu" => {},
+            "--menu-page" => {
+                i += 1;
+                let page = args.get(i).expect("--menu-page home, room, help or settings");
+                assert!(["home", "room", "help", "settings"].contains(&page.as_str()), "invalid --menu-page");
+                settings |= page == "settings";
+                menu_capture_page = Some(page.clone());
+            },
             "--select-unit" => {i+=1;select_unit=Some(args[i].parse::<usize>().expect("--select-unit zero-based unit index"));},
             "--start-battle" => start_layout_battle=true,
             "--paused" => pause_at_start=true,
+            "--object-catalog" => object_catalog=true,
+            "--object-sequence" => object_sequence=true,
+            "--material-sequence" => material_sequence=true,
+            "--ui-motion-sequence" => {i+=1;let mode=args[i].as_str();assert!(matches!(mode,"work"|"nav"));motion_sequence=Some(mode);},
+            "--ui-acceptance" => {i+=1;ui_acceptance_mode=Some(args[i].as_str());},
+            "--ui-effects" => {i+=1;let level=args[i].parse::<u8>().expect("--ui-effects 0..100");assert!(level<=100);ui_effects=Some(level);},
+            "--production-details" => production_details=true,
+            "--screen-ui" => screen_ui=true,
+            "--object-tools" => object_tools=true,
+            "--object-tooltip" => {i+=1;object_tooltip=Some(args[i].parse::<usize>().expect("--object-tooltip recipe slot 0..3"));assert!(object_tooltip.unwrap()<4);},
             "--laboratory" => start_laboratory = true,
             "--profile" => {
                 i += 1;
@@ -639,6 +674,10 @@ fn main() {
                 i += 1;
                 load_file = Some(args.get(i).expect("--load FILE").clone());
             }
+            "--play-recording" => {
+                i += 1;
+                play_recording = Some(args.get(i).expect("--play-recording FILE.rtsr").clone());
+            }
             "--power" => {
                 i += 1;
                 power = args[i].parse().expect("power in thousandths");
@@ -741,6 +780,11 @@ fn main() {
         repeat = false;
         if layout_file.is_none() && load_file.is_none() { layout_file = Some("data/range-km.ron".into()); }
     }
+    assert!(!material_sequence || (out.is_some() && pause_at_start && !object_sequence), "--material-sequence requires paused native capture, without --object-sequence");
+    assert!(motion_sequence.is_none() || (out.is_some() && pause_at_start && !object_sequence && !material_sequence),"--ui-motion-sequence requires exclusive paused native capture");
+    let usability=ui_acceptance::Acceptance::new(ui_acceptance_mode,out.as_deref());
+    assert!(ui_acceptance_mode.is_none()||ui_acceptance_mode==Some("battle")||(out.is_some()&&pause_at_start&&!object_sequence&&!material_sequence&&motion_sequence.is_none()));
+    assert!(!object_sequence || (out.is_some() && pause_at_start && select_unit.is_some() && !screen_ui), "--object-sequence requires paused native capture with a selected actor");
     // `--edit` включает паузу (`paused: edit`), а шаг симуляции выходит по
     // `scene.paused` — запись писала бы неподвижный кадр сколько угодно секунд
     // и завершалась кодом 0 с валидным timeline (ADR-269). Редактор живёт
@@ -969,6 +1013,11 @@ fn main() {
         repeat = false;
         view = 1;
     }
+    let mut lab = laboratory::Laboratory::new(start_laboratory);
+    if let Some(path) = play_recording {
+        assert!(load_file.is_some() && !start_laboratory, "--play-recording needs --load outside the laboratory");
+        lab.play_loaded_recording(&path, &sim).expect("--play-recording matching tape");
+    }
     // Один ярус приоритета на оба написания камеры: `--close` — то же, что
     // `--view exposed`, и оба сильнее камеры режима. Порядок ключей в строке
     // ничего не решает; при обоих побеждает явный `--view` (ADR-268).
@@ -1170,11 +1219,17 @@ fn main() {
         })
         .insert_resource(surround::Enabled(surround_enabled))
         .insert_resource(hud)
-        .insert_resource(frontend::Menu::new(start_menu))
+        .insert_resource(frontend::Menu::new(start_menu).with_capture_page(menu_capture_page.as_deref()))
         .init_resource::<construction::Catalog>()
-        .init_resource::<spatial_ui::State>()
+        .insert_resource(ui_motion::Settings::load(ui_effects))
+        .insert_resource(optical_ui::acceptance::Sequence::new(material_sequence))
+        .insert_resource(ui_motion::acceptance::Sequence::new(motion_sequence))
+        .insert_resource(usability)
+        .insert_resource(spatial_ui::acceptance::Sequence::new(object_sequence))
+        .insert_resource(spatial_ui::State::initial(object_catalog, object_tools).with_tooltip_preview(object_tooltip).screen_mode(screen_ui))
+        .insert_resource(construction::production_hud::State::initial(production_details))
         .init_resource::<construction::plans::Visuals>()
-        .insert_resource(laboratory::Laboratory::new(start_laboratory))
+        .insert_resource(lab)
         .insert_resource(knobs::Overrides::new(settings, stock_tuning))
         .insert_resource(pilot::Pilot::requested(view == 7))
         .init_resource::<moving::Visual>()
@@ -1191,7 +1246,7 @@ fn main() {
         .init_resource::<streaming::Streaming>()
         .init_resource::<overview::Distant>()
         .init_resource::<ui_snapshot::UiSnapshot>()
-        .add_plugins((GasPlugin, OcclusionPlugin))
+        .add_plugins((GasPlugin, OcclusionPlugin, optical_ui::OpticalUiPlugin, ui_motion::MotionPlugin,ui_acceptance::AcceptancePlugin))
         .add_systems(Startup, (setup, workbench::setup, panel::setup))
         .add_systems(
             Update,
@@ -1203,6 +1258,7 @@ fn main() {
                     (
                         laboratory::first_person_input.run_if(frontend::in_session),
                         laboratory::tools_input.run_if(frontend::in_session),
+                        spatial_ui::acceptance::drive,
                         spatial_ui::input,
                         panel::actions,
                         construction::input.run_if(frontend::in_session),
@@ -1240,9 +1296,8 @@ fn main() {
                     bodies::draw,
                     water::draw,
                     (
+                        laboratory::section_debris_draw,
                         laboratory::highlight,
-                        laboratory::metrics_draw,
-                        laboratory::metric_fragments_draw,
                     )
                         .chain(),
                     profile::stamp,
@@ -1272,12 +1327,13 @@ fn main() {
                         panel::refresh,
                         panel::minimap::refresh_markers,
                         panel::minimap::update_view,
-                        (panel::hud::refresh, construction::refresh).chain(),
+                        (panel::hud::refresh, construction::refresh, construction::responsive).chain(),
                         knobs::refresh,
                         pilot::hud,
                         (
                             laboratory::refresh,
                             laboratory::sync_ui,
+                            laboratory::responsive_ui,
                             laboratory::sync_parameters,
                             laboratory::sync_scenario,
                             laboratory::scroll_ui.run_if(frontend::in_session),
@@ -1287,7 +1343,7 @@ fn main() {
                     )
                         .chain(),
                     panel::hud::refresh_selection_box,
-                    (panel::release_keys, frontend::sync, frontend::skin_sync, spatial_ui::update).chain(),
+                    (panel::release_keys, frontend::sync, frontend::skin_sync, frontend::readability, construction::sync_visibility, construction::production_hud::refresh, construction::tooltip, spatial_ui::update).chain(),
                     record,
                     capture,
                     profile::render_context,
@@ -3024,7 +3080,7 @@ fn framing(
                 if scene.view == 5 {
                     // Explicit attack wins. Otherwise inspect a target in the
                     // selected sector; old layouts retain their named patrol.
-                    let id = workshop.target_unit(scene.sim.attack, scene.patrol);
+                    let id = workshop.target_unit(&scene.sim.units, scene.sim.attack, scene.patrol);
                     // Мишени может не быть вовсе: сохранённая раскладка
                     // допускает ноль тел. Тогда остаётся общий план, а не
                     // кроп в 150 единиц по пустому рельефу.
@@ -3223,6 +3279,11 @@ fn capture(
     laboratory: Option<Res<laboratory::Laboratory>>,
     mut exit: MessageWriter<AppExit>,
     catalog: Option<Res<construction::Catalog>>,
+    spatial: Res<spatial_ui::State>,
+    mut sequence: ResMut<spatial_ui::acceptance::Sequence>,
+    mut material_sequence: ResMut<optical_ui::acceptance::Sequence>,
+    mut motion_sequence: ResMut<ui_motion::acceptance::Sequence>,
+    mut usability:ResMut<ui_acceptance::Acceptance>,
 ) {
     if catalog.is_some_and(|c| !c.capture_ready()) { return; }
     // A map-scale camera can be ready before the asynchronous world columns.
@@ -3244,6 +3305,10 @@ fn capture(
     {
         return;
     }
+    if material_sequence.enabled {material_sequence.ready=true;return;}
+    if usability.enabled(){usability.mark_ready();return;}
+    if motion_sequence.enabled {motion_sequence.ready(&dir);return;}
+    if sequence.enabled {sequence.capture(&dir,&spatial,&mut commands,&mut exit);return;}
     // Editor captures have no simulation ticks. Save the actual paused UI
     // once and give the asynchronous screenshot writer time to finish.
     if scene.paused {

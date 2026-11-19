@@ -138,7 +138,10 @@ impl Wave {
         let c = n / 2;
         let centre = c + n * (c + n * c);
         cells[centre].state = energy;
-        let mut frontier = Frontier::default();
+        let mut frontier = Frontier {
+            buckets: vec![Vec::new(); (energy as usize >> BUCKET_SHIFT) + 1],
+            ..Frontier::default()
+        };
         frontier.push(key(energy, centre));
         Ok(Self {
             n,
@@ -321,6 +324,9 @@ impl Wave {
             }
         }
         let axis_offset = [1, n, plane];
+        // Exact reciprocal decomposition for n in 3..=65 and i < n^3 (q_max * plane^2 < 2^32).
+        let inv_n = (1u64 << 32).div_ceil(n as u64);
+        let inv_plane = (1u64 << 32).div_ceil(plane as u64);
         for _ in 0..budget {
             let Some((energy, i)) = self.frontier.pop().map(unkey) else {
                 break;
@@ -332,7 +338,10 @@ impl Wave {
                 continue;
             }
             self.cells[i].state |= SETTLED;
-            let p = [i % n, i / n % n, i / plane];
+            let z = ((i as u64 * inv_plane) >> 32) as usize;
+            let rem = i - z * plane;
+            let y = ((rem as u64 * inv_n) >> 32) as usize;
+            let p = [rem - y * n, y, z];
             let broken = cell.resistance > 0 && energy > cell.resistance;
             hits.push(Hit {
                 cell: p.map(|v| v as i32),
@@ -383,6 +392,11 @@ impl Wave {
                 // charged for the extra length: otherwise soil is 18 %
                 // cheaper per metre along diagonals and every crater
                 // comes out square (ADR-274).
+                if !diagonal || target.resistance == 0 {
+                    self.cells[j].state = upper;
+                    self.frontier.push(key(upper, j));
+                    continue;
+                }
                 let extra = target.resistance.saturating_mul(cost - 100) / 100;
                 let next = upper.saturating_sub(extra);
                 if next > target.state {
@@ -733,5 +747,20 @@ mod tests {
             assert_eq!(a.advance(53), b.advance(53));
         }
         assert!(b.finished());
+    }
+    #[test]
+    fn reciprocal_index_decomposition_matches_division_across_all_odd_grids() {
+        for n in (3usize..=65).step_by(2) {
+            let plane = n * n;
+            let inv_n = (1u64 << 32).div_ceil(n as u64);
+            let inv_plane = (1u64 << 32).div_ceil(plane as u64);
+            for i in 0..n * plane {
+                let z = ((i as u64 * inv_plane) >> 32) as usize;
+                let rem = i - z * plane;
+                let y = ((rem as u64 * inv_n) >> 32) as usize;
+                let x = rem - y * n;
+                assert_eq!([x, y, z], [i % n, i / n % n, i / plane], "n={n} i={i}");
+            }
+        }
     }
 }

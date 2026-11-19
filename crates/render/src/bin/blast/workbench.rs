@@ -602,13 +602,13 @@ impl Workshop {
         self.hover = None;
         self.preview = None;
     }
-    pub fn target_unit(&self, attack: Option<usize>, patrol_number: usize) -> Option<usize> {
+    pub fn target_unit(&self, units: &[sim_core::blast::RangeUnit], attack: Option<usize>, patrol_number: usize) -> Option<usize> {
         let r = self.layout.as_ref()?;
-        if let Some(i) = attack.filter(|&i| i < r.units.len()) {
+        if let Some(i) = attack.filter(|&i| i < units.len()) {
             return Some(i);
         }
         let local = |i: usize| {
-            r.units.get(i).is_some_and(|u| {
+            units.get(i).is_some_and(|u| {
                 self.sector()
                     .is_none_or(|z| z.contains([u.at[0], u.at[2]], 0))
             })
@@ -626,7 +626,7 @@ impl Workshop {
             .map(|p| p.unit)
             .or_else(|| {
                 self.sector()
-                    .and_then(|_| (0..r.units.len()).find(|&i| local(i)))
+                    .and_then(|_| (0..units.len()).find(|&i| local(i)))
             })
     }
     pub fn pan_by(&mut self, delta: Vec2) {
@@ -2125,11 +2125,18 @@ pub fn overlay(
                 / voxel::unit::WORLD_MM as f32
                 * 0.6)
                 .max(24.0);
-            if !spatial.as_ref().is_some_and(|s|s.enabled&&s.visible&&!edit.editing) {
-                giz.circle(Isometry3d::new(p + Vec3::Y * 0.8, flat), radius, color);
-            }
             let selected = edit.selected_units.contains(&i)
                 || (edit.selected_units.is_empty() && edit.controlled == Some(i));
+            if selected && !spatial.as_ref().is_some_and(|s|s.enabled&&s.visible&&!edit.editing) {
+                let (lo,hi)=u.bounds();
+                let centre=Vec3::new((lo[0]+hi[0]) as f32*0.5,p.y+0.8,(lo[2]+hi[2]) as f32*0.5);
+                let marker=radius.min(72.);
+                for (x,z) in [(-1.,-1.),(-1.,1.),(1.,-1.),(1.,1.)] {
+                    let corner=centre+Vec3::new(x*marker,0.,z*marker);
+                    giz.line(corner,corner-Vec3::new(x*14.,0.,0.),color);
+                    giz.line(corner,corner-Vec3::new(0.,0.,z*14.),color);
+                }
+            }
             if panel.ranges && selected && u.status.weapon {
                 let reach = scene.sim.battle_attack_range(i).unwrap_or(0);
                 if scene.sim.allied(i) {
@@ -2164,9 +2171,6 @@ pub fn overlay(
                     && scene.sim.supply_radius() > 0 {
                     ground_range(&mut giz, &scene.sim, [u.at[0], u.at[2]],
                         scene.sim.supply_radius() as i32, Color::srgba(0.3, 1.0, 0.45, 0.55));
-                }
-                if !spatial.as_ref().is_some_and(|s|s.enabled&&s.visible&&!edit.editing) {
-                    giz.circle(Isometry3d::new(p + Vec3::Y, flat),radius + 3.0,Color::WHITE);
                 }
             }
             if edit.controlled == Some(i) {
@@ -3164,18 +3168,31 @@ mod tests {
         let layout =
             RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
         let mut w = Workshop::new(Some(layout.clone()), false);
-        assert_eq!(w.target_unit(None, 1), Some(2));
+        let units:Vec<_>=layout.units.iter().map(|u|sim_core::blast::RangeUnit::of_kind(u.kind,u.at)).collect();
+        assert_eq!(w.target_unit(&units,None, 1), Some(2));
         w.change_zone(4);
-        assert_eq!(w.target_unit(None, 1), Some(4));
+        assert_eq!(w.target_unit(&units,None, 1), Some(4));
         let points = sector_patrol(&layout, 4).unwrap();
         assert!(points.iter().all(|p| layout.zones[4].contains(*p, 32)));
         w.change_zone(3);
         assert_eq!(
-            w.target_unit(None, 1),
+            w.target_unit(&units,None, 1),
             None,
             "empty far sector must not jump to the old patrol"
         );
-        assert_eq!(w.target_unit(Some(4), 1), Some(4), "explicit attack wins");
+        assert_eq!(w.target_unit(&units,Some(4), 1), Some(4), "explicit attack wins");
+    }
+    #[test]
+    fn target_camera_follows_a_spawned_drone_and_its_live_sector_position() {
+        let layout=RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
+        let mut w=Workshop::new(Some(layout.clone()),false);
+        let mut units:Vec<_>=layout.units.iter().map(|u|sim_core::blast::RangeUnit::of_kind(u.kind,u.at)).collect();
+        let id=units.len();units.push(sim_core::blast::RangeUnit::of_kind(RangeUnitKind::SkobaDrone,layout.zones[0].spawn));
+        w.selected=Some(Selection::Unit(id));
+        assert_eq!(w.target_unit(&units,None,1),Some(id),"spawned slot absent from authored layout");
+        units[id].at=layout.zones[4].spawn;
+        w.change_zone(4);w.selected=Some(Selection::Unit(id));
+        assert_eq!(w.target_unit(&units,None,1),Some(id),"live position was replaced by authored coordinates");
     }
     #[test]
     fn tactical_mission_camera_starts_on_own_deployment() {

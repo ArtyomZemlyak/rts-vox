@@ -20,6 +20,10 @@ pub mod commands;
 mod command_tests;
 
 #[cfg(test)]
+#[path = "range_walker_world_target_tests.rs"]
+mod world_target_tests;
+
+#[cfg(test)]
 #[path = "range_pilot_tests.rs"]
 mod pilot_tests;
 
@@ -414,8 +418,17 @@ pub(super) fn effective_weapon(
                 Some(
                     RangeUnitKind::Tank
                     | RangeUnitKind::EidolonTank
+                    | RangeUnitKind::LightningTank
                     | RangeUnitKind::Artillery
                     | RangeUnitKind::ArtilleryT2
+                    | RangeUnitKind::Commander
+                    | RangeUnitKind::Spider
+                    | RangeUnitKind::Walker04
+                    | RangeUnitKind::RazlomT3
+                    | RangeUnitKind::TurretT1
+                    | RangeUnitKind::TurretT2
+                    | RangeUnitKind::ArtilleryTurretT3
+                    | RangeUnitKind::NuclearSilo
                     | RangeUnitKind::Base,
                 ),
             ) => ammo.tank,
@@ -1138,29 +1151,201 @@ fn laser_requires_flank(
     blocked
 }
 
-pub(super) fn aim_point(u: &RangeUnit) -> [i32; 3] {
-    let origin = [u.body.core.0, u.body.core.1, u.body.core.2].map(usize::from);
-    let size = usize::from(u.body.core_size);
-    let dims = [u.body.vol.nx, u.body.vol.ny, u.body.vol.nz].map(usize::from);
-    let mut best = None;
-    for z in origin[2]..(origin[2] + size).min(dims[2]) {
-        for y in origin[1]..(origin[1] + size).min(dims[1]) {
-            for x in origin[0]..(origin[0] + size).min(dims[0]) {
-                if !u.body.vol.get(x, y, z) {
+fn verified_world_pos(u: &RangeUnit, p: [usize; 3]) -> (bool, [i32; 3]) {
+    let v = u
+        .root_frame(p[1])
+        .world(p.map(|c| Fx::from_int(c as i32).add(Fx::from_ratio(1, 2))));
+    let vw = [v.x, v.y, v.z];
+    let wp = vw.map(Fx::to_int_trunc);
+    if u.solid(wp) {
+        return (true, wp);
+    }
+    let mut best: Option<((i64, usize), [i32; 3])> = None;
+    for dz in -1..=1i32 {
+        for dy in -1..=1i32 {
+            for dx in -1..=1i32 {
+                if dx == 0 && dy == 0 && dz == 0 {
                     continue;
                 }
-                let p = [x, y, z];
-                let d = (0..3)
-                    .map(|a| ((2 * p[a]) as i32 - (2 * origin[a] + size - 1) as i32).pow(2))
-                    .sum::<i32>();
-                let key = (d, x + dims[0] * (y + dims[1] * z), p);
-                if best.is_none_or(|old| key < old) {
-                    best = Some(key);
+                let q = [wp[0] + dx, wp[1] + dy, wp[2] + dz];
+                if !u.solid(q) {
+                    continue;
+                }
+                let dist_sq: i64 = (0..3)
+                    .map(|a| {
+                        let diff = (Fx::from_int(q[a])
+                            .add(Fx::from_ratio(1, 2))
+                            .sub(vw[a])
+                            .raw()
+                            >> 20) as i64;
+                        diff * diff
+                    })
+                    .sum();
+                let ord = ((dx + 1) + 3 * ((dy + 1) + 3 * (dz + 1))) as usize;
+                let key = (dist_sq, ord);
+                if best.is_none_or(|(old, _)| key < old) {
+                    best = Some((key, q));
                 }
             }
         }
     }
-    u.world_pos(best.map_or(origin, |(_, _, p)| p))
+    match best {
+        Some((_, q)) => (true, q),
+        None => (false, wp),
+    }
+}
+
+fn core_neighbours(body: &voxel::UnitBody, p: [usize; 3], origin: [usize; 3], size: usize) -> u32 {
+    let dims = [body.vol.nx, body.vol.ny, body.vol.nz].map(usize::from);
+    let mut count = 0u32;
+    for dz in -1..=1isize {
+        for dy in -1..=1isize {
+            for dx in -1..=1isize {
+                let qx = p[0] as isize + dx;
+                let qy = p[1] as isize + dy;
+                let qz = p[2] as isize + dz;
+                if qx < 0
+                    || qy < 0
+                    || qz < 0
+                    || qx as usize >= dims[0]
+                    || qy as usize >= dims[1]
+                    || qz as usize >= dims[2]
+                {
+                    continue;
+                }
+                let (ux, uy, uz) = (qx as usize, qy as usize, qz as usize);
+                if !body.vol.get(ux, uy, uz) {
+                    continue;
+                }
+                let in_seed = ux >= origin[0]
+                    && ux < origin[0] + size
+                    && uy >= origin[1]
+                    && uy < origin[1] + size
+                    && uz >= origin[2]
+                    && uz < origin[2] + size;
+                if in_seed || body.part_at(ux, uy, uz) == voxel::Part::Core {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
+fn armour_cover_along_ray(body: &voxel::UnitBody, p: [usize; 3], shooter_local: [Fx; 3]) -> i32 {
+    let dims = [body.vol.nx, body.vol.ny, body.vol.nz].map(|d| i32::from(d));
+    let start: [Fx; 3] =
+        std::array::from_fn(|a| Fx::from_int(p[a] as i32).add(Fx::from_ratio(1, 2)));
+    let delta: [Fx; 3] = std::array::from_fn(|a| shooter_local[a].sub(start[a]));
+    let len_sq = delta.iter().fold(Fx::ZERO, |s, v| s.add(v.mul(*v)));
+    if len_sq <= Fx::ONE {
+        return 0;
+    }
+    let len = len_sq.sqrt();
+    let step = delta.map(|v| v.div(len));
+    let max_steps = len.to_int_trunc().min(48);
+    let mut cover = 0i32;
+    let mut prev = [p[0] as i32, p[1] as i32, p[2] as i32];
+    for t in 1..=max_steps {
+        let step_fx = Fx::from_int(t);
+        let q: [i32; 3] =
+            std::array::from_fn(|a| (start[a].add(step[a].mul(step_fx)).raw() >> 32) as i32);
+        if q == prev {
+            continue;
+        }
+        prev = q;
+        if (0..3).any(|a| q[a] < 0 || q[a] >= dims[a]) {
+            break;
+        }
+        let (ux, uy, uz) = (q[0] as usize, q[1] as usize, q[2] as usize);
+        if body.vol.get(ux, uy, uz) && body.part_at(ux, uy, uz) != voxel::Part::Core {
+            cover += 1;
+        }
+    }
+    cover
+}
+
+pub(super) fn aim_point(u: &RangeUnit) -> [i32; 3] {
+    aim_point_from(u, None)
+}
+
+pub(super) fn aim_point_from(u: &RangeUnit, from: Option<[Fx; 3]>) -> [i32; 3] {
+    let origin = [u.body.core.0, u.body.core.1, u.body.core.2].map(usize::from);
+    let size = usize::from(u.body.core_size);
+    let dims = [u.body.vol.nx, u.body.vol.ny, u.body.vol.nz].map(usize::from);
+    if u.removed.is_empty()
+        && u.seg_removed.is_empty()
+        && size > 0
+        && (0..3).all(|a| origin[a] + size <= dims[a])
+    {
+        let p = std::array::from_fn(|a| origin[a] + (size - 1) / 2);
+        if u.body.vol.get(p[0], p[1], p[2]) {
+            let (verified, q) = verified_world_pos(u, p);
+            if verified {
+                return q;
+            }
+        }
+    }
+    let mut cells = Vec::new();
+    for z in origin[2]..(origin[2] + size).min(dims[2]) {
+        for y in origin[1]..(origin[1] + size).min(dims[1]) {
+            for x in origin[0]..(origin[0] + size).min(dims[0]) {
+                if u.body.vol.get(x, y, z) {
+                    cells.push([x, y, z]);
+                }
+            }
+        }
+    }
+    if cells.is_empty() {
+        for z in 0..dims[2] {
+            for y in 0..dims[1] {
+                for x in 0..dims[0] {
+                    if u.body.vol.get(x, y, z)
+                        && u.body.part_at(x, y, z) == voxel::Part::Core
+                    {
+                        cells.push([x, y, z]);
+                    }
+                }
+            }
+        }
+    }
+    if cells.is_empty() {
+        return verified_world_pos(u, origin).1;
+    }
+    let mut sum2 = [0i64; 3];
+    for p in &cells {
+        for a in 0..3 {
+            sum2[a] += 2 * (p[a] as i64);
+        }
+    }
+    let count = cells.len() as i64;
+    let centroid2 = sum2.map(|s| (s / count) as i32);
+    let mut best: Option<((bool, i32, i32, i32, i32, usize), [i32; 3])> = None;
+    for p in cells {
+        let (verified, q) = verified_world_pos(u, p);
+        let cover_band = from.map_or(0, |eye| {
+            // Ballistic direct-fire shells enter at or above target height rather
+            // than rising steeply from below through open walker legs/pelvis.
+            let arrival_eye = [eye[0], eye[1].max(Fx::from_int(q[1])), eye[2]];
+            let s_local = u
+                .root_frame(p[1])
+                .local(phys::V3::new(arrival_eye[0], arrival_eye[1], arrival_eye[2]));
+            armour_cover_along_ray(&u.body, p, s_local) / 2
+        });
+        let density = core_neighbours(&u.body, p, origin, size);
+        let d_live = (0..3)
+            .map(|a| (2 * p[a] as i32 - centroid2[a]).pow(2))
+            .sum::<i32>();
+        let d_orig = (0..3)
+            .map(|a| ((2 * p[a]) as i32 - (2 * origin[a] + size - 1) as i32).pow(2))
+            .sum::<i32>();
+        let lin = p[0] + dims[0] * (p[1] + dims[1] * p[2]);
+        let key = (!verified, cover_band, -(density as i32), d_live, d_orig, lin);
+        if best.is_none_or(|(old, _)| key < old) {
+            best = Some((key, q));
+        }
+    }
+    best.map_or_else(|| verified_world_pos(u, origin).1, |(_, q)| q)
 }
 impl BlastRange {
     /// Economy controller uses the same validation and movement executor as
@@ -1526,7 +1711,7 @@ impl BlastRange {
         // Replay supplies both sides from the SAME recorded AfterMotion phase.
         // It never falls back to policy, including rejected external plans.
         let replay = battle.ai_step.as_mut().and_then(|step| step.input.take());
-        let (rules, allied_rules) = if let Some(input) = replay {
+        let (mut rules, allied_rules) = if let Some(input) = replay {
             input
         } else {
             assert!(!battle.ai_step.as_ref().is_some_and(|step| step.replay));
@@ -1548,6 +1733,17 @@ impl BlastRange {
             (rules, allied)
         };
         let supplied = battle.ai.pending.take();
+        // Whole-plan admission covers every living enemy, whereas the combat
+        // policy intentionally omits unarmed workers/disabled weapons. Include
+        // those supplied actors without assigning them unsolicited combat work.
+        // Keep the fallback in AiFrame output so replay attempts the same actors.
+        if let Some(plan) = &supplied {
+            let neutral: Vec<_> = plan.iter().filter(|d| {
+                rules.binary_search_by_key(&d.actor, |r| r.actor).is_err()
+            }).map(|d| ai::Decision { actor: d.actor, order: ai::AiOrder::Auto }).collect();
+            rules.extend(neutral);
+            rules.sort_by_key(|d| d.actor);
+        }
         if supplied.is_some() {
             if let Some(execution) = &mut battle.plan_execution {
                 execution.tick = Some(self.tick);
@@ -1556,7 +1752,7 @@ impl BlastRange {
         for fallback in rules.iter().copied() {
             let chosen = supplied
                 .as_ref()
-                .and_then(|plan| plan.iter().find(|d| d.actor == fallback.actor))
+                .and_then(|plan| plan.binary_search_by_key(&fallback.actor, |d| d.actor).ok().map(|i| &plan[i]))
                 .copied();
             let producer = if chosen.is_some() {
                 commands::Producer::EnemyPlan
@@ -2569,6 +2765,7 @@ impl BlastRange {
             trace.fill(FireGate::NoTarget);
         }
         let mut bursts = Vec::new();
+        let mut cached_laser_boxes: Option<(usize, Vec<([i32; 3], [i32; 3])>)> = None;
         for id in 0..self.units.len() {
             if b.phase == Phase::Setup
                 && !matches!(b.actors[id].order, Order::Pilot { .. } | Order::Support(_))
@@ -2751,7 +2948,13 @@ impl BlastRange {
             let mut p = if let Some(p) = a.order.point() {
                 p
             } else if let Some(other) = target {
-                aim_point(&self.units[other])
+                let eye = (!self.units[other].removed.is_empty()).then(|| {
+                    weapons::muzzles(&self.units[id], a.turret.angle)
+                        .first()
+                        .copied()
+                        .unwrap_or(from)
+                });
+                aim_point_from(&self.units[other], eye)
             } else {
                 stop_active_beam(a, kind, self.tick);
                 idle_aim::follow(&mut self.units[id], a, self.turret_limits);
@@ -2966,6 +3169,8 @@ impl BlastRange {
                     // A live route to a still usable firing point owns its
                     // destination. A brief blocked step asks navigation to
                     // repair that route, not to alternate the flank again.
+                    let mut cached_muzzle_y: Option<i32> = None;
+                    let mut old_line_clear: Option<([i32; 2], bool)> = None;
                     let retained_point = self.units[id].motion.destination.filter(|old| {
                         if target_changed || road_goal.is_some() {
                             return false;
@@ -2975,10 +3180,14 @@ impl BlastRange {
                         if x * x + z * z > i64::from(range) * i64::from(range) {
                             return false;
                         }
-                        let muzzle_y = weapons::muzzles(&self.units[id], a.turret.angle)
-                            .first()
-                            .map_or(from[1].to_int_trunc(), |m| m[1].to_int_trunc());
-                        self.firing_line_clear(id, p, *old, muzzle_y)
+                        let muzzle_y = *cached_muzzle_y.get_or_insert_with(|| {
+                            weapons::muzzles(&self.units[id], a.turret.angle)
+                                .first()
+                                .map_or(from[1].to_int_trunc(), |m| m[1].to_int_trunc())
+                        });
+                        let clear = self.firing_line_clear(id, p, *old, muzzle_y);
+                        old_line_clear = Some((*old, clear));
+                        clear
                     });
                     let standoff = if blocked_direct && weapon != Weapon::Laser {
                         (range / 3).min(200)
@@ -2991,24 +3200,30 @@ impl BlastRange {
                         from[2].add(dz.mul(approach)).to_int_trunc(),
                     ];
                     completed("orders_approach");
-                    let dest = self.firing_point(id, [p[0], p[2]], dest, b.tuning.firing_spacing);
-                    completed("orders_firing_point");
                     let dest = if let Some(old) = retained_point {
+                        completed("orders_firing_point");
                         old
-                    } else if blocked_direct || needs_detour && road_goal.is_none() {
-                        let muzzle_y = weapons::muzzles(&self.units[id], a.turret.angle)
-                            .first()
-                            .map_or(from[1].to_int_trunc(), |m| m[1].to_int_trunc());
-                        self.visible_flank(
-                            id,
-                            p,
-                            dest,
-                            muzzle_y,
-                            b.tuning.pursuit_ticks,
-                            b.tuning.firing_spacing,
-                        )
                     } else {
-                        dest
+                        let dest =
+                            self.firing_point(id, [p[0], p[2]], dest, b.tuning.firing_spacing);
+                        completed("orders_firing_point");
+                        if blocked_direct || needs_detour && road_goal.is_none() {
+                            let muzzle_y = *cached_muzzle_y.get_or_insert_with(|| {
+                                weapons::muzzles(&self.units[id], a.turret.angle)
+                                    .first()
+                                    .map_or(from[1].to_int_trunc(), |m| m[1].to_int_trunc())
+                            });
+                            self.visible_flank(
+                                id,
+                                p,
+                                dest,
+                                muzzle_y,
+                                b.tuning.pursuit_ticks,
+                                b.tuning.firing_spacing,
+                            )
+                        } else {
+                            dest
+                        }
                     };
                     completed("orders_flank");
                     // Keep a usable firing position when our own detour changes
@@ -3028,10 +3243,13 @@ impl BlastRange {
                             let z = i64::from(p[2]) - i64::from(old[1]);
                             x * x + z * z <= i64::from(range) * i64::from(range)
                         });
-                    let changed = if road_goal.is_some() {
-                        target_changed
-                            || needs_detour
-                            || self.units[id].motion.destination != Some(dest)
+                    let may_reissue = needs_detour
+                        || target_changed
+                        || self.units[id].motion.destination != Some(dest);
+                    let changed = if !may_reissue {
+                        false
+                    } else if road_goal.is_some() {
+                        true
                     } else if following_prefix && !target_changed && !needs_detour {
                         false
                     } else {
@@ -3045,13 +3263,20 @@ impl BlastRange {
                                 // Only a visible lateral point can use the full
                                 // weapon reach rather than the radial standoff.
                                 let reach = if blocked_direct && weapon != Weapon::Laser {
-                                    let muzzle_y =
-                                        weapons::muzzles(&self.units[id], a.turret.angle)
-                                            .first()
-                                            .map_or(from[1].to_int_trunc(), |m| {
-                                                m[1].to_int_trunc()
+                                    let clear = match old_line_clear {
+                                        Some((prev, clear)) if prev == old => clear,
+                                        _ => {
+                                            let muzzle_y = *cached_muzzle_y.get_or_insert_with(|| {
+                                                weapons::muzzles(&self.units[id], a.turret.angle)
+                                                    .first()
+                                                    .map_or(from[1].to_int_trunc(), |m| {
+                                                        m[1].to_int_trunc()
+                                                    })
                                             });
-                                    if self.firing_line_clear(id, p, old, muzzle_y) {
+                                            self.firing_line_clear(id, p, old, muzzle_y)
+                                        }
+                                    };
+                                    if clear {
                                         range
                                     } else {
                                         200
@@ -3066,11 +3291,7 @@ impl BlastRange {
                     // live route or its sight line. It only restarts work from
                     // a moved origin and can send the hull back into a pocket.
                     // A block or a different target still needs a fresh search.
-                    if changed
-                        && (needs_detour
-                            || target_changed
-                            || self.units[id].motion.destination != Some(dest))
-                    {
+                    if changed && may_reissue {
                         completed("orders_retarget_setup");
                         // A fine search starts here while what the motion
                         // phase left of the tick's start allowance holds a
@@ -3187,10 +3408,12 @@ impl BlastRange {
                     .copied()
                 {
                     let electric = supported_lightning(support[id]);
-                    let trace = self.laser_ray(
+                    let trace = self.laser_ray_cached(
                         from,
                         p,
                         Some(id),
+                        id,
+                        &mut cached_laser_boxes,
                         &electric,
                         config,
                         (&mut completed, physics),
@@ -3245,10 +3468,12 @@ impl BlastRange {
                             let Some((_, _, target)) = next else {
                                 break;
                             };
-                            let arc = self.laser_ray(
+                            let arc = self.laser_ray_cached(
                                 end,
                                 target,
                                 Some(previous),
+                                id,
+                                &mut cached_laser_boxes,
                                 &secondary,
                                 config,
                                 (&mut completed, physics),
@@ -3337,29 +3562,23 @@ impl BlastRange {
                 walker_laser.heat = (walker_laser.heat / 2).max(1);
                 walker_laser.fracture_j = (walker_laser.fracture_j / 2).max(1);
                 let targets = walker_goals.expect("walker goals are chosen before firing");
-                let current = self.units[id].arm_targets.expect("walker arms are aimed before firing");
                 let mut fired = false;
                 for (arm, from) in muzzles {
                     let target = targets[arm];
-                    if (0..3).any(|axis| (i64::from(current[arm][axis]) - i64::from(target[axis])).abs()
-                        > i64::from(super::walker::tuning().arm_fire_error_units)) {
-                        continue;
-                    }
                     let axis = self.units[id].seg_frames[13 + arm * 4].x;
                     let delta = phys::V3::new(Fx::from_int(target[0]).sub(from[0]),
                         Fx::from_int(target[1]).sub(from[1]), Fx::from_int(target[2]).sub(from[2]));
+                    if !super::walker::bore_ready(axis, delta) { continue; }
                     let length = delta.len_sq().sqrt();
                     if length <= Fx::ONE || axis.dot(delta).div(length) < Fx::from_ratio(998, 1000) {
                         continue;
                     }
                     // Never send a ray into terrain while an arm is still slewing
                     // or its independently chosen target is behind the ground.
-                    if target[0] < 0 || target[2] < 0 || target[0] >= self.world.nx as i32
-                        || target[2] >= self.world.nz as i32
-                        || target[1] < self.world.column_ceiling(target[0] as u32, target[2] as u32) as i32
-                        || !voxel::los::line_of_sight(&self.world,
-                            (from[0].to_int_trunc(), from[1].to_int_trunc(), from[2].to_int_trunc()),
-                            (target[0], target[1], target[2])).clear {
+                    if !super::walker::world_target_clear(
+                        &self.world, from, target, a.order.point().is_some(),
+                        &self.navigation.fell.materials,
+                    ) {
                         continue;
                     }
                     let length = length.add(Fx::from_int(4)).min(Fx::from_int(walker_laser.range));
@@ -3368,10 +3587,12 @@ impl BlastRange {
                     let end = [from[0].add(axis.x.mul(length)).to_int_trunc(),
                         from[1].add(axis.y.mul(length)).to_int_trunc(),
                         from[2].add(axis.z.mul(length)).to_int_trunc()];
-                    let trace = self.laser_ray(
+                    let trace = self.laser_ray_cached(
                         from,
                         end,
                         Some(id),
+                        id,
+                        &mut cached_laser_boxes,
                         &arm_laser,
                         config,
                         (&mut completed, physics),
@@ -3434,10 +3655,12 @@ impl BlastRange {
                     // the same surface. Publish only the last visual trace.
                     let mut last = None;
                     for _ in 0..samples {
-                        last = Some(self.laser_ray(
+                        last = Some(self.laser_ray_cached(
                             from,
                             p,
                             Some(id),
+                            id,
+                            &mut cached_laser_boxes,
                             &tuning.laser,
                             config,
                             (&mut completed, physics),
@@ -4158,6 +4381,13 @@ impl BlastRange {
 #[cfg(test)]
 #[path = "range_wave_admission_tests.rs"]
 mod wave_admission_tests;
+#[cfg(test)]
+#[path = "range_multi_crater_tests.rs"]
+mod multi_crater_tests;
+
+#[cfg(test)]
+#[path = "range_walking_blast_tests.rs"]
+mod walking_blast_tests;
 
 #[cfg(test)]
 #[path = "range_wave_budget_tests.rs"]

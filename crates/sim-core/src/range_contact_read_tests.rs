@@ -1252,3 +1252,136 @@ fn coarse_contact_materials_match_dense_after_mixed_overlay_edits() {
         }
     }
 }
+
+#[test]
+fn range_height_and_bounded_column_fastpaths_match_point_material_exactly() {
+    use voxel::Generator;
+    let mut layout =
+        modding::range::RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+    layout = layout.with_ground_level(80).unwrap();
+    let gen_layout = RangeTerrain::new(true, Some(layout)).with_tree_cache([10_000, 192, 10_000]);
+    let gen_stock = RangeTerrain::new(false, None).with_tree_cache([640, 192, 640]);
+
+    for x in [
+        0u32, 65, 129, 130, 189, 190, 191, 255, 319, 320, 451, 452, 639, 640, 4824, 5230, 9600,
+    ] {
+        for z in [
+            0u32, 36, 129, 130, 189, 190, 191, 319, 320, 336, 535, 536, 639, 640, 4824, 5230, 9600,
+        ] {
+            let gen: &RangeTerrain = if x < 640 && z < 640 {
+                &gen_stock
+            } else {
+                &gen_layout
+            };
+            for (y0, len) in [(0u32, 9usize), (70, 9), (79, 1), (79, 9), (80, 16), (0, 140)] {
+                let mut col = vec![0u16; len];
+                gen.column(x, z, y0, &mut col);
+                for (dy, &actual) in col.iter().enumerate() {
+                    let y = y0 + dy as u32;
+                    let expected = gen.material(x, y, z);
+                    assert_eq!(
+                        actual, expected,
+                        "column mismatch at ({x},{y},{z}) slice y0={y0} len={len}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+
+#[test]
+fn bounded_relief_matches_legacy_nine_neighbor_generator() {
+fn legacy_far_ridge(x: u32, z: u32) -> u32 {
+    const CELL: i32 = 320;
+    let mut ridge = 0;
+    let (gx, gz) = ((x as i32) / CELL, (z as i32) / CELL);
+    for ox in -1..=1 {
+        for oz in -1..=1 {
+            let (cx, cz) = (gx + ox, gz + oz);
+            if cx < 0 || cz < 0 {
+                continue;
+            }
+            let seed =
+                (cx as u32).wrapping_mul(2_654_435_761) ^ ((cz as u32).wrapping_mul(2_246_822_519));
+            if seed.is_multiple_of(5) {
+                continue;
+            }
+            let radius = 96 + (seed >> 3) as i32 % 96;
+            let hx = cx * CELL + (seed >> 11) as i32 % CELL;
+            let hz = cz * CELL + (seed >> 19) as i32 % CELL;
+            if hx - radius < STOCK_SIDE && hz - radius < STOCK_SIDE {
+                continue;
+            }
+            let (dx, dz) = (x as i32 - hx, z as i32 - hz);
+            let r2 = radius * radius;
+            let height = 10 + (seed >> 27) as i32 % 22;
+            ridge = ridge.max(((r2 - dx * dx - dz * dz).max(0) * height / r2) as u32);
+        }
+    }
+    ridge
+}
+fn legacy_range_height(x: u32, z: u32) -> u32 {
+    let mut ridge = 0;
+    for (cx, cz, radius, height) in [
+        (65, 65, 108, 25),
+        (181, 36, 112, 32),
+        (322, 100, 111, 29),
+        (363, 319, 89, 18),
+    ] {
+        let dx = x as i32 - cx;
+        let dz = z as i32 - (cz + 128);
+        let r2 = radius * radius;
+        ridge = ridge.max(((r2 - dx * dx - dz * dz).max(0) * height / r2) as u32);
+    }
+    // Blend the wooded hills into the level range without a straight escarpment.
+    ridge = ridge * (302u32.saturating_sub(z) + x.saturating_sub(285)).min(48) / 48;
+    ridge = ridge.max(legacy_far_ridge(x, z));
+    let relief = if ridge > 0 {
+        let a = (x / 48).wrapping_mul(17) ^ (z / 48).wrapping_mul(31);
+        let b = (x / 48 + 1).wrapping_mul(17) ^ (z / 48).wrapping_mul(31);
+        let c = (x / 48).wrapping_mul(17) ^ (z / 48 + 1).wrapping_mul(31);
+        let d = (x / 48 + 1).wrapping_mul(17) ^ (z / 48 + 1).wrapping_mul(31);
+        let u = x % 48;
+        let v = z % 48;
+        ((a % 7 * (48 - u) + b % 7 * u) * (48 - v) + (c % 7 * (48 - u) + d % 7 * u) * v) / (48 * 48)
+    } else {
+        0
+    };
+    FLOOR as u32 + ridge + relief
+}
+    let mut points = std::collections::BTreeSet::new();
+    for x in (0..1100u32).step_by(11) { for z in (0..1100u32).step_by(11) { points.insert([x,z]); } }
+    for gx in [0u32,1,2,3,7,14,30] { for gz in [0u32,1,2,3,7,14,30] {
+        let seed=gx.wrapping_mul(2_654_435_761)^gz.wrapping_mul(2_246_822_519);
+        let hx=gx as i32*320+40+((seed>>8)%240) as i32;
+        let hz=gz as i32*320+40+((seed>>16)%240) as i32;
+        for dx in [-192,-191,-190,-1,0,1,189,190,191,192] {for dz in [-192,-191,-190,-1,0,1,189,190,191,192] {
+            if hx+dx>=0 && hz+dz>=0 {points.insert([(hx+dx) as u32,(hz+dz) as u32]);}
+        }}
+        for ux in [0,129,130,189,190,191,319] {for uz in [0,129,130,189,190,191,319] {points.insert([gx*320+ux,gz*320+uz]);}}
+    }}
+    for [x,z] in points {
+        assert_eq!(far_ridge(x,z),legacy_far_ridge(x,z),"far ridge {x},{z}");
+        assert_eq!(range_height(x,z),legacy_range_height(x,z),"range height {x},{z}");
+    }
+}
+
+#[test]
+fn bounded_column_preserves_spill_air_water_and_foundation_precedence() {
+    use modding::range::{RangeBlock,RangeUnitDef,RangeUnitKind};
+    for gl in [16,80] {for count in [0,2,8,9,13] {for course in [false,true] {
+        let mut r=modding::range::RangeLayout::from_ron(include_str!("../../../data/range-motion-yard.ron")).unwrap();
+        r.units=vec![RangeUnitDef{kind:RangeUnitKind::PowerPlantT1,at:[48,16,48],allied:true,weapon:None}];r.blocks.clear();
+        if course {let c=r.course.as_mut().unwrap();c.min=[0,0];c.max=[96,96];c.patrols.clear();} else {r.course=None;}
+        for i in 0..count {r.blocks.push(RangeBlock{min:[30,4+i,30],max:[70,34+i,70],material:if i%3==0 {0}else{2+(i%2) as u16}});}
+        r.blocks.push(RangeBlock{min:[30,0,30],max:[70,64,70],material:modding::water::MATERIAL});
+        let gen=RangeTerrain::new(true,Some(r.with_ground_level(gl).unwrap()));
+        for x in [29u32,30,40,48,69,70] {for z in [29u32,30,48,69,70] {
+            for y0 in [0,gl as u32-2,gl as u32-1,gl as u32,gl as u32+1] {for len in [0usize,1,2,9,16,80] {
+                let mut out=vec![65535;len];gen.column(x,z,y0,&mut out);
+                for (dy,actual) in out.into_iter().enumerate() {assert_eq!(actual,gen.material(x,y0+dy as u32,z),"gl={gl} count={count} course={course} x={x} z={z} y0={y0} len={len} dy={dy}");}
+            }}
+        }}
+    }}}
+}

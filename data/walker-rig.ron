@@ -7,9 +7,18 @@
     turn_step_degrees: 32,
     turn_deg_s: 45,
     arm_turn_deg_s: 60,
+    arm_settle_ticks: 6,
     arm_pitch_limit_degrees: 35,
     // Visible elbow flex. Near/low targets fold the arm; high targets open it.
     arm_elbow_rest_degrees: 55,
     arm_elbow_swing_degrees: 20,
     arm_fire_error_units: 1,
+    // Keep the 15m biped torso upright across slopes: wide stance supports,
+    // high rotational inertia and an 8-degree torso tilt ceiling.
+    support_x_cm: 240,
+    support_z_cm: 200,
+    max_tilt_pct: 99,
+    inertia: 600,
+    settle_tilt_pct: 15,
+    body_sway_pct: 8,
 )

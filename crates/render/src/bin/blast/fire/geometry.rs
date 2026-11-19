@@ -115,7 +115,12 @@ fn siege_ports(buf: &mut MeshBuf, unit: &sim_core::blast::RangeUnit, charge: f32
     }
     // A smaller, recessed light in the open muzzle accompanies the charge.
     let anchor = [109, 13, 27];
-    if !unit.removed.contains(&anchor) && unit.body.vol.get(109, 13, 27) {
+    let (muzzle_body, muzzle_frame, offset) = if unit.articulated_siege() {
+        (&unit.body.segments[0].body, unit.muzzle_frame(&unit.pose, unit.turret_delta, unit.turret_pitch), [71, 10, 20])
+    } else { (&unit.body, frame, [0, 0, 0]) };
+    let local = std::array::from_fn::<_, 3, _>(|a| anchor[a] - offset[a]);
+    if !unit.seg_gone.first().copied().unwrap_or(false)
+        && muzzle_body.vol.get(local[0], local[1], local[2]) {
         let points = [
             [1101, 122, 254],
             [1101, 148, 254],
@@ -123,7 +128,7 @@ fn siege_ports(buf: &mut MeshBuf, unit: &sim_core::blast::RangeUnit, charge: f32
             [1101, 122, 306],
         ]
         .map(|p| {
-            let v = frame.world(p.map(|v| fx::Fx::from_ratio(v, 10)));
+            let v = muzzle_frame.world(std::array::from_fn(|a| fx::Fx::from_ratio(p[a] - offset[a] as i32 * 10, 10)));
             [
                 v.x.to_f64_lossy() as f32,
                 v.y.to_f64_lossy() as f32,

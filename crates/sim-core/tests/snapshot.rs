@@ -157,20 +157,9 @@ fn refuses_foreign_headers_of(bytes: &[u8]) {
             "принята версия {foreign}"
         );
     }
-    // Флаг настроек оружия — байт, а не логическое «не ноль»:
-    // любое значение, кроме нуля и единицы, — порча. Он стоит сразу
-    // за версией, флагами сцены и тиком выстрела начиная с версии 59.
-    let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-    let (inner, flag) = if version == 66 {
-        (u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 22)
-    } else {
-        (version, 18)
-    };
-    if inner >= 59 {
-        let mut b = bytes.to_vec();
-        b[flag] = 2;
-        assert!(BlastRange::restore(config(), &b).is_none());
-    }
+    // The dedicated live-wave test below checks the actual configuration
+    // flag at a known offset. Support/geometry envelopes have variable
+    // lengths, so an arbitrary byte18 is not that flag in this snapshot.
     for cut in [0, 4] {
         assert!(
             BlastRange::restore(config(), &bytes[..cut]).is_none(),

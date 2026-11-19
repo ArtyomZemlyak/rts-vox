@@ -21,7 +21,7 @@ struct Vertex {
 }
 // Bevy's mesh allocator does not allocate a slab for an empty vertex buffer.
 // A degenerate triangle is invisible but keeps the GPU allocation valid.
-fn section_mesh(b: &MeshBuf) -> Mesh {
+pub(super) fn section_mesh(b: &MeshBuf) -> Mesh {
     if !b.idx.is_empty() {
         let mut m = mesh(b);
         m.asset_usage |= RenderAssetUsages::MAIN_WORLD;
@@ -194,9 +194,7 @@ pub(super) fn clip_mesh(
             } else if let Some(value) = sampled.get(&cell) {
                 *value
             } else {
-                let value = if sampled.len() >= 8192 {
-                    metrics::UNKNOWN
-                } else {
+                let value = {
                     [0.2, 0.5, 1.0]
                         .into_iter()
                         .find_map(|offset| {
@@ -208,9 +206,7 @@ pub(super) fn clip_mesh(
                         })
                         .unwrap_or(metrics::UNKNOWN)
                 };
-                if sampled.len() < 8192 {
-                    sampled.insert(cell, value);
-                }
+                sampled.insert(cell, value);
                 value
             };
             a.color = Vec4::from(colour);
@@ -255,7 +251,7 @@ pub(super) fn clip_mesh(
     Some(section_mesh(&out))
 }
 
-fn clip_key(t: &Transform, plane: Vec4) -> [u32; 14] {
+pub(super) fn clip_key(t: &Transform, plane: Vec4) -> [u32; 14] {
     [
         t.translation.x,
         t.translation.y,
@@ -350,6 +346,10 @@ pub fn clip_units(
             .clone()
     });
     for (entity, t, mut current, mut material, aabb, witness, gun, mut clipped) in &mut query {
+        let source_changed = clipped.as_ref().is_some_and(|c| current.0 != c.result);
+        if source_changed {
+            let c = clipped.as_mut().unwrap(); c.source = current.0.clone(); c.bounds = aabb.cloned();
+        }
         if let (Some(c), Some(w), Some(art)) = (clipped.as_mut(), witness, art.as_ref()) {
             if scene.sim.units.get(w.0).is_some_and(|u| !u.status.alive) {
                 burned_source(&mut c.material, &art.materials, &art.burned_materials);
@@ -394,15 +394,14 @@ pub fn clip_units(
             .filter(|_| mode > 0)
             .map(|(u, id)| (&scene.sim, u, id, mode));
         let key = (
-            if plane.is_some() {
-                clip_key(t, plane_value)
-            } else {
-                [0; 14]
-            },
+            clip_key(t, plane_value),
             mode,
             metric_epoch(mode, scene.sim.tick, scene.sim.thermals.hot()),
         );
         if let Some(mut c) = clipped {
+            // The simulation's mesh publication may replace a damaged source
+            // while the diagnostic view is active. Never restore the old hull.
+            if source_changed { current.0 = c.result.clone(); }
             if let Some(m) = material.as_mut() {
                 let wanted = diagnostic.as_ref().or(c.material.as_ref());
                 if let Some(wanted) = wanted {
@@ -411,7 +410,7 @@ pub fn clip_units(
                     }
                 }
             }
-            if c.key == key {
+            if c.key == key && !source_changed {
                 continue;
             }
             if let Some(result) = if side < 0 {
@@ -453,10 +452,17 @@ pub fn clip_units(
 pub struct UnitSectionCap;
 #[derive(Default)]
 pub struct CapCache {
+    work: Option<CapWork>,
     key: Option<(u64, u32, [i32; 3], u8, bool, u8)>,
     mesh: Option<Handle<Mesh>>,
     entity: Option<Entity>,
     material: Option<Handle<StandardMaterial>>,
+}
+
+struct CapWork {
+    key: (u64, u32, [i32; 3], u8, bool, u8),
+    next: usize,
+    output: MeshBuf,
 }
 
 fn unit_cap_colour(unit: &sim_core::blast::RangeUnit, part: usize, local: [usize; 3]) -> [f32; 4] {
@@ -497,6 +503,7 @@ pub fn unit_caps(
             }
         }
         cache.key = None;
+        cache.work = None;
         return;
     }
     let s = &lab.tools.section;
@@ -515,7 +522,14 @@ pub fn unit_caps(
     let u = (axis + 1) % 3;
     let v = (axis + 2) % 3;
     let point = s.point();
-    let mut out = MeshBuf::default();
+    let compatible = |other: &(u64,u32,[i32;3],u8,bool,u8)| {
+        other.0==key.0 && other.2==key.2 && other.3==key.3 && other.4==key.4 && other.5==key.5
+    };
+    if cache.key.as_ref().is_some_and(|old| !compatible(old)) {
+        if let Some(entity)=cache.entity { if let Ok(mut shown)=visibility.get_mut(entity) { *shown=Visibility::Hidden; } }
+    }
+    let mut work=cache.work.take().filter(|w| compatible(&w.key)).unwrap_or(CapWork {key,next:0,output:MeshBuf::default()});
+    let mut out=std::mem::take(&mut work.output);
     let mut budget = 32768usize;
     for (id, unit) in scene
         .sim
@@ -523,17 +537,19 @@ pub fn unit_caps(
         .iter()
         .chain((!scene.sim.point_gun()).then_some(&scene.sim.gun))
         .enumerate()
+        .skip(work.next)
     {
+        work.next=id+1;
         let (lo, hi) = unit.bounds();
         let sample_axis = point[axis] - i32::from(!s.positive);
         if sample_axis < lo[axis] || sample_axis > hi[axis] {
             continue;
         }
         let area = (hi[u] - lo[u] + 1).max(0) as usize * (hi[v] - lo[v] + 1).max(0) as usize;
-        if area > budget {
-            continue;
-        }
-        budget -= area;
+        // A complete large unit gets its own frame. Remaining units keep
+        // their cursor instead of being permanently omitted by the budget.
+        if area > budget && budget < 32768 { work.next=id; break; }
+        budget=budget.saturating_sub(area);
         for j in lo[v]..=hi[v] {
             for i in lo[u]..=hi[u] {
                 let mut cell = [0; 3];
@@ -568,6 +584,9 @@ pub fn unit_caps(
             }
         }
     }
+    let count=scene.sim.units.len()+usize::from(!scene.sim.point_gun());
+    if work.next<count { work.output=out; cache.work=Some(work); return; }
+    let completed_key=work.key;
     let material = cache
         .material
         .get_or_insert_with(|| {
@@ -599,7 +618,7 @@ pub fn unit_caps(
             *vis = Visibility::Visible;
         }
     }
-    cache.key = Some(key);
+    cache.key = Some(completed_key);
 }
 
 pub struct State {
@@ -1055,8 +1074,12 @@ mod tests {
                 .0,
             original_material
         );
+        let newer=app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh(&b));
+        app.world_mut().get_mut::<Mesh3d>(entity).unwrap().0=newer.clone();
+        app.update();
         app.world_mut().resource_mut::<Laboratory>().tools.metric = 0;
         app.update();
+        assert_eq!(app.world().get::<Mesh3d>(entity).unwrap().0,newer);
         assert_eq!(
             app.world()
                 .get::<MeshMaterial3d<StandardMaterial>>(entity)
@@ -1064,7 +1087,6 @@ mod tests {
                 .0,
             original_material
         );
-        assert_eq!(app.world().get::<Mesh3d>(entity).unwrap().0, source);
         assert_eq!(app.world().resource::<Scene>().sim.state_hash(), before);
     }
 

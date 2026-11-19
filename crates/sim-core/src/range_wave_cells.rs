@@ -270,10 +270,13 @@ pub(super) struct BodyMap {
 impl BodyMap {
     /// The entries of wave cell `index`, as a range of `entries`.
     pub(super) fn range(&self, index: u32) -> (usize, usize) {
-        let index = u64::from(index);
-        let start = self.entries.partition_point(|e| e >> 32 < index);
-        let end = self.entries.partition_point(|e| e >> 32 <= index);
-        (start, end - start)
+        let lo = u64::from(index) << 32;
+        let start = self.entries.partition_point(|&e| e < lo);
+        // A resumed contact must not walk the whole cell's entries again.
+        // Inclusive packed upper bounds also admit the last u32 cell index.
+        let hi = lo | u64::from(u32::MAX);
+        let len = self.entries[start..].partition_point(|&e| e <= hi);
+        (start, len)
     }
     pub(super) fn contact(&self, k: usize) -> Contact {
         let v = self.entries[k] as u32;
@@ -411,8 +414,23 @@ fn bucket(
     reaches: impl Fn([i32; 3]) -> bool,
     out: &mut Vec<u64>,
 ) {
-    let min = [0, layers[0] as i32, 0];
-    let max = [body.vol.nx as i32, layers[1] as i32, body.vol.nz as i32];
+    let (dom_lo, dom_hi) = candidate_box(
+        body,
+        frame,
+        layers,
+        grid.origin,
+        (grid.n as i32).saturating_mul(grid.edge),
+    );
+    let min = [
+        dom_lo[0].saturating_sub(1).max(0),
+        dom_lo[1].saturating_sub(1).max(layers[0] as i32),
+        dom_lo[2].saturating_sub(1).max(0),
+    ];
+    let max = [
+        dom_hi[0].saturating_add(1).min(body.vol.nx as i32),
+        dom_hi[1].saturating_add(1).min(layers[1] as i32),
+        dom_hi[2].saturating_add(1).min(body.vol.nz as i32),
+    ];
     if (0..3).any(|a| min[a] >= max[a]) {
         return;
     }
@@ -425,9 +443,12 @@ fn bucket(
     let shift = (grid.edge > 0 && (grid.edge as u32).is_power_of_two())
         .then(|| 32 + grid.edge.trailing_zeros());
     let origin = grid.origin.map(|v| i64::from(v) << 32);
-    // The box of the last owning cell asked: neighbours share it.
-    let mut last: Option<OwnerBox> = None;
+    // Keep both the immediate run's cell and a small direct-mapped table of
+    // wave-cell candidate boxes so sweeping X across successive Y/Z rows does
+    // not recompute candidate_box at every cell boundary.
+    let mut last: Option<(u32, OwnerBox)> = None;
     let mut last_low = [0i64; 3];
+    let mut table = [(u32::MAX, [0i32; 3], [0i32; 3], false); 64];
     for (z, dz) in (min[2]..max[2]).zip(&tz) {
         let plane = frame.base.add(*dz);
         for (y, dy) in (min[1]..max[1]).zip(&ty) {
@@ -438,7 +459,7 @@ fn bucket(
                 // A run of neighbouring hull voxels often shares its owning
                 // wave cell. Check the exact half-open fixed-point box before
                 // repeating division; binary edges keep the cheaper old shifts.
-                let (cell, lo, hi, admitted) = if shift.is_none()
+                let (cell_idx, (_, lo, hi, admitted)) = if shift.is_none()
                     && last.is_some()
                     && (0..3).all(|a| (w[a].wrapping_sub(last_low[a]) as u64) < span as u64)
                 {
@@ -454,27 +475,39 @@ fn bucket(
                     if cell.iter().any(|&c| c < 0 || c as usize >= grid.n) {
                         continue;
                     }
-                    let (lo, hi, admitted) = match last {
-                        Some((c, lo, hi, admitted)) if c == cell => (lo, hi, admitted),
+                    let idx = grid.index(cell);
+                    let owner_box = match last {
+                        Some((last_idx, owner_box)) if last_idx == idx => owner_box,
                         _ => {
-                            let low: [i32; 3] =
-                                std::array::from_fn(|a| grid.origin[a] + cell[a] * grid.edge);
-                            let (lo, hi) = candidate_box(body, frame, layers, low, grid.edge);
-                            let admitted = reaches(low);
-                            last = Some((cell, lo, hi, admitted));
+                            let slot = (idx.wrapping_mul(0x9e37_79b9) >> 26) as usize;
+                            let entry = &mut table[slot];
+                            let (lo, hi, admitted) = if entry.0 == idx {
+                                (entry.1, entry.2, entry.3)
+                            } else {
+                                let low: [i32; 3] =
+                                    std::array::from_fn(|a| grid.origin[a] + cell[a] * grid.edge);
+                                let (lo, hi) = candidate_box(body, frame, layers, low, grid.edge);
+                                let admitted = reaches(low);
+                                *entry = (idx, lo, hi, admitted);
+                                (lo, hi, admitted)
+                            };
                             if shift.is_none() {
+                                let low: [i32; 3] =
+                                    std::array::from_fn(|a| grid.origin[a] + cell[a] * grid.edge);
                                 last_low = low.map(|v| i64::from(v) << 32);
                             }
-                            (lo, hi, admitted)
+                            let owner_box = (cell, lo, hi, admitted);
+                            last = Some((idx, owner_box));
+                            owner_box
                         }
                     };
-                    (cell, lo, hi, admitted)
+                    (idx, owner_box)
                 };
                 let p = [x, y, z];
                 if admitted && (0..3).all(|a| p[a] >= lo[a] && p[a] < hi[a]) {
                     let packed =
                         (layer as u32) << 24 | (z as u32) << 16 | (y as u32) << 8 | x as u32;
-                    out.push(u64::from(grid.index(cell)) << 32 | u64::from(packed));
+                    out.push(u64::from(cell_idx) << 32 | u64::from(packed));
                 }
             }
         }
@@ -669,4 +702,20 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn body_map_range_matches_sorted_reference_at_maximum_index_and_long_runs() {
+        use super::BodyMap;
+        for count in [0,1,17,4096] {
+            let mut entries:Vec<_>=(0..count).map(|i| (u64::from(7u32)<<32)|i as u64).collect();
+            entries.extend([0,1,(u64::from(u32::MAX-1)<<32)|3,u64::MAX]);entries.sort_unstable();
+            let map=BodyMap{sizes:vec![],entries};
+            for index in [0,1,6,7,8,65,u32::MAX-1,u32::MAX] {
+                let start=map.entries.iter().position(|e| e>>32>=u64::from(index)).unwrap_or(map.entries.len());
+                let len=map.entries.iter().filter(|e| **e>>32==u64::from(index)).count();
+                assert_eq!(map.range(index),(start,len),"count={count} index={index}");
+            }
+        }
+        assert_eq!(BodyMap{sizes:vec![],entries:vec![]}.range(u32::MAX),(0,0));
+    }
+
 }

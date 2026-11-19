@@ -4,10 +4,11 @@ use bevy::camera::RenderTarget;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::ui::FocusPolicy;
 use bevy::window::{CursorGrabMode, CursorOptions};
-use panel::theme;
+use panel::theme::service as theme;
 #[path = "frontend_skin.rs"]
 mod skin;
 pub use skin::sync as skin_sync;
+pub(super) use skin::{readability,ReadableInk};
 
 /// Bevy's atmosphere probes need an active 3D view to allocate their shared
 /// GPU uniforms. A tiny offscreen target keeps those resources valid while
@@ -104,8 +105,21 @@ impl Menu {
             focus: if open {1}else{0},
         }
     }
+    pub(super) fn signal_key(&self)->u8 {self.page as u8}
     pub fn shown(&self) -> bool {
         self.page != Page::Session
+    }
+    /// Direct page entry for native captures; controls use the normal menu state.
+    pub fn with_capture_page(mut self, page: Option<&str>) -> Self {
+        if let Some(page) = page {
+            self = Self::new(true);
+            self.page = match page {
+                "home" => Page::Home, "room" => Page::BattleRoom,
+                "help" => Page::Help, "settings" => Page::Settings,
+                _ => panic!("invalid --menu-page"),
+            };
+        }
+        self
     }
     pub fn settings(&self) -> bool {
         self.page == Page::Settings
@@ -141,7 +155,7 @@ impl Menu {
 }
 
 pub fn requested(args: &[String]) -> bool {
-    if args.iter().any(|a| a == "--main-menu") {
+    if args.iter().any(|a| a == "--main-menu" || a == "--menu-page") {
         return true;
     }
     !args.iter().any(|a| {
@@ -363,6 +377,7 @@ pub fn input(
 
 fn text(p: &mut ChildSpawnerCommands, font: &TextFont, value: &str, size: f32, color: Color) {
     p.spawn((
+        skin::ReadableInk(size),
         Text::new(value),
         TextFont {
             font_size: FontSize::Px(size),
@@ -372,9 +387,14 @@ fn text(p: &mut ChildSpawnerCommands, font: &TextFont, value: &str, size: f32, c
     ));
 }
 fn button(p: &mut ChildSpawnerCommands, font: &TextFont, label: &str, action: Action) -> Entity {
+    button_styled(p,font,label,action,panel::theme::Style::Service)
+}
+fn button_styled(p: &mut ChildSpawnerCommands, font: &TextFont, label: &str, action: Action, style: panel::theme::Style) -> Entity {
+    let palette=style.palette();
     let mut node = p.spawn((
         Button,
         action,
+        style,
         Node {
             min_height: px(48),
             padding: UiRect::axes(px(20), px(12)),
@@ -383,11 +403,11 @@ fn button(p: &mut ChildSpawnerCommands, font: &TextFont, label: &str, action: Ac
             border: UiRect::all(px(1)),
             ..default()
         },
-        BackgroundColor(theme::BUTTON),
-        BorderColor::all(theme::FRAME),
+        BackgroundColor(palette.button),
+        BorderColor::all(palette.frame),
     ));
     node.with_children(|p| {
-        let mut text = p.spawn((Text::new(label), TextFont { font_size: FontSize::Px(16.0), ..font.clone() }, TextColor(theme::TEXT)));
+        let mut text = p.spawn((skin::ReadableInk(16.),Text::new(label), TextFont { font_size: FontSize::Px(16.0), ..font.clone() }, TextColor(palette.text)));
         let field = match action {
             Action::RoomPosition => Some(0), Action::RoomPlayerStock => Some(1),
             Action::RoomEnemyStock => Some(2), Action::RoomSpectator => Some(3), _ => None,
@@ -397,7 +417,7 @@ fn button(p: &mut ChildSpawnerCommands, font: &TextFont, label: &str, action: Ac
     node.id()
 }
 pub fn entry(p: &mut ChildSpawnerCommands, font: &TextFont) {
-    let id = button(p, font, "Меню", Action::Menu);
+    let id = button_styled(p, font, "Меню", Action::Menu,panel::theme::Style::Pixel);
     p.commands().entity(id).insert(Node {
         min_height: px(36),
         padding: UiRect::axes(px(9), px(6)),
@@ -412,11 +432,41 @@ fn content() -> Node {
         width: percent(88),
         max_width: px(1240),
         flex_direction: FlexDirection::Column,
-        row_gap: px(24),
+        row_gap: px(22),
         padding: UiRect::all(px(36)),
         border: UiRect::all(px(1)),
         ..default()
     }
+}
+
+fn page_title(p: &mut ChildSpawnerCommands, font: &TextFont, index: &str, title: &str, style: panel::theme::Style) {
+    let palette=style.palette();
+    panel::theme::corners_for(p,style);
+    text(p, font, index, 13., palette.muted);
+    p.spawn((skin::ReadableInk(38.),Text::new(title), TextFont { font_size: FontSize::Px(38.), ..font.clone() },
+        bevy::text::LetterSpacing::Px(4.), TextColor(palette.text)));
+    p.spawn((Node { width: percent(100), height: px(1), ..default() },
+        BackgroundColor(palette.frame), Pickable::IGNORE));
+}
+
+fn side_card(p: &mut ChildSpawnerCommands, font: &TextFont, pixel: &TextFont, enemy: bool) {
+    p.spawn((Node { flex_grow: 1., flex_basis: px(0), padding: UiRect::all(px(22)),
+        flex_direction: FlexDirection::Column, row_gap: px(16), border: UiRect::left(px(2)),
+        ..default() }, BackgroundColor(panel::theme::BUTTON),
+        BorderColor::all(if enemy { panel::theme::DANGER } else { panel::theme::FRAME })))
+        .with_children(|p| {
+            panel::theme::corners(p);
+            text(p, pixel, if enemy { "02 / ПРОТИВНИК" } else { "01 / ВАША СТОРОНА" }, 16., if enemy { panel::theme::DANGER } else { panel::theme::AMBER });
+            text(p, font, if enemy { "ИСКУССТВЕННЫЙ ИНТЕЛЛЕКТ" } else { "КОМАНДИР" }, 24., panel::theme::TEXT);
+            if enemy {
+                button_styled(p, font, "Масса ИИ: 500", Action::RoomEnemyStock,panel::theme::Style::Pixel);
+                text(p, font, "Строит базу, добывает ресурсы и управляет армией.", 16., panel::theme::MUTED);
+            } else {
+                button_styled(p, font, "Позиция: северо-запад", Action::RoomPosition,panel::theme::Style::Pixel);
+                button_styled(p, font, "Масса: 500", Action::RoomPlayerStock,panel::theme::Style::Pixel);
+                button_styled(p, font, "Управление: игрок", Action::RoomSpectator,panel::theme::Style::Pixel);
+            }
+        });
 }
 
 pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont, fonts: &mut Assets<Font>, images: &mut Assets<Image>) {
@@ -428,35 +478,42 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont, fonts: &m
         .with_children(|root| {
             skin::backdrop(root,&assets);
             skin::home(root,&assets,font);
-            root.spawn((Part(Page::BattleRoom), content(), BackgroundColor(Color::srgba(0.015,0.033,0.043,0.96)), BorderColor::all(theme::FRAME))).with_children(|p| {
-                text(p, font, "НАСТРОЙКА СРАЖЕНИЯ", 40.0, theme::TEXT);
-                text(p, font, "КАРТА   Лесной полигон · 1 карта доступна", 21.0, theme::TEXT);
-                text(p, font, "СТОРОНА 1  /  ИГРОК", 18.0, theme::ACCENT);
-                p.spawn(Node { column_gap: px(12), row_gap: px(8), flex_wrap: FlexWrap::Wrap, ..default() }).with_children(|p| {
-                    button(p, font, "Позиция: северо-запад", Action::RoomPosition);
-                    button(p, font, "Масса: 500", Action::RoomPlayerStock);
-                    button(p, font, "Управление: игрок", Action::RoomSpectator);
+            root.spawn((Part(Page::BattleRoom),ui_motion::Target::panel(ui_motion::Role::Panel),panel::theme::Style::Pixel, content(), BackgroundColor(panel::theme::PANEL), BorderColor::all(panel::theme::FRAME))).with_children(|p| {
+                page_title(p, font, "С–07 / ПОДГОТОВКА ОПЕРАЦИИ", "НАСТРОЙКА СРАЖЕНИЯ",panel::theme::Style::Pixel);
+                text(p, font, "ЛЕСНОЙ ПОЛИГОН    /    1 КАРТА ДОСТУПНА", 18.0, panel::theme::MUTED);
+                p.spawn(Node { column_gap: px(24), align_items: AlignItems::Stretch, ..default() }).with_children(|p| {
+                    side_card(p, font, &assets.pixel, false);
+                    side_card(p, font, &assets.pixel, true);
                 });
-                text(p, font, "СТОРОНА 2  /  ПРОТИВНИК: ИИ", 18.0, theme::ACCENT);
+                text(p, font, "На старте у каждой стороны один командир. ИИ строит базу и добывает ресурсы.\nПока доступны один противник, две враждующие стороны и единая фракция; отдельные команды и фракции появятся позже.", 16.0, panel::theme::MUTED);
                 p.spawn(Node { column_gap: px(12), row_gap: px(8), flex_wrap: FlexWrap::Wrap, ..default() }).with_children(|p| {
-                    button(p, font, "Масса ИИ: 500", Action::RoomEnemyStock);
-                });
-                text(p, font, "На старте у каждой стороны один командир. ИИ строит базу и добывает ресурсы.\nПока доступны один противник, две враждующие стороны и единая фракция; отдельные команды и фракции появятся позже.", 16.0, theme::MUTED);
-                p.spawn(Node { column_gap: px(12), row_gap: px(8), flex_wrap: FlexWrap::Wrap, ..default() }).with_children(|p| {
-                    button(p, font, "НАЧАТЬ БОЙ", Action::StartPreparedBattle);
-                    button(p, font, "← Главное меню", Action::Back);
+                    button_styled(p, font, "НАЧАТЬ БОЙ", Action::StartPreparedBattle,panel::theme::Style::Pixel);
+                    button_styled(p, font, "Главное меню", Action::Back,panel::theme::Style::Pixel);
                 });
             });
-            root.spawn((Part(Page::Help), content(), BackgroundColor(Color::srgba(0.015,0.033,0.043,0.96)), BorderColor::all(theme::FRAME))).with_children(|p| {
-                text(p, font, "КАК ИГРАТЬ", 40.0, theme::TEXT);
-                text(p, font, "Полигон — выберите испытание, технику или оружие в верхней панели.\n\nБой — ЛКМ выбирает юнитов, рамка выделяет отряд. ПКМ отдаёт приказ двигаться или атаковать.\n\nЛаборатория — выберите объект в библиотеке снизу и разместите в сцене. «Живые» включает инструменты во время симуляции.\n\nКолесо мыши — приближение. В лаборатории средняя кнопка вращает вид, Shift + средняя кнопка перемещает его.\n\nF10 открывает главное меню и приостанавливает текущую сессию. Esc сначала отменяет активный инструмент или вид от первого лица.", 20.0, theme::TEXT);
-                button(p, font, "← Главное меню", Action::Back);
+            root.spawn((Part(Page::Help), ui_motion::Target::panel(ui_motion::Role::Service), content(), BackgroundColor(theme::PANEL), BorderColor::all(theme::FRAME))).with_children(|p| {
+                page_title(p, font, "СПРАВОЧНИК / УПРАВЛЕНИЕ", "КАК ИГРАТЬ",panel::theme::Style::Service);
+                for (title, keys, description) in [
+                    ("01 / КОМАНДОВАНИЕ", "ЛКМ  ·  РАМКА  ·  ПКМ", "Выбирайте юнит или отряд. Правая кнопка отдаёт приказ двигаться либо атаковать. Панель у объекта открывает его команды и производство."),
+                    ("02 / ЛАБОРАТОРИЯ", "БИБЛИОТЕКА  ·  ЖИВЫЕ", "Выберите карточку снизу и разместите объект в сцене. «Живые» включает инструменты во время симуляции. Испытания, техника и оружие полигона доступны в верхней навигации."),
+                    ("03 / КАМЕРА И МЕНЮ", "КОЛЕСО  ·  СКМ  ·  F10  ·  ESC", "Колесо приближает. В лаборатории средняя кнопка вращает вид, Shift + средняя кнопка перемещает его. F10 открывает меню и ставит сессию на паузу. Esc отменяет инструмент или вид от первого лица."),
+                ] {
+                    p.spawn(Node { column_gap: px(24), ..default() }).with_children(|p| {
+                        p.spawn(Node { width: px(300), flex_shrink: 0., flex_direction: FlexDirection::Column,
+                            row_gap: px(10), ..default() }).with_children(|p| {
+                            text(p, font, title, 18., theme::TEXT);
+                            text(p, font, keys, 13., theme::FOCUS);
+                        });
+                        text(p, font, description, 18., theme::MUTED);
+                    });
+                }
+                button(p, font, "Главное меню", Action::Back);
             });
             root.spawn((Part(Page::Settings), Node {position_type: PositionType::Absolute,
                 top: px(32), left: percent(8), right: percent(8), align_items: AlignItems::Center,
                 justify_content: JustifyContent::SpaceBetween, ..default()})).with_children(|p| {
-                    text(p, font, "НАСТРОЙКИ", 32.0, theme::TEXT);
-                    button(p, font, "← Главное меню", Action::Back);
+                    text(p, font, "НАСТРОЙКИ", 32.0, panel::theme::TEXT);
+                    button(p, font, "Главное меню", Action::Back);
                 });
         });
 }
@@ -497,7 +554,7 @@ pub fn sync(
             Without<Resume>,
         ),
     >,
-    mut buttons: Query<(&Action, &Interaction, &mut BackgroundColor)>,
+    mut buttons: Query<(&Action, &Interaction, &mut BackgroundColor, Option<&panel::theme::Style>, Option<&mut BorderColor>),Without<skin::HomeRow>>,
     mut notice: Query<&mut Text, With<Notice>>,
     mut room_values: Query<(&RoomValue, &mut Text), Without<Notice>>,
     mut cameras: Query<(&mut Camera, Option<&GasCamera>, &mut RenderTarget), With<Camera3d>>,
@@ -545,6 +602,11 @@ pub fn sync(
     });
     if menu.shown() {
         scale.0 = (size.x / 1920.0).min(size.y / 1080.0).clamp(0.45, 2.0);
+        // Dense editable rows keep their native text and input sizes. The
+        // settings panel scrolls inside the viewport instead of halving labels.
+        if menu.settings() {
+            scale.0 = scale.0.max(1.0);
+        }
         for mut cursor in &mut cursors {
             cursor.grab_mode = CursorGrabMode::None;
             cursor.visible = true;
@@ -561,18 +623,22 @@ pub fn sync(
             n.left = px((size.x / scale.0 - width) * 0.5);
             n.width = px(width);
             n.top = px(118);
-            n.bottom = px(32);
+            n.bottom = Val::Auto;
+            n.max_height = px((size.y / scale.0 - 150.0).max(120.0));
             z.0 = 200;
         } else {
             n.left = px(310);
             n.width = px(330);
             n.top = px(76);
             n.bottom = px(224);
+            n.max_height = Val::Auto;
             z.0 = 50;
         }
     }
-    for (action, interaction, mut background) in &mut buttons {
-        background.0 = theme::button_background(*interaction, *action == Action::Resume);
+    for (action, interaction, mut background, style, border) in &mut buttons {
+        let style=style.copied().unwrap_or(panel::theme::Style::Service);
+        background.0=style.button(*interaction,*action==Action::Resume);
+        if let Some(mut border)=border {*border=BorderColor::all(style.border(*interaction!=Interaction::None||*action==Action::Resume));}
     }
     for mut t in &mut notice {
         t.0 = menu.notice.clone();
@@ -700,6 +766,21 @@ mod tests {
         assert!(app.world().resource::<Scene>().paused);
     }
     #[test]
+    fn menu_text_floor_restores_shared_buttons_when_returning_to_session() {
+        let mut app=App::new();
+        app.insert_resource(Menu::new(true)).insert_resource(UiScale(0.5))
+            .add_systems(Update,skin::readability);
+        let button=app.world_mut().spawn((skin::ReadableInk(16.),TextFont{font_size:FontSize::Px(16.),..default()})).id();
+        app.update();assert_eq!(app.world().get::<TextFont>(button).unwrap().font_size,FontSize::Px(24.));
+        app.world_mut().resource_mut::<Menu>().page=Page::Session;
+        app.world_mut().resource_mut::<UiScale>().0=1.;
+        app.update();assert_eq!(app.world().get::<TextFont>(button).unwrap().font_size,FontSize::Px(16.));
+        app.update();assert_eq!(app.world().get::<TextFont>(button).unwrap().font_size,FontSize::Px(16.));
+        app.world_mut().resource_mut::<Menu>().page=Page::Home;
+        app.world_mut().resource_mut::<UiScale>().0=2.;
+        app.update();assert_eq!(app.world().get::<TextFont>(button).unwrap().font_size,FontSize::Px(16.));
+    }
+    #[test]
     fn menu_blocks_game_actions_and_f10_returns_from_secondary_pages() {
         let mut app = app(true);
         let e = app
@@ -805,8 +886,21 @@ mod tests {
         assert_eq!(skin::step_focus(7,1,true),0);
     }
     #[test]
+    fn optical_menu_capture_pages_use_the_normal_page_state() {
+        for (name, page) in [("home", Page::Home), ("room", Page::BattleRoom),
+                             ("help", Page::Help), ("settings", Page::Settings)] {
+            let menu = Menu::new(false).with_capture_page(Some(name));
+            assert!(menu.shown());
+            assert_eq!(menu.page, page);
+            assert!(!menu.has_session);
+            assert!(requested(&["--shots".into(), "--menu-page".into(), name.into()]));
+        }
+        assert!(!Menu::new(false).with_capture_page(None).shown());
+    }
+    #[test]
     fn optical_menu_builds_native_controls_and_keeps_background_as_one_image() {
         let mut app=app(true);
+        app.init_resource::<Time>();
         let mut fonts=Assets::<Font>::default();
         let mut images=Assets::<Image>::default();
         let camera=app.world_mut().spawn(Camera2d).id();
@@ -821,7 +915,7 @@ mod tests {
         assert!(labels.iter().any(|t|t=="ПЕРИМЕТР"));
         assert!(labels.iter().any(|t|t=="ЛАБОРАТОРИЯ"));
         assert_eq!(images.len(),3);
-        assert_eq!(fonts.len(),1);
+        assert_eq!(fonts.len(),2); // Embedded narrow + raster families; no runtime download.
         let lab=world.query::<(Entity,&Action)>().iter(world)
             .find(|(_,a)|**a==Action::Start(Destination::Laboratory)).unwrap().0;
         *world.get_mut::<Interaction>(lab).unwrap()=Interaction::Hovered;
@@ -947,7 +1041,7 @@ mod tests {
             CursorGrabMode::None
         );
         assert!(app.world().get::<CursorOptions>(window).unwrap().visible);
-        assert_eq!(app.world().resource::<UiScale>().0, 1.8);
+        assert_eq!(app.world().resource::<UiScale>().0, 2.0);
         click(&mut app, Action::Resume);
         assert_eq!(
             app.world().get::<Node>(root).unwrap().display,
@@ -958,6 +1052,6 @@ mod tests {
             app.world().get::<RenderTarget>(camera),
             Some(RenderTarget::Window(_))
         ));
-        assert_eq!(app.world().resource::<UiScale>().0, 1.0);
+        assert_eq!(app.world().resource::<UiScale>().0, 2.0);
     }
 }

@@ -956,3 +956,26 @@ impl voxel::Generator for FlatSoil {
         u16::from(y < 80)
     }
 }
+
+
+#[test]
+fn tight_body_map_domain_matches_independent_cell_walk() {
+    use crate::blast::wave_cells::Grid;
+    let r=salvo_range();
+    for (k,u) in r.units.iter().enumerate() {for (yaw,delta,pitch) in [(0,0,0),(11000,-3000,2500)] {
+        let mut pose=crate::damage::turned(&u.pose,yaw,0);
+        let mut segs:Vec<_>=u.seg_frames.iter().map(|f| crate::damage::turned(f,yaw,0)).collect();
+        if pitch!=0 {let offset=phys::V3::new(Fx::from_int(512),Fx::from_int(64),Fx::from_int(512));pose.base=pose.base.sub(offset);for f in &mut segs {f.base=f.base.sub(offset);}}
+        let frames=HitFrames::new(u,pose,&segs,delta,pitch);let (lo,hi)=u.bounds_aimed(Some(&pose),&segs,delta,pitch);
+        for (edge,n) in [(1,1usize),(3,2),(9,3),(64,1)] {
+            let origin=std::array::from_fn(|a|(lo[a]+hi[a])/2-edge+(k as i32%edge));let grid=Grid{origin,edge,n};
+            let map=frames.body_map(u,&pose,&segs,grid,body_sizes(u)).unwrap();
+            for i in 0..n*n*n {
+                let cell=[i%n,i/n%n,i/(n*n)].map(|v|v as i32);let low=std::array::from_fn(|a|origin[a]+cell[a]*edge);
+                let mut expected=Vec::new();frames.wave_cells(u,&pose,&segs,low,edge,&mut expected);
+                let (start,len)=map.range(grid.index(cell));let actual:Vec<_>=(start..start+len).map(|j|map.contact(j)).collect();
+                assert_eq!(actual,expected,"unit={k} yaw={yaw} edge={edge} n={n} cell={cell:?}");
+            }
+        }
+    }}
+}

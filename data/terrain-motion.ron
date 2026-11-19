@@ -1,0 +1,13 @@
+// Loss = max_loss * reference_mass / (reference_mass + actual chassis mass).
+// Trees and uneven support share one cap; their penalties never multiply.
+(
+    max_loss_pct: 10,
+    reference_mass_kg: 60000,
+    // Twenty SIM ticks = one second. This limits resistance entry, not
+    // commanded brakes, obstacle refusal, engine damage or stopping at a goal.
+    blend_ticks: 20,
+    // Robust track support over small pebbles; walkers keep their sole-derived
+    // walking-terrain profile. Exact belly and sole
+    // collision still reads the occupied columns; stone is not yielding matter.
+    track_detail_cm: 50,
+)

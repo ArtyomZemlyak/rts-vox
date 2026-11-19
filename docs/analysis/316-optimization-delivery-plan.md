@@ -1,5 +1,18 @@
 # Единый план производительности движка
 
+16.11: [625 — масштабная приёмка после функциональных исправлений](625-scale-performance-acceptance-plan-20261116.md).
+План128/1000/5000 × workers1/2/4/8, release/headless и native1080p/4K,
+общий tick-window, реальные edits/debris/orders/fire, debt и completed orders.
+Это протокол будущей приёмки; не новый performance-pass, не запуск в фоне и
+не изменение порядка существующей очереди. Результат609 на64–73 объектах не
+засчитывается как достижение5000; предел real-time будет указан по факту.
+
+
+13.11: [580 — полное ревью пакета Kimi и быстрый цикл проверок](580-kimi-review-and-fast-testing-20261113.md).
+Внедряются sim-test, inventory/zero-test guards, headless motion-lab и анализ
+записанной походки без повторного запуска. Это ускорение разработки, не новый
+замер FPS. Общие SupportValidity/переходы/5000 остаются следующими этапами.
+
 Проба513 [parallel Batches scan](513-parallel-batches-scan.md) отклонена:
 pooled FPS+0,24% при разных знаках пар, `fragments`+2,38%, p99 кадра+1,11%.
 Serial/parallel oracle и lifecycle прошли, но ordered copy/сборка results не окупились.

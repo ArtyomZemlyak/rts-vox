@@ -11,4 +11,5 @@
     transforms:(Some((from:10,to:12)),None,None,None),
     melt_flow:(Some((solid:3,liquid:13,freeze:180)),Some((solid:2,liquid:14,freeze:450)),Some((solid:12,liquid:16,freeze:1200))),
     melt_moves_per_tick:128,
+    vapor_heat_multiple:3,
 )

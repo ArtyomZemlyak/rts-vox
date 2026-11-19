@@ -1,29 +1,16 @@
 //! Bounded, read-only metric samples on the existing camera-facing section.
 use super::*;
+#[cfg(test)]
 use render::geom::MeshBuf;
+#[cfg(test)]
 use std::collections::BTreeSet;
 
+#[cfg(test)]
 const SIDE: i32 = 48;
+#[cfg(test)]
 const SAMPLES: i32 = SIDE * 2;
+#[cfg(test)]
 const ROWS_PER_FRAME: i32 = 8;
-#[derive(Component)]
-pub struct MetricSurface;
-type Key = (u64, u32, u8, [u32; 7], u32, [i32; 3], bool, u8, bool);
-struct Work {
-    key: Key,
-    camera: Transform,
-    row: i32,
-    output: MeshBuf,
-    seen: BTreeSet<([i32; 3], usize, i32)>,
-}
-#[derive(Default)]
-pub struct Cache {
-    key: Option<Key>,
-    work: Option<Work>,
-    entity: Option<Entity>,
-    mesh: Option<Handle<Mesh>>,
-    material: Option<Handle<StandardMaterial>>,
-}
 pub(crate) fn scale(n: u32, max: u32) -> [f32; 4] {
     let t = (n as f32 / max.max(1) as f32).clamp(0.0, 1.0);
     if t < 0.5 {
@@ -35,6 +22,7 @@ pub(crate) fn scale(n: u32, max: u32) -> [f32; 4] {
     }
 }
 pub(crate) const UNKNOWN: [f32; 4] = [0.35, 0.35, 0.38, 1.0];
+#[cfg(test)]
 fn sample(
     sim: &BlastRange,
     p: [i32; 3],
@@ -198,6 +186,7 @@ fn sample(
         _ => return None,
     })
 }
+#[cfg(test)]
 fn build(sim: &BlastRange, s: &section::State, mode: u8, scale: u8) -> MeshBuf {
     let mut out = MeshBuf::default();
     let axis = s.axis.min(2) as usize;
@@ -249,6 +238,7 @@ fn build(sim: &BlastRange, s: &section::State, mode: u8, scale: u8) -> MeshBuf {
 }
 /// A bounded window of camera rays finds the real visible voxel faces. The
 /// diagnostic mesh stays separate from the authoritative world and water.
+#[cfg(test)]
 fn occupied(
     sim: &BlastRange,
     p: [i32; 3],
@@ -265,6 +255,7 @@ fn occupied(
             (0..3).all(|a| p[a] >= lo[a] && p[a] < hi[a]) && u.hit(p).is_some()
         })
 }
+#[cfg(test)]
 fn surface_rows(
     sim: &BlastRange,
     t: &Transform,
@@ -392,6 +383,7 @@ fn surface_rows(
     }
 }
 #[cfg(test)]
+#[cfg(test)]
 fn surface(sim: &BlastRange, t: &Transform, anchor: [i32; 3], mode: u8) -> MeshBuf {
     let mut out = MeshBuf::default();
     let mut seen = BTreeSet::new();
@@ -433,6 +425,7 @@ fn thermal_table(sim: &BlastRange, mode: u8) -> (Vec<u32>, bool) {
             .take(THERMAL_LIMIT + 1)
             .count(),
         7 => sim.surface_work.len(),
+        6 => sim.diagnostic_ground_motion().take(THERMAL_LIMIT + 1).count(),
         _ => 0,
     };
     let slots = count
@@ -528,6 +521,10 @@ fn thermal_table(sim: &BlastRange, mode: u8) -> (Vec<u32>, bool) {
                 .all(|x| *x >= 0)
                 .then_some((p.map(|x| x as u32), v))
         })),
+        6 => Box::new(sim.diagnostic_ground_motion().map(|(p, v)| {
+            (p, (v.raw().max(0) as u64).saturating_mul(200)
+                .saturating_div(fx::ONE_RAW as u64).min(u64::from(u32::MAX)) as u32)
+        })),
         _ => return (words, false),
     };
     let mut overflow = false;
@@ -564,17 +561,17 @@ pub fn terrain_offset(
 ) {
     let _ = cameras;
     gas.params.look.z = 0.0;
-    let thermal = lab.active() && matches!(lab.tools.metric, 1 | 2 | 3 | 4 | 5 | 7 | 8 | 10);
+    let thermal = lab.active() && (1..=10).contains(&lab.tools.metric);
     gas.params.look.y = if thermal {
         f32::from(lab.tools.metric)
     } else {
         0.0
     };
     if thermal {
-        let dynamic = matches!(lab.tools.metric, 1 | 2 | 7 | 8);
+        let dynamic = matches!(lab.tools.metric, 1 | 2 | 6 | 7 | 8);
         let key = (
             scene.generation,
-            if dynamic { scene.sim.tick / 5 } else { 0 },
+            if lab.tools.metric == 6 { scene.sim.tick } else if dynamic { scene.sim.tick / 5 } else { 0 },
             lab.tools.metric,
         );
         if cache.key != Some(key) {
@@ -595,164 +592,26 @@ pub fn terrain_offset(
         cache.key = None;
     }
 }
-#[allow(clippy::too_many_arguments)]
-pub fn draw(
-    mut commands: Commands,
-    lab: Res<Laboratory>,
-    scene: Res<Scene>,
-    cameras: Query<(&Transform, &Projection), With<GasCamera>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut cache: Local<Cache>,
-    mut visibility: Query<&mut Visibility, With<MetricSurface>>,
-) {
-    // Heat and burn are shaded continuously by the terrain renderer; the
-    // local sampling mesh is only needed on an active section plane.
-    let active = lab.active()
-        && lab.tools.metric > 0
-        && !matches!(lab.tools.metric, 1 | 2 | 3 | 4 | 5 | 7 | 8 | 10);
-    let Some((t, projection)) = cameras.iter().next().filter(|_| active) else {
-        cache.work = None;
-        if let Some(e) = cache.entity {
-            if let Ok(mut v) = visibility.get_mut(e) {
-                *v = Visibility::Hidden;
-            }
-        }
-        return;
-    };
-    let perspective = matches!(projection, Projection::Perspective(_));
-    let cut = lab.tools.section.enabled;
-    let near = if cut {
-        f32::from(lab.tools.section.axis) + if lab.tools.section.positive { 4.0 } else { 0.0 }
-    } else {
-        0.1
-    };
-    let anchor = if cut {
-        lab.tools.section.point()
-    } else if lab.tools.live {
-        lab.tools.live_target.map(|(at, _)| at).unwrap_or_else(|| {
-            (t.translation + *t.forward() * lab.tools.distance)
-                .floor()
-                .to_array()
-                .map(|v| v as i32)
-        })
-    } else {
-        section::anchor(&lab, &scene)
-    };
-    let transform = [
-        t.translation.x,
-        t.translation.y,
-        t.translation.z,
-        t.rotation.x,
-        t.rotation.y,
-        t.rotation.z,
-        t.rotation.w,
-    ]
-    .map(f32::to_bits);
-    let key = (
-        scene.generation,
-        scene.sim.tick / 5,
-        lab.tools.metric,
-        transform,
-        near.to_bits(),
-        anchor,
-        cut,
-        lab.tools.metric_scale,
-        perspective,
-    );
-    if cache.key == Some(key) && cache.work.is_none() {
-        if let Some(e) = cache.entity {
-            if let Ok(mut v) = visibility.get_mut(e) {
-                *v = Visibility::Visible;
-            }
-        }
-        return;
-    }
-    let b = if cut {
-        cache.work = None;
-        build(
-            &scene.sim,
-            &lab.tools.section,
-            lab.tools.metric,
-            lab.tools.metric_scale,
-        )
-    } else {
-        let incompatible = cache.work.as_ref().is_some_and(|w| {
-            w.key.0 != key.0
-                || w.key.2 != key.2
-                || (!lab.tools.live && w.key.5 != key.5)
-                || w.key.6 != key.6
-                || w.key.7 != key.7
-                || w.key.8 != key.8
-        });
-        if incompatible {
-            cache.work = None;
-        }
-        let work = cache.work.get_or_insert_with(|| Work {
-            key,
-            camera: *t,
-            row: 0,
-            output: MeshBuf::default(),
-            seen: BTreeSet::new(),
-        });
-        let end = (work.row + ROWS_PER_FRAME).min(SAMPLES);
-        surface_rows(
-            &scene.sim,
-            &work.camera,
-            work.key.5,
-            work.key.2,
-            work.key.7,
-            work.key.8,
-            work.row..end,
-            &mut work.output,
-            &mut work.seen,
-        );
-        work.row = end;
-        if end < SAMPLES {
-            return;
-        }
-        let work = cache.work.take().expect("metric work");
-        cache.key = Some(work.key);
-        work.output
-    };
-    let material = cache
-        .material
-        .get_or_insert_with(|| {
-            materials.add(StandardMaterial {
-                base_color: Color::WHITE,
-                unlit: true,
-                cull_mode: None,
-                ..default()
-            })
-        })
-        .clone();
-    if let Some(handle) = &cache.mesh {
-        meshes.insert(handle.id(), mesh(&b)).expect("metric mesh");
-    } else {
-        let handle = meshes.add(mesh(&b));
-        let e = commands
-            .spawn((
-                MetricSurface,
-                Mesh3d(handle.clone()),
-                MeshMaterial3d(material),
-                Transform::default(),
-            ))
-            .id();
-        cache.mesh = Some(handle);
-        cache.entity = Some(e);
-    }
-    if let Some(e) = cache.entity {
-        if let Ok(mut v) = visibility.get_mut(e) {
-            *v = Visibility::Visible;
-        }
-    }
-    if cut {
-        cache.key = Some(key);
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn global_speed_table_streams_real_active_columns_without_mutating_the_world() {
+        let exp=modding::laboratory::experiments::stock().into_iter().find(|e|e.id=="sand-flow").unwrap();
+        let cfg=modding::explosion::ExplosionConfig::from_ron(include_str!("../../../../../../data/explosion.ron")).unwrap();
+        let mut sim=BlastRange::with_layout(cfg,exp.layout).unwrap();sim.control();
+        for _ in 0..8 {sim.step();}
+        let before=sim.state_hash();
+        let cells:Vec<_>=sim.diagnostic_ground_motion().collect();assert!(!cells.is_empty());
+        let (table,overflow)=thermal_table(&sim,6);assert!(!overflow);let slots=table.len()/4-16;
+        for &(at,speed) in cells.iter().step_by((cells.len()/64).max(1)) {
+            let expected=(speed.raw().max(0) as u64).saturating_mul(200)/fx::ONE_RAW as u64;
+            let h=metric_hash(at);
+            assert!((0..32).any(|probe|{let i=(h.wrapping_add(probe) as usize&(slots-1))*4;table[i..i+4]==[at[0]+1,at[1],at[2],expected as u32]}));
+            assert_eq!(sim.inspect_cell_with_motion(at,true).unwrap().motion.unwrap().0,speed);
+        }
+        assert_eq!(sim.state_hash(),before);
+    }
     #[test]
     fn palette_has_order() {
         assert!(scale(0, 100)[2] > scale(0, 100)[0]);

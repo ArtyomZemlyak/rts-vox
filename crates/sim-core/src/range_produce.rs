@@ -685,9 +685,12 @@ impl BlastRange {
     /// Append a unit to every per-unit list, at the end: the one place the
     /// roster grows, at runtime and when a snapshot is restored.
     pub(super) fn append_unit(&mut self, s: Spawned) -> usize {
+        self.append_unit_geometry(s, true)
+    }
+    pub(super) fn append_unit_geometry(&mut self, s: Spawned, full_greben: bool) -> usize {
         let id = self.units.len();
         let battle = self.layout.as_ref().is_some_and(|l| l.battle);
-        let mut u = RangeUnit::placed(s.def.kind, s.def.allied, s.def.at, battle);
+        let mut u = RangeUnit::placed_geometry(s.def.kind, s.def.allied, s.def.at, battle, full_greben);
         if let Some(c) = self.layout.as_ref().and_then(|l| l.course.as_ref()) {
             u.apply_course(c);
         }

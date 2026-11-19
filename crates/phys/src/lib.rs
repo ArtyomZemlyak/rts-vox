@@ -530,10 +530,17 @@ fn clamp_tilt(c: &mut Chassis, r: &Ride) {
         if h2.raw() > 0 {
             // Корень считается **только при завале за предел**, то есть
             // на уступе, а не каждый тик у каждой машины.
+            let h = h2.sqrt();
             let want = Fx::ONE.sub(r.min_up.mul(r.min_up)).max(Fx::ZERO).sqrt();
-            let k = want.div(h2.sqrt());
+            let k = want.div(h);
+            let nx = c.up.x.div(h);
+            let nz = c.up.z.div(h);
             c.up = V3::new(c.up.x.mul(k), r.min_up, c.up.z.mul(k));
-            c.w = V3::ZERO;
+            let outward = nz.mul(c.w.x).sub(nx.mul(c.w.z));
+            if outward > Fx::ZERO {
+                c.w.x = c.w.x.sub(outward.mul(nz));
+                c.w.z = c.w.z.add(outward.mul(nx));
+            }
         }
     }
 }
@@ -1163,5 +1170,22 @@ mod tests {
                 r.travel
             );
         }
+    }
+
+    #[test]
+    fn clamp_tilt_preserves_restoring_angular_velocity() {
+        let (_, r) = tracked();
+        let mut c = Chassis::resting(FLAT, &r);
+        c.up = V3::new(Fx::from_ratio(1, 2), Fx::from_ratio(7, 10), Fx::ZERO);
+        // Outward tilt rate around -z (since up.x > 0, (w x up).x = -w.z * up.y):
+        // w.z < 0 tilts further outward, w.z > 0 restores upright.
+        c.w = V3::new(Fx::ZERO, Fx::ZERO, Fx::from_int(-2));
+        clamp_tilt(&mut c, &r);
+        assert_eq!(c.w.z, Fx::ZERO, "outward radial w must be damped");
+
+        c.up = V3::new(Fx::from_ratio(1, 2), Fx::from_ratio(7, 10), Fx::ZERO);
+        c.w = V3::new(Fx::ZERO, Fx::ZERO, Fx::from_int(2));
+        clamp_tilt(&mut c, &r);
+        assert_eq!(c.w.z, Fx::from_int(2), "restoring w must be preserved");
     }
 }

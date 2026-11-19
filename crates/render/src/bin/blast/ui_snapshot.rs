@@ -18,6 +18,7 @@ pub(super) struct UiSnapshot {
     pub base_cargo: Vec<Option<(u64, u64)>>,
     pub electric_support: Vec<u32>,
     pub energy_total: (u64, u64),
+    pub matter_total: Option<(u64, u64)>,
     pub energy_local: Vec<Option<(u64, u64)>>,
     pub(super) energy_key: Option<(u64, u32, usize)>,
     pub unfinished: Vec<bool>,
@@ -78,6 +79,7 @@ pub(super) fn publish(
     output.weapon = panel::weapon_of(&scene);
     output.step_us = scene.step_us;
     output.notice.clone_from(&scene.notice);
+    output.matter_total = scene.sim.side_store(true);
     let energy_key = (scene.generation, scene.sim.tick, scene.sim.units.len());
     // Rendering can run ten times per simulation tick. The graph depends on
     // simulation state, so reuse it between ticks while still reflecting

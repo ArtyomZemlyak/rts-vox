@@ -1,5 +1,5 @@
 //! Persistent render identities and exact pose reuse. Physics owns every piece.
-use super::{Entity, Transform, Vec3};
+use super::{Entity, Transform, Vec3, Handle, Mesh, StandardMaterial};
 use sim_core::{burst::Fragment, damage::V3};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -22,9 +22,17 @@ impl Stamp {
     }
 }
 
+pub(super) struct Appearance {
+    pub colours: Vec<(Handle<Mesh>, Vec<[f32; 4]>)>,
+    pub materials: Vec<Handle<StandardMaterial>>,
+}
 pub(super) struct Slot {
     pub entity: Entity,
     pub key: (u64, bool),
+    pub diagnostic: bool,
+    pub colour: Option<[u8; 3]>,
+    pub children: Vec<Entity>,
+    pub appearance: Option<Box<Appearance>>,
     mesh: Option<render::model::FragmentMeshKey>,
     stamp: Stamp,
     current: Transform,
@@ -41,6 +49,10 @@ impl Slot {
         Self {
             entity,
             key,
+            diagnostic: false,
+            colour: None,
+            children: Vec::new(),
+            appearance: None,
             mesh: mesh_key(f),
             stamp: Stamp::of(f),
             current,

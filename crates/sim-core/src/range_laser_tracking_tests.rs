@@ -489,7 +489,20 @@ fn spider_laser_tracking_frozen_wave_pose_survives_aim_changes_and_snapshot_corr
         step(&mut r);
     }
     let bytes = r.snapshot();
-    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 52);
+    let mut header = fx::blob::Scan::new(&bytes);
+    assert_eq!(header.u32(), 67);
+    assert_eq!(header.u32(), crate::TICKS_PER_SECOND as u32);
+    let mut version = header.u32();
+    if version == 83 {
+        nav::vehicle::support::Sources::load_baseline(&mut header).unwrap();
+        version = header.u32();
+    }
+    if version == 81 {
+        crate::burst::molten::State::load(&mut header).unwrap();
+        version = header.u32();
+    }
+    if version == 80 { version = header.u32(); }
+    assert_eq!(version, 52);
     let mut replay = BlastRange::restore(r.config, &bytes).unwrap();
     assert_eq!(r.state_hash(), replay.state_hash());
     if let Some(e) = &replay.explosion {

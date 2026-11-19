@@ -127,7 +127,8 @@ fn nuclear_stock_mission_destroys_fortifications_and_restores_large_wave_budget(
     ] {
         scenario.units.push(modding::range::RangeUnitDef {
             kind,
-            at: [6200, 16, z],
+            // Keep the distant control outside the blast and clear of the silo.
+            at: [6000, 16, z],
             allied: false,
             weapon: None,
         });

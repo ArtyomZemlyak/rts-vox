@@ -265,3 +265,129 @@ fn zero_room_eviction_preserves_settled_contacts_outside_the_original_sweep() {
     assert_eq!(run(4), expected, "eviction must retain its settled support");
     assert_eq!(run(8), expected, "eviction must retain its settled support");
 }
+
+#[test]
+fn coarse_piece_fallback_respects_a_proven_empty_hull_box() {
+    struct Gap;
+    impl Voxels for Gap {
+        fn solid(&self,_:[i32;3])->bool { panic!("coarse box fallback must not scan unbounded cells") }
+        fn may_overlap_box(&self,lo:[i32;3],hi:[i32;3])->bool {lo[1]<=100 && hi[1]>=100}
+    }
+    let voxels=Gap;
+    let hull=Hull {pos:[Fx::ZERO;3],head:0,half:[Fx::from_int(100);2],height:Fx::from_int(120),
+        vel:[Fx::ZERO;3],step:Fx::ZERO,solid:Some(Solid(&voxels))};
+    let low=[Fx::from_int(-8);3];let high=[Fx::from_int(8);3];
+    assert!(!hull.meets_piece([Fx::ZERO,Fx::from_int(20),Fx::ZERO],low,high));
+    assert!(hull.meets_piece([Fx::ZERO,Fx::from_int(100),Fx::ZERO],low,high));
+    assert!(!hull.meets([Fx::from_int(-20);3],[Fx::from_int(20);3],1));
+}
+
+#[test]
+fn rotated_4x4x4_settled_shapes_match_scalar_oracle_across_multicell_queries() {
+    let mut basis = IDENTITY;
+    let c = fx::angle::cos(fx::angle::FULL / 7);
+    let s = fx::angle::sin(fx::angle::FULL / 7);
+    basis[0] = V3::new(c, Fx::ZERO, s);
+    basis[2] = V3::new(s.neg(), Fx::ZERO, c);
+    let masks = [
+        0x0001_0003_0007_000fu64,
+        0x8000_0000_0000_0001u64,
+        0x0f0f_3333_5555_aaaau64,
+    ];
+    let make = |id: u64, pos: [i32; 3], shape: u64| Fragment {
+        id,
+        position: V3::new(Fx::from_int(pos[0]), Fx::from_int(pos[1]), Fx::from_int(pos[2])),
+        velocity: V3::ZERO,
+        material: 4,
+        paint: None,
+        mm: 100,
+        basis,
+        mass_g: 500,
+        count: shape.count_ones(),
+        shape,
+        side: 4,
+        chunk: None,
+        held: u32::MAX,
+        resting: true,
+    };
+    let scalar_meets = |f: &Fragment, lo: [Fx; 3], hi: [Fx; 3]| -> bool {
+        let scale = Fx::from_ratio(f.mm as i32, voxel::unit::WORLD_MM as i32);
+        let half = Fx::from_ratio(49, 100).mul(scale);
+        let radius: [Fx; 3] = std::array::from_fn(|a| {
+            arr(f.basis[0])[a]
+                .abs()
+                .add(arr(f.basis[1])[a].abs())
+                .add(arr(f.basis[2])[a].abs())
+                .mul(half)
+        });
+        let centre = arr(shape_centre(f.shape, f.side));
+        for i in 0..box_cells(f.side) {
+            if f.shape & (1u64 << i) == 0 {
+                continue;
+            }
+            let q = shape_cell(i, f.side);
+            let mut offset = V3::ZERO;
+            for a in 0..3 {
+                offset = offset.add(f.basis[a].scale(Fx::from_int(q[a]).sub(centre[a]).mul(scale)));
+            }
+            let p = arr(f.position.add(offset));
+            if (0..3).all(|a| lo[a] < p[a].add(radius[a]) && p[a].sub(radius[a]) < hi[a]) {
+                return true;
+            }
+        }
+        false
+    };
+    for (idx, &mask_a) in masks.iter().enumerate() {
+        let fa = make(idx as u64 + 1, [32, 20, 32], mask_a);
+        let sa = SettledShape::new(&fa);
+        for &mask_b in &masks {
+            for dx in -5..=5 {
+                let fb = make(99, [32 + dx, 21, 33], mask_b);
+                let sb = SettledShape::new(&fb);
+                let shift_lo = [Fx::from_ratio(dx, 3), Fx::from_ratio(-1, 2), Fx::ZERO];
+                let shift_hi = [Fx::from_ratio(dx + 1, 3), Fx::ZERO, Fx::from_ratio(1, 4)];
+                let lo = [Fx::from_int(28), Fx::from_int(17), Fx::from_int(28)];
+                let hi = [Fx::from_int(38), Fx::from_int(25), Fx::from_int(38)];
+                assert_eq!(sa.meets(lo, hi), scalar_meets(&fa, lo, hi));
+                let mut buf = [([Fx::ZERO; 3], [Fx::ZERO; 3]); 64];
+                let (n, m_lo, m_hi) = sb.shifted_cells(shift_lo, shift_hi, &mut buf);
+                let fast_pair = sa.meets_shifted(lo, hi, &buf[..n], m_lo, m_hi);
+                let scale = Fx::from_ratio(fa.mm as i32, voxel::unit::WORLD_MM as i32);
+                let half = Fx::from_ratio(49, 100).mul(scale);
+                let ra: [Fx; 3] = std::array::from_fn(|a| {
+                    arr(fa.basis[0])[a]
+                        .abs()
+                        .add(arr(fa.basis[1])[a].abs())
+                        .add(arr(fa.basis[2])[a].abs())
+                        .mul(half)
+                });
+                let ca = arr(shape_centre(fa.shape, fa.side));
+                let mut slow_pair = false;
+                for i in 0..64 {
+                    if fa.shape & (1u64 << i) == 0 {
+                        continue;
+                    }
+                    let q = shape_cell(i, 4);
+                    let mut off = V3::ZERO;
+                    for a in 0..3 {
+                        off = off.add(fa.basis[a].scale(Fx::from_int(q[a]).sub(ca[a]).mul(scale)));
+                    }
+                    let p = arr(fa.position.add(off));
+                    let c_lo = [0, 1, 2].map(|a| p[a].sub(ra[a]));
+                    let c_hi = [0, 1, 2].map(|a| p[a].add(ra[a]));
+                    if (0..3).all(|a| lo[a] < c_hi[a] && c_lo[a] < hi[a])
+                        && scalar_meets(
+                            &fb,
+                            [0, 1, 2].map(|a| c_lo[a].sub(shift_hi[a])),
+                            [0, 1, 2].map(|a| c_hi[a].sub(shift_lo[a])),
+                        )
+                    {
+                        slow_pair = true;
+                        break;
+                    }
+                }
+                assert_eq!(fast_pair, slow_pair, "dx={dx} mask_a={mask_a:#x} mask_b={mask_b:#x}");
+            }
+        }
+    }
+}

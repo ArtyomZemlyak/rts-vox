@@ -241,6 +241,7 @@ pub fn actions(
     p.action_time = now;
 }
 impl Profile {
+    pub(super) fn finished(&self)->bool{self.finished}
     pub(super) fn camera_sample(&self, now: f64, size: [u32; 3]) -> Option<camera::Sample> {
         (self.camera_tour && !self.finished)
             .then(|| camera::sample(now - self.start.unwrap_or(now), size))

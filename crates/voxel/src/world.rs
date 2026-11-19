@@ -267,6 +267,8 @@ pub struct World {
     gen: Arc<dyn Generator + Send + Sync>,
     /// Слой изменений: `None` — чанк нетронут, материал у генератора.
     chunks: Vec<Option<Arc<Paletted>>>,
+    /// Ordered indices of materialized chunks; avoids scanning hundreds of thousands of empty slots.
+    touched_indices: std::collections::BTreeSet<u32>,
     /// Exact applied positions since the last reset. Purely a reset
     /// acceleration hint: loaded worlds and overflowing logs use the full
     /// chunk-column rebuild. It is deliberately absent from snapshots.
@@ -547,6 +549,7 @@ impl World {
             examined_in_tick: 0,
             gen: Arc::from(g),
             chunks: (0..(cx * cy * cz) as usize).map(|_| None).collect(),
+            touched_indices: std::collections::BTreeSet::new(),
             reset_dirty: Some(Vec::new()),
             cx,
             cy,
@@ -663,13 +666,24 @@ impl World {
     /// Use only an already prepared tile with the requested material profile.
     /// A fine terrain probe must not pay for a fresh 8x8 scan on a live tick.
     pub fn prepared_floor_tile(&self, x: u32, z: u32, yielding: [Mat; 2]) -> Option<[u16; 2]> {
+        self.prepared_floor_tile_detail(x, z, yielding)
+            .map(|(bounds, _)| bounds)
+    }
+    /// Prepared `[min_floor, max_floor]` together with whether every column in
+    /// the 8x8 tile has zero yielding voxels above its non-yielding floor.
+    pub fn prepared_floor_tile_detail(
+        &self,
+        x: u32,
+        z: u32,
+        yielding: [Mat; 2],
+    ) -> Option<([u16; 2], bool)> {
         if x >= self.nx.div_ceil(8) || z >= self.nz.div_ceil(8) {
             return None;
         }
         let i = x as usize + self.nx.div_ceil(8) as usize * z as usize;
         self.floor_tiles[i]
             .get()
-            .and_then(|(key, bounds, _, _)| (*key == yielding).then_some(*bounds))
+            .and_then(|(key, bounds, _, bare)| (*key == yielding).then_some((*bounds, *bare)))
     }
     /// Contiguous floor tiles, read lazily in X order. Bounds and row stride
     /// are checked once; cold or differently profiled tiles retain floor_tile's
@@ -1287,9 +1301,8 @@ impl World {
                 }
             }
         }
-        for (i, chunk) in self.chunks.iter_mut().enumerate() {
-            if chunk.take().is_some() {
-                let ci = i as u32;
+        for ci in std::mem::take(&mut self.touched_indices) {
+            if self.chunks[ci as usize].take().is_some() {
                 if let Some(chunks) = columns
                     .entry((ci % self.cx, ci / (self.cx * self.cy)))
                     .or_insert_with(|| Some(Vec::new()))
@@ -1406,6 +1419,7 @@ impl World {
             }
             let ci = self.chunk_index(x, y, z);
             self.chunks[ci] = None;
+            self.touched_indices.remove(&(ci as u32));
             let solid = self.gen.material(x, y, z) != AIR;
             let (word, mask) = self.bit_index(x, y, z);
             if solid {
@@ -1452,6 +1466,7 @@ impl World {
             return;
         }
         self.chunks[ci] = Some(Arc::new(self.build_chunk(ci)));
+        self.touched_indices.insert(ci as u32);
         self.materialized += 1;
     }
 
@@ -1505,6 +1520,7 @@ impl World {
     pub fn install_chunk(&mut self, ci: usize, chunk: Paletted) {
         if self.chunks[ci].is_none() {
             self.chunks[ci] = Some(Arc::new(chunk));
+            self.touched_indices.insert(ci as u32);
             self.materialized += 1;
         }
     }
@@ -1832,14 +1848,14 @@ impl World {
 
     /// Сколько чанков материализовано. Это и есть размер слоя изменений.
     pub fn touched_chunks(&self) -> usize {
-        self.chunks.iter().filter(|c| c.is_some()).count()
+        self.touched_indices.len()
     }
 
     /// Байты слоя изменений. Нетронутые чанки не стоят ничего.
     pub fn diff_bytes(&self) -> usize {
-        self.chunks
+        self.touched_indices
             .iter()
-            .filter_map(|c| c.as_ref())
+            .filter_map(|&ci| self.chunks[ci as usize].as_ref())
             .map(|c| c.bytes())
             .sum()
     }
@@ -1875,33 +1891,11 @@ impl World {
         // Тронутые чанки — по возрастанию номера. Порядок обхода
         // при записи фиксирован (`CLAUDE.md`), иначе один и тот же
         // мир давал бы разные файлы.
-        let touched: Vec<u32> = (0..self.chunks.len())
-            .filter(|&i| self.chunks[i].is_some())
-            .map(|i| i as u32)
-            .collect();
-        b.u32(touched.len() as u32);
-        for &ci in &touched {
+        b.u32(self.touched_indices.len() as u32);
+        for &ci in &self.touched_indices {
             b.u32(ci);
             let c = self.chunks[ci as usize].as_ref().expect("тронутый чанк");
-            // Повторы: (материал, длина). Порядок обхода — тот же,
-            // что у плотного чанка, поэтому чтение обратно однозначно.
-            let mut runs: Vec<(Mat, u16)> = Vec::new();
-            for y in 0..CS {
-                for z in 0..CS {
-                    for x in 0..CS {
-                        let m = c.get(x, y, z);
-                        match runs.last_mut() {
-                            Some((lm, n)) if *lm == m && *n < u16::MAX => *n += 1,
-                            _ => runs.push((m, 1)),
-                        }
-                    }
-                }
-            }
-            b.u32(runs.len() as u32);
-            for &(m, n) in &runs {
-                b.u16(m);
-                b.u16(n);
-            }
+            c.save_rle(b);
         }
         let q: Vec<Edit> = self.queue.iter().copied().collect();
         save_edits(b, self.nx, self.nz, &q);
@@ -1966,6 +1960,7 @@ impl World {
             }
             p.widenings = 0;
             self.chunks[ci] = Some(Arc::new(p));
+            self.touched_indices.insert(ci as u32);
             self.refresh_bits_of(ci);
             touched_columns.push(((ci as u32) % self.cx, (ci as u32) / (self.cx * self.cy)));
         }

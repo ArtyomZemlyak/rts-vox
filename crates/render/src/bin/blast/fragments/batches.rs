@@ -60,6 +60,8 @@ pub struct Batches {
     sources: BTreeMap<(render::model::FragmentMeshKey, u8), render::geom::MeshBuf>,
     pub flags: Vec<bool>,
     generation: Option<u64>,
+    metric_mode: u8,
+    metric_materials: BTreeMap<[u8; 3], Handle<StandardMaterial>>,
 }
 impl Batches {
     fn source(&mut self, f: &Fragment) -> &render::geom::MeshBuf {
@@ -92,6 +94,7 @@ impl Batches {
     pub fn update(
         &mut self,
         enabled: bool,
+        mode: u8,
         scene: &Scene,
         visual: &moving::Visual,
         commands: &mut Commands,
@@ -100,6 +103,10 @@ impl Batches {
         cached: &mut BTreeMap<u16, Handle<StandardMaterial>>,
         exists: impl Fn(Entity) -> bool,
     ) {
+        if self.metric_mode != mode {
+            for (_, group) in std::mem::take(&mut self.groups) { Self::retire(group, commands, meshes, &exists); }
+            self.input.clear(); self.generation = None; self.metric_mode = mode;
+        }
         let fragments = &scene.sim.matter.debris.fragments;
         self.scratch.clear();
         let full = self.generation != Some(scene.generation) || !enabled;
@@ -251,6 +258,7 @@ impl Batches {
             for s in &members {
                 let f = &fragments[s.index];
                 let transform = dense::transform(f);
+                let metric_colour = (mode > 0).then(|| laboratory::fragment_metric_colour(f, &scene.sim, mode));
                 let source = self.source(f);
                 let offset = buf.pos.len() as u32;
                 buf.pos.extend(
@@ -265,11 +273,14 @@ impl Batches {
                         .iter()
                         .map(|n| (transform.rotation * Vec3::from(*n)).to_array()),
                 );
-                buf.col.extend_from_slice(&source.col);
+                if let Some(colour) = metric_colour { buf.col.extend(std::iter::repeat_n(colour, source.col.len())); }
+                else { buf.col.extend_from_slice(&source.col); }
                 buf.idx.extend(source.idx.iter().map(|i| i + offset));
             }
-            let mesh = meshes.add(super::super::mesh(&buf));
-            let material = piece_material(key.1, cached, materials);
+            let mesh = meshes.add(retained_mesh(&buf));
+            let material = if mode > 0 {
+                laboratory::fragment_metric_material([31; 3], &mut self.metric_materials, materials)
+            } else { piece_material(key.1, cached, materials) };
             let entity = commands
                 .spawn((
                     RestingBatch,

@@ -26,11 +26,178 @@ struct Work {
     tile: Pos,
     cursor: u32,
 }
+struct TileSlice {
+    ty: usize,
+    tz6: usize,
+    revisit_count: usize,
+    /// Packed `(queued_bits, revisit_bits)` at `y * tz6 + z6`, bit `b = z & 63`.
+    words: Vec<(u64, u64)>,
+}
+#[derive(Default)]
+pub(super) struct TileQueueSet {
+    slices: Vec<Option<TileSlice>>,
+    default_ty: usize,
+    default_tz6: usize,
+    queued_len: usize,
+    revisit_len: usize,
+}
+impl TileQueueSet {
+    pub fn ensure_size(&mut self, size: Pos) {
+        let tx = size[0].div_ceil(SIDE) as usize;
+        let ty = size[1].div_ceil(SIDE).max(1) as usize;
+        let tz6 = size[2].div_ceil(SIDE).div_ceil(64).max(1) as usize;
+        if tx > self.slices.len() {
+            self.slices.resize_with(tx, || None);
+        }
+        self.default_ty = self.default_ty.max(ty);
+        self.default_tz6 = self.default_tz6.max(tz6);
+    }
+    #[inline]
+    fn slice_mut(&mut self, p: Pos) -> (&mut TileSlice, usize) {
+        let x = p[0] as usize;
+        let y = p[1] as usize;
+        let z6 = (p[2] as usize) >> 6;
+        if x >= self.slices.len() {
+            self.slices.resize_with(x + 1, || None);
+        }
+        let d_ty = self.default_ty.max(y + 1);
+        let d_tz6 = self.default_tz6.max(z6 + 1);
+        let slice = self.slices[x].get_or_insert_with(|| TileSlice {
+            ty: d_ty,
+            tz6: d_tz6,
+            revisit_count: 0,
+            words: vec![(0, 0); d_ty * d_tz6],
+        });
+        if y >= slice.ty || z6 >= slice.tz6 {
+            let new_ty = slice.ty.max(y + 1);
+            let new_tz6 = slice.tz6.max(z6 + 1);
+            let mut new_words = vec![(0, 0); new_ty * new_tz6];
+            for oy in 0..slice.ty {
+                let src = oy * slice.tz6;
+                let dst = oy * new_tz6;
+                new_words[dst..dst + slice.tz6].copy_from_slice(&slice.words[src..src + slice.tz6]);
+            }
+            slice.ty = new_ty;
+            slice.tz6 = new_tz6;
+            slice.words = new_words;
+        }
+        let idx = y * slice.tz6 + z6;
+        (slice, idx)
+    }
+    #[inline]
+    pub fn wake_or_revisit(&mut self, p: Pos) -> bool {
+        let bit = 1u64 << (p[2] & 63);
+        let (slice, idx) = self.slice_mut(p);
+        let word = &mut slice.words[idx];
+        if word.0 & bit == 0 {
+            word.0 |= bit;
+            self.queued_len += 1;
+            true
+        } else {
+            if word.1 & bit == 0 {
+                word.1 |= bit;
+                slice.revisit_count += 1;
+                self.revisit_len += 1;
+            }
+            false
+        }
+    }
+    pub fn insert_queued(&mut self, p: Pos) -> bool {
+        let bit = 1u64 << (p[2] & 63);
+        let (slice, idx) = self.slice_mut(p);
+        let word = &mut slice.words[idx];
+        if word.0 & bit == 0 {
+            word.0 |= bit;
+            self.queued_len += 1;
+            true
+        } else {
+            false
+        }
+    }
+    pub fn contains_queued(&self, p: &Pos) -> bool {
+        let x = p[0] as usize;
+        let y = p[1] as usize;
+        let z6 = (p[2] as usize) >> 6;
+        let Some(Some(slice)) = self.slices.get(x) else {
+            return false;
+        };
+        if y >= slice.ty || z6 >= slice.tz6 {
+            return false;
+        }
+        slice.words[y * slice.tz6 + z6].0 & (1u64 << (p[2] & 63)) != 0
+    }
+    pub fn insert_revisit(&mut self, p: Pos) {
+        let bit = 1u64 << (p[2] & 63);
+        let (slice, idx) = self.slice_mut(p);
+        let word = &mut slice.words[idx];
+        if word.1 & bit == 0 {
+            word.1 |= bit;
+            slice.revisit_count += 1;
+            self.revisit_len += 1;
+        }
+    }
+    #[inline]
+    pub fn finish_tile(&mut self, p: Pos) -> bool {
+        let x = p[0] as usize;
+        let y = p[1] as usize;
+        let z6 = (p[2] as usize) >> 6;
+        let bit = 1u64 << (p[2] & 63);
+        let Some(Some(slice)) = self.slices.get_mut(x) else {
+            return false;
+        };
+        if y >= slice.ty || z6 >= slice.tz6 {
+            return false;
+        }
+        let word = &mut slice.words[y * slice.tz6 + z6];
+        if word.1 & bit != 0 {
+            word.1 &= !bit;
+            slice.revisit_count -= 1;
+            self.revisit_len -= 1;
+            debug_assert!(word.0 & bit != 0);
+            true
+        } else {
+            if word.0 & bit != 0 {
+                word.0 &= !bit;
+                self.queued_len -= 1;
+            }
+            false
+        }
+    }
+    pub fn revisit_len(&self) -> usize {
+        self.revisit_len
+    }
+    pub fn clear(&mut self) {
+        self.slices.clear();
+        self.default_ty = 0;
+        self.default_tz6 = 0;
+        self.queued_len = 0;
+        self.revisit_len = 0;
+    }
+    pub fn for_each_revisit(&self, mut f: impl FnMut(Pos)) {
+        for (x, maybe_slice) in self.slices.iter().enumerate() {
+            let Some(slice) = maybe_slice.as_ref().filter(|s| s.revisit_count > 0) else {
+                continue;
+            };
+            for y in 0..slice.ty {
+                let row = y * slice.tz6;
+                for z6 in 0..slice.tz6 {
+                    let mut w = slice.words[row + z6].1;
+                    let z_base = (z6 as u32) << 6;
+                    while w != 0 {
+                        let b = w.trailing_zeros();
+                        w &= w - 1;
+                        f([x as u32, y as u32, z_base + b]);
+                    }
+                }
+            }
+        }
+    }
+}
 pub(super) struct Flow {
     pub tuning: Tuning,
     queue: VecDeque<Work>,
-    queued: Positions,
-    revisit: BTreeSet<Pos>,
+    tiles: TileQueueSet,
+    patch_scratch: Vec<Pos>,
     pub moved: u64,
     pub pushed: u64,
     pub scanned: u32,
@@ -47,8 +214,8 @@ impl Flow {
         Self {
             tuning: Tuning::stock(),
             queue: VecDeque::new(),
-            queued: Positions::default(),
-            revisit: BTreeSet::new(),
+            tiles: TileQueueSet::default(),
+            patch_scratch: Vec::new(),
             moved: 0,
             pushed: 0,
             scanned: 0,
@@ -62,14 +229,14 @@ impl Flow {
     pub fn pending(&self) -> usize {
         self.queue.len() + self.active.len()
     }
+    #[inline]
     fn wake_tile(&mut self, tile: Pos) {
-        if self.queued.insert(tile) {
+        if self.tiles.wake_or_revisit(tile) {
             self.queue.push_back(Work { tile, cursor: 0 });
-        } else {
-            self.revisit.insert(tile);
         }
     }
     fn wake(&mut self, p: Pos, size: Pos) {
+        self.tiles.ensure_size(size);
         let lo = p.map(|v| v.saturating_sub(1) / SIDE);
         let hi: Pos = std::array::from_fn(|a| (p[a] + 1).min(size[a] - 1) / SIDE);
         for z in lo[2]..=hi[2] {
@@ -84,6 +251,7 @@ impl Flow {
         let Some(layout) = layout else {
             return;
         };
+        self.tiles.ensure_size(layout.size);
         for b in &layout.blocks {
             if self.tuning.material(b.material).is_none() {
                 continue;
@@ -98,19 +266,26 @@ impl Flow {
         }
     }
     pub fn observe(&mut self, edits: &[Edit], size: Pos) {
-        // Deduplicate before adding neighbour patches; nuclear edits are dense.
-        let patches: BTreeSet<_> = edits
-            .iter()
-            .map(|e| [e.x / SIDE, e.y / SIDE, e.z / SIDE])
-            .collect();
+        if edits.is_empty() {
+            return;
+        }
+        self.tiles.ensure_size(size);
+        // Deduplicate in canonical lexicographical Pos order before adding
+        // neighbour patches; nuclear edits are dense.
+        let mut patches = std::mem::take(&mut self.patch_scratch);
+        patches.clear();
+        patches.extend(edits.iter().map(|e| [e.x / SIDE, e.y / SIDE, e.z / SIDE]));
+        patches.sort_unstable();
+        patches.dedup();
         // Discover changed cells before their (mostly empty) halo. Otherwise
         // a distant edited column can wait several ticks just for activation.
         for &tile in &patches {
             self.wake_tile(tile);
         }
-        for tile in patches {
+        let max_tile: Pos = std::array::from_fn(|a| (size[a] - 1) / SIDE);
+        for &tile in &patches {
             let lo = tile.map(|v| v.saturating_sub(1));
-            let hi: Pos = std::array::from_fn(|a| (tile[a] + 1).min((size[a] - 1) / SIDE));
+            let hi: Pos = std::array::from_fn(|a| (tile[a] + 1).min(max_tile[a]));
             for z in lo[2]..=hi[2] {
                 for y in lo[1]..=hi[1] {
                     for x in lo[0]..=hi[0] {
@@ -119,6 +294,8 @@ impl Flow {
                 }
             }
         }
+        patches.clear();
+        self.patch_scratch = patches;
     }
     #[cfg(test)]
     pub fn step(&mut self, w: &mut World, blocked: impl Fn(Pos) -> bool) {
@@ -279,12 +456,12 @@ impl Flow {
             }
             b.u32(work.cursor);
         }
-        b.u32(self.revisit.len() as u32);
-        for p in &self.revisit {
-            for &v in p {
+        b.u32(self.tiles.revisit_len() as u32);
+        self.tiles.for_each_revisit(|p| {
+            for v in p {
                 b.u32(v);
             }
-        }
+        });
     }
     pub fn load_legacy(&mut self, s: &mut Scan, size: Pos) -> Option<()> {
         self.active.clear();
@@ -293,8 +470,8 @@ impl Flow {
         self.moved = s.u64();
         self.pushed = s.u64();
         self.queue.clear();
-        self.queued.clear();
-        self.revisit.clear();
+        self.tiles.clear();
+        self.tiles.ensure_size(size);
         let count = s.u32() as usize;
         if count > s.left() / 16 {
             return None;
@@ -304,7 +481,7 @@ impl Flow {
             let cursor = s.u32();
             if (0..3).any(|a| tile[a] >= size[a].div_ceil(SIDE))
                 || cursor >= CELLS
-                || !self.queued.insert(tile)
+                || !self.tiles.insert_queued(tile)
             {
                 return None;
             }
@@ -317,10 +494,10 @@ impl Flow {
         let mut last = None;
         for _ in 0..count {
             let p = std::array::from_fn(|_| s.u32());
-            if !self.queued.contains(&p) || last.is_some_and(|prev| prev >= p) {
+            if !self.tiles.contains_queued(&p) || last.is_some_and(|prev| prev >= p) {
                 return None;
             }
-            self.revisit.insert(p);
+            self.tiles.insert_revisit(p);
             last = Some(p);
         }
         s.ok().then_some(())

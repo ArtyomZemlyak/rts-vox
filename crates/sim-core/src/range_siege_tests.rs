@@ -221,3 +221,148 @@ fn siege_large_tilted_barrel_remains_hittable_beyond_old_eight_metre_cutoff() {
         crate::blast::HitFrames::new(&u, u.pose, &u.seg_frames, u.turret_delta, u.turret_pitch);
     assert!(map.hit(&u, p).is_some(), "blast capture clipped the barrel");
 }
+
+#[test]
+fn siege_trunnion_elevates_only_the_barrel_and_uses_its_real_muzzle() {
+    let mut u = RangeUnit::of_kind(RangeUnitKind::ArtilleryTurretT3, [200, 16, 200]);
+    assert!(u.articulated_siege() && u.barrel_connected(0));
+    let deck = u.root_frame(14);
+    let bearing = u.seg_frames[0].base;
+    let flat = weapons::muzzles(&u, 0)[0];
+    u.turret_pitch = fx::angle::FULL / 8;
+    u.update_pose(0);
+    assert_eq!(u.root_frame(14), deck, "charge chambers tilted with the barrel");
+    assert_eq!(u.seg_frames[0].base, bearing, "trunnion translated");
+    let muzzle = weapons::muzzles(&u, 0)[0];
+    assert!(muzzle[1] > flat[1].add(Fx::from_int(20)));
+    let physical = u.seg_frames[0].world(weapons::muzzle_cell(u.weapon_path(0).unwrap()));
+    assert_eq!(muzzle, [physical.x, physical.y, physical.z]);
+    let b = &u.body.segments[0].body;
+    let mut hits = 0;
+    for x in 25..35 { for y in 1..6 { for z in 3..13 {
+        if !b.vol.get(x, y, z) { continue; }
+        let p = u.seg_frames[0].world([x, y, z].map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))));
+        if u.hit([p.x, p.y, p.z].map(|v|v.to_int_trunc())).is_some_and(|(part, _)|part == 1) { hits += 1; }
+    }}}
+    assert!(hits > 100, "elevated barrel is only a picture");
+}
+
+#[test]
+fn siege_trunnion_severed_barrel_cannot_fire_and_damaged_pose_restores() {
+    let mut r = arena_of([RangeUnitKind::ArtilleryTurretT3, RangeUnitKind::Tank]);
+    r.start_battle().unwrap();
+    r.battle.actors[0].turret.angle = fx::angle::FULL / 7;
+    r.battle.actors[0].elevation.angle = fx::angle::FULL / 10;
+    let u = &mut r.units[0];
+    u.turret_pitch = fx::angle::FULL / 10;
+    u.update_pose(fx::angle::FULL / 7);
+    for y in 0..7 { for z in 0..16 {
+        if u.body.segments[0].body.remove(20, y, z) { u.seg_removed.push((0, [20, y as u8, z as u8])); }
+    }}
+    assert!(!u.barrel_connected(0));
+    assert!(weapons::muzzles(u, u.motion.drive.head + u.turret_delta).is_empty());
+    r.matter.annihilate_removed(0, &r.units[0], 0, 0);
+    r.units[0].update_response();
+    assert!(!r.units[0].status.weapon && r.units[0].status.alive);
+    let mut phase = String::new();
+    let copy = BlastRange::restore_observed(r.config, &r.snapshot(), |p, offset, id| phase = format!("{p} {offset} {id:?}"))
+        .unwrap_or_else(|| panic!("hinged damaged siege snapshot: {phase}"));
+    assert_eq!(r.state_hash(), copy.state_hash());
+    assert_eq!(r.units[0].seg_frames, copy.units[0].seg_frames);
+    assert!(!copy.units[0].barrel_connected(0));
+    assert!(!copy.units[0].status.weapon);
+}
+
+#[test]
+fn siege_legacy_monolithic_snapshot_retains_its_voxel_ownership() {
+    let mut r = arena_of([RangeUnitKind::ArtilleryTurretT3, RangeUnitKind::Tank]);
+    let at = r.units[0].at;
+    r.units[0] = RangeUnit::of_kind_model(RangeUnitKind::ArtilleryTurretT3, at, false);
+    r.matter = crate::blast::matter::Matter::new(&r.units);
+    r.combustion = crate::blast::fire::Combustion::new(&r.units, &mut r.matter);
+    let mut phase = String::new();
+    let copy = BlastRange::restore_observed(r.config, &r.snapshot(), |p, offset, id| phase = format!("{p} {offset} {id:?}"))
+        .unwrap_or_else(|| panic!("legacy siege snapshot: {phase}"));
+    assert!(!copy.units[0].articulated_siege());
+    assert_eq!(r.state_hash(), copy.state_hash());
+    if let Some(folder) = std::env::var_os("RTS_ARTILLERY_EVIDENCE") {
+        r.start_battle().unwrap();
+        r.battle.actors[1].order = Order::Hold;
+        assert!(r.battle_order(0, Order::Ground([410, 16, 336]), None));
+        for _ in 0..180 {
+            if r.battle.actors[0].charge.is_some_and(|deadline| r.tick + 2 >= deadline) { break; }
+            step_without_ai(&mut r);
+        }
+        assert!(r.battle.actors[0].charge.is_some());
+        std::fs::write(std::path::Path::new(&folder).join("legacy.bin"), r.snapshot()).unwrap();
+    }
+}
+
+#[test]
+fn siege_native_charge_and_actual_shot_evidence() {
+    let Some(folder) = std::env::var_os("RTS_ARTILLERY_EVIDENCE") else { return; };
+    let folder = std::path::PathBuf::from(folder);
+    std::fs::create_dir_all(&folder).unwrap();
+    for (name, yaw) in [("rear", 0), ("left", fx::angle::FULL / 3), ("right", -fx::angle::FULL / 3)] {
+        let mut layout = arena_of([RangeUnitKind::ArtilleryTurretT3, RangeUnitKind::Tank]).layout.unwrap();
+        layout.units[0].at = [320, 16, 320];
+        layout.units[1].at = [560, 16, 560];
+        let target = [320 + fx::angle::cos(yaw).mul(Fx::from_int(240)).to_int_trunc(),
+            16, 320 + fx::angle::sin(yaw).mul(Fx::from_int(240)).to_int_trunc()];
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        let mut r = BlastRange::with_layout(c, layout).unwrap();
+        r.start_battle().unwrap();
+        r.battle.actors[1].order = Order::Hold;
+        assert!(r.battle_order(0, Order::Ground(target), None));
+        for _ in 0..240 {
+            if r.battle.actors[0].charge.is_some_and(|deadline| r.tick + 2 >= deadline) { break; }
+            step_without_ai(&mut r);
+        }
+        assert!(r.battle.actors[0].charge.is_some() && r.battle.actors[0].fired == 0);
+        let copy = BlastRange::restore(r.config, &r.snapshot()).unwrap();
+        assert_eq!(copy.state_hash(), r.state_hash());
+        std::fs::write(folder.join(format!("charge-{name}.bin")), r.snapshot()).unwrap();
+        println!("SIEGE_EVIDENCE view={name} tick={} pitch={} head_pitch_y={} barrel_pitch_y={}",
+            r.tick, r.units[0].turret_pitch, r.units[0].root_frame(14).x.y.raw(), r.units[0].seg_frames[0].x.y.raw());
+        if name == "rear" {
+            for _ in 0..12 { step_without_ai(&mut r); if r.battle.actors[0].fired > 0 { break; } }
+            assert_eq!(r.battle.actors[0].fired, 1);
+            assert!(r.battle.rounds[0].velocity[1] > Fx::ZERO);
+            std::fs::write(folder.join("shot.bin"), r.snapshot()).unwrap();
+        }
+    }
+}
+
+#[test]
+fn siege_trunnion_actual_laser_damage_is_conserved_and_replays() {
+    let mut r = arena_of([RangeUnitKind::ArtilleryTurretT3, RangeUnitKind::Tank]);
+    r.units[0].turret_pitch = fx::angle::FULL / 10;
+    r.units[0].update_pose(0);
+    let f = r.units[0].seg_frames[0];
+    let p = f.world([Fx::from_int(25), Fx::from_int(3), Fx::from_int(8)]);
+    let source = p.add(f.z.scale(Fx::from_int(40)));
+    let target = p.sub(f.z.scale(Fx::from_int(40)));
+    let tuning = crate::blast::motion::spider_tuning().laser.clone();
+    let config = r.config;
+    for _ in 0..20 {
+        let trace = r.laser_ray([source.x, source.y, source.z], [target.x, target.y, target.z].map(Fx::to_int_trunc),
+            None, &tuning, &config, (&mut |_| {}, &|_, _| {}));
+        assert!(trace.hit);
+    }
+    assert!(r.thermals.hot() > 0);
+    r.battle.actors[0].elevation.angle = fx::angle::FULL / 10;
+    r.units[0].turret_pitch = fx::angle::FULL / 10;
+    r.units[0].update_pose(0);
+    let mut phase = String::new();
+    let mut copy = BlastRange::restore_observed(r.config, &r.snapshot(), |p, offset, id|phase=format!("{p} {offset} {id:?}"))
+        .unwrap_or_else(||panic!("laser-contact siege snapshot: {phase}"));
+    for _ in 0..20 {
+        step_without_ai(&mut r); step_without_ai(&mut copy);
+        assert_eq!(r.state_hash(), copy.state_hash());
+    }
+    assert!(!r.units[0].seg_removed.is_empty(), "raised barrel did not receive thermal damage");
+    assert!(r.matter.economy.ledger.balanced());
+    if let Some(folder) = std::env::var_os("RTS_ARTILLERY_EVIDENCE") {
+        std::fs::write(std::path::Path::new(&folder).join("damage.bin"), r.snapshot()).unwrap();
+    }
+}

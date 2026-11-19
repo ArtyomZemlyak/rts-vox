@@ -31,6 +31,9 @@ impl Frame {
             let n = v.len_sq();
             if n <= Fx::ZERO {
                 fallback
+            } else if n == Fx::ONE {
+                // The exact Q32.32 unit needs neither sqrt/divide nor scale.
+                v
             } else {
                 v.scale(Fx::ONE.div(n.sqrt()))
             }

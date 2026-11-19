@@ -301,7 +301,6 @@ impl RowPacked {
 /// она отличается тем, что не держит тысячу отдельных аллокаций. Ширина
 /// индекса растёт по чанку целиком: 4 бита до шестнадцати материалов,
 /// дальше 8 — и тогда это плотный массив плюс палитра.
-#[derive(Clone)]
 pub struct Paletted {
     palette: Vec<Mat>,
     data: Vec<u32>,
@@ -310,11 +309,21 @@ pub struct Paletted {
     pub widenings: u64,
     /// Order-independent content fingerprint; palette insertion order is not state.
     content_hash: u64,
+    /// Derived wire-format RLE bytes; invalidated on every voxel write.
+    rle_cache: std::sync::OnceLock<Box<[u8]>>,
 }
 
 impl Default for Paletted {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Clone for Paletted {
+    fn clone(&self) -> Self {
+        Self { palette: self.palette.clone(), data: self.data.clone(), bits: self.bits,
+            widenings: self.widenings, content_hash: self.content_hash,
+            rle_cache: std::sync::OnceLock::new() }
     }
 }
 
@@ -366,6 +375,7 @@ impl Paletted {
             bits: 4,
             widenings: 0,
             content_hash: 0,
+            rle_cache: std::sync::OnceLock::new(),
         }
     }
 
@@ -494,6 +504,7 @@ impl Paletted {
         if was == m {
             return;
         }
+        self.rle_cache.take();
         let index = Dense::idx(x, y, z);
         self.content_hash ^= Self::cell_hash(index, was) ^ Self::cell_hash(index, m);
         let pi = match self.palette.iter().position(|&p| p == m) {
@@ -552,6 +563,65 @@ impl Paletted {
     }
     pub fn content_hash(&self) -> u64 {
         self.content_hash
+    }
+
+    pub(crate) fn save_rle(&self, b: &mut fx::blob::Blob) {
+        let bytes = self.rle_cache.get_or_init(|| self.encode_rle());
+        b.v.extend_from_slice(bytes);
+    }
+
+    fn encode_rle(&self) -> Box<[u8]> {
+        let bits = self.bits as usize;
+        let per = 32 / bits;
+        let mask = ((1u64 << bits) - 1) as u32;
+        let rep = u32::MAX / mask;
+        let mut runs: Vec<(Mat, u16)> = Vec::with_capacity(32);
+        let push_run = |runs: &mut Vec<(Mat, u16)>, m: Mat, mut count: usize| {
+            while count > 0 {
+                match runs.last_mut() {
+                    Some((lm, n)) if *lm == m && *n < u16::MAX => {
+                        let room = (u16::MAX - *n) as usize;
+                        let add = count.min(room);
+                        *n += add as u16;
+                        count -= add;
+                    }
+                    _ => {
+                        let add = count.min(u16::MAX as usize);
+                        runs.push((m, add as u16));
+                        count -= add;
+                    }
+                }
+            }
+        };
+        for &word in &self.data {
+            let first = word & mask;
+            if bits == 16 {
+                let m0 = self.palette[first as usize];
+                let m1 = self.palette[(word >> 16) as usize];
+                if m0 == m1 {
+                    push_run(&mut runs, m0, 2);
+                } else {
+                    push_run(&mut runs, m0, 1);
+                    push_run(&mut runs, m1, 1);
+                }
+            } else if word == first.wrapping_mul(rep) {
+                push_run(&mut runs, self.palette[first as usize], per);
+            } else {
+                for k in 0..per {
+                    let m = self.palette[((word >> (k * bits)) & mask) as usize];
+                    push_run(&mut runs, m, 1);
+                }
+            }
+        }
+        let mut out = fx::blob::Blob {
+            v: Vec::with_capacity(4 + runs.len() * 4),
+        };
+        out.u32(runs.len() as u32);
+        for &(m, n) in &runs {
+            out.u16(m);
+            out.u16(n);
+        }
+        out.v.into_boxed_slice()
     }
 
     pub fn from_dense(d: &Dense) -> Paletted {
@@ -970,4 +1040,58 @@ mod tests {
         }
         assert!(p.bytes() <= before, "уплотнение увеличило размер");
     }
+
+    #[test]
+    fn paletted_rle_cache_matches_dense_scan_and_invalidates_on_write() {
+        let reference = |p: &Paletted| {
+            let mut runs: Vec<(Mat, u16)> = Vec::new();
+            for y in 0..CS {
+                for z in 0..CS {
+                    for x in 0..CS {
+                        let m = p.get(x, y, z);
+                        match runs.last_mut() {
+                            Some((lm, n)) if *lm == m && *n < u16::MAX => *n += 1,
+                            _ => runs.push((m, 1)),
+                        }
+                    }
+                }
+            }
+            let mut b = fx::blob::Blob::new();
+            b.u32(runs.len() as u32);
+            for &(m, n) in &runs {
+                b.u16(m);
+                b.u16(n);
+            }
+            b.v
+        };
+        let mut p = Paletted::new();
+        let mut b0 = fx::blob::Blob::new();
+        p.save_rle(&mut b0);
+        assert_eq!(b0.v, reference(&p));
+        // Exercise 4-bit, 8-bit, and 16-bit palette widenings plus cache invalidation.
+        for mat in 1..=260u16 {
+            let i = (mat as usize * 97) % (CS * CS * CS);
+            let (x, z, y) = (i % CS, (i / CS) % CS, i / (CS * CS));
+            p.set(x, y, z, mat);
+            if mat == 12 || mat == 200 || mat == 260 {
+                let mut b = fx::blob::Blob::new();
+                p.save_rle(&mut b);
+                assert_eq!(b.v, reference(&p), "mismatch at mat={mat}");
+            }
+        }
+    }
+
+    #[test]
+    fn warm_rle_survives_copy_on_write_without_copying_derived_cache() {
+        let mut p = Paletted::new();p.set(1,2,3,7);
+        let mut before=fx::blob::Blob::new();p.save_rle(&mut before);
+        let mut changed=std::sync::Arc::new(p);let saved=changed.clone();
+        let copy=std::sync::Arc::make_mut(&mut changed);
+        assert!(copy.rle_cache.get().is_none(), "COW must not copy a cache about to be invalidated");
+        copy.set(1,2,3,9);
+        let mut old=fx::blob::Blob::new();saved.save_rle(&mut old);assert_eq!(old.v,before.v);
+        let mut new=fx::blob::Blob::new();changed.save_rle(&mut new);assert_ne!(new.v,old.v);
+        assert_eq!(saved.get(1,2,3),7);assert_eq!(changed.get(1,2,3),9);
+    }
+
 }

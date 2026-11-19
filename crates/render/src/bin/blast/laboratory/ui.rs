@@ -61,12 +61,67 @@ pub struct ObjectName(usize);
 pub struct ControlText(LabAction);
 #[derive(Component)]
 pub struct Icon(&'static str);
+// Responsive service islands keep native-size text at small viewports.
+#[derive(Component,Clone,Copy)]
+pub(crate) struct Dock(pub u8);
+#[derive(Component)]
+pub(crate) struct CompactStrip;
+#[derive(Component)]
+pub(crate) struct LibraryHeader;
+#[derive(Component)]
+pub(crate) struct CardRow;
+
+pub(crate) fn responsive(lab:Res<Laboratory>,windows:Query<&Window>,scale:Res<UiScale>,
+    mut nodes:Query<(Entity,&mut Node,Option<&Dock>,Has<LibraryHeader>,Has<CompactStrip>,Has<CardRow>,Option<&Card>,Option<&CardImage>,Option<&Label>),
+        Or<(With<Dock>,With<LibraryHeader>,With<CompactStrip>,With<CardRow>,With<Card>,With<CardImage>,With<Label>)>>,
+    mut original:Local<std::collections::BTreeMap<Entity,Node>>) {
+    if !lab.active(){return;}let Ok(w)=windows.single()else{return;};
+    let compact=w.width()/scale.0<1400. || w.height()/scale.0<780.;
+    for (e,mut node,dock,library,strip,row,card,image,label) in &mut nodes {
+        let base=original.entry(e).or_insert_with(||node.clone());let mut next=base.clone();next.display=node.display;
+        if compact {
+            if let Some(Dock(id))=dock {
+                next.overflow=Overflow{x:OverflowAxis::Clip,y:OverflowAxis::Scroll};
+                match id {
+                    0=>{next.width=px(250);next.height=px(100);next.flex_wrap=FlexWrap::Wrap;next.row_gap=px(0);},
+                    1=>{next.width=px(380);next.height=px(100);},
+                    2=>{next.width=px(260);next.height=px(180);},
+                    3=>{next.left=px(224);next.right=px(284);next.bottom=px(202);next.height=px(64);},
+                    4=>{next.width=px(200);next.top=px(120);next.bottom=px(202);},
+                    5=>{next.width=px(260);next.top=px(120);next.bottom=px(202);next.overflow=Overflow::clip();next.row_gap=px(6);},
+                    6=>{next.left=px(274);next.right=px(404);next.max_width=Val::Auto;next.height=px(100);},
+                    7=>{next.left=px(224);next.top=px(120);next.width=Val::Auto;next.right=px(284);next.height=px(46);},
+                    8=>{next.right=px(284);next.height=px(180);next.overflow=Overflow::clip();},
+                    _=>{}
+                }
+            }
+            if library{next.height=px(62);next.overflow=Overflow{x:OverflowAxis::Clip,y:OverflowAxis::Scroll};}
+            if strip{next.max_height=px(72);next.overflow=Overflow{x:OverflowAxis::Clip,y:OverflowAxis::Scroll};next.flex_shrink=0.;}
+            if row||card.is_some(){next.height=px(106);next.flex_shrink=0.;}
+            if image.is_some(){next.height=px(64);}
+            if label.is_some_and(|Label(id)|*id==15){next.display=Display::None;}
+        }
+        if *node!=next{*node=next;}
+    }
+}
 #[derive(Resource, Default)]
 pub struct Pictures {
     icons: Vec<(&'static str, Handle<Image>)>,
     assets: Vec<(Element, Handle<Image>)>,
     scenarios: Vec<(usize, Handle<Image>)>,
     event_icons: Vec<(&'static str, Handle<Image>)>,
+}
+// A service preview uses dark raster ink on paper; projection thumbnails stay luminous.
+fn service_thumbnail(image: Image) -> Image {
+    let mut image=spatial_ui::hologram_thumbnail(image);
+    let width=image.texture_descriptor.size.width as usize;
+    if let Some(data)=&mut image.data {for (i,p) in data.chunks_exact_mut(4).enumerate() {
+        if p[3]==0 {continue;}
+        let edge=p[3]>=220;
+        p[0]=if edge {31}else{62};p[1]=if edge {77}else{119};p[2]=if edge {86}else{131};
+        p[3]=if edge {240}else if width>0&&(i/width)%3==0 {92}else{178};
+    }}
+    image
 }
 const SLOTS: usize = 16;
 const CATEGORIES: [&str; 9] = [
@@ -116,8 +171,9 @@ fn caption(p: &mut ChildSpawnerCommands, f: &TextFont, text: &str) {
 }
 fn heading(p: &mut ChildSpawnerCommands, f: &TextFont, text: &str) {
     p.spawn((
-        Text::new(text),
+        Text::new(text.to_uppercase()),
         font(f, 16.0),
+        bevy::text::LetterSpacing::Px(1.2),
         TextColor(theme::TEXT),
         Node {
             margin: UiRect::top(px(5)),
@@ -149,11 +205,12 @@ pub(super) fn control(
         a,
         Node {
             min_height: px(37),
+            flex_shrink: 0.0,
             padding: UiRect::axes(px(9), px(7)),
             column_gap: px(7),
             align_items: AlignItems::Center,
             border: UiRect::all(px(1)),
-            border_radius: BorderRadius::all(px(5)),
+            border_radius: BorderRadius::ZERO,
             ..default()
         },
         BackgroundColor(theme::BUTTON),
@@ -173,12 +230,13 @@ pub(super) fn control(
     });
 }
 fn controls(p: &mut ChildSpawnerCommands, f: &TextFont, items: &[(&str, &'static str, LabAction)]) {
-    p.spawn(Node {
+    p.spawn((panel::HitIsland,ui_motion::Target::panel(ui_motion::Role::Service),bevy::ui::RelativeCursorPosition::default(),BackgroundColor(theme::PANEL),Node {
+        padding:UiRect::all(px(6)),flex_shrink:0.0,
         column_gap: px(6),
         row_gap: px(6),
         flex_wrap: FlexWrap::Wrap,
         ..default()
-    })
+    }))
     .with_children(|p| {
         for &(name, image, a) in items {
             control(p, f, name, image, a);
@@ -192,7 +250,7 @@ fn panel_node() -> Node {
         row_gap: px(10),
         flex_direction: FlexDirection::Column,
         border: UiRect::all(px(1)),
-        border_radius: BorderRadius::all(px(7)),
+        border_radius: BorderRadius::ZERO,
         display: Display::None,
         ..default()
     }
@@ -261,84 +319,46 @@ fn section_visible(lab: &Laboratory, id: u8) -> bool {
 pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
     commands.init_resource::<Pictures>();
     let f = font(base, 14.0);
-    let mut header = panel_node();
-    header.left = px(12);
-    header.right = px(12);
-    header.top = px(10);
-    header.height = px(58);
-    header.padding = UiRect::axes(px(12), px(8));
-    header.flex_direction = FlexDirection::Row;
-    header.justify_content = JustifyContent::SpaceBetween;
-    header.align_items = AlignItems::Center;
-    commands.spawn(root(header, camera)).with_children(|p| {
-        p.spawn(Node {
-            column_gap: px(10),
-            align_items: AlignItems::Center,
-            ..default()
-        })
-        .with_children(|p| {
-            frontend::entry(p, &f);
-            icon(p, "flask-conical");
-            heading(p, &f, "ЛАБОРАТОРИЯ");
-            label(p, &f, "", Some(14));
-        });
-        controls(
-            p,
-            &f,
-            &[
-                ("Опыты", "flask-conical", LabAction::Experiments),
-                ("Стенд · F6", "camera", LabAction::StandView),
-                ("Сохранить", "save", LabAction::SaveScene),
-                ("Открыть", "folder-open", LabAction::LoadScene),
-                ("Помощь", "circle-help", LabAction::Help),
-                ("Полигон", "x", LabAction::Back),
-            ],
-        );
+    let mut header=panel_node();
+    header.left=px(12);header.top=px(10);header.width=px(340);header.height=px(58);
+    header.flex_direction=FlexDirection::Row;header.align_items=AlignItems::Center;
+    header.column_gap=px(10);
+    commands.spawn((root(header,camera),Dock(0),panel::ScrollPanel,ScrollPosition::default())).with_children(|p| {
+        icon(p,"flask-conical");heading(p,&f,"ЛАБОРАТОРИЯ");label(p,&f,"",Some(14));
     });
-    let mut toolbar = panel_node();
-    toolbar.left = px(12);
-    toolbar.right = px(12);
-    toolbar.top = px(76);
-    toolbar.min_height = px(48);
-    toolbar.padding = UiRect::axes(px(9), px(5));
-    toolbar.flex_direction = FlexDirection::Row;
-    toolbar.justify_content = JustifyContent::SpaceBetween;
-    commands.spawn(root(toolbar, camera)).with_children(|p| {
-        controls(
-            p,
-            &f,
-            &[
-                ("Выбор · V", "mouse-pointer-2", LabAction::Tool(0)),
-                ("Пипетка · I", "pipette", LabAction::Tool(4)),
-                ("Перенос · G", "move", LabAction::Tool(1)),
-                ("Деталь · B", "box", LabAction::AddPart),
-                ("Цель · T", "crosshair", LabAction::Aim),
-                ("−90° · Q", "rotate-ccw", LabAction::Turn(-1)),
-                ("+90° · E", "rotate-cw", LabAction::Turn(1)),
-                ("Сетка", "grid-3x3", LabAction::Grid),
-                ("Разрез · F7", "layers", LabAction::Tab(30)),
-                ("Реплей · запись", "circle", LabAction::Tab(31)),
-                ("Общий вид · Home", "camera", LabAction::Frame),
-                ("Живые · F2", "hammer", LabAction::LiveTools),
-            ],
-        );
-        controls(
-            p,
-            &f,
-            &[
-                ("Пуск · F", "play", LabAction::Fire),
-                ("Пауза", "pause", LabAction::Pause),
-                ("Тик", "step-forward", LabAction::Step),
-                ("Сброс", "undo-2", LabAction::Reset),
-            ],
-        );
+    let mut transport=panel_node();
+    transport.right=px(12);transport.top=px(10);transport.width=px(440);
+    transport.padding=UiRect::all(px(4));
+    commands.spawn((root(transport,camera),Dock(1),panel::ScrollPanel,ScrollPosition::default())).with_children(|p| controls(p,&f,&[
+        ("Пуск · F","play",LabAction::Fire),("Пауза","pause",LabAction::Pause),
+        ("Тик","step-forward",LabAction::Step),("Сброс","undo-2",LabAction::Reset)]));
+    let mut auxiliary=panel_node();
+    auxiliary.right=px(12);auxiliary.bottom=px(10);auxiliary.width=px(330);
+    commands.spawn((root(auxiliary,camera),Dock(2),panel::ScrollPanel,ScrollPosition::default())).with_children(|p| {
+        frontend::entry(p,&f);
+        controls(p,&f,&[("Опыты","flask-conical",LabAction::Experiments),
+            ("Стенд · F6","camera",LabAction::StandView),("Сохранить","save",LabAction::SaveScene),
+            ("Открыть","folder-open",LabAction::LoadScene),("Помощь","circle-help",LabAction::Help),
+            ("Полигон","x",LabAction::Back)]);
     });
+    let mut toolbar=panel_node();
+    toolbar.left=px(262);toolbar.right=px(354);toolbar.bottom=px(308);
+    toolbar.flex_direction=FlexDirection::Row;toolbar.flex_wrap=FlexWrap::Wrap;
+    toolbar.border=UiRect::ZERO;toolbar.padding=UiRect::ZERO;
+    commands.spawn((root(toolbar,camera),Dock(3),panel::ScrollPanel,ScrollPosition::default())).insert((panel::LayoutOnly,Pickable::IGNORE,BackgroundColor(Color::NONE)))
+        .with_children(|p| controls(p,&f,&[
+            ("Выбор · V","mouse-pointer-2",LabAction::Tool(0)),("Пипетка · I","pipette",LabAction::Tool(4)),
+            ("Перенос · G","move",LabAction::Tool(1)),("Деталь · B","box",LabAction::AddPart),
+            ("Цель · T","crosshair",LabAction::Aim),("−90° · Q","rotate-ccw",LabAction::Turn(-1)),
+            ("+90° · E","rotate-cw",LabAction::Turn(1)),("Сетка","grid-3x3",LabAction::Grid),
+            ("Разрез · F7","layers",LabAction::Tab(30)),("Реплей · запись","circle",LabAction::Tab(31)),
+            ("Общий вид · Home","camera",LabAction::Frame),("Живые · F2","hammer",LabAction::LiveTools)]));
     let mut left = panel_node();
     left.left = px(12);
-    left.top = px(134);
-    left.bottom = px(318);
+    left.top = px(88);
+    left.bottom = px(310);
     left.width = px(238);
-    commands.spawn(root(left, camera)).with_children(|p| {
+    commands.spawn((root(left, camera),Dock(4),panel::ScrollPanel,ScrollPosition::default())).with_children(|p| {
         heading(p, &f, "Состав сцены");
         controls(p, &f, &[("Новый элемент", "plus", LabAction::Create)]);
         scrolling::area(p, 0, |p| {
@@ -355,7 +375,7 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
                         align_items: AlignItems::Center,
                         display: Display::None,
                         border: UiRect::all(px(1)),
-                        border_radius: BorderRadius::all(px(4)),
+                        border_radius: BorderRadius::ZERO,
                         ..default()
                     },
                     BackgroundColor(theme::BUTTON),
@@ -405,13 +425,13 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
     });
     let mut right = panel_node();
     right.right = px(12);
-    right.top = px(134);
-    right.bottom = px(318);
+    right.top = px(88);
+    right.bottom = px(310);
     right.width = px(330);
-    commands.spawn(root(right,camera)).with_children(|p| {
+    commands.spawn((root(right,camera),Dock(5),panel::ScrollPanel,ScrollPosition::default())).with_children(|p| {
         heading(p,&f,"Инспектор");
-        section(p,19,|p|{controls(p,&font(&f,12.0),&[("Объект","box",LabAction::Tab(0)),("Материал","layers",LabAction::Tab(1)),
-            ("Оружие","crosshair",LabAction::Tab(2)),("Результат","file-text",LabAction::Tab(3)),("Сцена","settings-2",LabAction::Tab(9)),("Сценарий","file-text",LabAction::Tab(24)),("Устройства","hammer",LabAction::Tab(25)),("Источники","crosshair",LabAction::Tab(10)),("Инструменты","hammer",LabAction::Tab(16)),("Пипетка","pipette",LabAction::Tab(14)),("Кубики","grid-3x3",LabAction::Tab(17)),("Реплей","circle",LabAction::Tab(31))]);});
+        section(p,19,|p|{p.spawn((CompactStrip,panel::ScrollPanel,ScrollPosition::default(),bevy::ui::RelativeCursorPosition::default(),Node{width:percent(100),flex_direction:FlexDirection::Column,..default()})).with_children(|p|controls(p,&font(&f,12.0),&[("Объект","box",LabAction::Tab(0)),("Материал","layers",LabAction::Tab(1)),
+            ("Оружие","crosshair",LabAction::Tab(2)),("Результат","file-text",LabAction::Tab(3)),("Сцена","settings-2",LabAction::Tab(9)),("Сценарий","file-text",LabAction::Tab(24)),("Устройства","hammer",LabAction::Tab(25)),("Источники","crosshair",LabAction::Tab(10)),("Инструменты","hammer",LabAction::Tab(16)),("Пипетка","pipette",LabAction::Tab(14)),("Кубики","grid-3x3",LabAction::Tab(17)),("Реплей","circle",LabAction::Tab(31))]));});
         section(p,20,|p|{controls(p,&font(&f,12.0),&[("Кубики","grid-3x3",LabAction::Tab(17)),("Материал","layers",LabAction::Tab(1))]);});
         section(p,22,|p|{controls(p,&font(&f,12.0),&[("Инструмент","hammer",LabAction::Tab(21)),("Материал","layers",LabAction::Tab(1))]);});
         scrolling::area(p, 1, |p| {
@@ -434,22 +454,21 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
                         label(p,&f,"",Some(27));
                         controls(p,&f,&[("Вкл / выкл · F7","layers",LabAction::SectionToggle),("К выбранному","crosshair",LabAction::SectionFocus)]);
                         caption(p,&f,"Плоскость остаётся на месте при движении камеры. Стрелка показывает оставляемую сторону. Выберите куб пипеткой и нажмите «К выбранному».");
-                        caption(p,&f,"Разрез показывает грунт, воду, юниты, дым и частицы эффектов. Отдельные обломки и падающие цельные куски пока отображаются целиком.");
+                        caption(p,&f,"Разрез показывает грунт, воду, юниты, дым и частицы эффектов. Разрез также применяется к отдельным обломкам и падающим цельным кускам.");
                         controls(p,&f,&[("Ось X","move",LabAction::SectionAxis(0)),("Ось Y","move",LabAction::SectionAxis(1)),("Ось Z","move",LabAction::SectionAxis(2)),("Другая сторона","layers",LabAction::SectionSide)]);
                         controls(p,&f,&[("−1 м","chevron-left",LabAction::SectionShift(-10)),("−10 см","chevron-left",LabAction::SectionShift(-1)),("+10 см","chevron-right",LabAction::SectionShift(1)),("+1 м","chevron-right",LabAction::SectionShift(10))]);
                         heading(p,&f,"Карта свойств");
                         label(p,&f,"",Some(28));
                         label(p,&f,"",Some(29));
-                        controls(p,&f,&[("Масштаб карты","camera",LabAction::MetricScale)]);
                         controls(p,&f,&[("Выкл","x",LabAction::Metric(0)),("Нагрев","flame",LabAction::Metric(1)),("Влажность","droplets",LabAction::Metric(2))]);
                         controls(p,&f,&[("Состояние","layers",LabAction::Metric(3)),("Прочность","shield",LabAction::Metric(4)),("Плотность","box",LabAction::Metric(5))]);
                         controls(p,&f,&[("Скорость","move",LabAction::Metric(6)),("Повреждение","crosshair",LabAction::Metric(7))]);
                         controls(p,&f,&[("Горение","flame",LabAction::Metric(8)),("Наполнение","droplets",LabAction::Metric(9)),("Материал","box",LabAction::Metric(10))]);
-                        caption(p,&f,"Карта показывает область вокруг выбранного куба; в живых инструментах — вокруг цели. Больший охват использует более редкие пробы. Без разреза окрашиваются видимые грани; с разрезом — плоскость. Синий — мало, красный — много; серый — данные недоступны. Нагрев указан в единицах симуляции на объём, не в градусах; для воды и обломков температура не рассчитывается. Скорость показывает поступательное движение юнитов и падение сыпучего вещества и воды.");
+                        caption(p,&f,"Карта окрашивает весь видимый грунт, воду, юниты и обломки. Разрез показывает оставленную часть и выбранную плоскость. Локальные пробы инспектора не ограничивают общую раскраску. Синий — мало, красный — много; серый — данные недоступны. Нагрев указан в единицах симуляции на объём, не в градусах. Для воды тепловых данных нет. Скорость берётся из реального движения грунта, воды, юнитов и обломков.");
                         caption(p,&f,"Состояние: синий — вода и расплав, жёлтый — сыпучее, серый — связное твёрдое. Вода и юниты не имеют всех свойств грунта.");
-                        caption(p,&f,"Обломки: окрашиваются до 64 находящихся в зоне; скорость и свойства материала берутся из самого обломка. Прочие данные для него не хранятся.");
+                        caption(p,&f,"Обломки окрашиваются по всей видимой сцене, включая неподвижные и объединённые в пакеты. Нагрев доступен для расплава; скорость и свойства материала берутся из самого обломка. Неизвестные свойства показаны серым.");
                         caption(p,&f,"Разрез только скрывает видимую часть сцены: физика и кубики не меняются. Он работает и в режиме живых инструментов.");
-                        caption(p,&f,"У юнитов показывается срез их видимой оболочки; отдельная заливка внутренних кубиков модели пока не строится.");
+                        caption(p,&f,"Разрез юнитов показывает внутренние детали, учитывает повреждения и положение подвижных частей. В режиме карты свойств сечение окрашивается по данным кубиков.");
                     },
                     0=>{
                         label(p,&f,"",Some(9));
@@ -469,7 +488,7 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
                         for (axis,name) in [(0,"Ширина"),(1,"Высота"),(2,"Глубина")] {
                             controls(p,&f,&[(&format!("{name} −"),"chevron-left",LabAction::Dimension(axis,-1)),(&format!("{name} +"),"chevron-right",LabAction::Dimension(axis,1))]);
                         }
-                        controls(p,&f,&[("Размер → объект","settings-2",LabAction::ApplySize)]);
+                        controls(p,&f,&[("Размер — объект","settings-2",LabAction::ApplySize)]);
                         });
                         section(p,18,|p| {controls(p,&f,&[("Кубики 10 см","grid-3x3",LabAction::BeginVoxelEdit),("В библиотеку","save",LabAction::SavePart)]);});
                         section(p,8,|p| {
@@ -601,7 +620,7 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
                         heading(p,&f,"Пипетка · куб мира 10 см");
                         controls(p,&font(&f,12.0),&[("Приблизить","camera",LabAction::ProbeFocus),("Снять выбор","x",LabAction::ClearProbe)]);
                         label(p,&f,"",Some(21));
-                        caption(p,&f,"I → ЛКМ по поверхности. Золотым светится поверхность выбранного кубика 10 см. Состояние обновляется с симуляцией.");
+                        caption(p,&f,"I — ЛКМ по поверхности. Золотым светится поверхность выбранного кубика 10 см. Состояние обновляется с симуляцией.");
                         caption(p,&f,"Соседняя клетка · шаг 10 см, включая пустоты и глубину материала");
                         for (a,n) in [(0,"X"),(1,"Y"),(2,"Z")] {controls(p,&f,&[(&format!("{n} −"),"chevron-left",LabAction::ProbeMove(a,-1)),(&format!("{n} +"),"chevron-right",LabAction::ProbeMove(a,1))]);}
                     },
@@ -626,28 +645,36 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
         caption(p,&f,"Прокрутка: колесо или полоса справа");
     });
     let mut status = panel_node();
-    status.left = px(262);
+    status.left = px(364);
     status.right = px(354);
-    status.bottom = px(270);
-    status.min_height = px(38);
+    status.top = px(10);
+    status.max_width=px(440);
+    status.min_height = px(58);
     status.padding = UiRect::all(px(9));
     commands
-        .spawn(root(status, camera))
+        .spawn((root(status, camera),Dock(6),panel::ScrollPanel,ScrollPosition::default()))
         .with_children(|p| label(p, &f, "", Some(12)));
+    let mut telemetry=panel_node();telemetry.left=px(364);telemetry.top=px(80);
+    telemetry.width=px(440);telemetry.min_height=px(38);
+    commands.spawn((root(telemetry,camera),Dock(7),panel::ScrollPanel,ScrollPosition::default())).with_children(|p| label(p,&font(&f,12.0),"",Some(13)));
     let mut browser = panel_node();
     browser.left = px(12);
-    browser.right = px(12);
+    browser.right = px(354);
     browser.bottom = px(10);
-    browser.height = px(250);
+    browser.height = px(288);
+    browser.padding=UiRect::ZERO;
+    browser.border=UiRect::ZERO;
     browser.row_gap = px(8);
-    commands.spawn(root(browser, camera)).with_children(|p| {
-        p.spawn(Node {
+    commands.spawn((root(browser, camera),Dock(8),panel::ScrollPanel,ScrollPosition::default())).insert((panel::LayoutOnly,Pickable::IGNORE,BackgroundColor(Color::NONE))).with_children(|p| {
+        p.spawn((LibraryHeader,panel::ScrollPanel,ScrollPosition::default(),panel::HitIsland,ui_motion::Target::panel(ui_motion::Role::Service),bevy::ui::RelativeCursorPosition::default(),BackgroundColor(theme::PANEL),Node {
+            padding:UiRect::all(px(6)),flex_shrink:0.0,flex_wrap:FlexWrap::Wrap,row_gap:px(4),
             justify_content: JustifyContent::SpaceBetween,
             align_items: AlignItems::Center,
             ..default()
-        })
+        }))
         .with_children(|p| {
             p.spawn(Node {
+                flex_wrap:FlexWrap::Wrap,row_gap:px(4),
                 column_gap: px(7),
                 align_items: AlignItems::Center,
                 ..default()
@@ -680,16 +707,18 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
                 ],
             );
         });
-        p.spawn(Node {
+        p.spawn((CardRow,Node {
             column_gap: px(8),
             height: px(142),
             ..default()
-        })
+        }))
         .with_children(|p| {
             for i in 0..SLOTS {
                 p.spawn((
                     Button,
                     Card(i),
+                    panel::HitIsland,
+                    bevy::ui::RelativeCursorPosition::default(),
                     LabAction::PickCatalog(0),
                     Node {
                         width: px(145),
@@ -698,8 +727,8 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
                         padding: UiRect::all(px(4)),
                         row_gap: px(4),
                         flex_direction: FlexDirection::Column,
-                        border: UiRect::all(px(2)),
-                        border_radius: BorderRadius::all(px(5)),
+                        border: UiRect::all(px(1)),
+                        border_radius: BorderRadius::ZERO,
                         overflow: Overflow::clip(),
                         ..default()
                     },
@@ -707,6 +736,7 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
                     BorderColor::all(theme::FRAME),
                 ))
                 .with_children(|p| {
+                    theme::corners(p);
                     p.spawn((
                         CardImage(i),
                         ImageNode::default(),
@@ -725,9 +755,11 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
                 });
             }
         });
-        label(p, &font(&f, 12.0), "", Some(13));
         p.spawn((
             Label(15),
+            panel::HitIsland,
+            bevy::ui::RelativeCursorPosition::default(),
+            BackgroundColor(theme::PANEL),
             Text::new(""),
             f.clone(),
             TextColor(theme::MUTED),
@@ -748,7 +780,7 @@ pub fn build(commands: &mut Commands, camera: Entity, base: &TextFont) {
     help.padding = UiRect::all(px(22));
     commands.spawn((root(help,camera),Help)).with_children(|p| {
         heading(p,&f,"Быстрый старт");
-        label(p,&f,"1. Выберите карточку в библиотеке снизу.\n2. Наведите на сцену: зелёный — можно разместить, красный — нельзя.\n3. Q / E или R — поворот на 90°. Page Up / Down — высота.\n4. ЛКМ — поставить; ПКМ / Esc — завершить размещение.\n5. V — выбор, G — перенос выбранного объекта мышью. I — пипетка кубика 10 см.\n6. Ctrl+D — копия, Delete — удалить. Ctrl+S — сохранить сцену.\n7. «Источники»: добавьте точку и поставьте её кнопкой «Позиция».\n8. Для ствола модели выберите юнит слева и нажмите «К юниту».\n9. «Оружие»: настройте выбранный источник и цель (T). F запускает выбранный источник; в готовом сценарии — все его команды по порядку.\n10. «Сцена»: размер карты, шаг сетки и длительность наблюдения.\n11. Выберите объект → «Материал» → материал по имени → «Применить к цели». Для части сборки сначала «Разобрать сборку».\n\nБиблиотека «Воздействия»: выберите взрыв → поставьте в сцене → F. PgUp/PgDn задают высоту. «Сценарии» открывают обвалы, падения, огонь и другие готовые проверки; «Вернуть мою сборку» возвращает вашу сцену.\n\nЧисла: клик → ввод → Enter или «Применить». Esc отменяет; Ctrl+A выделяет всё. При ошибке значение остаётся для исправления. Пробел — пауза, F5 — повторить.\n\nКамера: колёсико — приблизить к курсору; средняя кнопка + мышь — вращение; Shift + средняя кнопка — перемещение; Home — общий вид.\nEsc закрывает подсказку или отменяет инструмент. Кнопка «Полигон» возвращает прежнюю сессию.",None);
+        label(p,&f,"1. Выберите карточку в библиотеке снизу.\n2. Наведите на сцену: зелёный — можно разместить, красный — нельзя.\n3. Q / E или R — поворот на 90°. Page Up / Down — высота.\n4. ЛКМ — поставить; ПКМ / Esc — завершить размещение.\n5. V — выбор, G — перенос выбранного объекта мышью. I — пипетка кубика 10 см.\n6. Ctrl+D — копия, Delete — удалить. Ctrl+S — сохранить сцену.\n7. «Источники»: добавьте точку и поставьте её кнопкой «Позиция».\n8. Для ствола модели выберите юнит слева и нажмите «К юниту».\n9. «Оружие»: настройте выбранный источник и цель (T). F запускает выбранный источник; в готовом сценарии — все его команды по порядку.\n10. «Сцена»: размер карты, шаг сетки и длительность наблюдения.\n11. Выберите объект — «Материал» — материал по имени — «Применить к цели». Для части сборки сначала «Разобрать сборку».\n\nБиблиотека «Воздействия»: выберите взрыв — поставьте в сцене — F. PgUp/PgDn задают высоту. «Сценарии» открывают обвалы, падения, огонь и другие готовые проверки; «Вернуть мою сборку» возвращает вашу сцену.\n\nЧисла: клик — ввод — Enter или «Применить». Esc отменяет; Ctrl+A выделяет всё. При ошибке значение остаётся для исправления. Пробел — пауза, F5 — повторить.\n\nКамера: колёсико — приблизить к курсору; средняя кнопка + мышь — вращение; Shift + средняя кнопка — перемещение; Home — общий вид.\nEsc закрывает подсказку или отменяет инструмент. Кнопка «Полигон» возвращает прежнюю сессию.",None);
         controls(p,&f,&[("Камера","camera",LabAction::Camera),("Понятно · Esc","x",LabAction::Help)]);
     });
 }
@@ -821,8 +853,8 @@ pub fn text(lab: &Laboratory, kind: u8) -> String {
     let c = &lab.constructor;
     match kind {
         30=>lab.replay.text(lab.replay.position.unwrap_or(0)),
-        29=>if matches!(lab.tools.metric,1|2|3|4|5|7|8|10) {"Земля и вода целиком · обломки локально · серый: нет данных".into()}else{format!("Земля: {:.1} × {:.1} м · вода целиком · шаг пробы {} см",4.8*f32::from(lab.tools.metric_scale),4.8*f32::from(lab.tools.metric_scale),10*u32::from(lab.tools.metric_scale))},
-        28=>match lab.tools.metric {0=>"Карта выключена".into(),1=>"Нагрев: синий 0 → красный 1000 ед.; серый — нет данных".into(),2=>"Влажность: синий 0% → красный 100%".into(),3=>"Синий — жидкость · жёлтый — сыпучее · серый — твёрдое".into(),4=>"Прочность: синий 0 → красный 500".into(),5=>"Плотность: синий 0 → красный 10 000 кг/м³".into(),6=>"Скорость: синий 0 → красный 5 м/с".into(),7=>"Деформация: синий 0 → красный 2000 ед.".into(),8=>"Горение: синий 0 → красный 40 тиков; серый — нет данных".into(),9=>"Вода: синий пусто → красный полный куб".into(),_=>"Материал: каждому ID соответствует свой цвет".into()},
+        29=>"Весь мир · все юниты и обломки · серый: нет физических данных".into(),
+        28=>match lab.tools.metric {0=>"Карта выключена".into(),1=>"Нагрев: синий 0 — красный 1000 ед.; серый — нет данных".into(),2=>"Влажность: синий 0% — красный 100%".into(),3=>"Синий — жидкость · жёлтый — сыпучее · серый — твёрдое".into(),4=>"Прочность: синий 0 — красный 500".into(),5=>"Плотность: синий 0 — красный 10 000 кг/м³".into(),6=>"Скорость: синий 0 — красный 5 м/с".into(),7=>"Деформация: синий 0 — красный 2000 ед.".into(),8=>"Горение: синий 0 — красный 40 тиков; серый — нет данных".into(),9=>"Вода: синий пусто — красный полный куб".into(),_=>"Материал: каждому ID соответствует свой цвет".into()},
         27=>format!("{} · ось {} · сторона {} · точка X {} Y {} Z {}",if lab.tools.section.enabled {"Разрез включён"}else{"Разрез выключен"},["X","Y","Z"][lab.tools.section.axis.min(2) as usize],if lab.tools.section.positive {"+"}else{"−"},lab.tools.section.point()[0],lab.tools.section.point()[1],lab.tools.section.point()[2]),
         26=>format!("Выбрано: {}",scenario::label(lab,lab.ui.scenario_input)),
         12=>{
@@ -837,7 +869,7 @@ pub fn text(lab: &Laboratory, kind: u8) -> String {
                 "Выбор цели: нажмите на поверхность или объект · ЛКМ — задать цель · ПКМ / Esc — отмена".into()
             } else {format!("{}  ·  V выбор · G перенос · B деталь · T цель · F опыт · F1 помощь",lab.notice)}
         },
-        13=>match lab.ui.category {7=>format!("{} воздействий · страница {} · Клик по карточке → место в сцене → F · Мощность у каждого источника своя",lab.events.len(),lab.ui.page+1),8=>format!("{} готовых физических сценариев · страница {} · Карточка открывает отдельную расстановку · F — запуск",lab.experiments.len(),lab.ui.page+1),_=>format!("{} объектов в категории · страница {} · Клик по карточке → размещение в сцене · Шаг привязки {} ед. · {}",filtered(lab).len(),lab.ui.page+1,lab.definition.editor_step,c.catalog[c.choice].name)},
+        13=>match lab.ui.category {7=>format!("{} воздействий · страница {} · Клик по карточке — место в сцене — F · Мощность у каждого источника своя",lab.events.len(),lab.ui.page+1),8=>format!("{} готовых физических сценариев · страница {} · Карточка открывает отдельную расстановку · F — запуск",lab.experiments.len(),lab.ui.page+1),_=>format!("{} объектов в категории · страница {} · Клик по карточке — размещение в сцене · Шаг привязки {} ед. · {}",filtered(lab).len(),lab.ui.page+1,lab.definition.editor_step,c.catalog[c.choice].name)},
         15=>if filtered(lab).is_empty(){"В этой категории пока нет объектов. Выберите другую категорию или создайте свой элемент кнопкой «Новый элемент» слева.".into()}else{String::new()},
         18=>if c.creating(){"Создание элемента: добавьте детали и сохраните сборку в «Мои элементы».".into()}else{format!("Объектов: {} · {}",c.placed.len(),if c.stand{"стенд включён"}else{"свободная сцена"})},
         _=>String::new()
@@ -1026,13 +1058,14 @@ pub fn sync(
             pictures.icons.push((name, h.clone()));
             h
         };
+        image.color=theme::MUTED;
         if image.image != handle {
             image.image = handle;
         }
     }
     let count = windows
         .single()
-        .map_or(8, |w| ((w.width() / scale.0 - 48.0) / 153.0) as usize)
+        .map_or(8, |w| ((w.width() / scale.0 - 358.0) / 153.0) as usize)
         .clamp(1, SLOTS);
     lab.ui.per_page = count;
     let list = filtered(&lab);
@@ -1064,7 +1097,8 @@ pub fn sync(
             .find(|e| !pictures.assets.iter().any(|(cached, _)| cached == *e))
         {
             missing = true;
-            let h = images.add(visuals::thumbnail(element, &templates));
+            let h = images.add(service_thumbnail(
+                visuals::transparent_thumbnail(element, &templates)));
             pictures.assets.push((element.clone(), h));
         }
     }
@@ -1092,7 +1126,8 @@ pub fn sync(
                 {
                     event_image(&mut pictures, &mut images, "layers")
                 } else {
-                    images.add(visuals::thumbnail(&element, templates))
+                    images.add(service_thumbnail(
+                        visuals::transparent_thumbnail(&element, templates)))
                 };
                 pictures.scenarios.push((*i, h));
             }
@@ -1123,7 +1158,7 @@ pub fn sync(
                 *action = value;
             }
             *border = BorderColor::all(if selected(&lab, *action) {
-                theme::ACCENT
+                theme::FOCUS
             } else {
                 theme::FRAME
             });
@@ -1180,16 +1215,7 @@ pub fn sync(
                 })
                 .map(|(_, h)| h.clone())
         };
-        if let Some(handle) = handle {
-            if image.image != handle {
-                image.image = handle;
-            }
-            if image.color != Color::WHITE {
-                image.color = Color::WHITE;
-            }
-        } else if image.color != Color::NONE {
-            image.color = Color::NONE;
-        }
+        optical_ui::preview_image(&mut image,handle.unwrap_or_default());
     }
     for (CardName(slot), mut text) in &mut card_names {
         let value = page.get(*slot).map_or("", |i| match lab.ui.category {
@@ -1211,7 +1237,7 @@ pub fn sync(
             },
         );
         *border = BorderColor::all(if lab.constructor.selected == Some(*i) {
-            theme::ACCENT
+            theme::FOCUS
         } else {
             theme::FRAME
         });
@@ -1864,13 +1890,13 @@ fn display(node: &mut Mut<'_, Node>, value: Display) {
 mod tests {
     use super::*;
     #[test]
-    fn metric_legend_and_sampling_scale_are_described() {
+    fn metric_legend_describes_global_coverage_and_unknown_values() {
         let mut lab = Laboratory::new(false);
         lab.tools.metric = 6;
         lab.tools.metric_scale = 4;
         assert!(text(&lab, 28).contains("5 м/с"));
-        assert!(text(&lab, 29).contains("19.2"));
-        assert!(text(&lab, 29).contains("40 см"));
+        assert!(text(&lab, 29).contains("Весь мир"));
+        assert!(text(&lab, 29).contains("все юниты и обломки"));
     }
     #[test]
     fn scenario_and_device_panels_show_only_applicable_fields() {
@@ -2050,6 +2076,7 @@ mod tests {
 }
 
 impl Laboratory {
+    pub(crate) fn audit_ui(&self)->(u8,u8){(self.ui.tab,self.ui.category)}
     pub fn viewport_margins(&self, viewport: Vec2) -> Option<[f32; 4]> {
         (self.active() && !first_person::immersive(self)).then(|| {
             let factor = (viewport.x / 1920.0).clamp(1.0, 1.75);

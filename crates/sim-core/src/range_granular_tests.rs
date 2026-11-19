@@ -916,3 +916,111 @@ fn rocks_of_each_dune_size_roll_within_the_shared_budget() {
         assert!(rolled, "rock of {side} cells did not roll");
     }
 }
+
+#[test]
+fn tile_queue_set_and_sorted_patches_match_legacy_btree_and_positions_oracle() {
+    use super::membership::Positions;
+    let size = [512u32, 192, 600]; // spans multiple z>>6 words (600/4 = 150 > 128)
+    let mut flow = Flow::new();
+    let mut ref_queue: std::collections::VecDeque<[u32; 3]> = std::collections::VecDeque::new();
+    let mut ref_queued = Positions::default();
+    let mut ref_revisit: std::collections::BTreeSet<[u32; 3]> = std::collections::BTreeSet::new();
+
+    let ref_wake = |tile: [u32; 3],
+                    q: &mut std::collections::VecDeque<[u32; 3]>,
+                    qd: &mut Positions,
+                    rv: &mut std::collections::BTreeSet<[u32; 3]>| {
+        if qd.insert(tile) {
+            q.push_back(tile);
+        } else {
+            rv.insert(tile);
+        }
+    };
+
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next_u32 = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 16) as u32
+    };
+
+    for step in 0..8 {
+        let mut edits = Vec::new();
+        for _ in 0..180 {
+            let x = next_u32() % size[0];
+            let y = next_u32() % size[1];
+            let z = next_u32() % size[2];
+            edits.push(Edit::dig(x, y, z));
+        }
+        // Duplicate & boundary edits across z=252..264 (tile z=63..66 word boundary)
+        edits.push(Edit::dig(0, 0, 255));
+        edits.push(Edit::dig(0, 0, 256));
+        edits.push(Edit::dig(511, 191, 599));
+
+        flow.observe(&edits, size);
+
+        let patches: std::collections::BTreeSet<_> = edits
+            .iter()
+            .map(|e| [e.x / 4, e.y / 4, e.z / 4])
+            .collect();
+        for &tile in &patches {
+            ref_wake(tile, &mut ref_queue, &mut ref_queued, &mut ref_revisit);
+        }
+        for tile in patches {
+            let lo = tile.map(|v| v.saturating_sub(1));
+            let hi: [u32; 3] = std::array::from_fn(|a| (tile[a] + 1).min((size[a] - 1) / 4));
+            for z in lo[2]..=hi[2] {
+                for y in lo[1]..=hi[1] {
+                    for x in lo[0]..=hi[0] {
+                        ref_wake([x, y, z], &mut ref_queue, &mut ref_queued, &mut ref_revisit);
+                    }
+                }
+            }
+        }
+        assert_eq!(flow.pending(), ref_queue.len(), "step={step}");
+
+        // Pop and finish a batch of tiles, exercising revisit re-queueing vs removal.
+        let mut saved_now = fx::blob::Blob::new();
+        flow.save_legacy(&mut saved_now);
+        let mut ref_blob = fx::blob::Blob::new();
+        ref_blob.u64(0);
+        ref_blob.u64(0);
+        ref_blob.u32(ref_queue.len() as u32);
+        for &tile in &ref_queue {
+            for v in tile {
+                ref_blob.u32(v);
+            }
+            ref_blob.u32(0);
+        }
+        ref_blob.u32(ref_revisit.len() as u32);
+        for p in &ref_revisit {
+            for &v in p {
+                ref_blob.u32(v);
+            }
+        }
+        assert_eq!(saved_now.v, ref_blob.v, "serialized queue+revisit mismatch at step={step}");
+
+        let mut restored = Flow::new();
+        restored
+            .load_legacy(&mut fx::blob::Scan::new(&saved_now.v), size)
+            .expect("valid legacy flow snapshot");
+        let mut roundtrip = fx::blob::Blob::new();
+        restored.save_legacy(&mut roundtrip);
+        assert_eq!(roundtrip.v, saved_now.v, "roundtrip mismatch at step={step}");
+        flow = restored;
+
+        // Drain half the queue via step_moist on an empty world (all tiles finish cursor==64).
+        let mut empty_world = World::new(size[0], size[1], size[2], 1024, Box::new(Flat));
+        flow.tuning.scans_per_tick = 64 * 40;
+        flow.step_moist(&mut empty_world, |_| false, |_| 0);
+        for _ in 0..40 {
+            let Some(tile) = ref_queue.pop_front() else { break };
+            ref_queued.remove(&tile);
+            if ref_revisit.remove(&tile) {
+                ref_wake(tile, &mut ref_queue, &mut ref_queued, &mut ref_revisit);
+            }
+        }
+        assert_eq!(flow.pending(), ref_queue.len(), "post-drain step={step}");
+    }
+}

@@ -151,11 +151,8 @@ pub(super) fn solve_moving(
     config: &ExplosionConfig,
     flight_time_milli: i32,
 ) -> Option<Aim> {
-    let path = u
-        .body
-        .weapon_paths()
-        .iter()
-        .find(|p| u.body.barrel_connected(p, u.connectivity.reached_cols()))?;
+    let index = (0..u.body.weapon_paths().len()).find(|&i| u.barrel_connected(i))?;
+    let path = u.weapon_path(index)?;
     let cell = weapons::muzzle_cell(path);
     let mut aim = Aim {
         yaw: angle::norm(u.turret_delta + u.motion.drive.head),
@@ -173,7 +170,7 @@ pub(super) fn solve_moving(
         8
     };
     for _ in 0..iterations {
-        let f = u.aimed_frame(
+        let f = u.muzzle_frame(
             &u.pose,
             angle::diff(aim.yaw, u.motion.drive.head),
             aim.pitch,
@@ -253,7 +250,7 @@ pub(super) fn solve_moving(
 /// Firing tolerances must never make a shell visibly leave sideways/upward:
 /// its central velocity follows the *current* physical barrel exactly.
 pub(super) fn along_barrel(u: &RangeUnit, desired: [Fx; 3]) -> [Fx; 3] {
-    let axis = u.root_frame(usize::from(u.body.turret_y)).x;
+    let axis = u.muzzle_frame(&u.pose, u.turret_delta, u.turret_pitch).x;
     let [x, y, z] = desired;
     let speed = V3::new(x, y, z).len_sq().sqrt();
     let v = axis.scale(speed.div(axis.len_sq().sqrt().max(Fx::ONE)));
