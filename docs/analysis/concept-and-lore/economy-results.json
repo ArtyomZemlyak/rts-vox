@@ -1,0 +1,167 @@
+{
+  "status": "Illustrative model; NOT measured game balance",
+  "units": {
+    "matter": "M",
+    "energy_flow": "E/s",
+    "time": "seconds"
+  },
+  "common_commander_income": "Excluded; energy charging not selected in game design",
+  "baseline": {
+    "mining_gross_matter_per_second": 120,
+    "external_power": 1200,
+    "burn_energy_per_matter": 10,
+    "fabrication_energy_per_matter": 10,
+    "build_energy_per_matter": 2,
+    "other_power": 0,
+    "mining_useful_matter_per_second": 100.0,
+    "synthesis_useful_matter_per_second": 100.0
+  },
+  "flow_scenarios": [
+    {
+      "name": "baseline",
+      "mining": 100.0,
+      "synthesis": 100.0
+    },
+    {
+      "name": "half_primary_source",
+      "mining": 50.0,
+      "synthesis": 50.0
+    },
+    {
+      "name": "additional_300_power_for_other_uses",
+      "mining": 75.0,
+      "synthesis": 75.0
+    }
+  ],
+  "reserve_seconds_with_600_matter": {
+    "half_source": {
+      "mining": 10.0,
+      "synthesis": 10.0
+    },
+    "complete_source_loss": {
+      "mining": 5.0,
+      "synthesis": 0.0
+    },
+    "note": "Sufficient converter capacity; maintain 100 M/s plus 200 E/s work; B cannot burn stored matter"
+  },
+  "round_trip": {
+    "burn_10_fabrication_10_return_fraction": 1.0,
+    "burn_10_fabrication_12_return_fraction": 0.8333333333333334,
+    "burn_12_fabrication_10_return_fraction": 1.2,
+    "synthesis_power_for_matching_100_matter_at_cost_12": 1400,
+    "synthesis_output_at_cost_12_with_300_other_power": 78.57142857142857
+  },
+  "growth_assumptions": {
+    "dt": 0.1,
+    "initial_complete_packages": 6,
+    "cost_per_package_matter": 1200,
+    "min_build_seconds": 30,
+    "build_slots": 1,
+    "investment_fraction": 0.3,
+    "gross_mining_per_package": 20,
+    "external_power_per_package": 200,
+    "no_reserves_no_combat_no_reclaim_no_transport": true
+  },
+  "growth": {
+    "mining_unbounded": {
+      "checkpoints": {
+        "300": {
+          "packages": 15,
+          "army_matter_spend": 38449.166667,
+          "economy_matter_spend": 11977.5,
+          "ore_used": 60512.0
+        },
+        "600": {
+          "packages": 25,
+          "army_matter_spend": 126543.333333,
+          "economy_matter_spend": 24000.0,
+          "ore_used": 180652.0
+        },
+        "1200": {
+          "packages": 45,
+          "army_matter_spend": 452776.666667,
+          "economy_matter_spend": 48000.0,
+          "ore_used": 600932.0
+        }
+      },
+      "exhausted_at_seconds": null
+    },
+    "synthesis_unbounded": {
+      "checkpoints": {
+        "300": {
+          "packages": 15,
+          "army_matter_spend": 38449.166667,
+          "economy_matter_spend": 11977.5,
+          "ore_used": 0.0
+        },
+        "600": {
+          "packages": 25,
+          "army_matter_spend": 126543.333333,
+          "economy_matter_spend": 24000.0,
+          "ore_used": 0.0
+        },
+        "1200": {
+          "packages": 45,
+          "army_matter_spend": 452776.666667,
+          "economy_matter_spend": 48000.0,
+          "ore_used": 0.0
+        }
+      },
+      "exhausted_at_seconds": null
+    },
+    "mining_local_ore_72000": {
+      "checkpoints": {
+        "300": {
+          "packages": 15,
+          "army_matter_spend": 38449.166667,
+          "economy_matter_spend": 11977.5,
+          "ore_used": 60512.0
+        },
+        "600": {
+          "packages": 17,
+          "army_matter_spend": 46800.0,
+          "economy_matter_spend": 13200.0,
+          "ore_used": 72000.0
+        },
+        "1200": {
+          "packages": 17,
+          "army_matter_spend": 46800.0,
+          "economy_matter_spend": 13200.0,
+          "ore_used": 72000.0
+        }
+      },
+      "exhausted_at_seconds": 336.8
+    },
+    "synthesis_local_cap_8_packages": {
+      "checkpoints": {
+        "300": {
+          "packages": 8,
+          "army_matter_spend": 35695.0,
+          "economy_matter_spend": 2400.0,
+          "ore_used": 0.0
+        },
+        "600": {
+          "packages": 8,
+          "army_matter_spend": 75695.0,
+          "economy_matter_spend": 2400.0,
+          "ore_used": 0.0
+        },
+        "1200": {
+          "packages": 8,
+          "army_matter_spend": 155695.0,
+          "economy_matter_spend": 2400.0,
+          "ore_used": 0.0
+        }
+      },
+      "exhausted_at_seconds": null
+    }
+  },
+  "spatial_saturation_example": {
+    "formula": "P(n)=200*n/(1+0.25*(n-1))",
+    "six_in_independent_areas_power": 1200,
+    "six_in_one_area_power": 533.3333333333334,
+    "six_in_one_area_useful_matter": 44.44444444444445,
+    "note": "A proposed map constraint, not an adopted rule or calibrated parameter"
+  },
+  "validation": "1000 mirrored-flow cases, budget identities, reserve cases and delayed-growth equivalence passed"
+}

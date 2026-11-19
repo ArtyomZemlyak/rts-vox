@@ -1,0 +1,92 @@
+{
+  "status": "Hypothetical throughput model, not measured faction balance",
+  "assumptions": {
+    "gross_mining_matter_per_second": 120.0,
+    "energy_per_burned_matter": 10.0,
+    "construction_energy_per_matter": 2.0,
+    "other_power": 0,
+    "carrier_payload_matter": 300.0,
+    "carrier_speed_m_per_second": 10.0,
+    "total_handling_seconds_per_round_trip": 10.0,
+    "carrier_price_matter": 80.0,
+    "productive_core_price_both_sides": 2400.0,
+    "third_gross_external_power": 1200,
+    "third_energy_per_fabricated_matter": 10,
+    "third_useful_local_output": 100.0,
+    "fuel_and_construction_one_way_distance": 50.0,
+    "independent_fuel_carriers": 2,
+    "independent_construction_carriers": 7,
+    "internal_routes_not_shared_with_inbound_route": true,
+    "no_refining_loss_attrition_traffic_congestion_or_startup_transient": true,
+    "recoverable_cargo_inventory_not_added_to_equipment_capex": true,
+    "same_hypothetical_carrier_for_all_legs_not_existing_game_roster": true
+  },
+  "distance_scenarios": [
+    {
+      "mine_store_distance_m": 50.0,
+      "round_trip_seconds": 20.0,
+      "mine_haul_capacity_with_12_carriers": 180.0,
+      "useful_output_with_12_mine_carriers": 100.0,
+      "mine_carriers_for_100_useful_output": 8,
+      "all_carriers_for_100_useful_output": 17,
+      "total_fixed_capital_for_100_useful_output": 3760.0,
+      "average_loaded_cargo_in_travel_at_target_output": 1200.0,
+      "third_same_core_capex_efficiency_ratio": 1.5666666666666667,
+      "third_if_priced_4200_capex_efficiency_ratio": 0.8952380952380953,
+      "third_price_band_for_within_5_percent_capex_efficiency": [
+        3580.9523809523807,
+        3957.8947368421054
+      ]
+    },
+    {
+      "mine_store_distance_m": 100.0,
+      "round_trip_seconds": 30.0,
+      "mine_haul_capacity_with_12_carriers": 120.0,
+      "useful_output_with_12_mine_carriers": 100.0,
+      "mine_carriers_for_100_useful_output": 12,
+      "all_carriers_for_100_useful_output": 21,
+      "total_fixed_capital_for_100_useful_output": 4080.0,
+      "average_loaded_cargo_in_travel_at_target_output": 1800.0,
+      "third_same_core_capex_efficiency_ratio": 1.7,
+      "third_if_priced_4200_capex_efficiency_ratio": 0.9714285714285714,
+      "third_price_band_for_within_5_percent_capex_efficiency": [
+        3885.7142857142853,
+        4294.736842105263
+      ]
+    },
+    {
+      "mine_store_distance_m": 200.0,
+      "round_trip_seconds": 50.0,
+      "mine_haul_capacity_with_12_carriers": 72.0,
+      "useful_output_with_12_mine_carriers": 60.0,
+      "mine_carriers_for_100_useful_output": 20,
+      "all_carriers_for_100_useful_output": 29,
+      "total_fixed_capital_for_100_useful_output": 4720.0,
+      "average_loaded_cargo_in_travel_at_target_output": 3000.0,
+      "third_same_core_capex_efficiency_ratio": 1.9666666666666666,
+      "third_if_priced_4200_capex_efficiency_ratio": 1.1238095238095238,
+      "third_price_band_for_within_5_percent_capex_efficiency": [
+        4495.238095238095,
+        4968.421052631579
+      ]
+    },
+    {
+      "mine_store_distance_m": 300.0,
+      "round_trip_seconds": 70.0,
+      "mine_haul_capacity_with_12_carriers": 51.42857142857143,
+      "useful_output_with_12_mine_carriers": 42.85714285714286,
+      "mine_carriers_for_100_useful_output": 28,
+      "all_carriers_for_100_useful_output": 37,
+      "total_fixed_capital_for_100_useful_output": 5360.0,
+      "average_loaded_cargo_in_travel_at_target_output": 4200.0,
+      "third_same_core_capex_efficiency_ratio": 2.2333333333333334,
+      "third_if_priced_4200_capex_efficiency_ratio": 1.276190476190476,
+      "third_price_band_for_within_5_percent_capex_efficiency": [
+        5104.761904761905,
+        5642.105263157895
+      ]
+    }
+  ],
+  "single_third_price_within_5_percent_for_100_and_300_m_exists": false,
+  "validation": "Flow limits, independent fuel/build bottlenecks, integer fleet sizing and non-overlapping equal-efficiency price bands passed"
+}
