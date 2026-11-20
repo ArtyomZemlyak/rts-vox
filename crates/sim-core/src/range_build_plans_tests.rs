@@ -95,6 +95,26 @@ fn place(r: &mut BlastRange, x: i32, queued: bool) -> usize {
         .accepted());
     r.construction_sites().last().unwrap().id
 }
+#[test]
+fn commander_places_and_completes_t1_turret_with_full_ticks() {
+    let mut r = scene();
+    r.place_sandbox_unit(RangeUnitKind::Tank, false, [1400, 16, 1400], 0).unwrap();
+    r.start_battle().unwrap();
+    let site = place(&mut r, 500, false);
+    let tank = r.mining().unwrap().tank(0).unwrap();
+    let price = r.construction_cost(RangeUnitKind::TurretT1).unwrap();
+    r.matter.economy.ledger.generate(tank, price);
+    for _ in 0..1200 {
+        r.step();
+        if r.construction_sites()[site].complete {
+            break;
+        }
+    }
+    assert!(r.construction_sites()[site].complete, "commander did not finish T1 turret");
+    assert!(r.matter.economy.ledger.balanced());
+    restore(&r);
+}
+
 fn restore(r: &BlastRange) -> BlastRange {
     let mut section = ("", 0, None);
     let b = BlastRange::restore_observed(r.config, &r.snapshot(), |a, b, c| section = (a, b, c))

@@ -7226,28 +7226,33 @@ mod tests {
                 }
             }
         }
-        let mut w = World::new(256, 64, 256, 100, Box::new(TreeBelt));
-        let body = voxel::unit::strider();
-        let mut m = Motion::new([60, 16, 128], RangeUnitKind::Strider, &body);
-        let goal = [190, 128];
-        assert!(m.move_to(&w, goal, &body, &[], &nav::vehicle::Rubble::new()));
-        let mut cut_trunk = false;
-        for tick in 0..600 {
-            step(&mut m, &w, &body, &[], tick);
-            for [x, y, z] in m.cut.iter().copied() {
-                cut_trunk |= w.material(x, y, z) == 4;
-                w.queue_dig(x, y, z);
+        for kind in [RangeUnitKind::Strider, RangeUnitKind::Spider] {
+            let mut w = World::new(256, 64, 256, 100, Box::new(TreeBelt));
+            let body = match kind {
+                RangeUnitKind::Strider => voxel::unit::strider(),
+                _ => voxel::unit::spider(),
+            };
+            let mut m = Motion::new([60, 16, 128], kind, &body);
+            let goal = [190, 128];
+            assert!(m.move_to(&w, goal, &body, &[], &nav::vehicle::Rubble::new()));
+            let mut cut_trunk = false;
+            for tick in 0..600 {
+                step(&mut m, &w, &body, &[], tick);
+                for [x, y, z] in m.cut.iter().copied() {
+                    cut_trunk |= w.material(x, y, z) == 4;
+                    w.queue_dig(x, y, z);
+                }
+                w.flush();
+                if m.destination.is_none() {
+                    break;
+                }
             }
-            w.flush();
-            if m.destination.is_none() {
-                break;
-            }
+            assert!(
+                cut_trunk,
+                "{kind:?} crossed the forest without felling a trunk"
+            );
+            assert!(m.destination.is_none(), "{kind:?} stopped at {:?}", m.pos);
         }
-        assert!(
-            cut_trunk,
-            "walker crossed the forest without felling a trunk"
-        );
-        assert!(m.destination.is_none(), "walker stopped at {:?}", m.pos);
     }
     /// **A shoved hull fells what it slides into** (ADR-452), as a driven
     /// one does; slid into standing trunks, it stood in them until it

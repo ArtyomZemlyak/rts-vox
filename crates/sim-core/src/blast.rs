@@ -6823,7 +6823,7 @@ impl BlastRange {
             .iter()
             .chain(std::iter::once(&self.gun))
             .enumerate()
-            .filter(|(_, u)| u.skoba_form != 0)
+            .filter(|(id, u)| u.skoba_form != 0 || self.drone_cargo(*id).is_some())
             .collect();
         if !forms.is_empty() {
             b.u32(77);
@@ -7385,7 +7385,7 @@ impl BlastRange {
                 let id = s.u32() as usize;
                 let form = s.u8();
                 if id > modding::range::MAX_RANGE_UNITS
-                    || !(1..=2).contains(&form)
+                    || form > 2
                     || skoba_forms.last().is_some_and(|&(last, _)| id <= last)
                 {
                     return None;
@@ -8787,6 +8787,8 @@ impl BlastRange {
         });
         let mut flight_bounds =
             manual_flight.then(|| self.units.iter().map(RangeUnit::bounds).collect::<Vec<_>>());
+        let flight_homes = manual_flight.then(|| (0..self.units.len())
+            .map(|id| self.drone_home(id)).collect::<Vec<_>>());
         let driven = self.patrols_running && (!battle_mode || self.battle_movement_active());
         if driven && !changed.is_empty() {
             for u in &mut self.units {
@@ -9101,12 +9103,15 @@ impl BlastRange {
                             || u.motion.drive.vel != Fx::ZERO
                             || u.motion.drive.yaw_rate != 0)
                     {
-                        let blockers = flight_bounds
-                            .as_ref()
-                            .unwrap()
+                        let bounds = flight_bounds.as_ref().unwrap();
+                        let escaping_home = flight_homes.as_ref().unwrap()[id].filter(|home| {
+                            let (a, b) = (bounds[id], bounds[*home]);
+                            (0..3).all(|axis| a.0[axis] < b.1[axis] && b.0[axis] < a.1[axis])
+                        });
+                        let blockers = bounds
                             .iter()
                             .enumerate()
-                            .filter(|(other, _)| *other != id)
+                            .filter(|(other, _)| *other != id && Some(*other) != escaping_home)
                             .map(|(_, bounds)| *bounds);
                         u.motion.step_pilot_flight(
                             &self.world,

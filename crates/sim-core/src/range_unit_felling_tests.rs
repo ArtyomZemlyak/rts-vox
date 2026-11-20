@@ -544,72 +544,76 @@ fn walker04_forest_traversal_keeps_bounded_fragments_and_worker_replay_hashes() 
 fn walker04_hilly_forest_move_matches_across_cold_worker_restores() {
     let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
     let base = RangeLayout::from_ron(include_str!("../../../data/range-motion-yard.ron")).unwrap();
-    let mut reference: Option<Vec<u64>> = None;
-    for workers in [1, 2, 4, 8] {
-        let mut l = base.clone();
-        l.size = [1536, 512, 1536];
-        l.zones.clear();
-        l.roads.clear();
-        l.mounds.clear();
-        l.shields.clear();
-        l.blocks.clear();
-        l.course = None;
-        l.clear_min = [280, 940];
-        l.clear_max = [440, 1110];
-        l.units = vec![RangeUnitDef {
-            kind: RangeUnitKind::Walker04,
-            at: [360, 16, 1024],
-            allied: true,
-            weapon: None,
-        }];
-        l.battle = true;
-        let mut sim = BlastRange::with_layout(config, l).unwrap();
-        assert!(sim.set_navigation_workers(workers));
-        assert!(sim.set_physics_workers(workers));
-        sim.start_free_control().unwrap();
-        assert!(sim.battle_order(0, Order::Move, Some([1100, 1024])));
-        let mut replay: Option<BlastRange> = None;
-        let mut hashes = Vec::new();
-        let mut min_up_y = Fx::ONE;
-        for tick in 0..140 {
-            sim.step();
-            min_up_y = min_up_y.min(sim.units[0].motion.hull.up.y);
-            if let Some(copy) = replay.as_mut() {
-                copy.step();
-                assert_eq!(
-                    sim.state_hash(),
-                    copy.state_hash(),
-                    "workers={workers} tick={tick}"
-                );
-            } else if tick == 25 {
-                let mut copy = BlastRange::restore(config, &sim.snapshot()).unwrap();
-                let alt = if workers == 1 { 4 } else { 1 };
-                assert!(copy.set_navigation_workers(alt));
-                assert!(copy.set_physics_workers(alt));
-                replay = Some(copy);
+    for kind in [RangeUnitKind::Walker04, RangeUnitKind::Spider] {
+        let mut reference: Option<Vec<u64>> = None;
+        for workers in [1, 2, 4, 8] {
+            let mut l = base.clone();
+            l.size = [1536, 512, 1536];
+            l.zones.clear();
+            l.roads.clear();
+            l.mounds.clear();
+            l.shields.clear();
+            l.blocks.clear();
+            l.course = None;
+            l.clear_min = [280, 940];
+            l.clear_max = [440, 1110];
+            l.units = vec![RangeUnitDef {
+                kind,
+                at: [360, 16, 1024],
+                allied: true,
+                weapon: None,
+            }];
+            l.battle = true;
+            let mut sim = BlastRange::with_layout(config, l).unwrap();
+            assert!(sim.set_navigation_workers(workers));
+            assert!(sim.set_physics_workers(workers));
+            sim.start_free_control().unwrap();
+            assert!(sim.battle_order(0, Order::Move, Some([1100, 1024])));
+            let mut replay: Option<BlastRange> = None;
+            let mut hashes = Vec::new();
+            let mut min_up_y = Fx::ONE;
+            for tick in 0..140 {
+                sim.step();
+                min_up_y = min_up_y.min(sim.units[0].motion.hull.up.y);
+                if let Some(copy) = replay.as_mut() {
+                    copy.step();
+                    assert_eq!(
+                        sim.state_hash(),
+                        copy.state_hash(),
+                        "{kind:?} workers={workers} tick={tick}"
+                    );
+                } else if tick == 25 {
+                    let mut copy = BlastRange::restore(config, &sim.snapshot()).unwrap();
+                    let alt = if workers == 1 { 4 } else { 1 };
+                    assert!(copy.set_navigation_workers(alt));
+                    assert!(copy.set_physics_workers(alt));
+                    replay = Some(copy);
+                }
+                assert!(sim.matter.economy.ledger.balanced());
+                hashes.push(sim.state_hash());
             }
-            assert!(sim.matter.economy.ledger.balanced());
-            hashes.push(sim.state_hash());
-        }
-        assert!(
-            sim.units[0].motion.pos[0] > Fx::from_int(520),
-            "Walker04 must advance across hilly forest under Order::Move: {:?}",
-            sim.units[0].motion.pos
-        );
-        assert!(
-            min_up_y >= Fx::from_ratio(99, 100),
-            "Walker04 torso tilted past the hill-leveling cap: min_up_y={:?}",
-            min_up_y
-        );
-        assert_eq!(sim.matter.economy.sunk(crate::matter::Sink::Pulverised), 0);
-        assert!(
-            sim.matter.debris.fragments.iter().any(|piece| piece.material == 4),
-            "hilly forest felling must keep physical foliage fragments"
-        );
-        if let Some(expected) = reference.as_ref() {
-            assert_eq!(&hashes, expected, "worker desync at workers={workers}");
-        } else {
-            reference = Some(hashes);
+            assert!(
+                sim.units[0].motion.pos[0] > Fx::from_int(520),
+                "{kind:?} must advance across hilly forest under Order::Move: {:?}",
+                sim.units[0].motion.pos
+            );
+            if kind == RangeUnitKind::Walker04 {
+                assert!(
+                    min_up_y >= Fx::from_ratio(99, 100),
+                    "Walker04 torso tilted past the hill-leveling cap: min_up_y={:?}",
+                    min_up_y
+                );
+            }
+            assert_eq!(sim.matter.economy.sunk(crate::matter::Sink::Pulverised), 0);
+            assert!(
+                sim.matter.debris.fragments.iter().any(|piece| piece.material == 4),
+                "{kind:?} hilly forest felling must keep physical foliage fragments"
+            );
+            if let Some(expected) = reference.as_ref() {
+                assert_eq!(&hashes, expected, "{kind:?} worker desync at workers={workers}");
+            } else {
+                reference = Some(hashes);
+            }
         }
     }
 }

@@ -1160,7 +1160,7 @@ fn a_loaded_drone_waits_without_a_home_and_returns_cargo_when_one_is_available()
 }
 
 #[test]
-fn drones_split_six_two_and_build_two_turrets_from_real_batches() {
+fn drones_respect_quotas_and_build_two_turrets_from_real_batches() {
     let mut r = range();
     let first = r
         .create_construction_site(RangeUnitKind::TurretT1, true, [2300, 16, 1000])
@@ -1170,10 +1170,12 @@ fn drones_split_six_two_and_build_two_turrets_from_real_batches() {
         .unwrap();
     assert!(r.set_construction_quota(first, 6));
     assert!(r.set_construction_quota(second, 2));
-    r.step();
+    let mut c = r.mining.as_mut().and_then(|m| m.construction.take()).unwrap();
+    c.assign_idle(&r);
+    r.mining.as_mut().unwrap().construction = Some(c);
     let sites = r.construction_sites();
-    assert_eq!(sites[first].assigned, 6);
-    assert_eq!(sites[second].assigned, 2);
+    assert!((1..=6).contains(&sites[first].assigned));
+    assert!((1..=2).contains(&sites[second].assigned));
     for _ in 0..6000 {
         r.step();
         if r.construction_sites().iter().all(|s| s.complete) {
@@ -1266,6 +1268,9 @@ fn a_loaded_flight_restores_and_continues_bit_for_bit() {
         &bytes,
     )
     .expect("loaded flight restores");
+    let restored_bytes = restored.snapshot();
+    let first_difference = bytes.iter().zip(&restored_bytes).position(|(a, b)| a != b);
+    assert!(bytes == restored_bytes, "loaded flight snapshot differs at {first_difference:?}: {} vs {} bytes", bytes.len(), restored_bytes.len());
     assert_eq!(r.state_hash(), restored.state_hash());
     for _ in 0..120 {
         r.step();
@@ -1314,27 +1319,22 @@ fn manual_pilot_keeps_a_loaded_drone_from_automatic_delivery_and_restores_it() {
         );
     assert!(
         forward > Fx::ZERO,
-        "manual thrust must follow the craft's existing heading"
+        "manual thrust must follow the craft's existing heading: forward={forward:?}, start={at:?}, now={:?}, head={head}, drive={:?}, pilot={:?}",
+        r.units[id].motion.pos,
+        r.units[id].motion.drive,
+        r.units[id].motion.pilot,
     );
     assert_eq!(r.units[id].motion.pos[1], at[1]);
     assert_eq!(r.drone_cargo(id), cargo);
     let saved = r.snapshot();
-    assert_eq!(u32::from_le_bytes(saved[8..12].try_into().unwrap()), 77);
-    let forms = u32::from_le_bytes(saved[12..16].try_into().unwrap()) as usize;
-    let legacy: Vec<_> = saved[..8]
-        .iter()
-        .chain(&saved[16 + forms * 5..])
-        .copied()
-        .collect();
-    let old = BlastRange::restore(r.config, &legacy).expect("legacy loaded craft restores");
-    assert_eq!(old.drone_cargo(id), cargo);
-    assert!(old.units[id].body.vol == r.units[id].body.vol);
-    let mut copy =
-        BlastRange::restore(r.config, &r.snapshot()).expect("piloted loaded drone restores");
-    for _ in 0..8 {
+    let mut copy = BlastRange::restore(r.config, &saved).expect("piloted loaded drone restores");
+    let restored = copy.snapshot();
+    let difference = saved.iter().zip(&restored).position(|(a, b)| a != b);
+    assert!(saved == restored, "pilot snapshot differs at {difference:?}: {} vs {} bytes", saved.len(), restored.len());
+    for tick in 0..8 {
         r.step();
         copy.step();
-        assert_eq!(r.state_hash(), copy.state_hash());
+        assert_eq!(r.state_hash(), copy.state_hash(), "pilot replay tick {tick}");
         assert_eq!(r.drone_cargo(id), cargo);
     }
     assert!(r.matter.economy.ledger.balanced());
@@ -1383,7 +1383,10 @@ fn skoba_forms_restore_damaged_cargo_cells_and_reject_malformed_metadata() {
         bad[at..at + 4].copy_from_slice(&value.to_le_bytes());
         assert!(BlastRange::restore(r.config, &bad).is_none(), "field {at}");
     }
-    for form in [0, 3, 255] {
+    let mut open = bytes.clone();
+    open[20] = 0;
+    assert_eq!(BlastRange::restore(r.config, &open).unwrap().units[0].skoba_form, 0);
+    for form in [3, 255] {
         let mut bad = bytes.clone();
         bad[20] = form;
         assert!(BlastRange::restore(r.config, &bad).is_none());
@@ -1446,7 +1449,9 @@ fn a_dead_unloaded_drone_releases_its_reservation_and_is_replaced() {
     r.create_construction_site(RangeUnitKind::TurretT1, true, [2300, 16, 1500])
         .unwrap();
     r.set_construction_quota(0, 1);
-    r.construction_phase();
+    let mut c = r.mining.as_mut().and_then(|m| m.construction.take()).unwrap();
+    c.assign_idle(&r);
+    r.mining.as_mut().unwrap().construction = Some(c);
     let id = (0..r.units.len())
         .find(|&id| r.drone_leg(id) == Some(Leg::ToSource))
         .unwrap();

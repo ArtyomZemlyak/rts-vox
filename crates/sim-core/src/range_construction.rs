@@ -1634,6 +1634,11 @@ impl BlastRange {
         self.mining.as_ref()?.construction.as_ref()?.leg(id)
     }
 
+    pub(in crate::blast) fn drone_home(&self, id: usize) -> Option<usize> {
+        let drone = self.mining.as_ref()?.construction.as_ref()?.drones.get(&(id as u16))?;
+        Some(usize::from(drone.home))
+    }
+
     pub fn set_construction_quota(&mut self, site: usize, quota: u8) -> bool {
         self.mining
             .as_mut()
@@ -1894,8 +1899,8 @@ impl BlastRange {
         let c = self.mining.as_mut()?.construction.as_mut()?;
         c.load(s, &self.units, &self.matter.economy.ledger)?;
         if legacy_forms {
-            // Older snapshots omitted the form. Undamaged loaded/returning
-            // craft have an unambiguous form; damaged historical poses do not.
+            // Older snapshots omitted the form. Loading keeps the open frame;
+            // departing cargo and returning craft have unambiguous forms.
             let forms: Vec<_> = c
                 .drones
                 .iter()
@@ -1903,7 +1908,7 @@ impl BlastRange {
                     let u = &self.units[usize::from(id)];
                     (u.status.alive && u.removed.is_empty()).then_some((
                         id,
-                        if d.cargo.is_some() {
+                        if d.cargo.is_some() && !matches!(d.leg, Leg::Loading(_)) {
                             2
                         } else if d.leg == Leg::Returning {
                             1
