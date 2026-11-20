@@ -163,4 +163,3 @@ Release в этом исправлении не собирался: общий �
 queue/steer, порядок очереди, context limits или архивный диалог.
 Итоговые hashes, receipts, документация и завершение команд:
 `out/ui647/final-evidence.json`, done/remaining — `out/ui647/ledger.json`.
-

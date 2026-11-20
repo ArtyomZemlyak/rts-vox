@@ -63,4 +63,3 @@ processing/parsing/validation errors. Subsequent619 development renders passed;
 final qualification and release use the combined620 source and native receipts.
 
 No screenshot or paused UI run constitutes battle FPS evidence.
-

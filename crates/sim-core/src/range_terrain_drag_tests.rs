@@ -130,4 +130,3 @@ fn actual_body_mass_weakens_the_shared_surface_loss_and_smoothing_never_override
         if pair[0].0<pair[1].0 {assert!(pair[0].1>pair[1].1,"mass did not weaken resistance: {pair:?}");}
     }
 }
-
